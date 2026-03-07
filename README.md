@@ -56,9 +56,9 @@ This stack was built and tested on the following hardware. You do **not** need i
 | **Server** | Supermicro SuperServer 5019A-FTN4 (1U Rackmount) |
 | **CPU** | Intel Atom C3758 (8 cores, 2.2 GHz, 25W TDP) |
 | **RAM** | 64 GB DDR4 ECC (4 × 16 GB) |
-| **OS Disk** | 224 GB SanDisk SSD PLUS (SATA) |
+| **OS Disk** | 240 GB SanDisk SSD PLUS (SATA) |
 | **HOT Storage** | 1 TB Samsung 970 EVO Plus (NVMe) |
-| **WARM Storage** | 1.8 TB Samsung 870 EVO (SATA SSD) |
+| **WARM Storage** | 2 TB Samsung 870 EVO (SATA SSD) |
 | **Network** | 4 × GbE (Intel I350-AM4) |
 | **OS** | Ubuntu 24.04 LTS Server |
 
@@ -273,24 +273,37 @@ siem-docker-stack/
 │   ├── maintenance.md                    # Maintenance & backup guide
 │   └── troubleshooting.md               # Common issues & fixes
 └── media/
-    └── icons/                            # Social media icons for README
+  ├── icons/                            # Social media icons for README
+  └── screenshots/                      # Stack screenshots used in docs
 ```
 
 ---
 
 ## Screenshots
 
-> Screenshots coming soon. Contributions welcome!
+### Grafana Dashboards Home
 
-<!-- 
-Suggested screenshots to add:
-1. Grafana dashboard overview showing all panels
-2. Wazuh Security Overview — alerts, attack distribution  
-3. Docker Container Monitoring — CPU, memory, network
-4. OpenSearch Dashboards — index management view
-5. Terminal: `docker compose ps` showing all services healthy
-6. Terminal: `05-verify.sh` output showing all checks passing
--->
+![Grafana Dashboards Home](media/screenshots/Grafana_dashboards_home.png)
+
+### Wazuh Security Overview
+
+![Wazuh Security Overview](media/screenshots/Wazuh_Security_Overview.png)
+
+### Wazuh Vulnerability Detection
+
+![Wazuh Vulnerability Detection](media/screenshots/Wazuh_Vulnerability_Detection.png)
+
+### Docker Container Monitoring
+
+![Docker Container Monitoring](media/screenshots/Docker_Container_monitoring.png)
+
+### Docker Compose Service Status
+
+![Docker Compose Service Status](media/screenshots/docker_ps.png)
+
+### Full Stack Verification Script Output
+
+![05 Verify Output](media/screenshots/05-verify.png)
 
 ---
 
@@ -324,11 +337,17 @@ Suggested screenshots to add:
 | [pfsense_siem_stack](https://github.com/ChiefGyk3D/pfsense_siem_stack) | pfSense-side SIEM integration (Suricata, Telegraf, pfBlockerNG, 30+ docs) |
 | [PiNodeXMR_Grafana_Dashboard](https://github.com/ChiefGyk3D/PiNodeXMR_Grafana_Dashboard) | Monero node monitoring dashboard for Grafana |
 
+### UniFi Network Monitoring
+
+This stack includes **UniFi Poller** for collecting UniFi switch and AP telemetry, but UniFi Poller itself is a separate community project — not covered in depth here. I have contributed some dashboard fixes upstream. For setup, configuration, and dedicated UniFi dashboards, see the official project:
+
+> **[UniFi Poller (unpoller)](https://unpoller.com/)** — [GitHub](https://github.com/unpoller/unpoller) — Purpose-built UniFi telemetry collector for Grafana + InfluxDB/Prometheus.
+
 ---
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the [GNU GPL v2](LICENSE).
 
 ---
 
