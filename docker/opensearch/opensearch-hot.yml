@@ -1,0 +1,33 @@
+# =============================================================================
+# OpenSearch — Hot Node Configuration
+# =============================================================================
+# This node is the cluster manager and primary data node.
+# Data lives on fast NVMe storage (/data/hot/opensearch).
+#
+# The node.attr.temp=hot tag is used by ISM policies to route
+# indices to the correct tier.
+
+cluster.name: siem-cluster
+node.name: opensearch-hot
+
+# Hot tier — fastest storage
+node.attr.temp: hot
+
+# Cluster formation
+discovery.seed_hosts:
+  - opensearch-hot
+  - opensearch-warm
+cluster.initial_cluster_manager_nodes:
+  - opensearch-hot
+
+# Network
+network.host: 0.0.0.0
+http.port: 9200
+transport.port: 9300
+
+# Security disabled (internal network only)
+# Enable the security plugin for production or internet-exposed deployments.
+plugins.security.disabled: true
+
+# ISM (Index State Management) for hot/warm lifecycle
+plugins.index_state_management.enabled: true

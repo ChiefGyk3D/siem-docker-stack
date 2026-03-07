@@ -1,0 +1,34 @@
+# =============================================================================
+# OpenSearch — Warm Node Configuration
+# =============================================================================
+# This node stores older data on slower (SATA SSD) storage.
+# ISM policies migrate indices here after 30 days.
+#
+# The warm node is NOT a cluster manager — it only acts as
+# data + ingest.
+
+cluster.name: siem-cluster
+node.name: opensearch-warm
+
+# Warm tier — SATA SSD or spinning disk
+node.attr.temp: warm
+
+# Restricted roles (no cluster manager)
+node.roles:
+  - data
+  - ingest
+
+# Cluster formation
+discovery.seed_hosts:
+  - opensearch-hot
+  - opensearch-warm
+cluster.initial_cluster_manager_nodes:
+  - opensearch-hot
+
+# Network
+network.host: 0.0.0.0
+http.port: 9200
+transport.port: 9300
+
+# Security disabled (internal network only)
+plugins.security.disabled: true

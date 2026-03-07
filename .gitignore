@@ -1,0 +1,27 @@
+# Environment files (contain credentials)
+.env
+config.env
+
+# Wazuh TLS certificates (generated per-deployment)
+docker/wazuh/certs/*.pem
+
+# OpenSearch data
+/data/
+
+# Docker volumes
+portainer_data/
+
+# OS / Editor
+.DS_Store
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Backup files
+*.bak
+*.backup

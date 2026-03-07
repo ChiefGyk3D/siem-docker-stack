@@ -1,0 +1,10 @@
+# =============================================================================
+# Logstash Configuration
+# =============================================================================
+# Pipeline workers and batch size tuned for a mid-range SIEM server.
+# Adjust pipeline.workers to match your CPU core count.
+
+http.host: "0.0.0.0"
+pipeline.workers: 4
+pipeline.batch.size: 250
+pipeline.batch.delay: 50

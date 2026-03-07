@@ -1,0 +1,75 @@
+{
+  "index_patterns": ["suricata-*"],
+  "template": {
+    "settings": {
+      "number_of_shards": 1,
+      "number_of_replicas": 0,
+      "index.routing.allocation.require.temp": "hot",
+      "plugins.index_state_management.rollover_alias": "suricata"
+    },
+    "mappings": {
+      "properties": {
+        "@timestamp": { "type": "date" },
+        "suricata": {
+          "properties": {
+            "eve": {
+              "properties": {
+                "timestamp": { "type": "date" },
+                "event_type": { "type": "keyword" },
+                "src_ip": { "type": "ip" },
+                "dest_ip": { "type": "ip" },
+                "src_port": { "type": "integer" },
+                "dest_port": { "type": "integer" },
+                "proto": { "type": "keyword" },
+                "app_proto": { "type": "keyword" },
+                "flow_id": { "type": "long" },
+                "in_iface": { "type": "keyword" },
+                "alert": {
+                  "properties": {
+                    "signature": { "type": "text", "fields": { "keyword": { "type": "keyword" } } },
+                    "signature_id": { "type": "long" },
+                    "severity": { "type": "integer" },
+                    "category": { "type": "keyword" },
+                    "action": { "type": "keyword" },
+                    "rev": { "type": "integer" },
+                    "gid": { "type": "integer" }
+                  }
+                },
+                "geoip": {
+                  "properties": {
+                    "src": {
+                      "properties": {
+                        "geo": {
+                          "properties": {
+                            "location": { "type": "geo_point" },
+                            "country_name": { "type": "keyword" },
+                            "city_name": { "type": "keyword" },
+                            "region_name": { "type": "keyword" }
+                          }
+                        }
+                      }
+                    },
+                    "dest": {
+                      "properties": {
+                        "geo": {
+                          "properties": {
+                            "location": { "type": "geo_point" },
+                            "country_name": { "type": "keyword" },
+                            "city_name": { "type": "keyword" },
+                            "region_name": { "type": "keyword" }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "priority": 200,
+  "version": 1
+}

@@ -1,0 +1,78 @@
+# =============================================================================
+# Grafana — Datasource Provisioning
+# =============================================================================
+# Auto-provisions datasources on first boot.
+# All URLs use Docker service names (resolved via the siem-net network).
+#
+# Datasources:
+#   1. OpenSearch — Suricata IDS/IPS indices (suricata-*)
+#   2. OpenSearch — Syslog indices (syslog-*, pfsense-*, unifi-*)
+#   3. OpenSearch — pfBlockerNG indices (pfblockerng-*)
+#   4. InfluxDB — pfSense/Telegraf/UniFi metrics
+#   5. Prometheus — Infrastructure metrics
+
+apiVersion: 1
+
+datasources:
+  # --- OpenSearch: Suricata IDS/IPS ---
+  - name: OpenSearch-Suricata
+    type: grafana-opensearch-datasource
+    access: proxy
+    url: http://opensearch-hot:9200
+    database: "suricata-*"
+    isDefault: true
+    jsonData:
+      timeField: "@timestamp"
+      version: "2.19.0"
+      flavor: "opensearch"
+      logMessageField: ""
+      logLevelField: ""
+
+  # --- OpenSearch: Syslog / pfSense / UniFi ---
+  - name: OpenSearch-Syslog
+    type: grafana-opensearch-datasource
+    access: proxy
+    url: http://opensearch-hot:9200
+    database: "syslog-*"
+    jsonData:
+      timeField: "@timestamp"
+      version: "2.19.0"
+      flavor: "opensearch"
+
+  # --- OpenSearch: pfBlockerNG ---
+  - name: OpenSearch-pfBlockerNG
+    type: grafana-opensearch-datasource
+    access: proxy
+    url: http://opensearch-hot:9200
+    database: "pfblockerng-*"
+    jsonData:
+      timeField: "@timestamp"
+      version: "2.19.0"
+      flavor: "opensearch"
+
+  # --- InfluxDB: pfSense + Telegraf + UniFi Poller ---
+  - name: InfluxDB
+    type: influxdb
+    access: proxy
+    url: http://influxdb:8086
+    database: pfsense
+    jsonData:
+      httpMode: GET
+
+  # --- InfluxDB: UniFi Poller ---
+  - name: InfluxDB-UniFi
+    type: influxdb
+    access: proxy
+    url: http://influxdb:8086
+    database: unpoller
+    jsonData:
+      httpMode: GET
+
+  # --- Prometheus ---
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    jsonData:
+      httpMethod: POST
+      timeInterval: "15s"

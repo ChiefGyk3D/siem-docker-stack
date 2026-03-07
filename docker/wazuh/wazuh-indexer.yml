@@ -1,0 +1,56 @@
+# =============================================================================
+# Wazuh Indexer — OpenSearch Configuration
+# =============================================================================
+# Single-node setup with TLS. This file is mounted into the wazuh-indexer
+# container at /usr/share/wazuh-indexer/opensearch.yml.
+#
+# IMPORTANT: Generate TLS certificates before first start!
+#   docker run --rm -v ./wazuh/certs:/certs \
+#     wazuh/wazuh-certs-generator:latest
+#
+# See: https://documentation.wazuh.com/current/deployment-options/docker/
+
+network.host: "0.0.0.0"
+
+node.name: "wazuh-indexer"
+
+# Single-node discovery
+discovery.type: single-node
+
+# TLS — Transport layer
+plugins.security.ssl.transport.pemcert_filepath: /usr/share/wazuh-indexer/certs/wazuh-indexer.pem
+plugins.security.ssl.transport.pemkey_filepath: /usr/share/wazuh-indexer/certs/wazuh-indexer-key.pem
+plugins.security.ssl.transport.pemtrustedcas_filepath: /usr/share/wazuh-indexer/certs/root-ca.pem
+
+# TLS — HTTP layer
+plugins.security.ssl.http.enabled: true
+plugins.security.ssl.http.pemcert_filepath: /usr/share/wazuh-indexer/certs/wazuh-indexer.pem
+plugins.security.ssl.http.pemkey_filepath: /usr/share/wazuh-indexer/certs/wazuh-indexer-key.pem
+plugins.security.ssl.http.pemtrustedcas_filepath: /usr/share/wazuh-indexer/certs/root-ca.pem
+
+# Admin certificate (used for securityadmin.sh operations)
+plugins.security.authcz.admin_dn:
+  - "CN=admin,OU=Wazuh,O=Wazuh,L=California,C=US"
+
+plugins.security.nodes_dn:
+  - "CN=wazuh-indexer,OU=Wazuh,O=Wazuh,L=California,C=US"
+
+plugins.security.allow_default_init_securityindex: true
+plugins.security.restapi.roles_enabled:
+  - "all_access"
+  - "security_rest_api_access"
+
+# Performance
+plugins.security.system_indices.enabled: true
+plugins.security.system_indices.indices:
+  - ".opendistro-alerting-config"
+  - ".opendistro-alerting-alert*"
+  - ".opendistro-anomaly-results*"
+  - ".opendistro-anomaly-detector*"
+  - ".opendistro-anomaly-checkpoints"
+  - ".opendistro-anomaly-detection-state"
+  - ".opendistro-reports-*"
+  - ".opendistro-notifications-*"
+  - ".opendistro-notebooks"
+  - ".opensearch-observability"
+  - ".wazuh-*"

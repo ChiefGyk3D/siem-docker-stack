@@ -1,0 +1,390 @@
+# =============================================================================
+# SIEM Docker Stack — Docker Compose
+# =============================================================================
+# A complete SIEM/SOC stack with hot/warm tiering for home labs and SMBs.
+#
+# Services:
+#   - OpenSearch (2-node hot/warm cluster) — Log search & indexing
+#   - OpenSearch Dashboards — OpenSearch UI
+#   - Logstash — Log parsing & enrichment
+#   - Grafana — Dashboards & visualization
+#   - InfluxDB — Time-series metrics
+#   - Prometheus — Metrics scraping & alerting
+#   - Wazuh (Manager + Indexer + Dashboard) — EDR/SIEM
+#   - Syslog-ng — Centralized syslog receiver
+#   - UniFi Poller — UniFi network telemetry (optional)
+#   - Portainer — Docker management UI (optional)
+#
+# Prerequisites:
+#   1. Run scripts/01-disk-setup.sh (creates /data/hot and /data/warm)
+#   2. Run scripts/02-bootstrap.sh (installs Docker, kernel tuning)
+#   3. Copy .env.example to .env and configure
+#
+# Usage:
+#   cd docker/
+#   cp ../.env.example .env   # then edit .env
+#   docker compose up -d
+#   docker compose logs -f
+# =============================================================================
+
+networks:
+  siem-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/24
+
+# =============================================================================
+# OPENSEARCH — Hot/Warm Two-Node Cluster
+# =============================================================================
+services:
+
+  opensearch-hot:
+    image: opensearchproject/opensearch:${OPENSEARCH_VERSION:-2.19.0}
+    container_name: opensearch-hot
+    hostname: opensearch-hot
+    restart: unless-stopped
+    environment:
+      - cluster.name=siem-cluster
+      - node.name=opensearch-hot
+      - node.attr.temp=hot
+      - discovery.seed_hosts=opensearch-hot,opensearch-warm
+      - cluster.initial_cluster_manager_nodes=opensearch-hot
+      - bootstrap.memory_lock=true
+      - plugins.security.disabled=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms${OPENSEARCH_HOT_HEAP:-12g} -Xmx${OPENSEARCH_HOT_HEAP:-12g}"
+      - plugins.index_state_management.enabled=true
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - /data/hot/opensearch:/usr/share/opensearch/data
+      - ./opensearch/opensearch-hot.yml:/usr/share/opensearch/config/opensearch.yml:ro
+    ports:
+      - "${OPENSEARCH_PORT:-9200}:9200"
+      - "9300:9300"
+      - "9600:9600"
+    networks:
+      siem-net:
+        ipv4_address: 172.20.0.10
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  opensearch-warm:
+    image: opensearchproject/opensearch:${OPENSEARCH_VERSION:-2.19.0}
+    container_name: opensearch-warm
+    hostname: opensearch-warm
+    restart: unless-stopped
+    depends_on:
+      opensearch-hot:
+        condition: service_healthy
+    environment:
+      - cluster.name=siem-cluster
+      - node.name=opensearch-warm
+      - node.attr.temp=warm
+      - node.roles=data,ingest
+      - discovery.seed_hosts=opensearch-hot,opensearch-warm
+      - cluster.initial_cluster_manager_nodes=opensearch-hot
+      - bootstrap.memory_lock=true
+      - plugins.security.disabled=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms${OPENSEARCH_WARM_HEAP:-4g} -Xmx${OPENSEARCH_WARM_HEAP:-4g}"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - /data/warm/opensearch:/usr/share/opensearch/data
+      - ./opensearch/opensearch-warm.yml:/usr/share/opensearch/config/opensearch.yml:ro
+    ports:
+      - "9201:9200"
+      - "9301:9300"
+    networks:
+      siem-net:
+        ipv4_address: 172.20.0.11
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:${OPENSEARCH_VERSION:-2.19.0}
+    container_name: opensearch-dashboards
+    restart: unless-stopped
+    depends_on:
+      opensearch-hot:
+        condition: service_healthy
+    environment:
+      - 'OPENSEARCH_HOSTS=["http://opensearch-hot:9200"]'
+      - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true
+    ports:
+      - "${OPENSEARCH_DASHBOARDS_PORT:-5601}:5601"
+    networks:
+      - siem-net
+
+# =============================================================================
+# LOGSTASH — Log Parsing & Enrichment
+# =============================================================================
+
+  logstash:
+    image: opensearchproject/logstash-oss-with-opensearch-output-plugin:8.9.0
+    container_name: logstash
+    restart: unless-stopped
+    depends_on:
+      opensearch-hot:
+        condition: service_healthy
+    environment:
+      - "LS_JAVA_OPTS=-Xms${LOGSTASH_HEAP:-2g} -Xmx${LOGSTASH_HEAP:-2g}"
+    volumes:
+      - ./logstash/pipeline:/usr/share/logstash/pipeline:ro
+      - ./logstash/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
+      - /data/hot/logstash:/usr/share/logstash/data
+    ports:
+      - "${LOGSTASH_UDP_PORT:-5140}:5140/udp"
+      - "${LOGSTASH_BEATS_PORT:-5044}:5044"
+    networks:
+      - siem-net
+
+# =============================================================================
+# GRAFANA — Dashboards & Visualization
+# =============================================================================
+
+  grafana:
+    image: grafana/grafana-oss:latest
+    container_name: grafana
+    restart: unless-stopped
+    depends_on:
+      opensearch-hot:
+        condition: service_healthy
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASS:-changeme}
+      - GF_INSTALL_PLUGINS=grafana-opensearch-datasource,grafana-clock-panel,grafana-worldmap-panel
+      - GF_SERVER_ROOT_URL=http://${SIEM_HOST:-localhost}:3000
+    volumes:
+      - /data/warm/grafana:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    networks:
+      - siem-net
+    user: "472"
+
+# =============================================================================
+# INFLUXDB — Time-Series Metrics (pfSense, Telegraf, UniFi)
+# =============================================================================
+
+  influxdb:
+    image: influxdb:1.8
+    container_name: influxdb
+    restart: unless-stopped
+    environment:
+      - INFLUXDB_DB=${INFLUXDB_DB:-pfsense}
+      - INFLUXDB_HTTP_AUTH_ENABLED=false
+      - INFLUXDB_DATA_MAX_SERIES_PER_DATABASE=0
+      - INFLUXDB_DATA_MAX_VALUES_PER_TAG=0
+      - INFLUXDB_REPORTING_DISABLED=true
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        influxd &
+        until influx -execute 'SHOW DATABASES' &>/dev/null; do sleep 1; done
+        influx -execute 'CREATE DATABASE pfsense'
+        influx -execute 'CREATE DATABASE unpoller'
+        influx -execute 'CREATE DATABASE telegraf'
+        wait
+    volumes:
+      - /data/hot/influxdb:/var/lib/influxdb
+    ports:
+      - "${INFLUXDB_PORT:-8086}:8086"
+    networks:
+      - siem-net
+
+# =============================================================================
+# PROMETHEUS — Metrics Scraping & Alerting
+# =============================================================================
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    restart: unless-stopped
+    volumes:
+      - /data/hot/prometheus:/prometheus
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-365d}'
+      - '--web.enable-lifecycle'
+    networks:
+      - siem-net
+    user: "65534"
+
+# =============================================================================
+# WAZUH — EDR/SIEM
+# =============================================================================
+# Wazuh provides endpoint detection & response, file integrity monitoring,
+# vulnerability detection, and compliance checking.
+#
+# IMPORTANT: Generate TLS certificates before first start!
+#   See docs/wazuh-certificates.md or run:
+#   docker run --rm -v ./wazuh/certs:/certs wazuh/wazuh-certs-generator:latest
+#
+# Change ALL default passwords before production use:
+#   - INDEXER_PASSWORD (SecretPassword → your password)
+#   - API_PASSWORD (MyS3cr3tP4ssw0rd → your password)
+#   - Run scripts/wazuh-change-password.sh after first boot
+
+  wazuh-manager:
+    image: wazuh/wazuh-manager:${WAZUH_VERSION:-4.9.2}
+    container_name: wazuh-manager
+    hostname: wazuh-manager
+    restart: unless-stopped
+    environment:
+      - INDEXER_URL=https://wazuh-indexer:9200
+      - INDEXER_USERNAME=admin
+      - INDEXER_PASSWORD=${WAZUH_INDEXER_PASSWORD:-SecretPassword}
+      - FILEBEAT_SSL_VERIFICATION_MODE=full
+      - SSL_CERTIFICATE_AUTHORITIES=/etc/ssl/root-ca.pem
+      - SSL_CERTIFICATE=/etc/ssl/filebeat.pem
+      - SSL_KEY=/etc/ssl/filebeat-key.pem
+    volumes:
+      - /data/hot/wazuh/manager/data:/var/ossec/data
+      - /data/hot/wazuh/manager/etc:/var/ossec/etc
+      - /data/hot/wazuh/manager/logs:/var/ossec/logs
+      - /data/hot/wazuh/manager/queue:/var/ossec/queue
+      - /data/hot/wazuh/manager/integrations:/var/ossec/integrations
+      - /data/hot/wazuh/manager/active-response:/var/ossec/active-response/bin
+      - ./wazuh/certs/root-ca.pem:/etc/ssl/root-ca.pem:ro
+      - ./wazuh/certs/filebeat.pem:/etc/ssl/filebeat.pem:ro
+      - ./wazuh/certs/filebeat-key.pem:/etc/ssl/filebeat-key.pem:ro
+    ports:
+      - "${WAZUH_MANAGER_PORT:-1514}:1514/udp"
+      - "1515:1515"
+      - "${WAZUH_API_PORT:-55000}:55000"
+    networks:
+      - siem-net
+
+  wazuh-indexer:
+    image: wazuh/wazuh-indexer:${WAZUH_VERSION:-4.9.2}
+    container_name: wazuh-indexer
+    hostname: wazuh-indexer
+    restart: unless-stopped
+    environment:
+      - "OPENSEARCH_JAVA_OPTS=-Xms${WAZUH_INDEXER_HEAP:-4g} -Xmx${WAZUH_INDEXER_HEAP:-4g}"
+    volumes:
+      - /data/hot/wazuh/indexer:/var/lib/wazuh-indexer
+      - ./wazuh/wazuh-indexer.yml:/usr/share/wazuh-indexer/opensearch.yml:ro
+      - ./wazuh/certs/root-ca.pem:/usr/share/wazuh-indexer/certs/root-ca.pem:ro
+      - ./wazuh/certs/wazuh-indexer.pem:/usr/share/wazuh-indexer/certs/wazuh-indexer.pem:ro
+      - ./wazuh/certs/wazuh-indexer-key.pem:/usr/share/wazuh-indexer/certs/wazuh-indexer-key.pem:ro
+      - ./wazuh/certs/admin.pem:/usr/share/wazuh-indexer/certs/admin.pem:ro
+      - ./wazuh/certs/admin-key.pem:/usr/share/wazuh-indexer/certs/admin-key.pem:ro
+    ports:
+      - "${WAZUH_INDEXER_PORT:-9202}:9200"
+    networks:
+      - siem-net
+
+  wazuh-dashboard:
+    image: wazuh/wazuh-dashboard:${WAZUH_VERSION:-4.9.2}
+    container_name: wazuh-dashboard
+    hostname: wazuh-dashboard
+    restart: unless-stopped
+    depends_on:
+      - wazuh-indexer
+      - wazuh-manager
+    environment:
+      - INDEXER_USERNAME=admin
+      - INDEXER_PASSWORD=${WAZUH_INDEXER_PASSWORD:-SecretPassword}
+      - WAZUH_API_URL=https://wazuh-manager
+      - API_USERNAME=${WAZUH_API_USER:-wazuh-wui}
+      - API_PASSWORD=${WAZUH_API_PASSWORD:-MyS3cr3tP4ssw0rd}
+      - DASHBOARD_USERNAME=kibanaserver
+      - DASHBOARD_PASSWORD=kibanaserver
+    volumes:
+      - ./wazuh/opensearch_dashboards.yml:/usr/share/wazuh-dashboard/config/opensearch_dashboards.yml:ro
+      - ./wazuh/certs/root-ca.pem:/etc/wazuh-dashboard/certs/root-ca.pem:ro
+      - ./wazuh/certs/wazuh-dashboard.pem:/etc/wazuh-dashboard/certs/dashboard.pem:ro
+      - ./wazuh/certs/wazuh-dashboard-key.pem:/etc/wazuh-dashboard/certs/dashboard-key.pem:ro
+    ports:
+      - "${WAZUH_DASHBOARD_PORT:-443}:443"
+    networks:
+      - siem-net
+
+# =============================================================================
+# UNIFI POLLER — UniFi Network Telemetry (Optional)
+# =============================================================================
+# Remove or comment out if you don't use UniFi networking equipment.
+# Requires a read-only user on your UniFi Controller.
+# See: https://github.com/unpoller/unpoller
+
+  unifi-poller:
+    image: ghcr.io/unpoller/unpoller:latest
+    container_name: unifi-poller
+    restart: unless-stopped
+    depends_on:
+      - influxdb
+    environment:
+      - UP_INFLUXDB_URL=http://influxdb:8086
+      - UP_INFLUXDB_DB=${UNIFI_INFLUXDB:-unpoller}
+      - UP_UNIFI_DEFAULT_URL=${UNIFI_URL:-https://unifi.example.com}
+      - UP_UNIFI_DEFAULT_USER=${UNIFI_USER:-unpoller}
+      - UP_UNIFI_DEFAULT_PASS=${UNIFI_PASS:-changeme}
+      - UP_UNIFI_DEFAULT_VERIFY_SSL=false
+      - UP_UNIFI_DEFAULT_SAVE_DPI=true
+      - UP_PROMETHEUS_DISABLE=true
+    networks:
+      - siem-net
+
+# =============================================================================
+# SYSLOG-NG — Centralized Syslog Receiver
+# =============================================================================
+
+  syslog-ng:
+    image: balabit/syslog-ng:latest
+    container_name: syslog-ng
+    restart: unless-stopped
+    depends_on:
+      - logstash
+    volumes:
+      - ./syslog-ng/syslog-ng.conf:/etc/syslog-ng/syslog-ng.conf:ro
+      - /data/warm/archives/syslog:/var/log/syslog-ng
+    ports:
+      - "${SYSLOG_UDP_PORT:-514}:514/udp"
+      - "${SYSLOG_TCP_PORT:-514}:514/tcp"
+    networks:
+      - siem-net
+
+# =============================================================================
+# PORTAINER CE — Docker Management UI (Optional)
+# =============================================================================
+
+  portainer:
+    image: portainer/portainer-ce:lts
+    container_name: portainer
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+    ports:
+      - "9443:9443"
+    networks:
+      - siem-net
+
+volumes:
+  portainer_data:

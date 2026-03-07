@@ -1,0 +1,29 @@
+# =============================================================================
+# Wazuh Dashboard — OpenSearch Dashboards Configuration
+# =============================================================================
+# Maps to /usr/share/wazuh-dashboard/config/opensearch_dashboards.yml
+# in the wazuh-dashboard container.
+
+server.host: "0.0.0.0"
+server.port: 443
+opensearch.hosts: https://wazuh-indexer:9200
+
+# TLS
+server.ssl.enabled: true
+server.ssl.key: "/etc/wazuh-dashboard/certs/dashboard-key.pem"
+server.ssl.certificate: "/etc/wazuh-dashboard/certs/dashboard.pem"
+
+opensearch.ssl.certificateAuthorities: ["/etc/wazuh-dashboard/certs/root-ca.pem"]
+opensearch.ssl.verificationMode: certificate
+
+# Authentication (use default admin; change in production)
+opensearch.username: "kibanaserver"
+opensearch.password: "kibanaserver"
+
+# Wazuh plugin
+opensearch.requestHeadersAllowlist: ["securitytenant","Authorization"]
+opensearch_security.multitenancy.enabled: false
+opensearch_security.readonly_mode.roles: ["kibana_read_only"]
+
+# Branding
+uiSettings.overrides.defaultRoute: /app/wazuh

@@ -1,0 +1,47 @@
+# =============================================================================
+# Prometheus Configuration
+# =============================================================================
+# Scrape targets for the SIEM stack. Add additional targets as needed.
+#
+# Default targets:
+#   - Prometheus self-monitoring (:9090)
+#   - OpenSearch hot node (:9200)
+#   - OpenSearch warm node (:9201)
+#   - Grafana (:3000)
+#
+# Optional targets (uncomment as needed):
+#   - node_exporter (:9100) — installed on the host
+#   - cAdvisor (:8080) — Docker container metrics
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'opensearch-hot'
+    metrics_path: '/_prometheus/metrics'
+    static_configs:
+      - targets: ['opensearch-hot:9200']
+
+  - job_name: 'opensearch-warm'
+    metrics_path: '/_prometheus/metrics'
+    static_configs:
+      - targets: ['opensearch-warm:9200']
+
+  - job_name: 'grafana'
+    static_configs:
+      - targets: ['grafana:3000']
+
+  # Uncomment if you install node_exporter on the host:
+  # - job_name: 'node'
+  #   static_configs:
+  #     - targets: ['host.docker.internal:9100']
+
+  # Uncomment if you add cAdvisor:
+  # - job_name: 'cadvisor'
+  #   static_configs:
+  #     - targets: ['cadvisor:8080']

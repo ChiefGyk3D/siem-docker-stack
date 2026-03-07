@@ -1,0 +1,21 @@
+# =============================================================================
+# Grafana — Dashboard Provisioning
+# =============================================================================
+# Automatically loads dashboards from /var/lib/grafana/dashboards/json/
+# on startup. Place exported JSON files in the dashboards/json/ directory
+# and they will appear under the "Provisioned" folder in Grafana.
+
+apiVersion: 1
+
+providers:
+  - name: 'default'
+    orgId: 1
+    folder: 'Provisioned'
+    type: file
+    disableDeletion: false
+    editable: true
+    updateIntervalSeconds: 60
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards/json
+      foldersFromFilesStructure: false
