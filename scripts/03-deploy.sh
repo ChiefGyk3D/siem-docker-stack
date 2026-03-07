@@ -8,7 +8,7 @@
 #
 # Usage:
 #   # Remote deployment (from workstation):
-#   bash scripts/03-deploy.sh 10.0.0.100 siem
+#   bash scripts/03-deploy.sh 10.0.0.100 myuser
 #
 #   # Local deployment (on the SIEM server):
 #   bash scripts/03-deploy.sh local
@@ -17,7 +17,7 @@
 set -euo pipefail
 
 SIEM_HOST="${1:-${SIEM_HOST:-localhost}}"
-SIEM_USER="${2:-${SIEM_USER:-siem}}"
+SIEM_USER="${2:-${SIEM_USER:-$(whoami)}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="${SCRIPT_DIR}/.."
 DEPLOY_DIR="/opt/siem"

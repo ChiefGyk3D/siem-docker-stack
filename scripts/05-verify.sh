@@ -6,13 +6,16 @@
 # Can run locally on the SIEM server or remotely against it.
 #
 # Usage:
-#   bash scripts/05-verify.sh              # defaults to localhost
-#   bash scripts/05-verify.sh 10.0.0.100   # check remote server
+#   bash scripts/05-verify.sh                        # defaults to localhost
+#   bash scripts/05-verify.sh 10.0.0.100              # check remote server
+#   bash scripts/05-verify.sh 10.0.0.100 myuser       # remote with custom SSH user
+#   SIEM_USER=myuser bash scripts/05-verify.sh 10.0.0.100
 # =============================================================================
 
 set -uo pipefail
 
 SIEM_HOST="${1:-${SIEM_HOST:-localhost}}"
+SIEM_USER="${2:-${SIEM_USER:-$(whoami)}}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -111,8 +114,8 @@ if docker ps > /dev/null 2>&1; then
     RUNNING_CONTAINERS=$(docker ps --format "{{.Names}}" 2>/dev/null | sort | tr '\n' ' ')
     DOCKER_CMD="docker"
 elif [ "$SIEM_HOST" != "localhost" ] && [ "$SIEM_HOST" != "127.0.0.1" ]; then
-    RUNNING_CONTAINERS=$(ssh -o ConnectTimeout=5 "${SIEM_USER:-siem}@${SIEM_HOST}" 'docker ps --format "{{.Names}}"' 2>/dev/null | sort | tr '\n' ' ')
-    DOCKER_CMD="ssh ${SIEM_USER:-siem}@${SIEM_HOST} docker"
+    RUNNING_CONTAINERS=$(ssh -o ConnectTimeout=5 "${SIEM_USER}@${SIEM_HOST}" 'docker ps --format "{{.Names}}"' 2>/dev/null | sort | tr '\n' ' ')
+    DOCKER_CMD="ssh ${SIEM_USER}@${SIEM_HOST} docker"
 else
     echo -e "  ${YELLOW}Cannot access Docker - skipping container check${NC}"
     RUNNING_CONTAINERS=""
