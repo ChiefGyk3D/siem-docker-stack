@@ -39,7 +39,7 @@ A production-ready, fully Dockerized SIEM/SOC stack with **hot/warm tiering** fo
 
 - **Hot/Warm Tiering** — Automatically migrates indices from NVMe → SATA after 30 days, deletes after 1 year
 - **12+ Services** — OpenSearch (2-node cluster), Logstash, Grafana, InfluxDB, Prometheus, Wazuh (full EDR), Syslog-ng, UniFi Poller, Portainer
-- **Pre-built Dashboards** — Wazuh Security Overview, Vulnerability Detection, File Integrity Monitoring, Docker Container Monitoring, Prometheus Stats
+- **Pre-built Dashboards** — 14 dashboards covering Wazuh security/compliance/agents, SIEM overview, network security with GeoIP maps, O365 audit, Docker containers, Prometheus stats
 - **Automated Setup** — Numbered scripts (01-06) walk through disk formatting → system tuning → deployment → verification
 - **ISM Lifecycle** — Index State Management handles the hot→warm→delete lifecycle automatically
 - **pfSense Integration** — Suricata IDS/IPS logs, pfBlockerNG, syslog, and Telegraf metrics
@@ -146,6 +146,25 @@ bash scripts/05-verify.sh localhost
 
 > **IMPORTANT:** Change ALL default passwords immediately after first login!
 
+### Changing Default Passwords
+
+An interactive password change script is included to safely update credentials for all stack components:
+
+```bash
+# Run on the SIEM server
+sudo bash /opt/siem/change-passwords.sh
+```
+
+The script handles:
+- **Wazuh Indexer** — Generates bcrypt hash, applies to security config, updates compose + Grafana datasources
+- **Wazuh API (wazuh-wui)** — Changes via REST API, updates compose + Dashboard wazuh.yml
+- **Grafana** — Resets via Grafana CLI, updates .env file
+- Automatically escapes `$` as `$$` in docker-compose.yml
+- Uses `docker compose up -d` (not restart) so env var changes take effect
+- Verifies each password change worked before finishing
+
+> **TIP:** Avoid using `$` in passwords — it causes escaping issues across YAML, shell, Docker Compose, and JSON layers.
+
 ---
 
 ## Dashboards
@@ -157,9 +176,17 @@ Pre-built Grafana dashboards are included in the `dashboards/` directory:
 | `wazuh_security_overview.json` | Wazuh alerts, agent status, attack distribution |
 | `wazuh_vulnerability_detection.json` | CVE tracking, vulnerable packages, severity breakdown |
 | `wazuh_file_integrity_monitoring.json` | FIM alerts, file changes, affected agents |
-| `docker_container_monitoring.json` | Container CPU, memory, network, disk I/O |
+| `wazuh_agent_health.json` | Agent health, SCA compliance, Docker events, VirusTotal, O365 summary |
+| `wazuh_compliance.json` | PCI DSS, NIST 800-53, HIPAA, GDPR compliance dashboards |
+| `wazuh_network_security.json` | MITRE ATT&CK, SSH/Auth, pfSense alerts, GeoIP threat map |
+| `wazuh_office365.json` | Office 365 SharePoint, Exchange, Azure AD, Copilot audit monitoring |
+| `siem_overview.json` | Unified SIEM overview — cross-source correlation, Suricata, Wazuh, pfSense |
+| `docker_container_monitoring.json` | Container CPU, memory, network, disk I/O via cAdvisor/Prometheus |
 | `prometheus_stats.json` | Prometheus self-monitoring and scrape targets |
 | `datasources_reference.json` | Quick reference for all configured datasources |
+| `pfsense_firewall.json` | pfSense firewall rules, traffic by interface/protocol, blocked connections, pfBlockerNG |
+| `suricata_ids.json` | Suricata IDS alerts, severity breakdown, GeoIP map, top signatures, protocol analysis |
+| `unifi_network.json` | UniFi AP/switch metrics, client count, throughput, errors, rogue APs |
 
 ### Importing Dashboards
 
@@ -264,13 +291,22 @@ siem-docker-stack/
 │   ├── 04-apply-ism-policy.sh            # Apply ISM policy & templates
 │   ├── 05-verify.sh                      # Health check all services
 │   └── 06-generate-wazuh-certs.sh        # Generate Wazuh TLS certs
+├── change-passwords.sh                   # Interactive password change tool
 ├── dashboards/
-│   ├── docker_container_monitoring.json
-│   ├── prometheus_stats.json
-│   ├── wazuh_security_overview.json
-│   ├── wazuh_vulnerability_detection.json
-│   ├── wazuh_file_integrity_monitoring.json
-│   └── datasources_reference.json
+│   ├── siem_overview.json                # Cross-source SIEM correlation
+│   ├── wazuh_security_overview.json       # Wazuh alerts & attack distribution
+│   ├── wazuh_vulnerability_detection.json # CVE tracking & severity breakdown
+│   ├── wazuh_file_integrity_monitoring.json # FIM alerts & file changes
+│   ├── wazuh_agent_health.json            # Agent health, SCA, Docker events
+│   ├── wazuh_compliance.json              # PCI DSS, NIST, HIPAA, GDPR
+│   ├── wazuh_network_security.json        # MITRE, SSH, pfSense, GeoIP map
+│   ├── wazuh_office365.json               # O365 audit monitoring & GeoIP map
+│   ├── docker_container_monitoring.json   # Container metrics via cAdvisor
+│   ├── prometheus_stats.json              # Prometheus self-monitoring
+│   ├── datasources_reference.json         # Datasource UID reference
+│   ├── pfsense_firewall.json
+│   ├── suricata_ids.json
+│   └── unifi_network.json
 ├── docs/
 │   ├── disk-strategy.md                  # Hot/warm tiering deep dive
 │   ├── maintenance.md                    # Maintenance & backup guide
@@ -312,9 +348,17 @@ siem-docker-stack/
 
 ## Roadmap
 
+- [x] **Suricata Dashboard** — IDS/IPS alerts with GeoIP map, severity breakdown, protocol analysis
+- [x] **pfSense Firewall Dashboard** — Firewall rule visualization, traffic analysis, pfBlockerNG stats
+- [x] **UniFi Network Dashboard** — AP/switch metrics, client monitoring, throughput analysis
+- [x] **SIEM Overview Dashboard** — Unified cross-source threat overview with correlation
+- [x] **Wazuh Agent Health Dashboard** — Agent status, SCA compliance, Docker events, VirusTotal, O365
+- [x] **Wazuh Compliance Dashboard** — PCI DSS, NIST 800-53, HIPAA, GDPR compliance panels
+- [x] **Wazuh Network Security Dashboard** — MITRE ATT&CK, SSH/Auth, pfSense alerts, GeoIP threat map
+- [x] **Wazuh Office 365 Dashboard** — SharePoint, Exchange, Azure AD, Copilot audit monitoring with GeoIP map
+- [x] **Dashboard Templating** — All dashboards use datasource template variables (portable across instances)
+- [x] **Password Management** — Interactive script to change all default passwords safely
 - [ ] **N8N Integration** — AI-powered log analysis workflows using a dedicated AI inference server
-- [ ] **Suricata Dashboard** — Dedicated Grafana dashboard for IDS/IPS alerts with GeoIP world map
-- [ ] **pfSense Filterlog Dashboard** — Firewall rule hit visualization
 - [ ] **Automated Backup Script** — Scheduled OpenSearch snapshots to remote storage
 - [ ] **Alerting** — Grafana alert rules for critical security events
 - [ ] **GeoIP Enrichment** — MaxMind GeoLite2 integration in Logstash pipelines
