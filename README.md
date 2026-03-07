@@ -203,7 +203,7 @@ See [docs/disk-strategy.md](docs/disk-strategy.md) for detailed sizing guideline
 
 This stack is designed as the **server-side** receiver for a pfSense-based network. For the **pfSense-side** configuration (Suricata, Telegraf, pfBlockerNG, syslog forwarding), see the companion repository:
 
-> **[pfsense_siem_stack](https://github.com/ChiefGyk3D/pfsense_siem_stack)** — pfSense packages, Telegraf configuration, SID management, and 30+ pages of documentation.
+> **[pfsense_siem_stack](https://github.com/ChiefGyk3D/pfsense_siem_stack)** — pfSense packages, Telegraf configuration, SID management, syslog format requirements, and 30+ pages of documentation.
 
 ### Data Flow Summary
 
@@ -212,10 +212,13 @@ This stack is designed as the **server-side** receiver for a pfSense-based netwo
 | Suricata IDS/IPS | UDP | 5140 | pfSense → Logstash → OpenSearch | `suricata-*` |
 | pfSense Syslog | UDP | 514 | pfSense → Syslog-ng → Logstash → OpenSearch | `pfsense-syslog-*` |
 | pfSense Filterlog | UDP | 514 | pfSense → Syslog-ng → Logstash → OpenSearch | `pfsense-filterlog-*` |
+| pfSense Filterlog | UDP | 514 | pfSense → Syslog-ng → Wazuh Manager → Wazuh Indexer | `wazuh-alerts-*` |
 | pfBlockerNG | InfluxDB | 8086 | Telegraf → InfluxDB | `pfblockerng` |
 | pfSense Metrics | InfluxDB | 8086 | Telegraf → InfluxDB | `pfsense` |
 | UniFi Devices | Poller | — | UniFi Poller → InfluxDB | `unpoller` |
-| Wazuh Agents | UDP | 1514 | Agent → Wazuh Manager → Wazuh Indexer | `wazuh-*` |
+| Wazuh Agents | TCP | 1514 | Agent → Wazuh Manager → Wazuh Indexer | `wazuh-*` |
+
+> **Note:** pfSense must be configured to send syslog in **RFC 5424 format** (with RFC 3339 timestamps). Syslog-ng parses RFC 5424 and re-formats as BSD syslog for Wazuh's pre-decoder, which requires the traditional `timestamp hostname program[pid]: message` format to match the built-in pfSense `pf` decoder.
 
 ---
 
