@@ -1,0 +1,37 @@
+<!--
+  Wazuh Custom Local Rules (safe baseline)
+
+  Deploy to: /var/ossec/etc/rules/local_rules.xml on wazuh-manager
+  Host path: /data/hot/wazuh/manager/etc/rules/local_rules.xml
+
+  NOTE:
+  - Keep this file parser-safe. A malformed local rule can prevent
+    wazuh-analysisd from starting and break dashboard API login.
+  - pfSense frequency-rule overrides (e.g., 87702) are intentionally
+    not modified here until a validated override pattern is in place.
+-->
+
+<group name="local,syscheck,">
+
+  <!-- Suppress FIM for package manager metadata (apt/dnf/yum/rpm) -->
+  <rule id="100200" level="0">
+    <if_group>syscheck</if_group>
+    <field name="syscheck.path" type="pcre2">^/var/lib/(dpkg|apt|rpm|dnf|yum)</field>
+    <description>FIM: Suppressed - package manager metadata change</description>
+  </rule>
+
+  <!-- Suppress FIM for log rotation artifacts -->
+  <rule id="100201" level="0">
+    <if_group>syscheck</if_group>
+    <field name="syscheck.path" type="pcre2">^/var/log/.*\.(gz|[0-9]+|old|bak)$</field>
+    <description>FIM: Suppressed - log rotation artifact</description>
+  </rule>
+
+  <!-- Suppress FIM for temp/cache directories -->
+  <rule id="100202" level="0">
+    <if_group>syscheck</if_group>
+    <field name="syscheck.path" type="pcre2">^/(tmp|var/tmp|var/cache)/</field>
+    <description>FIM: Suppressed - temporary/cache file change</description>
+  </rule>
+
+</group>

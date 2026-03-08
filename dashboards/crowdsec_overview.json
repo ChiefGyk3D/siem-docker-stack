@@ -1,0 +1,401 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "CrowdSec events from pfSense — decisions, alerts, bouncer activity, and LAPI metrics. Select your OpenSearch datasource from the dropdown above.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${ds}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 10 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
+      "id": 1,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "${ds}" },
+          "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "1d" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "message:\"ban on Ip\"",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ],
+      "title": "Ban Decisions",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${ds}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "blue", "value": null },
+              { "color": "yellow", "value": 5000 },
+              { "color": "red", "value": 20000 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 0 },
+      "id": 10,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "${ds}" },
+          "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "1d" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "*",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ],
+      "title": "Total CrowdSec Events",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${ds}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 50 },
+              { "color": "red", "value": 200 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 0 },
+      "id": 11,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "${ds}" },
+          "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "1d" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "program:\"crowdsec-firewall-bouncer\"",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ],
+      "title": "Bouncer Events",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${ds}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "purple", "value": null }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 0 },
+      "id": 12,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false },
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "${ds}" },
+          "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "1d" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "message:\"/v1/alerts\"",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ],
+      "title": "LAPI Alert Calls",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${ds}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "bars",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 60,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": { "mode": "normal", "group": "A" }
+          },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 5 },
+      "id": 2,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "${ds}" },
+          "bucketAggs": [
+            { "field": "program.keyword", "id": "3", "settings": { "order": "desc", "orderBy": "1", "size": "5" }, "type": "terms" },
+            { "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }
+          ],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "*",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ],
+      "title": "CrowdSec Events Over Time (by Program)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${ds}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 30,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
+      "id": 4,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "single", "sort": "none" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "${ds}" },
+          "bucketAggs": [
+            { "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }
+          ],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "message:\"ban on Ip\" OR message:\"overflow\"",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ],
+      "title": "Decisions & Alerts Over Time",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${ds}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 13 },
+      "id": 5,
+      "options": {
+        "cellHeight": "sm",
+        "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false },
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "${ds}" },
+          "bucketAggs": [
+            { "field": "source_host.keyword", "id": "2", "settings": { "order": "desc", "orderBy": "1", "size": "10" }, "type": "terms" }
+          ],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "*",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ],
+      "title": "Events by Source Host",
+      "type": "table"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${ds}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 21 },
+      "id": 3,
+      "options": {
+        "cellHeight": "sm",
+        "footer": { "countRows": false, "fields": "", "reducer": ["sum"], "show": false },
+        "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "Time" }]
+      },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "${ds}" },
+          "bucketAggs": [],
+          "metrics": [
+            { "id": "1", "type": "raw_data", "settings": { "size": "50" } }
+          ],
+          "query": "message:\"ban on Ip\" OR message:\"overflow\" OR message:\"alert\" NOT message:\"/v1/\"",
+          "refId": "A",
+          "timeField": "@timestamp"
+        }
+      ],
+      "title": "Recent CrowdSec Alerts & Decisions (Raw Logs)",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "@version": true,
+              "DATE": true,
+              "FACILITY": true,
+              "HOST_FROM": true,
+              "MSGFORMAT": true,
+              "PRIORITY": true,
+              "SOURCE": true,
+              "TRANSPORT": true,
+              "rfc5424_host": true,
+              "rfc5424_msg": true,
+              "rfc5424_msgid": true,
+              "rfc5424_pid": true,
+              "rfc5424_program": true,
+              "rfc5424_sd": true,
+              "rfc5424_ts": true,
+              "syslog_pri": true,
+              "event.module": true,
+              "_id": true
+            },
+            "renameByName": {
+              "@timestamp": "Time",
+              "program": "Program",
+              "source_host": "Source",
+              "message": "Message"
+            }
+          }
+        }
+      ],
+      "type": "table"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": [
+    "crowdsec",
+    "siem",
+    "security"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "selected": true,
+          "text": "OpenSearch-CrowdSec",
+          "value": "efff6w5w0r4lcc"
+        },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Data Source",
+        "multi": false,
+        "name": "ds",
+        "options": [],
+        "query": "grafana-opensearch-datasource",
+        "queryValue": "",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "CrowdSec Overview",
+  "uid": "crowdsec-overview",
+  "version": 4,
+  "weekStart": ""
+}

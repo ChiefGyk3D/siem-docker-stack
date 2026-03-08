@@ -1,0 +1,27 @@
+# CrowdSec log acquisition for Phase 1 bootstrap.
+# Extend this with service-specific logs as needed.
+
+filenames:
+  - /var/log/auth.log
+labels:
+  type: syslog
+---
+filenames:
+  - /var/log/nginx/access.log
+labels:
+  type: nginx
+---
+filenames:
+  - /var/log/nginx/error.log
+labels:
+  type: nginx_error
+---
+filenames:
+  - /var/log/apache2/access.log
+labels:
+  type: apache2
+---
+filenames:
+  - /var/log/apache2/error.log
+labels:
+  type: apache2_error

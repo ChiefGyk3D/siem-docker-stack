@@ -45,3 +45,35 @@ scrape_configs:
   # - job_name: 'cadvisor'
   #   static_configs:
   #     - targets: ['cadvisor:8080']
+
+  # ===========================================================================
+  # NVIDIA GPU Monitoring
+  # ===========================================================================
+  # Linux machines use dcgm-exporter (:9400)
+  # Windows machines use nvidia_gpu_exporter (:9835)
+  # See docs/gpu-monitoring.md for installation instructions.
+
+  - job_name: 'nvidia-dcgm'
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['GPU_WORKSTATION_IP:9400']      # .env → GPU_WORKSTATION_IP
+        labels:
+          instance_name: 'workstation'
+          gpu_role: 'desktop'
+      - targets: ['GPU_LLM_SERVER_IP:9400']       # .env → GPU_LLM_SERVER_IP
+        labels:
+          instance_name: 'llm-server'
+          gpu_role: 'inference'
+      # Uncomment when transcoding server VLAN is ready:
+      # - targets: ['TRANSCODE_SERVER_IP:9400']
+      #   labels:
+      #     instance_name: 'transcode-server'
+      #     gpu_role: 'transcode'
+
+  - job_name: 'nvidia-gpu-windows'
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['GPU_WINDOWS_STREAMING_IP:9835']  # .env → GPU_WINDOWS_STREAMING_IP
+        labels:
+          instance_name: 'streaming-pc'
+          gpu_role: 'streaming'

@@ -1,0 +1,33 @@
+<group name="crowdsec,">
+  <!-- Base match for CrowdSec alerts -->
+  <rule id="120500" level="5">
+    <decoded_as>crowdsec-alert</decoded_as>
+    <description>CrowdSec alert detected</description>
+    <group>crowdsec,crowdsec_alert,</group>
+    <options>no_full_log</options>
+  </rule>
+
+  <!-- High-confidence decision event -->
+  <rule id="120501" level="10">
+    <if_sid>120500</if_sid>
+    <match>\"action\":\"ban\"</match>
+    <description>CrowdSec ban decision issued</description>
+    <group>crowdsec,crowdsec_decision,firewall,</group>
+  </rule>
+
+  <!-- Scenario includes credential abuse -->
+  <rule id="120502" level="11">
+    <if_sid>120500</if_sid>
+    <match>credential|bruteforce|ssh</match>
+    <description>CrowdSec credential abuse scenario triggered</description>
+    <group>crowdsec,authentication_failures,</group>
+  </rule>
+
+  <!-- Decision expiration/cleanup events -->
+  <rule id="120503" level="4">
+    <decoded_as>crowdsec-decision</decoded_as>
+    <description>CrowdSec decision lifecycle event</description>
+    <group>crowdsec,crowdsec_decision,</group>
+    <options>no_full_log</options>
+  </rule>
+</group>

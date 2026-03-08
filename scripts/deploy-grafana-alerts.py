@@ -64,6 +64,29 @@ def grafana_get(endpoint):
         return json.loads(resp.read())
 
 
+def resolve_alert_folder_uid():
+    """Return a valid alert folder UID.
+
+    If ALERT_FOLDER_UID is not configured, fall back to the first available folder.
+    """
+    if ALERT_FOLDER and ALERT_FOLDER != "YOUR_ALERT_FOLDER_UID":
+        return ALERT_FOLDER
+
+    folders = grafana_get("/api/folders")
+    if folders:
+        # Prefer a SIEM-specific folder when ALERT_FOLDER_UID is not explicitly set.
+        for f in folders:
+            title = (f.get("title") or "").lower()
+            if "siem" in title:
+                return f.get("uid")
+        return folders[0].get("uid")
+
+    raise RuntimeError(
+        "ALERT_FOLDER_UID is not set and no Grafana folders were found. "
+        "Create a folder in Grafana and set ALERT_FOLDER_UID."
+    )
+
+
 def opensearch_rule(title, group, query, ds_uid, window_secs, threshold,
                     severity, labels, annotations, for_duration="0s"):
     """Build a Grafana alert rule that queries an OpenSearch datasource."""
@@ -192,7 +215,7 @@ RULES = [
         window_secs=600,
         threshold=0,
         severity="critical",
-        labels={"source": "wazuh"},
+        labels={"source": "wazuh", "alert_group": "wazuh"},
         annotations={
             "summary": "Wazuh agent disconnected",
             "description": (
@@ -210,7 +233,7 @@ RULES = [
         window_secs=300,
         threshold=50,
         severity="critical",
-        labels={"source": "wazuh"},
+        labels={"source": "wazuh", "alert_group": "wazuh"},
         annotations={
             "summary": "Burst of high-severity Wazuh alerts",
             "description": (
@@ -227,7 +250,7 @@ RULES = [
         window_secs=300,
         threshold=20,
         severity="critical",
-        labels={"source": "wazuh"},
+        labels={"source": "wazuh", "alert_group": "auth"},
         annotations={
             "summary": "Burst of authentication failures",
             "description": (
@@ -244,12 +267,14 @@ RULES = [
         window_secs=600,
         threshold=0,
         severity="warning",
-        labels={"source": "wazuh"},
+        labels={"source": "wazuh", "alert_group": "fim"},
         annotations={
-            "summary": "File integrity change on monitored path",
+            "summary": "File integrity changes detected (Wazuh FIM level 7+)",
             "description": (
-                "Wazuh FIM detected level 7+ file changes in the last 10 minutes. "
-                "Review the File Integrity Monitoring dashboard."
+                "Wazuh FIM detected file additions, modifications, or deletions on monitored "
+                "paths with rule level 7+ in the last 10 minutes. Individual file details "
+                "(path, owner, permissions, hash) are sent to Discord/Matrix via the Wazuh "
+                "N8N triage workflow. Review the File Integrity Monitoring dashboard for trends."
             ),
         },
     ),
@@ -263,12 +288,13 @@ RULES = [
         window_secs=300,
         threshold=0,
         severity="critical",
-        labels={"source": "suricata"},
+        labels={"source": "suricata", "alert_group": "ids"},
         annotations={
             "summary": "Suricata severity 1 alerts detected",
             "description": (
                 "One or more critical Suricata IDS alerts in the last 5 minutes. "
-                "Check the Suricata and Network Security dashboards."
+                "Datasource: OpenSearch-Suricata-Active, Query: alert.severity:1, Window: 5m. "
+                "Check the Suricata and Network Security dashboards for signature, src/dst IP, and interface."
             ),
         },
     ),
@@ -280,14 +306,35 @@ RULES = [
         query='rule.id:"87701"',
         ds_uid=DS_WAZUH,
         window_secs=300,
-        threshold=500,
+        threshold=1000,
         severity="warning",
-        labels={"source": "pfsense"},
+        labels={"source": "pfsense", "alert_group": "firewall"},
         annotations={
-            "summary": "Surge of pfSense firewall blocks",
+            "summary": "Surge of pfSense firewall blocks (>1000 in 5m)",
             "description": (
-                "More than 500 firewall block events (rule 87701) in 5 minutes. "
-                "Could indicate a scan, DDoS, or misconfigured rule."
+                "More than 1000 firewall block events (rule 87701) in 5 minutes. "
+                "Could indicate port scanning, DDoS, or misconfigured firewall rule. "
+                "Check pfSense Firewall and Network Security dashboards for source IP distribution. "
+                "Note: high-volume blocks from internet scanners may be routine — review source IPs."
+            ),
+        },
+    ),
+
+    # --- CrowdSec ---
+    opensearch_rule(
+        title="CrowdSec Ban Decision Surge",
+        group="SIEM — CrowdSec",
+        query='rule.groups:"crowdsec_decision" OR rule.groups:"crowdsec" OR event.module:"crowdsec"',
+        ds_uid=DS_WAZUH,
+        window_secs=300,
+        threshold=5,
+        severity="warning",
+        labels={"source": "crowdsec", "alert_group": "crowdsec"},
+        annotations={
+            "summary": "CrowdSec ban/decision surge (>5 in 5m)",
+            "description": (
+                "CrowdSec decision events exceeded threshold in 5 minutes. "
+                "Review top scenarios, source IPs, and active decision TTLs in CrowdSec dashboard."
             ),
         },
     ),
@@ -299,13 +346,14 @@ RULES = [
         expr='changes(container_start_time_seconds{name=~".+"}[10m])',
         threshold=2,
         severity="warning",
-        labels={"source": "docker"},
+        labels={"source": "docker", "alert_group": "infrastructure"},
         annotations={
             "summary": "Container {{ $labels.name }} is restart-looping",
             "description": (
                 "Container {{ $labels.name }} on {{ $labels.instance }} "
                 "has restarted 3+ times in 10 minutes. "
-                "Check: docker logs {{ $labels.name }}"
+                "Datasource: Prometheus, Expr: changes(container_start_time_seconds{name=~\".+\"}[10m]) > 2. "
+                "Check: docker ps --filter name={{ $labels.name }} ; docker logs --tail 200 {{ $labels.name }}"
             ),
         },
     ),
@@ -313,31 +361,61 @@ RULES = [
 
 
 def main():
-    # Get existing rules
+    alert_folder_uid = resolve_alert_folder_uid()
+
+    # Get existing rules and map title -> uid for idempotent updates.
     existing = grafana_get("/api/v1/provisioning/alert-rules")
-    existing_titles = {r["title"] for r in existing}
+    existing_by_title = {r.get("title"): r for r in existing}
 
     created = 0
-    skipped = 0
+    updated = 0
     failed = 0
 
     for rule in RULES:
         title = rule["title"]
-        if title in existing_titles:
-            print(f"  ✓ '{title}' — already exists, skipping")
-            skipped += 1
-            continue
+        rule = dict(rule)
+        rule["folderUID"] = alert_folder_uid
+        existing_rule = existing_by_title.get(title)
 
-        result, status = grafana_post("/api/v1/provisioning/alert-rules", rule)
-        if 200 <= status < 300:
-            print(f"  ✓ '{title}' — created")
-            created += 1
+        if existing_rule:
+            uid = existing_rule.get("uid")
+            if not uid:
+                print(f"  ✗ '{title}' — existing rule missing uid, cannot update")
+                failed += 1
+                continue
+
+            payload = dict(rule)
+            payload["uid"] = uid
+            body = json.dumps(payload).encode()
+            req = urllib.request.Request(
+                f"{GRAFANA_URL}/api/v1/provisioning/alert-rules/{uid}",
+                data=body,
+                headers=_HEADERS,
+                method="PUT",
+            )
+            try:
+                with urllib.request.urlopen(req) as resp:
+                    if 200 <= resp.status < 300:
+                        print(f"  ✓ '{title}' — updated")
+                        updated += 1
+                    else:
+                        print(f"  ✗ '{title}' — {resp.status}")
+                        failed += 1
+            except urllib.error.HTTPError as e:
+                msg = e.read().decode("utf-8", errors="replace")
+                print(f"  ✗ '{title}' — {e.code}: {msg}")
+                failed += 1
         else:
-            msg = result.get("message", str(result))
-            print(f"  ✗ '{title}' — {status}: {msg}")
-            failed += 1
+            result, status = grafana_post("/api/v1/provisioning/alert-rules", rule)
+            if 200 <= status < 300:
+                print(f"  ✓ '{title}' — created")
+                created += 1
+            else:
+                msg = result.get("message", str(result))
+                print(f"  ✗ '{title}' — {status}: {msg}")
+                failed += 1
 
-    print(f"\nDone: {created} created, {skipped} skipped, {failed} failed")
+    print(f"\nDone: {created} created, {updated} updated, {failed} failed")
 
 
 if __name__ == "__main__":

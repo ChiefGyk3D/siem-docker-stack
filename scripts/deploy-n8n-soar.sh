@@ -144,10 +144,56 @@ if [[ -f "${N8N_DIR}/grafana-alert-router.json" ]]; then
   fi
 fi
 
+# Deploy CrowdSec SOAR workflow
+CROWDSEC_WF_ID=$(echo "$EXISTING" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+for w in d.get('data', []):
+  if 'CrowdSec' in w.get('name', '') and 'SOAR' in w.get('name', ''):
+    print(w['id']); break
+else:
+  print('')
+" 2>/dev/null)
+
+if [[ -f "${N8N_DIR}/crowdsec-alert-enrichment.json" ]]; then
+  WF_JSON=$(cat "${N8N_DIR}/crowdsec-alert-enrichment.json" | python3 -c "
+import sys, json
+wf = json.load(sys.stdin)
+wf.pop('active', None)
+if 'settings' not in wf: wf['settings'] = {'executionOrder': 'v1'}
+json.dump(wf, sys.stdout)
+")
+  if [[ -n "$CROWDSEC_WF_ID" ]]; then
+    echo "  Updating existing CrowdSec SOAR workflow (ID: ${CROWDSEC_WF_ID})..."
+    echo "$WF_JSON" | ssh "${SSH_USER}@${SIEM_SERVER}" "curl -sf -X PUT \
+      -H 'Content-Type: application/json' \
+      -H 'X-N8N-API-KEY: ${N8N_API_KEY}' \
+      '${N8N_BASE}/api/v1/workflows/${CROWDSEC_WF_ID}' \
+      -d @-" >/dev/null && echo "  ✓ Updated" || echo "  ✗ Failed"
+  else
+    echo "  Creating CrowdSec SOAR workflow..."
+    RESULT=$(echo "$WF_JSON" | ssh "${SSH_USER}@${SIEM_SERVER}" "curl -sf -X POST \
+      -H 'Content-Type: application/json' \
+      -H 'X-N8N-API-KEY: ${N8N_API_KEY}' \
+      '${N8N_BASE}/api/v1/workflows' \
+      -d @-" 2>/dev/null)
+    CROWDSEC_WF_ID=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+    echo "  ✓ Created (ID: ${CROWDSEC_WF_ID})"
+  fi
+
+  # Activate
+  if [[ -n "$CROWDSEC_WF_ID" ]]; then
+    ssh "${SSH_USER}@${SIEM_SERVER}" "curl -sf -X POST \
+      -H 'X-N8N-API-KEY: ${N8N_API_KEY}' \
+      '${N8N_BASE}/api/v1/workflows/${CROWDSEC_WF_ID}/activate'" >/dev/null 2>&1 && \
+      echo "  ✓ Activated" || echo "  (already active or activation skipped)"
+  fi
+fi
+
 echo ""
 
 # ---------------------------------------------------------------------------
-# 2. Create N8N Webhook Contact Point in Grafana
+# 2. Create N8N Webhook Contact Points in Grafana
 # ---------------------------------------------------------------------------
 echo "--- Step 2: Grafana contact points ---"
 
@@ -171,6 +217,26 @@ else
   echo "  ✓ N8N-SOAR contact point already exists"
 fi
 
+# Check if CrowdSec contact point already exists
+CS_CP_EXISTS=$(grafana_api GET "/api/v1/provisioning/contact-points" | \
+  python3 -c "import sys,json; cps=json.load(sys.stdin); print('yes' if any('CrowdSec' in c.get('name','') for c in cps) else 'no')" 2>/dev/null || echo "no")
+
+if [[ "$CS_CP_EXISTS" == "no" ]]; then
+  echo "  Creating N8N-CrowdSec webhook contact point..."
+  grafana_api POST "/api/v1/provisioning/contact-points" \
+    "-d '{
+      \"name\": \"N8N-CrowdSec\",
+      \"type\": \"webhook\",
+      \"settings\": {
+        \"url\": \"http://n8n/webhook/crowdsec-alerts\",
+        \"httpMethod\": \"POST\"
+      },
+      \"disableResolveMessage\": false
+    }'" && echo "  ✓ Created N8N-CrowdSec contact point" || echo "  ✗ Failed"
+else
+  echo "  ✓ N8N-CrowdSec contact point already exists"
+fi
+
 echo ""
 
 # ---------------------------------------------------------------------------
@@ -183,15 +249,23 @@ EXISTING_RULES=$(grafana_api GET "/api/v1/provisioning/alert-rules" || echo "[]"
 
 create_alert_rule() {
   local title="$1" rule_json="$2"
-  local exists
-  exists=$(echo "$EXISTING_RULES" | python3 -c "
+  local existing_uid
+  existing_uid=$(echo "$EXISTING_RULES" | python3 -c "
 import sys, json
 rules = json.load(sys.stdin)
-print('yes' if any(r['title'] == '$title' for r in rules) else 'no')
-" 2>/dev/null || echo "no")
+for r in rules:
+  if r.get('title') == '$title':
+    print(r.get('uid', ''))
+    break
+else:
+  print('')
+" 2>/dev/null || echo "")
 
-  if [[ "$exists" == "yes" ]]; then
-    echo "  ✓ '$title' already exists — skipping"
+  if [[ -n "$existing_uid" ]]; then
+    echo "  Updating '$title' (uid: ${existing_uid})..."
+    # Provisioning update endpoint expects the full rule body and preserves uid from URL.
+    grafana_api PUT "/api/v1/provisioning/alert-rules/${existing_uid}" "-d '${rule_json}'" && \
+      echo "  ✓ Updated" || echo "  ✗ Failed"
   else
     echo "  Creating '$title'..."
     grafana_api POST "/api/v1/provisioning/alert-rules" "-d '${rule_json}'" && \
@@ -343,8 +417,8 @@ create_alert_rule "pfSense Firewall Block Surge" '{
   "for": "0s",
   "labels": { "severity": "warning", "source": "pfsense" },
   "annotations": {
-    "summary": "Surge of pfSense firewall blocks detected",
-    "description": "More than 500 firewall block events in the last 5 minutes via Wazuh decoder. This could indicate a scan, DDoS attempt, or misconfigured rule."
+    "summary": "Surge of pfSense firewall blocks detected (>1000 in 5m)",
+    "description": "More than 1000 firewall block events in the last 5 minutes via Wazuh decoder. This could indicate a scan, DDoS attempt, or misconfigured rule."
   },
   "data": [
     {
@@ -373,7 +447,7 @@ create_alert_rule "pfSense Firewall Block Surge" '{
         "expression": "B",
         "refId": "C",
         "type": "threshold",
-        "conditions": [{ "evaluator": { "type": "gt", "params": [500] }, "operator": { "type": "and" }, "query": { "params": ["C"] } }]
+        "conditions": [{ "evaluator": { "type": "gt", "params": [1000] }, "operator": { "type": "and" }, "query": { "params": ["C"] } }]
       }
     }
   ]
@@ -528,6 +602,12 @@ grafana_api PUT "/api/v1/provisioning/policies" \
     \"repeat_interval\": \"4h\",
     \"routes\": [
       {
+        \"receiver\": \"N8N-CrowdSec\",
+        \"matchers\": [\"source=crowdsec\"],
+        \"continue\": true,
+        \"group_wait\": \"10s\"
+      },
+      {
         \"receiver\": \"N8N-SOAR\",
         \"matchers\": [\"source=wazuh\"],
         \"continue\": true,
@@ -540,26 +620,28 @@ grafana_api PUT "/api/v1/provisioning/policies" \
         \"group_wait\": \"10s\"
       }
     ]
-  }'" && echo "  ✓ Updated notification policy — SIEM alerts routed to both Discord and N8N" || echo "  ✗ Failed to update notification policy"
+  }'" && echo "  ✓ Updated notification policy — SIEM alerts routed to Discord, N8N-SOAR, and N8N-CrowdSec" || echo "  ✗ Failed to update notification policy"
 
 echo ""
 echo "=== Deployment complete ==="
 echo ""
 echo "Workflows deployed to N8N:"
 echo "  - Wazuh SOAR — Alert Triage & Routing (ID: ${WAZUH_WF_ID:-unknown})"
-echo "  - Grafana SOAR — Alert to N8N (ID: ${GRAFANA_WF_ID:-unknown})"
+echo "  - Grafana SOAR — Alert Router (ID: ${GRAFANA_WF_ID:-unknown})"
+echo "  - CrowdSec SOAR — Alert Enrichment (ID: ${CROWDSEC_WF_ID:-unknown})"
 echo ""
 echo "Grafana SIEM alert rules created:"
 echo "  - Wazuh Agent Disconnected (5m, critical)"
 echo "  - High-Severity Alert Burst (>50 in 5m, critical)"
 echo "  - Suricata Critical Alert (severity 1, critical)"
-echo "  - pfSense Firewall Block Surge (>500 in 5m, warning)"
+echo "  - pfSense Firewall Block Surge (>1000 in 5m, warning)"
 echo "  - Docker Container Restart Loop (3+ in 10m, warning)"
 echo "  - Authentication Failure Burst (>20 in 5m, critical)"
 echo "  - Critical File Integrity Change (level 7+, warning)"
 echo ""
 echo "Notification routing:"
 echo "  - All alerts → Discord-SIEM (default)"
+echo "  - source=crowdsec → N8N-CrowdSec (enriched alerts with OpenSearch lookup)"
 echo "  - source=wazuh|suricata → N8N-SOAR (additional, continue=true)"
 echo ""
 echo "Next steps:"

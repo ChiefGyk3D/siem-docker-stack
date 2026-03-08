@@ -25,3 +25,5 @@ portainer_data/
 # Backup files
 *.bak
 *.backup
+__pycache__/
+*.pyc
