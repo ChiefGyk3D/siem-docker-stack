@@ -1,0 +1,431 @@
+<!-- =================================================================
+     JumpCloud Directory Insights — Wazuh Rules
+     =================================================================
+     Rule IDs: 120600 – 120699 (reserved block for JumpCloud)
+
+     Event types reference:
+     https://docs.jumpcloud.com/api/insights/directory/1.0/index.html
+
+     All rules key on decoded "jumpcloud_bridge" fields.
+     ================================================================= -->
+
+<group name="jumpcloud,">
+
+  <!-- ── Catch-all: any JumpCloud event ─────────────────────────── -->
+  <rule id="120600" level="3">
+    <decoded_as>jumpcloud-bridge</decoded_as>
+    <description>JumpCloud: Directory Insights event</description>
+    <group>jumpcloud,</group>
+  </rule>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       AUTHENTICATION — Admin & User Portal
+       ═══════════════════════════════════════════════════════════════ -->
+
+  <!-- Admin login success -->
+  <rule id="120601" level="3">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">admin_login_attempt</field>
+    <field name="jumpcloud_bridge.success">true</field>
+    <description>JumpCloud: Admin login success — $(jumpcloud_bridge.resource.email)</description>
+    <group>jumpcloud,authentication_success,</group>
+  </rule>
+
+  <!-- Admin login failure -->
+  <rule id="120602" level="5">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">admin_login_attempt</field>
+    <field name="jumpcloud_bridge.success">false</field>
+    <description>JumpCloud: Admin login FAILED — $(jumpcloud_bridge.resource.email) from $(jumpcloud_bridge.client_ip)</description>
+    <group>jumpcloud,authentication_failed,</group>
+  </rule>
+
+  <!-- User portal login success -->
+  <rule id="120603" level="3">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">user_login_attempt</field>
+    <field name="jumpcloud_bridge.success">true</field>
+    <description>JumpCloud: User portal login success — $(jumpcloud_bridge.initiated_by.username)</description>
+    <group>jumpcloud,authentication_success,</group>
+  </rule>
+
+  <!-- User portal login failure -->
+  <rule id="120604" level="5">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">user_login_attempt</field>
+    <field name="jumpcloud_bridge.success">false</field>
+    <description>JumpCloud: User portal login FAILED — $(jumpcloud_bridge.initiated_by.username) from $(jumpcloud_bridge.client_ip)</description>
+    <group>jumpcloud,authentication_failed,</group>
+  </rule>
+
+  <!-- Admin login brute-force (5 failures in 120s) -->
+  <rule id="120605" level="10" frequency="5" timeframe="120">
+    <if_matched_sid>120602</if_matched_sid>
+    <description>JumpCloud: Admin brute-force — 5+ failed logins in 2 minutes</description>
+    <group>jumpcloud,authentication_failed,brute_force,</group>
+  </rule>
+
+  <!-- User login brute-force (5 failures in 120s) -->
+  <rule id="120606" level="10" frequency="5" timeframe="120">
+    <if_matched_sid>120604</if_matched_sid>
+    <description>JumpCloud: User brute-force — 5+ failed logins in 2 minutes</description>
+    <group>jumpcloud,authentication_failed,brute_force,</group>
+  </rule>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       SSO AUTHENTICATION
+       ═══════════════════════════════════════════════════════════════ -->
+
+  <!-- SSO auth success -->
+  <rule id="120610" level="3">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">sso_auth</field>
+    <field name="jumpcloud_bridge.success">true</field>
+    <description>JumpCloud: SSO auth success — $(jumpcloud_bridge.initiated_by.username) → $(jumpcloud_bridge.application.name)</description>
+    <group>jumpcloud,sso,authentication_success,</group>
+  </rule>
+
+  <!-- SSO auth failure -->
+  <rule id="120611" level="5">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">sso_auth</field>
+    <field name="jumpcloud_bridge.success">false</field>
+    <description>JumpCloud: SSO auth FAILED — $(jumpcloud_bridge.initiated_by.username) → $(jumpcloud_bridge.application.name)</description>
+    <group>jumpcloud,sso,authentication_failed,</group>
+  </rule>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       RADIUS AUTHENTICATION
+       ═══════════════════════════════════════════════════════════════ -->
+
+  <!-- RADIUS auth success -->
+  <rule id="120615" level="3">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">radius_auth</field>
+    <field name="jumpcloud_bridge.success">true</field>
+    <description>JumpCloud: RADIUS auth success — $(jumpcloud_bridge.username)</description>
+    <group>jumpcloud,radius,authentication_success,</group>
+  </rule>
+
+  <!-- RADIUS auth failure -->
+  <rule id="120616" level="5">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">radius_auth</field>
+    <field name="jumpcloud_bridge.success">false</field>
+    <description>JumpCloud: RADIUS auth FAILED — $(jumpcloud_bridge.username) from $(jumpcloud_bridge.client_ip)</description>
+    <group>jumpcloud,radius,authentication_failed,</group>
+  </rule>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       LDAP AUTHENTICATION
+       ═══════════════════════════════════════════════════════════════ -->
+
+  <!-- LDAP bind success -->
+  <rule id="120620" level="3">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">ldap_bind</field>
+    <field name="jumpcloud_bridge.success">true</field>
+    <description>JumpCloud: LDAP bind success — $(jumpcloud_bridge.username)</description>
+    <group>jumpcloud,ldap,authentication_success,</group>
+  </rule>
+
+  <!-- LDAP bind failure -->
+  <rule id="120621" level="5">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">ldap_bind</field>
+    <field name="jumpcloud_bridge.success">false</field>
+    <description>JumpCloud: LDAP bind FAILED — $(jumpcloud_bridge.username)</description>
+    <group>jumpcloud,ldap,authentication_failed,</group>
+  </rule>
+
+  <!-- LDAP search -->
+  <rule id="120622" level="3">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">ldap_search</field>
+    <description>JumpCloud: LDAP search — $(jumpcloud_bridge.username) base=$(jumpcloud_bridge.base)</description>
+    <group>jumpcloud,ldap,</group>
+  </rule>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       SYSTEM AUTHENTICATION (device logins)
+       ═══════════════════════════════════════════════════════════════ -->
+
+  <!-- System login success -->
+  <rule id="120625" level="3">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">login_attempt</field>
+    <field name="jumpcloud_bridge.success">true</field>
+    <description>JumpCloud: System login success — $(jumpcloud_bridge.username) on $(jumpcloud_bridge.system.hostname)</description>
+    <group>jumpcloud,systems,authentication_success,</group>
+  </rule>
+
+  <!-- System login failure -->
+  <rule id="120626" level="5">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">login_attempt</field>
+    <field name="jumpcloud_bridge.success">false</field>
+    <description>JumpCloud: System login FAILED — $(jumpcloud_bridge.username) on $(jumpcloud_bridge.system.hostname)</description>
+    <group>jumpcloud,systems,authentication_failed,</group>
+  </rule>
+
+  <!-- User lockout -->
+  <rule id="120627" level="8">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">user_lockout</field>
+    <description>JumpCloud: User account LOCKED OUT — $(jumpcloud_bridge.username)</description>
+    <group>jumpcloud,systems,account_lockout,</group>
+  </rule>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       USER LIFECYCLE
+       ═══════════════════════════════════════════════════════════════ -->
+
+  <!-- User created -->
+  <rule id="120630" level="5">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">user_create</field>
+    <description>JumpCloud: User CREATED — $(jumpcloud_bridge.resource.username)</description>
+    <group>jumpcloud,user_lifecycle,</group>
+  </rule>
+
+  <!-- User deleted -->
+  <rule id="120631" level="7">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">user_delete</field>
+    <description>JumpCloud: User DELETED — $(jumpcloud_bridge.resource.username)</description>
+    <group>jumpcloud,user_lifecycle,</group>
+  </rule>
+
+  <!-- User updated -->
+  <rule id="120632" level="3">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">user_update</field>
+    <description>JumpCloud: User updated — $(jumpcloud_bridge.resource.username)</description>
+    <group>jumpcloud,user_lifecycle,</group>
+  </rule>
+
+  <!-- User suspended -->
+  <rule id="120633" level="7">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">user_suspended</field>
+    <description>JumpCloud: User SUSPENDED — $(jumpcloud_bridge.resource.username)</description>
+    <group>jumpcloud,user_lifecycle,</group>
+  </rule>
+
+  <!-- User activated -->
+  <rule id="120634" level="5">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">user_activated</field>
+    <description>JumpCloud: User activated — $(jumpcloud_bridge.resource.username)</description>
+    <group>jumpcloud,user_lifecycle,</group>
+  </rule>
+
+  <!-- User password change -->
+  <rule id="120635" level="5">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">user_password_change</field>
+    <description>JumpCloud: Password changed — $(jumpcloud_bridge.resource.username)</description>
+    <group>jumpcloud,user_lifecycle,password_change,</group>
+  </rule>
+
+  <!-- User password expired -->
+  <rule id="120636" level="5">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">user_password_expired</field>
+    <description>JumpCloud: Password expired — $(jumpcloud_bridge.resource.username)</description>
+    <group>jumpcloud,user_lifecycle,</group>
+  </rule>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       ADMIN LIFECYCLE
+       ═══════════════════════════════════════════════════════════════ -->
+
+  <!-- Admin created -->
+  <rule id="120640" level="7">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">admin_create</field>
+    <description>JumpCloud: Admin CREATED — $(jumpcloud_bridge.resource.email)</description>
+    <group>jumpcloud,admin_lifecycle,</group>
+  </rule>
+
+  <!-- Admin deleted -->
+  <rule id="120641" level="9">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">admin_delete</field>
+    <description>JumpCloud: Admin DELETED — $(jumpcloud_bridge.resource.email)</description>
+    <group>jumpcloud,admin_lifecycle,</group>
+  </rule>
+
+  <!-- Admin updated -->
+  <rule id="120642" level="5">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">admin_update</field>
+    <description>JumpCloud: Admin updated — $(jumpcloud_bridge.resource.email)</description>
+    <group>jumpcloud,admin_lifecycle,</group>
+  </rule>
+
+  <!-- Admin lockout -->
+  <rule id="120643" level="10">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">admin_lockout</field>
+    <description>JumpCloud: Admin account LOCKED OUT — $(jumpcloud_bridge.resource.email)</description>
+    <group>jumpcloud,admin_lifecycle,account_lockout,</group>
+  </rule>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       GROUP & POLICY CHANGES
+       ═══════════════════════════════════════════════════════════════ -->
+
+  <!-- Group created -->
+  <rule id="120650" level="5">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">group_create</field>
+    <description>JumpCloud: Group CREATED</description>
+    <group>jumpcloud,group_change,</group>
+  </rule>
+
+  <!-- Group deleted -->
+  <rule id="120651" level="7">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">group_delete</field>
+    <description>JumpCloud: Group DELETED</description>
+    <group>jumpcloud,group_change,</group>
+  </rule>
+
+  <!-- Association change (user bound/unbound to group) -->
+  <rule id="120652" level="5">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">association_change</field>
+    <description>JumpCloud: Association changed (user/group binding)</description>
+    <group>jumpcloud,group_change,</group>
+  </rule>
+
+  <!-- Policy created -->
+  <rule id="120653" level="5">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">policy_create</field>
+    <description>JumpCloud: Policy CREATED</description>
+    <group>jumpcloud,policy_change,</group>
+  </rule>
+
+  <!-- Policy updated -->
+  <rule id="120654" level="5">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">policy_update</field>
+    <description>JumpCloud: Policy updated</description>
+    <group>jumpcloud,policy_change,</group>
+  </rule>
+
+  <!-- Policy deleted -->
+  <rule id="120655" level="7">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">policy_delete</field>
+    <description>JumpCloud: Policy DELETED</description>
+    <group>jumpcloud,policy_change,</group>
+  </rule>
+
+  <!-- Conditional access policy (authnpolicy) changes -->
+  <rule id="120656" level="7">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">authnpolicy_create|authnpolicy_delete|authnpolicy_update</field>
+    <description>JumpCloud: Conditional access policy changed — $(jumpcloud_bridge.event_type)</description>
+    <group>jumpcloud,policy_change,</group>
+  </rule>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       MFA EVENTS
+       ═══════════════════════════════════════════════════════════════ -->
+
+  <!-- TOTP enrollment started -->
+  <rule id="120660" level="5">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">totp_start_enrollment|admin_totp_start_enrollment</field>
+    <description>JumpCloud: MFA TOTP enrollment started</description>
+    <group>jumpcloud,mfa,</group>
+  </rule>
+
+  <!-- TOTP enrollment finished -->
+  <rule id="120661" level="3">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">totp_finish_enrollment|admin_totp_finish_enrollment</field>
+    <description>JumpCloud: MFA TOTP enrollment completed</description>
+    <group>jumpcloud,mfa,</group>
+  </rule>
+
+  <!-- TOTP disabled (potential security concern) -->
+  <rule id="120662" level="7">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">totp_delete_enrollment|admin_totp_disable</field>
+    <description>JumpCloud: MFA TOTP DISABLED — potential security concern</description>
+    <group>jumpcloud,mfa,</group>
+  </rule>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       SYSTEM & DEVICE EVENTS
+       ═══════════════════════════════════════════════════════════════ -->
+
+  <!-- FDE key updated -->
+  <rule id="120665" level="3">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">system_fde_key_update</field>
+    <description>JumpCloud: Full disk encryption key updated on $(jumpcloud_bridge.system.hostname)</description>
+    <group>jumpcloud,systems,encryption,</group>
+  </rule>
+
+  <!-- FDE key decrypted (someone viewed the recovery key) -->
+  <rule id="120666" level="7">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">system_fde_key_decrypt</field>
+    <description>JumpCloud: FDE recovery key DECRYPTED for $(jumpcloud_bridge.system.hostname)</description>
+    <group>jumpcloud,systems,encryption,</group>
+  </rule>
+
+  <!-- Command run -->
+  <rule id="120667" level="5">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">command_run</field>
+    <description>JumpCloud: Command executed</description>
+    <group>jumpcloud,command,</group>
+  </rule>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       SOFTWARE EVENTS
+       ═══════════════════════════════════════════════════════════════ -->
+
+  <rule id="120670" level="3">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">software_add|software_change|software_remove</field>
+    <description>JumpCloud: Software $(jumpcloud_bridge.event_type) on device</description>
+    <group>jumpcloud,software,</group>
+  </rule>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       MDM EVENTS
+       ═══════════════════════════════════════════════════════════════ -->
+
+  <rule id="120675" level="3">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">mdm_command_result</field>
+    <description>JumpCloud: MDM command result — $(jumpcloud_bridge.status)</description>
+    <group>jumpcloud,mdm,</group>
+  </rule>
+
+  <!-- ═══════════════════════════════════════════════════════════════
+       ALERT EVENTS
+       ═══════════════════════════════════════════════════════════════ -->
+
+  <rule id="120680" level="5">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">alert_created</field>
+    <description>JumpCloud: Alert created — severity=$(jumpcloud_bridge.severity)</description>
+    <group>jumpcloud,alerts,</group>
+  </rule>
+
+  <rule id="120681" level="3">
+    <if_sid>120600</if_sid>
+    <field name="jumpcloud_bridge.event_type">alert_updated|alert_status_updated</field>
+    <description>JumpCloud: Alert status updated</description>
+    <group>jumpcloud,alerts,</group>
+  </rule>
+
+</group>

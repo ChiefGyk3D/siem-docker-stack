@@ -35,45 +35,32 @@ Phased plan for Wazuh noise reduction, JumpCloud IdP integration, SOAR expansion
 
 ---
 
-## Phase 1 — JumpCloud IdP Integration
+## Phase 1 — JumpCloud IdP Integration ✅ DEPLOYED
 
-**Goal:** Ingest JumpCloud identity events into Wazuh for centralized auth monitoring.
+**Status:** JumpCloud bridge, Wazuh decoders/rules, and Grafana dashboard deployed.
 
-### Research Summary
+### Implementation Summary
 
-The existing project [wazuh-jumpcloud-integration](https://github.com/lbrictson/wazuh-jumpcloud-integration) is a Go binary that:
-- Polls JumpCloud Directory Insights API every 5 minutes
-- Writes JSON events to a log file Wazuh reads via `<localfile>`
-- Includes 10 basic Wazuh rules (IDs 866000–866010) for login success/fail, user create/delete
-- Covers Directory, System, SSO, LDAP, RADIUS, and Admin events
+| Component | Location | Status |
+|-----------|----------|--------|
+| Python bridge (Doppler + env var) | `jumpcloud-wazuh-bridge/` (separate repo) | ✅ |
+| Wazuh decoders | `wazuh/jumpcloud_decoders.xml` | ✅ |
+| Wazuh rules (120600–120681) | `wazuh/jumpcloud_rules.xml` | ✅ |
+| Grafana dashboard | `dashboards/jumpcloud_security.json` | ✅ |
+| Documentation | `docs/jumpcloud.md` | ✅ |
+| `.env.example` variables | JumpCloud + Doppler sections | ✅ |
 
-**Concerns:**
-- Low maintenance (last commit ~2 years ago, v0.0.4)
-- Known config corruption bug (issue #9)
-- Only 10 Wazuh rules — no coverage for SSO failures, LDAP, RADIUS, group/policy changes
-- No log rotation, no retry logic, plaintext API key, x86_64 only
-- Read-only JumpCloud API key is sufficient (Directory Insights read access)
+**Key design decisions:**
+- **Doppler-first secrets:** Bridge resolves `JUMPCLOUD_API_KEY` from Doppler CLI, falls back to env vars. Hardcoded defaults preserved for those without Doppler.
+- **Envelope format:** Events wrapped in `{"jumpcloud_bridge": {...}}` for reliable Wazuh decoder matching.
+- **Pagination:** Proper `X-Search_after` header-based pagination per JumpCloud API spec.
+- **Services:** Configurable via `JUMPCLOUD_SERVICES` — supports directory, sso, radius, ldap, systems, software, mdm, alerts, all.
 
-### Approach Options
-
-**Option A: Use the existing project as-is + extend**
-- Deploy the Go binary on Wazuh manager
-- Add our own rules for gaps (SSO failures, RADIUS, group changes, device compliance)
-- Add logrotate config
-- Wrap the API key in a file permissions guard or Docker secret
-
-**Option B: Rewrite the poller in Python**
-- Python is already used throughout the stack
-- Simpler to maintain, no Go toolchain needed
-- Can add pagination, retry logic, better error handling
-- Could run as N8N workflow (scheduled HTTP poll → write to Wazuh API or log)
-- More portable (no binary build)
-
-**Recommended: Option B** — Write a Python JumpCloud poller that:
-1. Calls JumpCloud Directory Insights API
-2. Writes events to Wazuh `active-responses.log` or a `<localfile>` JSON path
-3. Runs as an N8N scheduled workflow OR cron/systemd timer
-4. Ships with comprehensive Wazuh rules (extending the original 10)
+### Remaining (nice-to-have)
+- [ ] SIEM Overview dashboard: add optional JumpCloud panel row
+- [ ] N8N JumpCloud-specific triage workflow
+- [ ] CrowdSec Console web enrollment (optional — `cscli console enroll <key>`)
+- [ ] Capstone docs: architecture diagram, baseline metrics
 
 ### Dashboards Needed
 
@@ -101,14 +88,14 @@ JUMPCLOUD_ORG_ID=             # Only needed for multi-tenant JumpCloud orgs
 JUMPCLOUD_POLL_INTERVAL=300   # Seconds between polls (default: 5 minutes)
 ```
 
-### Deliverables
-- `scripts/jumpcloud-poller.py` — Python poller script
-- `config/wazuh/jumpcloud_rules.xml` — Extended Wazuh rules (beyond the original 10)
-- `config/wazuh/jumpcloud_decoders.xml` — Custom decoder if needed
-- `dashboards/jumpcloud_security.json` — Grafana dashboard
-- Updated SIEM Overview dashboard with optional JumpCloud row
-- `n8n/jumpcloud-poller.json` — Optional N8N scheduled workflow version
-- Documentation in `docs/jumpcloud.md`
+### Deliverables ✅
+- ~~`scripts/jumpcloud-poller.py`~~ → `jumpcloud-wazuh-bridge/` separate repo with Doppler support
+- ~~`config/wazuh/jumpcloud_rules.xml`~~ → `wazuh/jumpcloud_rules.xml` (IDs 120600–120681)
+- ~~`config/wazuh/jumpcloud_decoders.xml`~~ → `wazuh/jumpcloud_decoders.xml`
+- `dashboards/jumpcloud_security.json` — Grafana dashboard ✅
+- `docs/jumpcloud.md` — Full documentation ✅
+- Updated SIEM Overview dashboard with optional JumpCloud row — TODO
+- `n8n/jumpcloud-poller.json` — Optional N8N scheduled workflow — TODO
 
 ### Phase 1 Add-On — CrowdSec ✅ DEPLOYED
 
@@ -146,6 +133,61 @@ JUMPCLOUD_POLL_INTERVAL=300   # Seconds between polls (default: 5 minutes)
 - Discord: sends enriched embed with IP list, ban count, program breakdown
 - Grafana contact point: `N8N-CrowdSec` → `http://n8n/webhook/crowdsec-alerts`
 - Notification route: `source="crowdsec"` → N8N-CrowdSec (continue=true, also goes to Discord-SIEM)
+
+---
+
+## Phase 1B — Doppler Secrets Migration
+
+**Goal:** Migrate all hardcoded API keys, passwords, and webhook URLs into Doppler
+for centralized secrets management. Keep env var fallbacks for users without Doppler.
+
+**Priority:** Revisit after Phase 1 and Phase 2A are stable.
+
+### Secrets to Migrate
+
+| Secret | Current Location | Doppler Key |
+|--------|-----------------|-------------|
+| JumpCloud API key | `.env` / env var | `JUMPCLOUD_API_KEY` ✅ (already Doppler-aware) |
+| JumpCloud Org ID | `.env` / env var | `JUMPCLOUD_ORG_ID` ✅ (already Doppler-aware) |
+| Discord webhook URL | `.env` / Grafana contact point | `DISCORD_WEBHOOK_URL` |
+| N8N API key | `.env` | `N8N_API_KEY` |
+| Grafana admin password | `.env` / `docker-compose.yml` | `GRAFANA_ADMIN_PASS` |
+| Wazuh indexer password | `.env` / `docker-compose.yml` | `WAZUH_INDEXER_PASSWORD` |
+| Wazuh API password | `.env` / `docker-compose.yml` | `WAZUH_API_PASSWORD` |
+| CrowdSec Console key | pfSense local config | `CROWDSEC_CONSOLE_KEY` |
+| Matrix access token | `.env` (future) | `MATRIX_ACCESS_TOKEN` |
+| Ollama API key | `.env` (future, if auth enabled) | `OLLAMA_API_KEY` |
+
+### Implementation Pattern
+
+All integrations should follow the same pattern established by the JumpCloud bridge:
+
+```python
+def _doppler_secrets():
+    """Try Doppler CLI first, return dict or None."""
+    try:
+        result = subprocess.run(
+            ["doppler", "secrets", "download", "--no-file", "--format", "json"],
+            capture_output=True, text=True, timeout=10)
+        if result.returncode == 0:
+            return json.loads(result.stdout)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+def _get(key, default=None):
+    doppler = _doppler_secrets()
+    if doppler and key in doppler:
+        return doppler[key]
+    return os.environ.get(key, default)
+```
+
+### Deliverables
+- [ ] Docker Compose integration: `doppler run -- docker compose up`
+- [ ] Deploy script wrapper: `scripts/doppler-deploy.sh`
+- [ ] Documentation: `docs/doppler.md` — setup guide, project/config structure
+- [ ] Grafana provisioning: inject datasource credentials via Doppler
+- [ ] N8N credential injection via Doppler env
 
 ---
 
