@@ -24,7 +24,7 @@
         "name": "DS_WAZUH_ALERTS",
         "type": "datasource",
         "query": "grafana-opensearch-datasource",
-        "current": { "text": "Wazuh-Alerts", "value": "dff8stu43lr7kc" },
+        "current": {},
         "hide": 0,
         "label": "Wazuh Alerts"
       },
@@ -32,7 +32,7 @@
         "name": "DS_SURICATA",
         "type": "datasource",
         "query": "grafana-opensearch-datasource",
-        "current": { "text": "OpenSearch-Suricata-Active", "value": "P9744FCCEAAFBD98F" },
+        "current": {},
         "hide": 0,
         "label": "Suricata"
       },
@@ -40,7 +40,7 @@
         "name": "DS_PFSENSE",
         "type": "datasource",
         "query": "grafana-opensearch-datasource",
-        "current": { "text": "OpenSearch-pfSense", "value": "PAA10D95C2457C72B" },
+        "current": {},
         "hide": 0,
         "label": "pfSense"
       },
@@ -48,7 +48,7 @@
         "name": "DS_PFBLOCKERNG",
         "type": "datasource",
         "query": "grafana-opensearch-datasource",
-        "current": { "text": "OpenSearch-pfBlockerNG", "value": "PAA10D95C2457C72B" },
+        "current": {},
         "hide": 0,
         "label": "pfBlockerNG"
       },
@@ -56,7 +56,7 @@
         "name": "DS_WAZUH_VULNS",
         "type": "datasource",
         "query": "grafana-opensearch-datasource",
-        "current": { "text": "Wazuh-Vulnerabilities", "value": "dff8stu43lr7kc" },
+        "current": {},
         "hide": 0,
         "label": "Vulnerabilities"
       },
@@ -64,7 +64,7 @@
         "name": "DS_CROWDSEC",
         "type": "datasource",
         "query": "grafana-opensearch-datasource",
-        "current": { "text": "OpenSearch-CrowdSec", "value": "efff6w5w0r4lcc" },
+        "current": {},
         "hide": 0,
         "label": "CrowdSec"
       }

@@ -1327,11 +1327,7 @@
   "templating": {
     "list": [
       {
-        "current": {
-          "selected": true,
-          "text": "OpenSearch-pfBlockerNG",
-          "value": "PB8673F471865BBED"
-        },
+        "current": {},
         "label": "pfBlockerNG",
         "name": "DS_PFBLOCKERNG",
         "query": "grafana-opensearch-datasource",
@@ -1340,11 +1336,7 @@
         "type": "datasource"
       },
       {
-        "current": {
-          "selected": true,
-          "text": "OpenSearch-pfSense",
-          "value": "PAA10D95C2457C72B"
-        },
+        "current": {},
         "label": "pfSense",
         "name": "DS_PFSENSE",
         "query": "grafana-opensearch-datasource",
@@ -1353,11 +1345,7 @@
         "type": "datasource"
       },
       {
-        "current": {
-          "selected": true,
-          "text": "OpenSearch-Suricata-Active",
-          "value": "fff2eegoxyxogf"
-        },
+        "current": {},
         "label": "Suricata",
         "name": "DS_SURICATA",
         "query": "grafana-opensearch-datasource",
@@ -1366,11 +1354,7 @@
         "type": "datasource"
       },
       {
-        "current": {
-          "selected": true,
-          "text": "Wazuh-Vulnerabilities",
-          "value": "P252056AD08B86313"
-        },
+        "current": {},
         "label": "Wazuh Vulnerabilities",
         "name": "DS_WAZUH_VULNS",
         "query": "grafana-opensearch-datasource",
@@ -1379,11 +1363,7 @@
         "type": "datasource"
       },
       {
-        "current": {
-          "selected": true,
-          "text": "Wazuh-Alerts",
-          "value": "P75BB31EF98597818"
-        },
+        "current": {},
         "label": "Wazuh Alerts",
         "name": "DS_WAZUH_ALERTS",
         "query": "grafana-opensearch-datasource",

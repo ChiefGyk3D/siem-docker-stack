@@ -181,6 +181,8 @@ Pre-built Grafana dashboards are included in the `dashboards/` directory:
 | `wazuh_network_security.json` | MITRE ATT&CK, SSH/Auth, pfSense alerts, GeoIP threat map |
 | `wazuh_office365.json` | Office 365 SharePoint, Exchange, Azure AD, Copilot audit monitoring |
 | `siem_overview.json` | Unified SIEM overview — cross-source correlation, Suricata, Wazuh, pfSense |
+| `siem_plus_overview.json` | Extended SIEM+ overview — adds CrowdSec, JumpCloud, and Office 365 panels |
+| `crowdsec_overview.json` | CrowdSec ban decisions, bouncer events, LAPI alerts, source analysis |
 | `docker_container_monitoring.json` | Container CPU, memory, network, disk I/O via cAdvisor/Prometheus |
 | `prometheus_stats.json` | Prometheus self-monitoring and scrape targets |
 | `datasources_reference.json` | Quick reference for all configured datasources |
@@ -303,9 +305,11 @@ For pfSense install/config/testing steps, see your pfSense repo runbook:
 
 JumpCloud support is intentionally split into a separate optional repo so non-JumpCloud users are not forced to deploy extra components:
 
-- `../jumpcloud-wazuh-bridge`
+> **[jumpcloud-wazuh-bridge](https://github.com/ChiefGyk3D/jumpcloud-wazuh-bridge)** — Polls JumpCloud Directory Insights and writes JSONL for Wazuh ingestion. Includes its own Grafana dashboard, Dockerfile, Doppler support, and CI/CD.
 
-This bridge polls JumpCloud Directory Insights and writes JSONL for Wazuh ingestion.
+The **SIEM+ Overview** dashboard in this repo includes summary JumpCloud panels (auth failures, events by service) that pull from the same Wazuh index. The dedicated JumpCloud IdP Security dashboard (14 panels) lives in the bridge repo.
+
+Wazuh decoders and rules for JumpCloud events are in `wazuh/jumpcloud_decoders.xml` and `wazuh/jumpcloud_rules.xml`.
 
 ---
 
@@ -369,6 +373,8 @@ siem-docker-stack/
 │   ├── wazuh_office365.json               # O365 audit monitoring & GeoIP map
 │   ├── docker_container_monitoring.json   # Container metrics via cAdvisor
 │   ├── prometheus_stats.json              # Prometheus self-monitoring
+│   ├── siem_plus_overview.json             # Extended SIEM+ with CrowdSec, JumpCloud, O365
+│   ├── crowdsec_overview.json              # CrowdSec decisions & bouncer activity
 │   ├── datasources_reference.json         # Datasource UID reference
 │   ├── pfsense_firewall.json
 │   ├── suricata_ids.json
@@ -427,6 +433,9 @@ siem-docker-stack/
 - [x] **Password Management** — Interactive script to change all default passwords safely
 - [x] **N8N SOAR Integration** — Automated alert triage and Discord notification workflows via N8N webhooks
 - [x] **Alerting** — 7 Grafana alert rules for Wazuh, Suricata, pfSense, and Docker events
+- [x] **CrowdSec Integration** — CrowdSec overview dashboard, alert rules, pfSense deployment
+- [x] **SIEM+ Overview** — Extended overview dashboard with CrowdSec, JumpCloud, and Office 365 panels
+- [x] **JumpCloud Bridge** — Optional [jumpcloud-wazuh-bridge](https://github.com/ChiefGyk3D/jumpcloud-wazuh-bridge) with Wazuh decoders/rules in this repo
 - [ ] **Automated Backup Script** — Scheduled OpenSearch snapshots to remote storage
 - [ ] **GeoIP Enrichment** — MaxMind GeoLite2 integration in Logstash pipelines
 - [ ] **Node Exporter** — Add host-level metrics collection to the compose stack
@@ -450,6 +459,7 @@ siem-docker-stack/
 | Repository | Description |
 |-----------|-------------|
 | [pfsense_siem_stack](https://github.com/ChiefGyk3D/pfsense_siem_stack) | pfSense-side SIEM integration (Suricata, Telegraf, pfBlockerNG, 30+ docs) |
+| [jumpcloud-wazuh-bridge](https://github.com/ChiefGyk3D/jumpcloud-wazuh-bridge) | JumpCloud Directory Insights → Wazuh bridge with Grafana dashboard, Docker, Doppler |
 | [PiNodeXMR_Grafana_Dashboard](https://github.com/ChiefGyk3D/PiNodeXMR_Grafana_Dashboard) | Monero node monitoring dashboard for Grafana |
 
 ### UniFi Network Monitoring
