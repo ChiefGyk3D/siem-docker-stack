@@ -368,11 +368,7 @@
   "templating": {
     "list": [
       {
-        "current": {
-          "selected": true,
-          "text": "OpenSearch-CrowdSec",
-          "value": "efff6w5w0r4lcc"
-        },
+        "current": {},
         "hide": 0,
         "includeAll": false,
         "label": "Data Source",
