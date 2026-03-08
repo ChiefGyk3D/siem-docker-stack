@@ -517,7 +517,7 @@
       },
       "targets": [{
         "bucketAggs": [
-          { "field": "src_ip.keyword", "id": "2", "settings": { "min_doc_count": "1", "size": "20", "order": "desc", "orderBy": "_count" }, "type": "terms" }
+          { "field": "src_ip", "id": "2", "settings": { "min_doc_count": "1", "size": "20", "order": "desc", "orderBy": "_count" }, "type": "terms" }
         ],
         "metrics": [{ "id": "1", "type": "count" }],
         "query": "action:block",
