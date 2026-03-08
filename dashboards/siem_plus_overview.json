@@ -1,0 +1,1002 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "Extended SIEM overview — Wazuh, Suricata, pfSense, pfBlockerNG, CrowdSec, JumpCloud IdP, and Office 365. Select datasources from the dropdowns above.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [
+    { "title": "SIEM Overview (Classic)", "url": "/d/siem-overview", "type": "link" },
+    { "title": "CrowdSec Overview", "url": "/d/crowdsec-overview", "type": "link" },
+    { "title": "JumpCloud Security", "url": "/d/jumpcloud-security", "type": "link" },
+    { "title": "Office 365 Security", "url": "/d/wazuh-office365", "type": "link" }
+  ],
+  "tags": ["siem", "overview", "crowdsec", "jumpcloud", "office365", "wazuh", "suricata", "pfsense"],
+  "time": { "from": "now-24h", "to": "now" },
+  "timezone": "browser",
+  "title": "SIEM+ Overview",
+  "uid": "siem-plus-overview",
+  "refresh": "5m",
+  "templating": {
+    "list": [
+      {
+        "name": "DS_WAZUH_ALERTS",
+        "type": "datasource",
+        "query": "grafana-opensearch-datasource",
+        "current": { "text": "Wazuh-Alerts", "value": "dff8stu43lr7kc" },
+        "hide": 0,
+        "label": "Wazuh Alerts"
+      },
+      {
+        "name": "DS_SURICATA",
+        "type": "datasource",
+        "query": "grafana-opensearch-datasource",
+        "current": { "text": "OpenSearch-Suricata-Active", "value": "P9744FCCEAAFBD98F" },
+        "hide": 0,
+        "label": "Suricata"
+      },
+      {
+        "name": "DS_PFSENSE",
+        "type": "datasource",
+        "query": "grafana-opensearch-datasource",
+        "current": { "text": "OpenSearch-pfSense", "value": "PAA10D95C2457C72B" },
+        "hide": 0,
+        "label": "pfSense"
+      },
+      {
+        "name": "DS_PFBLOCKERNG",
+        "type": "datasource",
+        "query": "grafana-opensearch-datasource",
+        "current": { "text": "OpenSearch-pfBlockerNG", "value": "PAA10D95C2457C72B" },
+        "hide": 0,
+        "label": "pfBlockerNG"
+      },
+      {
+        "name": "DS_WAZUH_VULNS",
+        "type": "datasource",
+        "query": "grafana-opensearch-datasource",
+        "current": { "text": "Wazuh-Vulnerabilities", "value": "dff8stu43lr7kc" },
+        "hide": 0,
+        "label": "Vulnerabilities"
+      },
+      {
+        "name": "DS_CROWDSEC",
+        "type": "datasource",
+        "query": "grafana-opensearch-datasource",
+        "current": { "text": "OpenSearch-CrowdSec", "value": "efff6w5w0r4lcc" },
+        "hide": 0,
+        "label": "CrowdSec"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "gridPos": { "h": 2, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "options": {
+        "content": "# SIEM+ Cross-Source Correlation\nWazuh Alerts \u00b7 Suricata IDS \u00b7 pfSense Firewall \u00b7 pfBlockerNG \u00b7 CrowdSec \u00b7 JumpCloud IdP \u00b7 Office 365",
+        "mode": "markdown"
+      },
+      "type": "text",
+      "transparent": true
+    },
+
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_WAZUH_ALERTS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 100 },
+            { "color": "red", "value": 1000 }
+          ]}
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 3, "x": 0, "y": 2 },
+      "id": 1,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["sum"] },
+        "textMode": "auto"
+      },
+      "targets": [{
+        "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "*",
+        "refId": "A",
+        "timeField": "@timestamp"
+      }],
+      "title": "Wazuh Alerts",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_WAZUH_ALERTS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [
+            { "color": "green", "value": null },
+            { "color": "orange", "value": 1 },
+            { "color": "red", "value": 10 }
+          ]}
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 3, "x": 3, "y": 2 },
+      "id": 2,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": { "calcs": ["sum"] },
+        "textMode": "auto"
+      },
+      "targets": [{
+        "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "rule.level: >=12",
+        "refId": "A",
+        "timeField": "@timestamp"
+      }],
+      "title": "Critical (12+)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_SURICATA}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [
+            { "color": "blue", "value": null },
+            { "color": "yellow", "value": 500 },
+            { "color": "red", "value": 5000 }
+          ]}
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 3, "x": 6, "y": 2 },
+      "id": 3,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["sum"] },
+        "textMode": "auto"
+      },
+      "targets": [{
+        "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "event_type:alert",
+        "refId": "A",
+        "timeField": "@timestamp"
+      }],
+      "title": "Suricata Alerts",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_PFSENSE}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 500 },
+            { "color": "red", "value": 5000 }
+          ]}
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 3, "x": 9, "y": 2 },
+      "id": 4,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["sum"] },
+        "textMode": "auto"
+      },
+      "targets": [{
+        "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "action:block",
+        "refId": "A",
+        "timeField": "@timestamp"
+      }],
+      "title": "Firewall Blocks",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_CROWDSEC}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [
+            { "color": "green", "value": null },
+            { "color": "orange", "value": 1 },
+            { "color": "red", "value": 10 }
+          ]}
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 3, "x": 12, "y": 2 },
+      "id": 5,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": { "calcs": ["sum"] },
+        "textMode": "auto"
+      },
+      "targets": [{
+        "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "1d" }, "type": "date_histogram" }],
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "message:\"ban on Ip\"",
+        "refId": "A",
+        "timeField": "@timestamp"
+      }],
+      "title": "CrowdSec Bans",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_WAZUH_ALERTS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [
+            { "color": "green", "value": null },
+            { "color": "orange", "value": 5 },
+            { "color": "red", "value": 50 }
+          ]}
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 3, "x": 15, "y": 2 },
+      "id": 6,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "reduceOptions": { "calcs": ["sum"] },
+        "textMode": "auto"
+      },
+      "targets": [{
+        "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "rule.groups:jumpcloud AND rule.groups:authentication_failed",
+        "refId": "A",
+        "timeField": "@timestamp"
+      }],
+      "title": "JumpCloud Auth Fails",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_WAZUH_ALERTS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [
+            { "color": "blue", "value": null }
+          ]}
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 3, "x": 18, "y": 2 },
+      "id": 7,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["sum"] },
+        "textMode": "auto"
+      },
+      "targets": [{
+        "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "rule.groups:office365",
+        "refId": "A",
+        "timeField": "@timestamp"
+      }],
+      "title": "O365 Events",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_WAZUH_VULNS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 10 },
+            { "color": "red", "value": 100 }
+          ]}
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 3, "x": 21, "y": 2 },
+      "id": 8,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": { "calcs": ["sum"] },
+        "textMode": "auto"
+      },
+      "targets": [{
+        "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "*",
+        "refId": "A",
+        "timeField": "@timestamp"
+      }],
+      "title": "Vulnerabilities",
+      "type": "stat"
+    },
+
+    {
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 6 },
+      "id": 200,
+      "title": "Wazuh Alerts & Suricata IDS",
+      "type": "row",
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_WAZUH_ALERTS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "fillOpacity": 20,
+            "lineWidth": 2,
+            "drawStyle": "line",
+            "pointSize": 5,
+            "showPoints": "never",
+            "stacking": { "mode": "normal" }
+          }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "rule.level: >=12" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "rule.level: [7 TO 11]" }, "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "rule.level: [4 TO 6]" }, "properties": [{ "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "rule.level: [0 TO 3]" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] }
+        ]
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 7 },
+      "id": 201,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.level: >=12",
+          "refId": "A",
+          "timeField": "@timestamp",
+          "alias": "Critical (12+)"
+        },
+        {
+          "bucketAggs": [{ "field": "@timestamp", "id": "3", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "4", "type": "count" }],
+          "query": "rule.level: [7 TO 11]",
+          "refId": "B",
+          "timeField": "@timestamp",
+          "alias": "High (7-11)"
+        },
+        {
+          "bucketAggs": [{ "field": "@timestamp", "id": "5", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "6", "type": "count" }],
+          "query": "rule.level: [4 TO 6]",
+          "refId": "C",
+          "timeField": "@timestamp",
+          "alias": "Medium (4-6)"
+        },
+        {
+          "bucketAggs": [{ "field": "@timestamp", "id": "7", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "8", "type": "count" }],
+          "query": "rule.level: [0 TO 3]",
+          "refId": "D",
+          "timeField": "@timestamp",
+          "alias": "Low (0-3)"
+        }
+      ],
+      "title": "Wazuh Alert Timeline by Severity",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_SURICATA}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "fillOpacity": 15,
+            "lineWidth": 2,
+            "drawStyle": "line",
+            "pointSize": 5,
+            "showPoints": "never",
+            "stacking": { "mode": "normal" }
+          }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 7 },
+      "id": 202,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "event_type:alert",
+          "refId": "A",
+          "timeField": "@timestamp",
+          "alias": "Alerts"
+        },
+        {
+          "bucketAggs": [{ "field": "@timestamp", "id": "3", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "4", "type": "count" }],
+          "query": "event_type:dns",
+          "refId": "B",
+          "timeField": "@timestamp",
+          "alias": "DNS"
+        },
+        {
+          "bucketAggs": [{ "field": "@timestamp", "id": "5", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "6", "type": "count" }],
+          "query": "event_type:http",
+          "refId": "C",
+          "timeField": "@timestamp",
+          "alias": "HTTP"
+        },
+        {
+          "bucketAggs": [{ "field": "@timestamp", "id": "7", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "8", "type": "count" }],
+          "query": "event_type:tls",
+          "refId": "D",
+          "timeField": "@timestamp",
+          "alias": "TLS"
+        }
+      ],
+      "title": "Suricata Event Timeline",
+      "type": "timeseries"
+    },
+
+    {
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 15 },
+      "id": 300,
+      "title": "Firewall & Network Defense",
+      "type": "row",
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_PFSENSE}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "fillOpacity": 15,
+            "lineWidth": 2,
+            "drawStyle": "bars",
+            "pointSize": 5,
+            "showPoints": "never",
+            "stacking": { "mode": "normal" }
+          }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "id": 301,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "action:block",
+          "refId": "A",
+          "timeField": "@timestamp",
+          "alias": "Block"
+        },
+        {
+          "bucketAggs": [{ "field": "@timestamp", "id": "3", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "4", "type": "count" }],
+          "query": "action:pass",
+          "refId": "B",
+          "timeField": "@timestamp",
+          "alias": "Pass"
+        }
+      ],
+      "title": "pfSense Firewall Actions Over Time",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_PFSENSE}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "filterable": true }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "id": 302,
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "displayName": "Count", "desc": true }]
+      },
+      "targets": [{
+        "bucketAggs": [
+          { "field": "src_ip.keyword", "id": "2", "settings": { "min_doc_count": "1", "size": "20", "order": "desc", "orderBy": "_count" }, "type": "terms" }
+        ],
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "action:block",
+        "refId": "A",
+        "timeField": "@timestamp"
+      }],
+      "title": "Top Blocked Source IPs",
+      "type": "table"
+    },
+
+    {
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 },
+      "id": 400,
+      "title": "CrowdSec Threat Intelligence",
+      "type": "row",
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_CROWDSEC}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "fillOpacity": 15,
+            "lineWidth": 2,
+            "drawStyle": "line",
+            "pointSize": 5,
+            "showPoints": "auto"
+          }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 25 },
+      "id": 401,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "*",
+          "refId": "A",
+          "timeField": "@timestamp",
+          "alias": "All Events"
+        },
+        {
+          "bucketAggs": [{ "field": "@timestamp", "id": "3", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "4", "type": "count" }],
+          "query": "message:\"ban on Ip\"",
+          "refId": "B",
+          "timeField": "@timestamp",
+          "alias": "Ban Decisions"
+        },
+        {
+          "bucketAggs": [{ "field": "@timestamp", "id": "5", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "6", "type": "count" }],
+          "query": "program:\"crowdsec-firewall-bouncer\"",
+          "refId": "C",
+          "timeField": "@timestamp",
+          "alias": "Bouncer"
+        }
+      ],
+      "title": "CrowdSec Events Over Time",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_CROWDSEC}" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "filterable": true }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 25 },
+      "id": 402,
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "displayName": "Count", "desc": true }]
+      },
+      "targets": [{
+        "bucketAggs": [
+          { "field": "source_host.keyword", "id": "2", "settings": { "min_doc_count": "1", "size": "20", "order": "desc", "orderBy": "_count" }, "type": "terms" }
+        ],
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "message:\"ban on Ip\" OR message:\"overflow\"",
+        "refId": "A",
+        "timeField": "@timestamp"
+      }],
+      "title": "CrowdSec Events by Source Host",
+      "type": "table"
+    },
+
+    {
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 33 },
+      "id": 500,
+      "title": "JumpCloud Identity Provider",
+      "type": "row",
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_WAZUH_ALERTS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "fillOpacity": 20,
+            "lineWidth": 2,
+            "drawStyle": "line",
+            "pointSize": 5,
+            "showPoints": "auto"
+          }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Auth Failures" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "Auth Success" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] }
+        ]
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 34 },
+      "id": 501,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "auto", "min_doc_count": "0" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.groups:jumpcloud AND rule.groups:authentication_failed",
+          "refId": "A",
+          "timeField": "@timestamp",
+          "alias": "Auth Failures"
+        },
+        {
+          "bucketAggs": [{ "field": "@timestamp", "id": "3", "settings": { "interval": "auto", "min_doc_count": "0" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "4", "type": "count" }],
+          "query": "rule.groups:jumpcloud AND rule.groups:authentication_success",
+          "refId": "B",
+          "timeField": "@timestamp",
+          "alias": "Auth Success"
+        }
+      ],
+      "title": "JumpCloud Authentication Over Time",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_WAZUH_ALERTS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 34 },
+      "id": 502,
+      "options": {
+        "legend": { "displayMode": "list", "placement": "right" },
+        "tooltip": { "mode": "single" },
+        "pieType": "donut",
+        "reduceOptions": { "calcs": ["sum"], "values": false }
+      },
+      "targets": [{
+        "bucketAggs": [
+          { "field": "data.jumpcloud_bridge.service.keyword", "id": "2", "settings": { "min_doc_count": "1", "size": "15", "order": "desc", "orderBy": "_count" }, "type": "terms" }
+        ],
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "rule.groups:jumpcloud",
+        "refId": "A",
+        "timeField": "@timestamp"
+      }],
+      "title": "JumpCloud Events by Service",
+      "type": "piechart"
+    },
+
+    {
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 42 },
+      "id": 600,
+      "title": "Office 365",
+      "type": "row",
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_WAZUH_ALERTS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "fillOpacity": 15,
+            "lineWidth": 2,
+            "drawStyle": "line",
+            "pointSize": 5,
+            "showPoints": "never",
+            "stacking": { "mode": "normal" }
+          }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 43 },
+      "id": 601,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.groups:office365 AND data.office365.Workload:SharePoint",
+          "refId": "A",
+          "timeField": "@timestamp",
+          "alias": "SharePoint"
+        },
+        {
+          "bucketAggs": [{ "field": "@timestamp", "id": "3", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "4", "type": "count" }],
+          "query": "rule.groups:office365 AND data.office365.Workload:Exchange",
+          "refId": "B",
+          "timeField": "@timestamp",
+          "alias": "Exchange"
+        },
+        {
+          "bucketAggs": [{ "field": "@timestamp", "id": "5", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "6", "type": "count" }],
+          "query": "rule.groups:office365 AND data.office365.Workload:AzureActiveDirectory",
+          "refId": "C",
+          "timeField": "@timestamp",
+          "alias": "Azure AD"
+        },
+        {
+          "bucketAggs": [{ "field": "@timestamp", "id": "7", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "8", "type": "count" }],
+          "query": "rule.groups:office365 AND data.office365.Workload:MicrosoftCopilot",
+          "refId": "D",
+          "timeField": "@timestamp",
+          "alias": "Copilot"
+        }
+      ],
+      "title": "O365 Events by Workload Over Time",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_WAZUH_ALERTS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "fillOpacity": 30
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 43 },
+      "id": 602,
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": { "calcs": ["sum"], "values": false },
+        "showUnfilled": true,
+        "minVizWidth": 0,
+        "minVizHeight": 10
+      },
+      "targets": [{
+        "bucketAggs": [
+          { "field": "data.office365.Operation.keyword", "id": "2", "settings": { "min_doc_count": "1", "size": "15", "order": "desc", "orderBy": "_count" }, "type": "terms" }
+        ],
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "rule.groups:office365",
+        "refId": "A",
+        "timeField": "@timestamp"
+      }],
+      "title": "O365 Operations Distribution",
+      "type": "bargauge"
+    },
+
+    {
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 51 },
+      "id": 700,
+      "title": "MITRE ATT&CK & Threat Intelligence",
+      "type": "row",
+      "collapsed": true,
+      "panels": [
+        {
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_WAZUH_ALERTS}" },
+          "fieldConfig": {
+            "defaults": {
+              "color": { "mode": "palette-classic" },
+              "custom": { "fillOpacity": 30 }
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 52 },
+          "id": 701,
+          "options": {
+            "displayMode": "gradient",
+            "orientation": "horizontal",
+            "reduceOptions": { "calcs": ["sum"], "values": false },
+            "showUnfilled": true,
+            "minVizWidth": 0,
+            "minVizHeight": 10
+          },
+          "targets": [{
+            "bucketAggs": [
+              { "field": "rule.mitre.tactic.keyword", "id": "2", "settings": { "min_doc_count": "1", "size": "20", "order": "desc", "orderBy": "_count" }, "type": "terms" }
+            ],
+            "metrics": [{ "id": "1", "type": "count" }],
+            "query": "rule.mitre.tactic:*",
+            "refId": "A",
+            "timeField": "@timestamp"
+          }],
+          "title": "MITRE ATT&CK Tactics",
+          "type": "bargauge"
+        },
+        {
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_WAZUH_ALERTS}" },
+          "fieldConfig": {
+            "defaults": {
+              "custom": { "filterable": true }
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 52 },
+          "id": 702,
+          "options": {
+            "showHeader": true,
+            "sortBy": [{ "displayName": "Count", "desc": true }]
+          },
+          "targets": [{
+            "bucketAggs": [
+              { "field": "rule.mitre.technique.keyword", "id": "2", "settings": { "min_doc_count": "1", "size": "20", "order": "desc", "orderBy": "_count" }, "type": "terms" },
+              { "field": "rule.mitre.tactic.keyword", "id": "3", "settings": { "min_doc_count": "1", "size": "5", "order": "desc", "orderBy": "_count" }, "type": "terms" }
+            ],
+            "metrics": [{ "id": "1", "type": "count" }],
+            "query": "rule.mitre.technique:*",
+            "refId": "A",
+            "timeField": "@timestamp"
+          }],
+          "title": "MITRE ATT&CK Techniques",
+          "type": "table"
+        }
+      ]
+    },
+
+    {
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 60 },
+      "id": 800,
+      "title": "Detailed Tables",
+      "type": "row",
+      "collapsed": true,
+      "panels": [
+        {
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_WAZUH_ALERTS}" },
+          "fieldConfig": {
+            "defaults": {
+              "custom": { "filterable": true }
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 61 },
+          "id": 801,
+          "options": {
+            "showHeader": true,
+            "sortBy": [{ "displayName": "Count", "desc": true }]
+          },
+          "targets": [{
+            "bucketAggs": [
+              { "field": "rule.description.keyword", "id": "2", "settings": { "min_doc_count": "1", "size": "20", "order": "desc", "orderBy": "_count" }, "type": "terms" },
+              { "field": "rule.level", "id": "3", "settings": { "min_doc_count": "1", "size": "1", "order": "desc", "orderBy": "_count" }, "type": "terms" }
+            ],
+            "metrics": [{ "id": "1", "type": "count" }],
+            "query": "rule.level: [7 TO 15]",
+            "refId": "A",
+            "timeField": "@timestamp"
+          }],
+          "title": "Top Wazuh Alert Rules (Level 7+)",
+          "type": "table"
+        },
+        {
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_SURICATA}" },
+          "fieldConfig": {
+            "defaults": {
+              "custom": { "filterable": true }
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 61 },
+          "id": 802,
+          "options": {
+            "showHeader": true,
+            "sortBy": [{ "displayName": "Count", "desc": true }]
+          },
+          "targets": [{
+            "bucketAggs": [
+              { "field": "alert.signature.keyword", "id": "2", "settings": { "min_doc_count": "1", "size": "20", "order": "desc", "orderBy": "_count" }, "type": "terms" }
+            ],
+            "metrics": [{ "id": "1", "type": "count" }],
+            "query": "event_type:alert",
+            "refId": "A",
+            "timeField": "@timestamp"
+          }],
+          "title": "Top Suricata Signatures",
+          "type": "table"
+        },
+        {
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_WAZUH_ALERTS}" },
+          "fieldConfig": {
+            "defaults": {
+              "custom": { "filterable": true }
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 69 },
+          "id": 803,
+          "options": {
+            "showHeader": true,
+            "sortBy": [{ "displayName": "Count", "desc": true }]
+          },
+          "targets": [{
+            "bucketAggs": [
+              { "field": "data.jumpcloud_bridge.event_type.keyword", "id": "2", "settings": { "min_doc_count": "1", "size": "20", "order": "desc", "orderBy": "_count" }, "type": "terms" },
+              { "field": "data.jumpcloud_bridge.service.keyword", "id": "3", "settings": { "min_doc_count": "1", "size": "5", "order": "desc", "orderBy": "_count" }, "type": "terms" }
+            ],
+            "metrics": [{ "id": "1", "type": "count" }],
+            "query": "rule.groups:jumpcloud",
+            "refId": "A",
+            "timeField": "@timestamp"
+          }],
+          "title": "JumpCloud Events by Type",
+          "type": "table"
+        },
+        {
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_WAZUH_ALERTS}" },
+          "fieldConfig": {
+            "defaults": {
+              "custom": { "filterable": true }
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 69 },
+          "id": 804,
+          "options": {
+            "showHeader": true,
+            "sortBy": [{ "displayName": "Count", "desc": true }]
+          },
+          "targets": [{
+            "bucketAggs": [
+              { "field": "data.office365.Operation.keyword", "id": "2", "settings": { "min_doc_count": "1", "size": "20", "order": "desc", "orderBy": "_count" }, "type": "terms" },
+              { "field": "data.office365.UserId.keyword", "id": "3", "settings": { "min_doc_count": "1", "size": "5", "order": "desc", "orderBy": "_count" }, "type": "terms" }
+            ],
+            "metrics": [{ "id": "1", "type": "count" }],
+            "query": "rule.groups:office365",
+            "refId": "A",
+            "timeField": "@timestamp"
+          }],
+          "title": "O365 Operations by User",
+          "type": "table"
+        },
+        {
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_WAZUH_ALERTS}" },
+          "fieldConfig": {
+            "defaults": {
+              "custom": { "filterable": true }
+            },
+            "overrides": []
+          },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 77 },
+          "id": 805,
+          "options": {
+            "showHeader": true,
+            "sortBy": [{ "displayName": "Count", "desc": true }]
+          },
+          "targets": [{
+            "bucketAggs": [
+              { "field": "rule.groups.keyword", "id": "2", "settings": { "min_doc_count": "1", "size": "25", "order": "desc", "orderBy": "_count" }, "type": "terms" },
+              { "field": "rule.description.keyword", "id": "3", "settings": { "min_doc_count": "1", "size": "5", "order": "desc", "orderBy": "_count" }, "type": "terms" }
+            ],
+            "metrics": [{ "id": "1", "type": "count" }],
+            "query": "*",
+            "refId": "A",
+            "timeField": "@timestamp"
+          }],
+          "title": "Alert Groups → Top Rules",
+          "type": "table"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "version": 1
+}
