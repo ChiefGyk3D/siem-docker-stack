@@ -1,0 +1,397 @@
+{
+  "dashboard": {
+    "id": null,
+    "uid": "jumpcloud-security",
+    "title": "JumpCloud IdP Security",
+    "description": "JumpCloud Directory Insights — auth events, user lifecycle, SSO, RADIUS, LDAP, policy changes",
+    "tags": ["jumpcloud", "idp", "security", "wazuh"],
+    "timezone": "browser",
+    "editable": true,
+    "graphTooltip": 1,
+    "refresh": "5m",
+    "time": { "from": "now-24h", "to": "now" },
+    "templating": {
+      "list": [
+        {
+          "name": "ds",
+          "type": "datasource",
+          "query": "opensearch",
+          "current": { "text": "Wazuh", "value": "dff8stu43lr7kc" },
+          "hide": 0,
+          "label": "Datasource"
+        }
+      ]
+    },
+    "panels": [
+      {
+        "id": 1,
+        "title": "Auth Failures Over Time",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+        "datasource": { "type": "grafana-opensearch-datasource", "uid": "${ds}" },
+        "targets": [
+          {
+            "query": "rule.groups:jumpcloud AND rule.groups:authentication_failed",
+            "metrics": [{ "type": "count", "id": "1" }],
+            "bucketAggs": [
+              {
+                "type": "date_histogram",
+                "field": "timestamp",
+                "id": "2",
+                "settings": { "interval": "auto", "min_doc_count": "0" }
+              }
+            ],
+            "timeField": "timestamp"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": { "mode": "fixed", "fixedColor": "red" },
+            "custom": {
+              "fillOpacity": 20,
+              "lineWidth": 2,
+              "drawStyle": "line",
+              "pointSize": 5,
+              "showPoints": "auto"
+            }
+          }
+        },
+        "options": { "legend": { "displayMode": "list" }, "tooltip": { "mode": "single" } }
+      },
+      {
+        "id": 2,
+        "title": "Auth Success Over Time",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+        "datasource": { "type": "grafana-opensearch-datasource", "uid": "${ds}" },
+        "targets": [
+          {
+            "query": "rule.groups:jumpcloud AND rule.groups:authentication_success",
+            "metrics": [{ "type": "count", "id": "1" }],
+            "bucketAggs": [
+              {
+                "type": "date_histogram",
+                "field": "timestamp",
+                "id": "2",
+                "settings": { "interval": "auto", "min_doc_count": "0" }
+              }
+            ],
+            "timeField": "timestamp"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": { "mode": "fixed", "fixedColor": "green" },
+            "custom": {
+              "fillOpacity": 20,
+              "lineWidth": 2,
+              "drawStyle": "line",
+              "pointSize": 5,
+              "showPoints": "auto"
+            }
+          }
+        },
+        "options": { "legend": { "displayMode": "list" }, "tooltip": { "mode": "single" } }
+      },
+      {
+        "id": 3,
+        "title": "Total Auth Failures",
+        "type": "stat",
+        "gridPos": { "h": 4, "w": 4, "x": 0, "y": 8 },
+        "datasource": { "type": "grafana-opensearch-datasource", "uid": "${ds}" },
+        "targets": [
+          {
+            "query": "rule.groups:jumpcloud AND rule.groups:authentication_failed",
+            "metrics": [{ "type": "count", "id": "1" }],
+            "bucketAggs": [],
+            "timeField": "timestamp"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": { "mode": "fixed", "fixedColor": "red" },
+            "thresholds": { "steps": [{ "value": null, "color": "green" }, { "value": 10, "color": "yellow" }, { "value": 50, "color": "red" }] }
+          }
+        }
+      },
+      {
+        "id": 4,
+        "title": "Total Auth Success",
+        "type": "stat",
+        "gridPos": { "h": 4, "w": 4, "x": 4, "y": 8 },
+        "datasource": { "type": "grafana-opensearch-datasource", "uid": "${ds}" },
+        "targets": [
+          {
+            "query": "rule.groups:jumpcloud AND rule.groups:authentication_success",
+            "metrics": [{ "type": "count", "id": "1" }],
+            "bucketAggs": [],
+            "timeField": "timestamp"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": { "color": { "mode": "fixed", "fixedColor": "green" } }
+        }
+      },
+      {
+        "id": 5,
+        "title": "User Lifecycle Events",
+        "type": "stat",
+        "gridPos": { "h": 4, "w": 4, "x": 8, "y": 8 },
+        "datasource": { "type": "grafana-opensearch-datasource", "uid": "${ds}" },
+        "targets": [
+          {
+            "query": "rule.groups:jumpcloud AND rule.groups:user_lifecycle",
+            "metrics": [{ "type": "count", "id": "1" }],
+            "bucketAggs": [],
+            "timeField": "timestamp"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": { "color": { "mode": "fixed", "fixedColor": "blue" } }
+        }
+      },
+      {
+        "id": 6,
+        "title": "Brute-Force Alerts",
+        "type": "stat",
+        "gridPos": { "h": 4, "w": 4, "x": 12, "y": 8 },
+        "datasource": { "type": "grafana-opensearch-datasource", "uid": "${ds}" },
+        "targets": [
+          {
+            "query": "rule.groups:jumpcloud AND rule.groups:brute_force",
+            "metrics": [{ "type": "count", "id": "1" }],
+            "bucketAggs": [],
+            "timeField": "timestamp"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": { "mode": "fixed", "fixedColor": "dark-red" },
+            "thresholds": { "steps": [{ "value": null, "color": "green" }, { "value": 1, "color": "red" }] }
+          }
+        }
+      },
+      {
+        "id": 7,
+        "title": "Policy Changes",
+        "type": "stat",
+        "gridPos": { "h": 4, "w": 4, "x": 16, "y": 8 },
+        "datasource": { "type": "grafana-opensearch-datasource", "uid": "${ds}" },
+        "targets": [
+          {
+            "query": "rule.groups:jumpcloud AND rule.groups:policy_change",
+            "metrics": [{ "type": "count", "id": "1" }],
+            "bucketAggs": [],
+            "timeField": "timestamp"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": { "color": { "mode": "fixed", "fixedColor": "orange" } }
+        }
+      },
+      {
+        "id": 8,
+        "title": "MFA Events",
+        "type": "stat",
+        "gridPos": { "h": 4, "w": 4, "x": 20, "y": 8 },
+        "datasource": { "type": "grafana-opensearch-datasource", "uid": "${ds}" },
+        "targets": [
+          {
+            "query": "rule.groups:jumpcloud AND rule.groups:mfa",
+            "metrics": [{ "type": "count", "id": "1" }],
+            "bucketAggs": [],
+            "timeField": "timestamp"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": { "color": { "mode": "fixed", "fixedColor": "purple" } }
+        }
+      },
+      {
+        "id": 9,
+        "title": "Events by Service",
+        "type": "piechart",
+        "gridPos": { "h": 8, "w": 8, "x": 0, "y": 12 },
+        "datasource": { "type": "grafana-opensearch-datasource", "uid": "${ds}" },
+        "targets": [
+          {
+            "query": "rule.groups:jumpcloud",
+            "metrics": [{ "type": "count", "id": "1" }],
+            "bucketAggs": [
+              {
+                "type": "terms",
+                "field": "data.jumpcloud_bridge.service.keyword",
+                "id": "2",
+                "settings": { "size": "10", "order": "desc", "orderBy": "_count" }
+              }
+            ],
+            "timeField": "timestamp"
+          }
+        ],
+        "options": { "legend": { "displayMode": "table", "placement": "right" } }
+      },
+      {
+        "id": 10,
+        "title": "Events by Type",
+        "type": "barchart",
+        "gridPos": { "h": 8, "w": 16, "x": 8, "y": 12 },
+        "datasource": { "type": "grafana-opensearch-datasource", "uid": "${ds}" },
+        "targets": [
+          {
+            "query": "rule.groups:jumpcloud",
+            "metrics": [{ "type": "count", "id": "1" }],
+            "bucketAggs": [
+              {
+                "type": "terms",
+                "field": "data.jumpcloud_bridge.event_type.keyword",
+                "id": "2",
+                "settings": { "size": "15", "order": "desc", "orderBy": "_count" }
+              }
+            ],
+            "timeField": "timestamp"
+          }
+        ],
+        "options": { "orientation": "horizontal" }
+      },
+      {
+        "id": 11,
+        "title": "SSO Application Usage",
+        "type": "barchart",
+        "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+        "datasource": { "type": "grafana-opensearch-datasource", "uid": "${ds}" },
+        "targets": [
+          {
+            "query": "rule.groups:jumpcloud AND rule.groups:sso",
+            "metrics": [{ "type": "count", "id": "1" }],
+            "bucketAggs": [
+              {
+                "type": "terms",
+                "field": "data.jumpcloud_bridge.application.name.keyword",
+                "id": "2",
+                "settings": { "size": "10", "order": "desc", "orderBy": "_count" }
+              }
+            ],
+            "timeField": "timestamp"
+          }
+        ],
+        "options": { "orientation": "horizontal" }
+      },
+      {
+        "id": 12,
+        "title": "Auth Failures by Source IP",
+        "type": "table",
+        "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+        "datasource": { "type": "grafana-opensearch-datasource", "uid": "${ds}" },
+        "targets": [
+          {
+            "query": "rule.groups:jumpcloud AND rule.groups:authentication_failed",
+            "metrics": [{ "type": "count", "id": "1" }],
+            "bucketAggs": [
+              {
+                "type": "terms",
+                "field": "data.jumpcloud_bridge.client_ip.keyword",
+                "id": "2",
+                "settings": { "size": "20", "order": "desc", "orderBy": "_count" }
+              }
+            ],
+            "timeField": "timestamp"
+          }
+        ]
+      },
+      {
+        "id": 13,
+        "title": "User Lifecycle Timeline",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 24, "x": 0, "y": 28 },
+        "datasource": { "type": "grafana-opensearch-datasource", "uid": "${ds}" },
+        "targets": [
+          {
+            "query": "rule.groups:jumpcloud AND rule.groups:user_lifecycle",
+            "metrics": [{ "type": "count", "id": "1" }],
+            "bucketAggs": [
+              {
+                "type": "terms",
+                "field": "data.jumpcloud_bridge.event_type.keyword",
+                "id": "3",
+                "settings": { "size": "10", "order": "desc", "orderBy": "_count" }
+              },
+              {
+                "type": "date_histogram",
+                "field": "timestamp",
+                "id": "2",
+                "settings": { "interval": "auto", "min_doc_count": "0" }
+              }
+            ],
+            "timeField": "timestamp"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "fillOpacity": 10,
+              "lineWidth": 2,
+              "drawStyle": "bars",
+              "stacking": { "mode": "normal" }
+            }
+          }
+        },
+        "options": { "legend": { "displayMode": "table", "placement": "bottom" } }
+      },
+      {
+        "id": 14,
+        "title": "Recent JumpCloud Events",
+        "type": "table",
+        "gridPos": { "h": 10, "w": 24, "x": 0, "y": 36 },
+        "datasource": { "type": "grafana-opensearch-datasource", "uid": "${ds}" },
+        "targets": [
+          {
+            "query": "rule.groups:jumpcloud",
+            "metrics": [
+              {
+                "type": "raw_data",
+                "id": "1",
+                "settings": { "size": "50" }
+              }
+            ],
+            "bucketAggs": [],
+            "timeField": "timestamp"
+          }
+        ],
+        "transformations": [
+          {
+            "id": "organize",
+            "options": {
+              "includeByName": {
+                "timestamp": true,
+                "rule.description": true,
+                "rule.level": true,
+                "data.jumpcloud_bridge.event_type": true,
+                "data.jumpcloud_bridge.service": true,
+                "data.jumpcloud_bridge.client_ip": true,
+                "data.jumpcloud_bridge.username": true,
+                "data.jumpcloud_bridge.success": true
+              },
+              "renameByName": {
+                "timestamp": "Time",
+                "rule.description": "Description",
+                "rule.level": "Level",
+                "data.jumpcloud_bridge.event_type": "Event Type",
+                "data.jumpcloud_bridge.service": "Service",
+                "data.jumpcloud_bridge.client_ip": "Source IP",
+                "data.jumpcloud_bridge.username": "Username",
+                "data.jumpcloud_bridge.success": "Success"
+              }
+            }
+          }
+        ],
+        "options": {
+          "showHeader": true,
+          "sortBy": [{ "displayName": "Time", "desc": true }]
+        }
+      }
+    ],
+    "schemaVersion": 39,
+    "version": 1
+  },
+  "overwrite": true
+}

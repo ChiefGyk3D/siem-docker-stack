@@ -1,0 +1,21 @@
+<!-- =================================================================
+     JumpCloud Directory Insights — Wazuh Decoders
+     =================================================================
+     Matches events written by jumpcloud-wazuh-bridge in JSONL format:
+       {"jumpcloud_bridge": {"event_type":"admin_login_attempt", ...}}
+
+     The bridge wraps every JumpCloud API event in a "jumpcloud_bridge"
+     envelope so these decoders trigger reliably without false-matching
+     other JSON logs.
+     ================================================================= -->
+
+<!-- Parent decoder: key on the jumpcloud_bridge envelope -->
+<decoder name="jumpcloud-bridge">
+  <prematch>\"jumpcloud_bridge\"</prematch>
+</decoder>
+
+<!-- Child: extract top-level fields from the JumpCloud event -->
+<decoder name="jumpcloud-bridge-json">
+  <parent>jumpcloud-bridge</parent>
+  <plugin_decoder>JSON_Decoder</plugin_decoder>
+</decoder>
