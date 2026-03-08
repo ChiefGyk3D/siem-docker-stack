@@ -290,7 +290,13 @@ siem-docker-stack/
 │   ├── 03-deploy.sh                      # Deploy stack (local or remote)
 │   ├── 04-apply-ism-policy.sh            # Apply ISM policy & templates
 │   ├── 05-verify.sh                      # Health check all services
-│   └── 06-generate-wazuh-certs.sh        # Generate Wazuh TLS certs
+│   ├── 06-generate-wazuh-certs.sh        # Generate Wazuh TLS certs
+│   ├── deploy-n8n-soar.sh               # Deploy N8N workflows + Grafana alerts
+│   ├── deploy-n8n-grafana-router.py      # Deploy Grafana alert router to N8N
+│   └── deploy-grafana-alerts.py          # Deploy Grafana SIEM alert rules
+├── n8n/
+│   ├── grafana-alert-router.json         # N8N workflow: Grafana → Discord
+│   └── wazuh-alert-triage.json           # N8N workflow: Wazuh → severity triage → Discord
 ├── change-passwords.sh                   # Interactive password change tool
 ├── dashboards/
 │   ├── siem_overview.json                # Cross-source SIEM correlation
@@ -310,6 +316,7 @@ siem-docker-stack/
 ├── docs/
 │   ├── disk-strategy.md                  # Hot/warm tiering deep dive
 │   ├── maintenance.md                    # Maintenance & backup guide
+│   ├── n8n-soar.md                       # N8N SOAR deployment & workflow reference
 │   └── troubleshooting.md               # Common issues & fixes
 └── media/
   ├── icons/                            # Social media icons for README
@@ -358,9 +365,9 @@ siem-docker-stack/
 - [x] **Wazuh Office 365 Dashboard** — SharePoint, Exchange, Azure AD, Copilot audit monitoring with GeoIP map
 - [x] **Dashboard Templating** — All dashboards use datasource template variables (portable across instances)
 - [x] **Password Management** — Interactive script to change all default passwords safely
-- [ ] **N8N Integration** — AI-powered log analysis workflows using a dedicated AI inference server
+- [x] **N8N SOAR Integration** — Automated alert triage and Discord notification workflows via N8N webhooks
+- [x] **Alerting** — 7 Grafana alert rules for Wazuh, Suricata, pfSense, and Docker events
 - [ ] **Automated Backup Script** — Scheduled OpenSearch snapshots to remote storage
-- [ ] **Alerting** — Grafana alert rules for critical security events
 - [ ] **GeoIP Enrichment** — MaxMind GeoLite2 integration in Logstash pipelines
 - [ ] **Node Exporter** — Add host-level metrics collection to the compose stack
 
@@ -373,6 +380,7 @@ siem-docker-stack/
 | [docs/disk-strategy.md](docs/disk-strategy.md) | Hot/warm tiering, directory layout, sizing guidelines |
 | [docs/maintenance.md](docs/maintenance.md) | Systemd timers, backup strategy, service commands |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Common issues, memory budgets, emergency procedures |
+| [docs/n8n-soar.md](docs/n8n-soar.md) | N8N SOAR deployment, workflow reference, env var setup |
 | [.env.example](.env.example) | All configurable environment variables with descriptions |
 
 ---
