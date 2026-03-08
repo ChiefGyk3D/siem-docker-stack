@@ -1,0 +1,520 @@
+{
+  "name": "Wazuh SOAR — Alert Triage & Routing",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "wazuh-alerts",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        300
+      ],
+      "id": "webhook-wazuh",
+      "name": "Wazuh Webhook",
+      "webhookId": "wazuh-alerts"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "crit",
+                    "leftValue": "={{ $json.body.rule.level }}",
+                    "rightValue": 12,
+                    "operator": {
+                      "type": "number",
+                      "operation": "gte"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Critical (12+)"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "high",
+                    "leftValue": "={{ $json.body.rule.level }}",
+                    "rightValue": 10,
+                    "operator": {
+                      "type": "number",
+                      "operation": "gte"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "High (10-11)"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "med",
+                    "leftValue": "={{ $json.body.rule.level }}",
+                    "rightValue": 7,
+                    "operator": {
+                      "type": "number",
+                      "operation": "gte"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Medium (7-9)"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        280,
+        300
+      ],
+      "id": "switch-severity",
+      "name": "Severity Router"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"content\": \"<@YOUR_DISCORD_USER_ID>\",\n  \"embeds\": [{\n    \"title\": \"🚨 CRITICAL — Wazuh Alert (Level {{ $json.body.rule.level }})\",\n    \"description\": \"{{ $json.body.rule.description }}\",\n    \"color\": 15158332,\n    \"fields\": [\n      { \"name\": \"Rule ID\", \"value\": \"{{ $json.body.rule.id }}\", \"inline\": true },\n      { \"name\": \"Agent\", \"value\": \"{{ $json.body.agent.name }} ({{ $json.body.agent.ip }})\", \"inline\": true },\n      { \"name\": \"Source IP\", \"value\": \"{{ $json.body.srcip || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"MITRE\", \"value\": \"{{ ($json.body.rule.mitre?.tactic || []).join(', ') || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"Groups\", \"value\": \"{{ ($json.body.rule.groups || []).join(', ') }}\", \"inline\": false },\n      { \"name\": \"Location\", \"value\": \"```{{ $json.body.location }}```\", \"inline\": false }\n    ],\n    \"timestamp\": \"{{ $json.body.timestamp }}\"\n  }]\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        580,
+        100
+      ],
+      "id": "discord-critical",
+      "name": "Discord — Critical"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"embeds\": [{\n    \"title\": \"🟠 HIGH — Wazuh Alert (Level {{ $json.body.rule.level }})\",\n    \"description\": \"{{ $json.body.rule.description }}\",\n    \"color\": 16744448,\n    \"fields\": [\n      { \"name\": \"Rule ID\", \"value\": \"{{ $json.body.rule.id }}\", \"inline\": true },\n      { \"name\": \"Agent\", \"value\": \"{{ $json.body.agent.name }} ({{ $json.body.agent.ip }})\", \"inline\": true },\n      { \"name\": \"Source IP\", \"value\": \"{{ $json.body.srcip || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"MITRE\", \"value\": \"{{ ($json.body.rule.mitre?.tactic || []).join(', ') || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"Groups\", \"value\": \"{{ ($json.body.rule.groups || []).join(', ') }}\", \"inline\": false }\n    ],\n    \"timestamp\": \"{{ $json.body.timestamp }}\"\n  }]\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        580,
+        300
+      ],
+      "id": "discord-high",
+      "name": "Discord — High"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "ts",
+              "name": "timestamp",
+              "value": "={{ $json.body.timestamp }}",
+              "type": "string"
+            },
+            {
+              "id": "rid",
+              "name": "rule_id",
+              "value": "={{ $json.body.rule.id }}",
+              "type": "string"
+            },
+            {
+              "id": "lvl",
+              "name": "level",
+              "value": "={{ $json.body.rule.level }}",
+              "type": "number"
+            },
+            {
+              "id": "desc",
+              "name": "description",
+              "value": "={{ $json.body.rule.description }}",
+              "type": "string"
+            },
+            {
+              "id": "agent",
+              "name": "agent",
+              "value": "={{ $json.body.agent.name }}",
+              "type": "string"
+            },
+            {
+              "id": "src",
+              "name": "srcip",
+              "value": "={{ $json.body.srcip || '' }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        580,
+        500
+      ],
+      "id": "set-medium",
+      "name": "Log Medium"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "ts",
+              "name": "timestamp",
+              "value": "={{ $json.body.timestamp }}",
+              "type": "string"
+            },
+            {
+              "id": "rid",
+              "name": "rule_id",
+              "value": "={{ $json.body.rule.id }}",
+              "type": "string"
+            },
+            {
+              "id": "lvl",
+              "name": "level",
+              "value": "={{ $json.body.rule.level }}",
+              "type": "number"
+            },
+            {
+              "id": "desc",
+              "name": "description",
+              "value": "={{ $json.body.rule.description }}",
+              "type": "string"
+            },
+            {
+              "id": "agent",
+              "name": "agent",
+              "value": "={{ $json.body.agent.name }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        580,
+        700
+      ],
+      "id": "set-low",
+      "name": "Log Low"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "brute",
+                    "leftValue": "={{ ($json.body.rule.groups || []).join(',') }}",
+                    "rightValue": "authentication_fail",
+                    "operator": {
+                      "type": "string",
+                      "operation": "contains"
+                    }
+                  }
+                ],
+                "combinator": "or"
+              },
+              "renameOutput": true,
+              "outputKey": "Brute Force"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "fim",
+                    "leftValue": "={{ ($json.body.rule.groups || []).join(',') }}",
+                    "rightValue": "syscheck",
+                    "operator": {
+                      "type": "string",
+                      "operation": "contains"
+                    }
+                  }
+                ],
+                "combinator": "or"
+              },
+              "renameOutput": true,
+              "outputKey": "File Integrity"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "vuln",
+                    "leftValue": "={{ ($json.body.rule.groups || []).join(',') }}",
+                    "rightValue": "vulnerability-detector",
+                    "operator": {
+                      "type": "string",
+                      "operation": "contains"
+                    }
+                  }
+                ],
+                "combinator": "or"
+              },
+              "renameOutput": true,
+              "outputKey": "Vulnerability"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        860,
+        100
+      ],
+      "id": "switch-category",
+      "name": "Attack Categorizer"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"content\": \"<@YOUR_DISCORD_USER_ID>\",\n  \"embeds\": [{\n    \"title\": \"🔐 Brute Force Detected — {{ $json.body.agent.name }}\",\n    \"description\": \"{{ $json.body.rule.description }}\",\n    \"color\": 15105570,\n    \"fields\": [\n      { \"name\": \"Source IP\", \"value\": \"{{ $json.body.srcip || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"Agent\", \"value\": \"{{ $json.body.agent.name }}\", \"inline\": true },\n      { \"name\": \"Rule\", \"value\": \"{{ $json.body.rule.id }} (Level {{ $json.body.rule.level }})\", \"inline\": true },\n      { \"name\": \"Action\", \"value\": \"Check auth logs, consider firewall block\", \"inline\": false }\n    ],\n    \"timestamp\": \"{{ $json.body.timestamp }}\"\n  }]\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1140,
+        0
+      ],
+      "id": "discord-brute",
+      "name": "Discord — Brute Force"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"content\": \"<@YOUR_DISCORD_USER_ID>\",\n  \"embeds\": [{\n    \"title\": \"📁 File Integrity Change — {{ $json.body.agent.name }}\",\n    \"description\": \"{{ $json.body.rule.description }}\",\n    \"color\": 3447003,\n    \"fields\": [\n      { \"name\": \"Agent\", \"value\": \"{{ $json.body.agent.name }}\", \"inline\": true },\n      { \"name\": \"Rule\", \"value\": \"{{ $json.body.rule.id }} (Level {{ $json.body.rule.level }})\", \"inline\": true },\n      { \"name\": \"Location\", \"value\": \"```{{ $json.body.location }}```\", \"inline\": false }\n    ],\n    \"timestamp\": \"{{ $json.body.timestamp }}\"\n  }]\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1140,
+        200
+      ],
+      "id": "discord-fim",
+      "name": "Discord — FIM Alert"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"embeds\": [{\n    \"title\": \"🛡️ Vulnerability Found — {{ $json.body.agent.name }}\",\n    \"description\": \"{{ $json.body.rule.description }}\",\n    \"color\": 16776960,\n    \"fields\": [\n      { \"name\": \"Agent\", \"value\": \"{{ $json.body.agent.name }}\", \"inline\": true },\n      { \"name\": \"Rule\", \"value\": \"{{ $json.body.rule.id }} (Level {{ $json.body.rule.level }})\", \"inline\": true }\n    ],\n    \"timestamp\": \"{{ $json.body.timestamp }}\"\n  }]\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1140,
+        400
+      ],
+      "id": "discord-vuln",
+      "name": "Discord — Vulnerability"
+    }
+  ],
+  "connections": {
+    "Wazuh Webhook": {
+      "main": [
+        [
+          {
+            "node": "Severity Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Severity Router": {
+      "main": [
+        [
+          {
+            "node": "Discord — Critical",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Discord — High",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Medium",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Low",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Discord — Critical": {
+      "main": [
+        [
+          {
+            "node": "Attack Categorizer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attack Categorizer": {
+      "main": [
+        [
+          {
+            "node": "Discord — Brute Force",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Discord — FIM Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Discord — Vulnerability",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false,
+    "callerPolicy": "workflowsFromSameOwner"
+  }
+}

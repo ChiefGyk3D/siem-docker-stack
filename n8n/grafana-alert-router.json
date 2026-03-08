@@ -1,0 +1,176 @@
+{
+  "name": "Grafana SOAR — Alert Router",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "grafana-alerts",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        300
+      ],
+      "id": "grafana-webhook",
+      "name": "Grafana Webhook",
+      "webhookId": "grafana-alerts"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "firing",
+                    "leftValue": "={{ $json.body.status }}",
+                    "rightValue": "firing",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Firing"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "resolved",
+                    "leftValue": "={{ $json.body.status }}",
+                    "rightValue": "resolved",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Resolved"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        300,
+        300
+      ],
+      "id": "alert-status",
+      "name": "Alert Status"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"content\": \"<@YOUR_DISCORD_USER_ID>\",\n  \"embeds\": [\n    {\n      \"title\": \"\\ud83d\\udd25 FIRING \\u2014 {{ ($json.body.alerts || [{}])[0].labels?.alertname || 'Grafana Alert' }}\",\n      \"description\": \"{{ ($json.body.alerts || [{}])[0].annotations?.summary || 'Alert triggered' }}\",\n      \"color\": 15158332,\n      \"fields\": [\n        {\n          \"name\": \"Severity\",\n          \"value\": \"{{ ($json.body.alerts || [{}])[0].labels?.severity || 'unknown' }}\",\n          \"inline\": true\n        },\n        {\n          \"name\": \"Instance\",\n          \"value\": \"{{ ($json.body.alerts || [{}])[0].labels?.instance_name || ($json.body.alerts || [{}])[0].labels?.instance || 'N/A' }}\",\n          \"inline\": true\n        },\n        {\n          \"name\": \"Details\",\n          \"value\": \"{{ ($json.body.alerts || [{}])[0].annotations?.description || '' }}\",\n          \"inline\": false\n        }\n      ],\n      \"timestamp\": \"{{ ($json.body.alerts || [{}])[0].startsAt || new Date().toISOString() }}\"\n    }\n  ]\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        600,
+        200
+      ],
+      "id": "discord---firing",
+      "name": "Discord — Firing"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"embeds\": [\n    {\n      \"title\": \"\\u2705 RESOLVED \\u2014 {{ ($json.body.alerts || [{}])[0].labels?.alertname || 'Grafana Alert' }}\",\n      \"description\": \"{{ ($json.body.alerts || [{}])[0].annotations?.summary || 'Alert resolved' }}\",\n      \"color\": 3066993,\n      \"fields\": [\n        {\n          \"name\": \"Instance\",\n          \"value\": \"{{ ($json.body.alerts || [{}])[0].labels?.instance_name || 'N/A' }}\",\n          \"inline\": true\n        }\n      ],\n      \"timestamp\": \"{{ ($json.body.alerts || [{}])[0].endsAt || new Date().toISOString() }}\"\n    }\n  ]\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        600,
+        400
+      ],
+      "id": "discord---resolved",
+      "name": "Discord — Resolved"
+    }
+  ],
+  "connections": {
+    "Grafana Webhook": {
+      "main": [
+        [
+          {
+            "node": "Alert Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Alert Status": {
+      "main": [
+        [
+          {
+            "node": "Discord — Firing",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Discord — Resolved",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
