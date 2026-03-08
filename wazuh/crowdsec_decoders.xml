@@ -1,0 +1,17 @@
+<decoders>
+  <!-- Decoder for CrowdSec JSON logs forwarded to Wazuh -->
+  <decoder name="crowdsec-json">
+    <prematch>\"crowdsec\"|\"scenario\"|\"decision\"</prematch>
+    <plugin_decoder>JSON_Decoder</plugin_decoder>
+  </decoder>
+
+  <decoder name="crowdsec-alert">
+    <parent>crowdsec-json</parent>
+    <prematch>\"type\":\"alert\"</prematch>
+  </decoder>
+
+  <decoder name="crowdsec-decision">
+    <parent>crowdsec-json</parent>
+    <prematch>\"type\":\"decision\"</prematch>
+  </decoder>
+</decoders>

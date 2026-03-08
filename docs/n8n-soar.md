@@ -8,7 +8,7 @@ Automated Security Orchestration, Automation and Response (SOAR) using [N8N](htt
 ┌─────────────┐    webhook     ┌───────────────────────────────┐
 │   Grafana    │──────────────►│  Grafana Alert Router (N8N)   │
 │  Alerting    │  POST /webhook│  Switch firing/resolved →     │
-│  (7 rules)   │  /grafana-    │  Discord embed per status     │
+│  (8 rules)   │  /grafana-    │  Discord embed per status     │
 └─────────────┘  alerts        └───────────────────────────────┘
 
 ┌─────────────┐    webhook     ┌───────────────────────────────┐
@@ -17,6 +17,13 @@ Automated Security Orchestration, Automation and Response (SOAR) using [N8N](htt
 │ (integratord)│  /wazuh-alerts│  Attack categorizer (brute    │
 └─────────────┘                │  force, FIM, vulnerability)   │
                                └───────────────────────────────┘
+
+┌─────────────┐    webhook     ┌───────────────────────────────┐
+│   Grafana    │──────────────►│  CrowdSec Alert Enrichment    │
+│  Alerting    │  POST /webhook│  (N8N) Query OpenSearch for   │
+│ source=      │  /crowdsec-   │  recent bans → enriched       │
+│  crowdsec    │  alerts       │  Discord embed with IPs       │
+└─────────────┘                └───────────────────────────────┘
 ```
 
 ## Workflows
@@ -29,6 +36,22 @@ Routes Grafana alert notifications to Discord with status-appropriate formatting
 - **Alert Status** (Switch node) → routes `firing` vs `resolved`
 - **Discord — Firing** → red embed with severity, instance, description
 - **Discord — Resolved** → green embed with resolution timestamp
+
+### CrowdSec Alert Enrichment (`n8n/crowdsec-alert-enrichment.json`)
+
+Receives CrowdSec alerts from Grafana and enriches them with live OpenSearch data before sending to Discord:
+
+- **CrowdSec Webhook** → receives POST from Grafana contact point (`/crowdsec-alerts`)
+- **Alert Status** (Switch node) → routes `firing` vs `resolved`
+- **Query OpenSearch Bans** → queries `crowdsec-events-*` for recent ban decisions (last 1h), aggregates banned IPs, programs, and source hosts
+- **Enrich Alert Data** (Code node) → extracts IP addresses, total bans, program breakdown from OpenSearch response
+- **Discord — CrowdSec Firing** → orange embed with banned IPs, total bans, active programs, source hosts
+- **Discord — CrowdSec Resolved** → green embed with resolution timestamp
+
+**Placeholders to replace:**
+- `OPENSEARCH_URL` → your OpenSearch URL (e.g., `http://opensearch-hot:9200` for Docker network)
+- `YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN` → Discord webhook credentials
+- `YOUR_DISCORD_USER_ID` → your Discord user ID for mentions
 
 ### Wazuh Alert Triage (`n8n/wazuh-alert-triage.json`)
 
@@ -58,6 +81,7 @@ The deployment creates 7 alert rules across 4 rule groups:
 | Suricata Critical Alert | SIEM — IDS | Critical | severity 1 alerts in 5m |
 | pfSense Firewall Block Surge | SIEM — Firewall | Warning | >500 blocks in 5m |
 | Docker Container Restart Loop | SIEM — Docker | Warning | 3+ restarts in 10m |
+| CrowdSec Ban Decision Surge | SIEM — CrowdSec | Critical | Ban decisions surging in 5m |
 
 ## Prerequisites
 

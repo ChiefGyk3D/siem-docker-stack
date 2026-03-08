@@ -1,5 +1,5 @@
 {
-  "name": "Wazuh SOAR — Alert Triage & Routing",
+  "name": "Wazuh SOAR \u2014 Alert Triage & Routing",
   "nodes": [
     {
       "parameters": {
@@ -16,6 +16,20 @@
       "id": "webhook-wazuh",
       "name": "Wazuh Webhook",
       "webhookId": "wazuh-alerts"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const WINDOW_MS = 90 * 1000;\nconst state = getWorkflowStaticData('global');\nif (!state.recent) state.recent = {};\nconst now = Date.now();\n\nconst out = [];\nfor (const item of items) {\n  const body = item.json?.body || {};\n  const ruleId = String(body?.rule?.id || 'unknown');\n  const src = String(body?.srcip || body?.data?.srcip || 'unknown');\n  const key = `${ruleId}|${src}`;\n  const last = Number(state.recent[key] || 0);\n\n  if (now - last >= WINDOW_MS) {\n    state.recent[key] = now;\n    out.push(item);\n  }\n}\n\nfor (const k of Object.keys(state.recent)) {\n  if (now - Number(state.recent[k]) > (6 * WINDOW_MS)) delete state.recent[k];\n}\n\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        140,
+        300
+      ],
+      "id": "dedup-burst-window",
+      "name": "Dedup Burst Window"
     },
     {
       "parameters": {
@@ -120,7 +134,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"content\": \"<@YOUR_DISCORD_USER_ID>\",\n  \"embeds\": [{\n    \"title\": \"🚨 CRITICAL — Wazuh Alert (Level {{ $json.body.rule.level }})\",\n    \"description\": \"{{ $json.body.rule.description }}\",\n    \"color\": 15158332,\n    \"fields\": [\n      { \"name\": \"Rule ID\", \"value\": \"{{ $json.body.rule.id }}\", \"inline\": true },\n      { \"name\": \"Agent\", \"value\": \"{{ $json.body.agent.name }} ({{ $json.body.agent.ip }})\", \"inline\": true },\n      { \"name\": \"Source IP\", \"value\": \"{{ $json.body.srcip || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"MITRE\", \"value\": \"{{ ($json.body.rule.mitre?.tactic || []).join(', ') || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"Groups\", \"value\": \"{{ ($json.body.rule.groups || []).join(', ') }}\", \"inline\": false },\n      { \"name\": \"Location\", \"value\": \"```{{ $json.body.location }}```\", \"inline\": false }\n    ],\n    \"timestamp\": \"{{ $json.body.timestamp }}\"\n  }]\n}",
+        "jsonBody": "={\n  \"content\": \"<@YOUR_DISCORD_USER_ID>\",\n  \"embeds\": [{\n    \"title\": \"\ud83d\udea8 CRITICAL \u2014 Wazuh Alert (Level {{ $json.body.rule.level }})\",\n    \"description\": \"{{ $json.body.rule.description }}\",\n    \"color\": 15158332,\n    \"fields\": [\n      { \"name\": \"Rule ID\", \"value\": \"{{ $json.body.rule.id }}\", \"inline\": true },\n      { \"name\": \"Agent\", \"value\": \"{{ $json.body.agent.name }} ({{ $json.body.agent.ip }})\", \"inline\": true },\n      { \"name\": \"Source IP\", \"value\": \"{{ $json.body.srcip || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"MITRE\", \"value\": \"{{ ($json.body.rule.mitre?.tactic || []).join(', ') || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"Groups\", \"value\": \"{{ ($json.body.rule.groups || []).join(', ') }}\", \"inline\": false },\n      { \"name\": \"Location\", \"value\": \"```{{ $json.body.location }}```\", \"inline\": false }\n    ],\n    \"timestamp\": \"{{ $json.body.timestamp }}\"\n  }]\n}",
         "options": {}
       },
       "type": "n8n-nodes-base.httpRequest",
@@ -130,7 +144,7 @@
         100
       ],
       "id": "discord-critical",
-      "name": "Discord — Critical"
+      "name": "Discord \u2014 Critical"
     },
     {
       "parameters": {
@@ -147,17 +161,17 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"embeds\": [{\n    \"title\": \"🟠 HIGH — Wazuh Alert (Level {{ $json.body.rule.level }})\",\n    \"description\": \"{{ $json.body.rule.description }}\",\n    \"color\": 16744448,\n    \"fields\": [\n      { \"name\": \"Rule ID\", \"value\": \"{{ $json.body.rule.id }}\", \"inline\": true },\n      { \"name\": \"Agent\", \"value\": \"{{ $json.body.agent.name }} ({{ $json.body.agent.ip }})\", \"inline\": true },\n      { \"name\": \"Source IP\", \"value\": \"{{ $json.body.srcip || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"MITRE\", \"value\": \"{{ ($json.body.rule.mitre?.tactic || []).join(', ') || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"Groups\", \"value\": \"{{ ($json.body.rule.groups || []).join(', ') }}\", \"inline\": false }\n    ],\n    \"timestamp\": \"{{ $json.body.timestamp }}\"\n  }]\n}",
+        "jsonBody": "={\n  \"embeds\": [{\n    \"title\": \"\ud83d\udfe0 HIGH \u2014 Wazuh Alert (Level {{ $json.body.rule.level }})\",\n    \"description\": \"{{ $json.body.rule.description }}\",\n    \"color\": 16744448,\n    \"fields\": [\n      { \"name\": \"Rule ID\", \"value\": \"{{ $json.body.rule.id }}\", \"inline\": true },\n      { \"name\": \"Agent\", \"value\": \"{{ $json.body.agent?.name || 'N/A' }} ({{ $json.body.agent?.ip || '' }})\", \"inline\": true },\n      { \"name\": \"Source IP\", \"value\": \"{{ $json.body.srcip || $json.body.data?.srcip || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"MITRE\", \"value\": \"{{ ($json.body.rule.mitre?.tactic || []).join(', ') || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"Groups\", \"value\": \"{{ ($json.body.rule.groups || []).join(', ') }}\", \"inline\": false },\n      { \"name\": \"Location\", \"value\": \"```{{ $json.body.location || 'N/A' }}```\", \"inline\": false }\n    ],\n    \"timestamp\": \"{{ $json.body.timestamp }}\"\n  }]\n}",
         "options": {}
       },
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        580,
-        300
+        860,
+        400
       ],
       "id": "discord-high",
-      "name": "Discord — High"
+      "name": "Discord \u2014 High"
     },
     {
       "parameters": {
@@ -362,7 +376,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"content\": \"<@YOUR_DISCORD_USER_ID>\",\n  \"embeds\": [{\n    \"title\": \"🔐 Brute Force Detected — {{ $json.body.agent.name }}\",\n    \"description\": \"{{ $json.body.rule.description }}\",\n    \"color\": 15105570,\n    \"fields\": [\n      { \"name\": \"Source IP\", \"value\": \"{{ $json.body.srcip || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"Agent\", \"value\": \"{{ $json.body.agent.name }}\", \"inline\": true },\n      { \"name\": \"Rule\", \"value\": \"{{ $json.body.rule.id }} (Level {{ $json.body.rule.level }})\", \"inline\": true },\n      { \"name\": \"Action\", \"value\": \"Check auth logs, consider firewall block\", \"inline\": false }\n    ],\n    \"timestamp\": \"{{ $json.body.timestamp }}\"\n  }]\n}",
+        "jsonBody": "={\n  \"content\": \"<@YOUR_DISCORD_USER_ID>\",\n  \"embeds\": [{\n    \"title\": \"\ud83d\udd10 Brute Force Detected \u2014 {{ $json.body.agent.name }}\",\n    \"description\": \"{{ $json.body.rule.description }}\",\n    \"color\": 15105570,\n    \"fields\": [\n      { \"name\": \"Source IP\", \"value\": \"{{ $json.body.srcip || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"Agent\", \"value\": \"{{ $json.body.agent.name }}\", \"inline\": true },\n      { \"name\": \"Rule\", \"value\": \"{{ $json.body.rule.id }} (Level {{ $json.body.rule.level }})\", \"inline\": true },\n      { \"name\": \"Action\", \"value\": \"Check auth logs, consider firewall block\", \"inline\": false }\n    ],\n    \"timestamp\": \"{{ $json.body.timestamp }}\"\n  }]\n}",
         "options": {}
       },
       "type": "n8n-nodes-base.httpRequest",
@@ -372,7 +386,21 @@
         0
       ],
       "id": "discord-brute",
-      "name": "Discord — Brute Force"
+      "name": "Discord \u2014 Brute Force"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const WINDOW_MS = 3 * 60 * 1000;\nconst state = getWorkflowStaticData('global');\nif (!state.auth_recent_critical) state.auth_recent_critical = {};\nconst now = Date.now();\n\nconst out = [];\nfor (const item of items) {\n  const body = item.json?.body || {};\n  const src = String(body?.srcip || body?.data?.srcip || 'unknown');\n  const user = String(body?.data?.srcuser || body?.data?.dstuser || 'unknown');\n  const ruleId = String(body?.rule?.id || 'unknown');\n  const key = `${src}|${user}|${ruleId}`;\n  const last = Number(state.auth_recent_critical[key] || 0);\n\n  if (now - last >= WINDOW_MS) {\n    state.auth_recent_critical[key] = now;\n    out.push(item);\n  }\n}\n\nfor (const k of Object.keys(state.auth_recent_critical)) {\n  if (now - Number(state.auth_recent_critical[k]) > (6 * WINDOW_MS)) delete state.auth_recent_critical[k];\n}\n\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1020,
+        0
+      ],
+      "id": "dedup-auth-critical",
+      "name": "Dedup Auth Critical"
     },
     {
       "parameters": {
@@ -389,7 +417,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"content\": \"<@YOUR_DISCORD_USER_ID>\",\n  \"embeds\": [{\n    \"title\": \"📁 File Integrity Change — {{ $json.body.agent.name }}\",\n    \"description\": \"{{ $json.body.rule.description }}\",\n    \"color\": 3447003,\n    \"fields\": [\n      { \"name\": \"Agent\", \"value\": \"{{ $json.body.agent.name }}\", \"inline\": true },\n      { \"name\": \"Rule\", \"value\": \"{{ $json.body.rule.id }} (Level {{ $json.body.rule.level }})\", \"inline\": true },\n      { \"name\": \"Location\", \"value\": \"```{{ $json.body.location }}```\", \"inline\": false }\n    ],\n    \"timestamp\": \"{{ $json.body.timestamp }}\"\n  }]\n}",
+        "jsonBody": "={\n  \"content\": \"<@YOUR_DISCORD_USER_ID>\",\n  \"embeds\": [{\n    \"title\": \"\ud83d\udcc1 File Integrity Change \u2014 {{ $json.body.agent?.name || 'unknown' }}\",\n    \"description\": \"{{ $json.body.rule.description }}\",\n    \"color\": 3447003,\n    \"fields\": [\n      { \"name\": \"File Path\", \"value\": \"```{{ $json.body.syscheck?.path || 'N/A' }}```\", \"inline\": false },\n      { \"name\": \"Event\", \"value\": \"{{ $json.body.syscheck?.event || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"Agent\", \"value\": \"{{ $json.body.agent?.name || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"Rule\", \"value\": \"{{ $json.body.rule.id }} (Level {{ $json.body.rule.level }})\", \"inline\": true },\n      { \"name\": \"File Size\", \"value\": \"{{ $json.body.syscheck?.size_after || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"Owner\", \"value\": \"{{ $json.body.syscheck?.uname_after || 'N/A' }}:{{ $json.body.syscheck?.gname_after || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"Permissions\", \"value\": \"{{ $json.body.syscheck?.perm_after || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"SHA256\", \"value\": \"`{{ ($json.body.syscheck?.sha256_after || 'N/A').substring(0, 16) }}\u2026`\", \"inline\": true },\n      { \"name\": \"Groups\", \"value\": \"{{ ($json.body.rule.groups || []).join(', ') }}\", \"inline\": false }\n    ],\n    \"timestamp\": \"{{ $json.body.timestamp }}\"\n  }]\n}",
         "options": {}
       },
       "type": "n8n-nodes-base.httpRequest",
@@ -399,7 +427,7 @@
         200
       ],
       "id": "discord-fim",
-      "name": "Discord — FIM Alert"
+      "name": "Discord \u2014 FIM Alert"
     },
     {
       "parameters": {
@@ -416,7 +444,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"embeds\": [{\n    \"title\": \"🛡️ Vulnerability Found — {{ $json.body.agent.name }}\",\n    \"description\": \"{{ $json.body.rule.description }}\",\n    \"color\": 16776960,\n    \"fields\": [\n      { \"name\": \"Agent\", \"value\": \"{{ $json.body.agent.name }}\", \"inline\": true },\n      { \"name\": \"Rule\", \"value\": \"{{ $json.body.rule.id }} (Level {{ $json.body.rule.level }})\", \"inline\": true }\n    ],\n    \"timestamp\": \"{{ $json.body.timestamp }}\"\n  }]\n}",
+        "jsonBody": "={\n  \"embeds\": [{\n    \"title\": \"\ud83d\udee1\ufe0f Vulnerability Found \u2014 {{ $json.body.agent.name }}\",\n    \"description\": \"{{ $json.body.rule.description }}\",\n    \"color\": 16776960,\n    \"fields\": [\n      { \"name\": \"Agent\", \"value\": \"{{ $json.body.agent.name }}\", \"inline\": true },\n      { \"name\": \"Rule\", \"value\": \"{{ $json.body.rule.id }} (Level {{ $json.body.rule.level }})\", \"inline\": true }\n    ],\n    \"timestamp\": \"{{ $json.body.timestamp }}\"\n  }]\n}",
         "options": {}
       },
       "type": "n8n-nodes-base.httpRequest",
@@ -426,11 +454,246 @@
         400
       ],
       "id": "discord-vuln",
-      "name": "Discord — Vulnerability"
+      "name": "Discord \u2014 Vulnerability"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "pf-internal",
+                    "leftValue": "={{ ($json.body.rule.groups || []).join(',') + '|' + ($json.body.srcip || $json.body.data?.srcip || '') }}",
+                    "rightValue": "pfsense|192.168.",
+                    "operator": {
+                      "type": "string",
+                      "operation": "contains"
+                    }
+                  },
+                  {
+                    "id": "pf-internal2",
+                    "leftValue": "={{ ($json.body.rule.groups || []).join(',') + '|' + ($json.body.srcip || $json.body.data?.srcip || '') }}",
+                    "rightValue": "pfsense|10.",
+                    "operator": {
+                      "type": "string",
+                      "operation": "contains"
+                    }
+                  },
+                  {
+                    "id": "pf-internal3",
+                    "leftValue": "={{ ($json.body.rule.groups || []).join(',') + '|' + ($json.body.srcip || $json.body.data?.srcip || '') }}",
+                    "rightValue": "pfsense|172.",
+                    "operator": {
+                      "type": "string",
+                      "operation": "contains"
+                    }
+                  }
+                ],
+                "combinator": "or"
+              },
+              "renameOutput": true,
+              "outputKey": "pfSense Internal (log)"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "pf-external",
+                    "leftValue": "={{ ($json.body.rule.groups || []).join(',') + '|' + ($json.body.srcip || $json.body.data?.srcip || '') }}",
+                    "rightValue": "pfsense|",
+                    "operator": {
+                      "type": "string",
+                      "operation": "contains"
+                    }
+                  },
+                  {
+                    "id": "pf-not-192",
+                    "leftValue": "={{ $json.body.srcip || $json.body.data?.srcip || '' }}",
+                    "rightValue": "192.168.",
+                    "operator": {
+                      "type": "string",
+                      "operation": "notContains"
+                    }
+                  },
+                  {
+                    "id": "pf-not-10",
+                    "leftValue": "={{ $json.body.srcip || $json.body.data?.srcip || '' }}",
+                    "rightValue": "10.",
+                    "operator": {
+                      "type": "string",
+                      "operation": "notContains"
+                    }
+                  },
+                  {
+                    "id": "pf-not-172",
+                    "leftValue": "={{ $json.body.srcip || $json.body.data?.srcip || '' }}",
+                    "rightValue": "172.",
+                    "operator": {
+                      "type": "string",
+                      "operation": "notContains"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "pfSense External (discord)"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "fim",
+                    "leftValue": "={{ ($json.body.rule.groups || []).join(',') }}",
+                    "rightValue": "syscheck",
+                    "operator": {
+                      "type": "string",
+                      "operation": "contains"
+                    }
+                  }
+                ],
+                "combinator": "or"
+              },
+              "renameOutput": true,
+              "outputKey": "File Integrity"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "auth",
+                    "leftValue": "={{ ($json.body.rule.groups || []).join(',') }}",
+                    "rightValue": "authentication_fail",
+                    "operator": {
+                      "type": "string",
+                      "operation": "contains"
+                    }
+                  }
+                ],
+                "combinator": "or"
+              },
+              "renameOutput": true,
+              "outputKey": "Auth Failure"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra"
+        }
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        580,
+        300
+      ],
+      "id": "switch-high-type",
+      "name": "High Alert Router"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"embeds\": [{\n    \"title\": \"\ud83d\udd25 pfSense \u2014 Blocks from {{ $json.body.srcip || $json.body.data?.srcip || 'unknown' }}\",\n    \"description\": \"{{ $json.body.rule.description }}\",\n    \"color\": 16744448,\n    \"fields\": [\n      { \"name\": \"Source IP\", \"value\": \"{{ $json.body.srcip || $json.body.data?.srcip || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"Dest IP\", \"value\": \"{{ $json.body.data?.dstip || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"Dest Port\", \"value\": \"{{ $json.body.data?.dstport || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"Protocol\", \"value\": \"{{ $json.body.data?.protocol || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"Action\", \"value\": \"{{ $json.body.data?.action || 'block' }}\", \"inline\": true },\n      { \"name\": \"Classification\", \"value\": \"Recon/scan or policy block (not necessarily credential attack)\", \"inline\": false },\n      { \"name\": \"Rule\", \"value\": \"{{ $json.body.rule.id }} (Level {{ $json.body.rule.level }})\", \"inline\": true },\n      { \"name\": \"Agent\", \"value\": \"{{ $json.body.agent?.name || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"Groups\", \"value\": \"{{ ($json.body.rule.groups || []).join(', ') }}\", \"inline\": true },\n      { \"name\": \"Raw Log\", \"value\": \"```{{ ($json.body.full_log || '').substring(0, 500) }}```\", \"inline\": false }\n    ],\n    \"timestamp\": \"{{ $json.body.timestamp }}\"\n  }]\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        860,
+        200
+      ],
+      "id": "discord-pfsense",
+      "name": "Discord \u2014 pfSense"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"embeds\": [{\n    \"title\": \"\ud83d\udd11 Auth Failure \u2014 {{ $json.body.agent?.name || 'unknown' }}\",\n    \"description\": \"{{ $json.body.rule.description }}\",\n    \"color\": 16744448,\n    \"fields\": [\n      { \"name\": \"Source IP\", \"value\": \"{{ $json.body.srcip || $json.body.data?.srcip || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"User\", \"value\": \"{{ $json.body.data?.srcuser || $json.body.data?.dstuser || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"Agent\", \"value\": \"{{ $json.body.agent?.name || 'N/A' }} ({{ $json.body.agent?.ip || '' }})\", \"inline\": true },\n      { \"name\": \"Rule\", \"value\": \"{{ $json.body.rule.id }} (Level {{ $json.body.rule.level }})\", \"inline\": true },\n      { \"name\": \"MITRE\", \"value\": \"{{ ($json.body.rule.mitre?.tactic || []).join(', ') || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"Groups\", \"value\": \"{{ ($json.body.rule.groups || []).join(', ') }}\", \"inline\": false },\n      { \"name\": \"Location\", \"value\": \"```{{ $json.body.location || 'N/A' }}```\", \"inline\": false }\n    ],\n    \"timestamp\": \"{{ $json.body.timestamp }}\"\n  }]\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        860,
+        500
+      ],
+      "id": "discord-auth-high",
+      "name": "Discord \u2014 Auth Failure"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const WINDOW_MS = 2 * 60 * 1000;\nconst state = getWorkflowStaticData('global');\nif (!state.auth_recent_high) state.auth_recent_high = {};\nconst now = Date.now();\n\nconst out = [];\nfor (const item of items) {\n  const body = item.json?.body || {};\n  const src = String(body?.srcip || body?.data?.srcip || 'unknown');\n  const user = String(body?.data?.srcuser || body?.data?.dstuser || 'unknown');\n  const ruleId = String(body?.rule?.id || 'unknown');\n  const key = `${src}|${user}|${ruleId}`;\n  const last = Number(state.auth_recent_high[key] || 0);\n\n  if (now - last >= WINDOW_MS) {\n    state.auth_recent_high[key] = now;\n    out.push(item);\n  }\n}\n\nfor (const k of Object.keys(state.auth_recent_high)) {\n  if (now - Number(state.auth_recent_high[k]) > (6 * WINDOW_MS)) delete state.auth_recent_high[k];\n}\n\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        740,
+        500
+      ],
+      "id": "dedup-auth-high",
+      "name": "Dedup Auth High"
     }
   ],
   "connections": {
     "Wazuh Webhook": {
+      "main": [
+        [
+          {
+            "node": "Dedup Burst Window",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dedup Burst Window": {
       "main": [
         [
           {
@@ -445,14 +708,14 @@
       "main": [
         [
           {
-            "node": "Discord — Critical",
+            "node": "Discord \u2014 Critical",
             "type": "main",
             "index": 0
           }
         ],
         [
           {
-            "node": "Discord — High",
+            "node": "High Alert Router",
             "type": "main",
             "index": 0
           }
@@ -473,7 +736,7 @@
         ]
       ]
     },
-    "Discord — Critical": {
+    "Discord \u2014 Critical": {
       "main": [
         [
           {
@@ -488,26 +751,87 @@
       "main": [
         [
           {
-            "node": "Discord — Brute Force",
+            "node": "Dedup Auth Critical",
             "type": "main",
             "index": 0
           }
         ],
         [
           {
-            "node": "Discord — FIM Alert",
+            "node": "Discord \u2014 FIM Alert",
             "type": "main",
             "index": 0
           }
         ],
         [
           {
-            "node": "Discord — Vulnerability",
+            "node": "Discord \u2014 Vulnerability",
             "type": "main",
             "index": 0
           }
         ],
         []
+      ]
+    },
+    "High Alert Router": {
+      "main": [
+        [
+          {
+            "node": "Log Medium",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Discord \u2014 pfSense",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Discord \u2014 FIM Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Dedup Auth High",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Discord \u2014 High",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dedup Auth Critical": {
+      "main": [
+        [
+          {
+            "node": "Discord \u2014 Brute Force",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dedup Auth High": {
+      "main": [
+        [
+          {
+            "node": "Discord \u2014 Auth Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     }
   },

@@ -249,6 +249,66 @@ This stack is designed as the **server-side** receiver for a pfSense-based netwo
 
 ---
 
+## CrowdSec (Phase 1)
+
+CrowdSec is supported in this stack, but the recommended production path is **pfSense-hosted CrowdSec** for edge enforcement.
+
+- Primary: install CrowdSec on pfSense (bouncer + log processor, optional LAPI)
+- This repo: ingest CrowdSec events, alerting, dashboards, and notification workflows
+- Local `crowdsec` service profile: optional lab/testing mode only
+
+### Optional Local CrowdSec Service (Lab Mode)
+
+```bash
+cd /opt/siem
+docker compose -f docker-compose.yml --profile crowdsec up -d crowdsec
+```
+
+### Deploy CrowdSec Alert Rule + Dashboard
+
+```bash
+DS_WAZUH="<your_wazuh_datasource_uid>" \
+ALERT_FOLDER_UID="<your_grafana_folder_uid>" \
+GRAFANA_URL="http://localhost:3000" \
+GRAFANA_USER="admin" \
+GRAFANA_PASS="changeme" \
+python3 scripts/deploy-grafana-alerts.py
+
+DS_WAZUH="<your_wazuh_datasource_uid>" \
+GRAFANA_URL="http://localhost:3000" \
+GRAFANA_USER="admin" \
+GRAFANA_PASS="changeme" \
+python3 scripts/deploy-crowdsec-dashboard.py
+```
+
+### Run Smoke Test
+
+```bash
+OPENSEARCH_URL="http://localhost:9200" \
+GRAFANA_URL="http://localhost:3000" \
+GRAFANA_USER="admin" \
+GRAFANA_PASS="changeme" \
+bash scripts/08-crowdsec-smoketest.sh
+```
+
+The smoke test verifies synthetic CrowdSec events can be indexed and that the CrowdSec Grafana alert rule/dashboard are present.
+
+For pfSense install/config/testing steps, see your pfSense repo runbook:
+
+- `pfsense_siem_stack/docs/crowdsec-phase1.md`
+
+---
+
+## Optional JumpCloud Bridge
+
+JumpCloud support is intentionally split into a separate optional repo so non-JumpCloud users are not forced to deploy extra components:
+
+- `../jumpcloud-wazuh-bridge`
+
+This bridge polls JumpCloud Directory Insights and writes JSONL for Wazuh ingestion.
+
+---
+
 ## Directory Structure
 
 ```

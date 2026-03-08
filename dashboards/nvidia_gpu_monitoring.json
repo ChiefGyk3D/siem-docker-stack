@@ -1,0 +1,676 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "__elements": {},
+  "__requires": [
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "10.0.0"
+    },
+    {
+      "type": "datasource",
+      "id": "prometheus",
+      "name": "Prometheus",
+      "version": "1.0.0"
+    },
+    {
+      "type": "panel",
+      "id": "gauge",
+      "name": "Gauge",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "timeseries",
+      "name": "Time series",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "stat",
+      "name": "Stat",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "table",
+      "name": "Table",
+      "version": ""
+    }
+  ],
+  "id": null,
+  "uid": "nvidia-gpu-monitoring",
+  "title": "NVIDIA GPU Monitoring",
+  "description": "GPU utilization, temperature, VRAM, power, encoder/decoder, and fan metrics for NVIDIA GPUs across Linux (dcgm-exporter) and Windows (nvidia_gpu_exporter).",
+  "tags": ["nvidia", "gpu", "prometheus", "dcgm"],
+  "style": "dark",
+  "timezone": "browser",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "title": "Overview",
+      "type": "row"
+    },
+    {
+      "id": 1,
+      "title": "GPU Utilization — All Machines",
+      "description": "Current GPU utilization percentage for all monitored GPUs",
+      "type": "gauge",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 60 },
+              { "color": "orange", "value": 80 },
+              { "color": "red", "value": 95 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "targets": [
+        {
+          "expr": "DCGM_FI_DEV_GPU_UTIL{job=\"nvidia-dcgm\"}",
+          "legendFormat": "{{instance_name}} GPU{{gpu}}",
+          "refId": "A"
+        },
+        {
+          "expr": "nvidia_smi_gpu_utilization_gpu{job=\"nvidia-gpu-windows\"}",
+          "legendFormat": "{{instance_name}} GPU{{index}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "GPU Temperature — All Machines",
+      "description": "Current GPU temperature for all monitored GPUs",
+      "type": "gauge",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "celsius",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "blue", "value": null },
+              { "color": "green", "value": 30 },
+              { "color": "yellow", "value": 65 },
+              { "color": "orange", "value": 80 },
+              { "color": "red", "value": 90 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "targets": [
+        {
+          "expr": "DCGM_FI_DEV_GPU_TEMP{job=\"nvidia-dcgm\"}",
+          "legendFormat": "{{instance_name}} GPU{{gpu}}",
+          "refId": "A"
+        },
+        {
+          "expr": "nvidia_smi_temperature_gpu{job=\"nvidia-gpu-windows\"}",
+          "legendFormat": "{{instance_name}} GPU{{index}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "VRAM Used — All Machines",
+      "description": "Framebuffer / VRAM usage across all GPUs",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 12, "x": 0, "y": 7 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decmbytes",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 8000 },
+              { "color": "red", "value": 14000 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "DCGM_FI_DEV_FB_USED{job=\"nvidia-dcgm\"}",
+          "legendFormat": "{{instance_name}} GPU{{gpu}}",
+          "refId": "A"
+        },
+        {
+          "expr": "nvidia_smi_memory_used_bytes{job=\"nvidia-gpu-windows\"} / 1048576",
+          "legendFormat": "{{instance_name}} GPU{{index}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Power Draw — All Machines",
+      "description": "Current GPU power consumption in watts",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 12, "x": 12, "y": 7 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "watt",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 200 },
+              { "color": "red", "value": 350 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "expr": "DCGM_FI_DEV_POWER_USAGE{job=\"nvidia-dcgm\"}",
+          "legendFormat": "{{instance_name}} GPU{{gpu}}",
+          "refId": "A"
+        },
+        {
+          "expr": "nvidia_smi_power_draw_watts{job=\"nvidia-gpu-windows\"}",
+          "legendFormat": "{{instance_name}} GPU{{index}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 11 },
+      "id": 101,
+      "title": "GPU Utilization Over Time",
+      "type": "row"
+    },
+    {
+      "id": 10,
+      "title": "GPU Utilization % — Time Series",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 15,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] } },
+      "targets": [
+        {
+          "expr": "DCGM_FI_DEV_GPU_UTIL{job=\"nvidia-dcgm\"}",
+          "legendFormat": "{{instance_name}} GPU{{gpu}}",
+          "refId": "A"
+        },
+        {
+          "expr": "nvidia_smi_gpu_utilization_gpu{job=\"nvidia-gpu-windows\"}",
+          "legendFormat": "{{instance_name}} GPU{{index}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "title": "GPU Temperature — Time Series",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "celsius",
+          "min": 0,
+          "max": 100,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 15,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 65 },
+              { "color": "orange", "value": 80 },
+              { "color": "red", "value": 90 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] } },
+      "targets": [
+        {
+          "expr": "DCGM_FI_DEV_GPU_TEMP{job=\"nvidia-dcgm\"}",
+          "legendFormat": "{{instance_name}} GPU{{gpu}}",
+          "refId": "A"
+        },
+        {
+          "expr": "nvidia_smi_temperature_gpu{job=\"nvidia-gpu-windows\"}",
+          "legendFormat": "{{instance_name}} GPU{{index}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 20 },
+      "id": 102,
+      "title": "Memory & Power",
+      "type": "row"
+    },
+    {
+      "id": 20,
+      "title": "VRAM Usage — Time Series",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 21 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decmbytes",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 20,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": { "mode": "none" }
+          }
+        },
+        "overrides": []
+      },
+      "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] } },
+      "targets": [
+        {
+          "expr": "DCGM_FI_DEV_FB_USED{job=\"nvidia-dcgm\"}",
+          "legendFormat": "{{instance_name}} GPU{{gpu}} Used",
+          "refId": "A"
+        },
+        {
+          "expr": "nvidia_smi_memory_used_bytes{job=\"nvidia-gpu-windows\"} / 1048576",
+          "legendFormat": "{{instance_name}} GPU{{index}} Used",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "title": "Power Draw — Time Series",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 21 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "watt",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 15,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] } },
+      "targets": [
+        {
+          "expr": "DCGM_FI_DEV_POWER_USAGE{job=\"nvidia-dcgm\"}",
+          "legendFormat": "{{instance_name}} GPU{{gpu}}",
+          "refId": "A"
+        },
+        {
+          "expr": "nvidia_smi_power_draw_watts{job=\"nvidia-gpu-windows\"}",
+          "legendFormat": "{{instance_name}} GPU{{index}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 29 },
+      "id": 103,
+      "title": "Encoder / Decoder (Streaming & Transcoding)",
+      "type": "row"
+    },
+    {
+      "id": 30,
+      "title": "Encoder Utilization (NVENC)",
+      "description": "Video encoder utilization — critical for streaming and transcoding workloads",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 30 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 20,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 70 },
+              { "color": "red", "value": 95 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] } },
+      "targets": [
+        {
+          "expr": "DCGM_FI_DEV_ENC_UTIL{job=\"nvidia-dcgm\"}",
+          "legendFormat": "{{instance_name}} GPU{{gpu}}",
+          "refId": "A"
+        },
+        {
+          "expr": "nvidia_smi_encoder_utilization{job=\"nvidia-gpu-windows\"}",
+          "legendFormat": "{{instance_name}} GPU{{index}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 31,
+      "title": "Decoder Utilization (NVDEC)",
+      "description": "Video decoder utilization",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 30 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 20,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 70 },
+              { "color": "red", "value": 95 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] } },
+      "targets": [
+        {
+          "expr": "DCGM_FI_DEV_DEC_UTIL{job=\"nvidia-dcgm\"}",
+          "legendFormat": "{{instance_name}} GPU{{gpu}}",
+          "refId": "A"
+        },
+        {
+          "expr": "nvidia_smi_decoder_utilization{job=\"nvidia-gpu-windows\"}",
+          "legendFormat": "{{instance_name}} GPU{{index}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 38 },
+      "id": 104,
+      "title": "Fan & Clocks",
+      "type": "row"
+    },
+    {
+      "id": 40,
+      "title": "Fan Speed",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 39 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] } },
+      "targets": [
+        {
+          "expr": "DCGM_FI_DEV_FAN_SPEED{job=\"nvidia-dcgm\"}",
+          "legendFormat": "{{instance_name}} GPU{{gpu}}",
+          "refId": "A"
+        },
+        {
+          "expr": "nvidia_smi_fan_speed{job=\"nvidia-gpu-windows\"}",
+          "legendFormat": "{{instance_name}} GPU{{index}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 41,
+      "title": "SM / Graphics Clock",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 39 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "clockHz",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] } },
+      "targets": [
+        {
+          "expr": "DCGM_FI_DEV_SM_CLOCK{job=\"nvidia-dcgm\"} * 1000000",
+          "legendFormat": "{{instance_name}} GPU{{gpu}} SM",
+          "refId": "A"
+        },
+        {
+          "expr": "nvidia_smi_clocks_current_graphics_clock_hz{job=\"nvidia-gpu-windows\"}",
+          "legendFormat": "{{instance_name}} GPU{{index}} Graphics",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 42,
+      "title": "Memory Clock",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 39 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "clockHz",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] } },
+      "targets": [
+        {
+          "expr": "DCGM_FI_DEV_MEM_CLOCK{job=\"nvidia-dcgm\"} * 1000000",
+          "legendFormat": "{{instance_name}} GPU{{gpu}}",
+          "refId": "A"
+        },
+        {
+          "expr": "nvidia_smi_clocks_current_memory_clock_hz{job=\"nvidia-gpu-windows\"}",
+          "legendFormat": "{{instance_name}} GPU{{index}}",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 47 },
+      "id": 105,
+      "title": "PCIe Bandwidth (Linux only — DCGM)",
+      "type": "row"
+    },
+    {
+      "id": 50,
+      "title": "PCIe Throughput",
+      "description": "PCIe TX/RX throughput (dcgm-exporter only)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 48 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "KBs",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 15,
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "auto",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": { "tooltip": { "mode": "multi", "sort": "desc" }, "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["mean", "max", "lastNotNull"] } },
+      "targets": [
+        {
+          "expr": "DCGM_FI_DEV_PCIE_TX_THROUGHPUT{job=\"nvidia-dcgm\"}",
+          "legendFormat": "{{instance_name}} GPU{{gpu}} TX",
+          "refId": "A"
+        },
+        {
+          "expr": "DCGM_FI_DEV_PCIE_RX_THROUGHPUT{job=\"nvidia-dcgm\"}",
+          "legendFormat": "{{instance_name}} GPU{{gpu}} RX",
+          "refId": "B"
+        }
+      ]
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 38,
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "version": 1
+}

@@ -1,0 +1,41 @@
+version: "3.9"
+
+# Phase 1 CrowdSec add-on services for siem-docker-stack.
+# Usage:
+#   docker compose -f docker/docker-compose.yml -f docker/crowdsec/docker-compose.crowdsec.yml up -d
+
+services:
+  crowdsec:
+    image: crowdsecurity/crowdsec:latest
+    container_name: crowdsec
+    restart: unless-stopped
+    volumes:
+      - ./docker/crowdsec/acquis.yaml:/etc/crowdsec/acquis.yaml:ro
+      - crowdsec_data:/var/lib/crowdsec/data
+      - crowdsec_config:/etc/crowdsec
+      - /var/log:/var/log:ro
+    environment:
+      - TZ=${TZ:-UTC}
+      - COLLECTIONS=crowdsecurity/linux crowdsecurity/sshd
+    networks:
+      - siem-net
+
+  crowdsec-dashboard:
+    image: crowdsecurity/metabase:latest
+    container_name: crowdsec-dashboard
+    restart: unless-stopped
+    depends_on:
+      - crowdsec
+    environment:
+      - MB_DB_FILE=/data/metabase.db
+    volumes:
+      - crowdsec_dashboard:/data
+    ports:
+      - "3001:3000"
+    networks:
+      - siem-net
+
+volumes:
+  crowdsec_data:
+  crowdsec_config:
+  crowdsec_dashboard:

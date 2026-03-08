@@ -374,6 +374,23 @@ services:
 # PORTAINER CE — Docker Management UI (Optional)
 # =============================================================================
 
+  crowdsec:
+    image: crowdsecurity/crowdsec:latest
+    container_name: crowdsec
+    restart: unless-stopped
+    profiles: ["crowdsec"]
+    depends_on:
+      - syslog-ng
+    environment:
+      - TZ=${TZ:-UTC}
+      - COLLECTIONS=crowdsecurity/linux crowdsecurity/sshd
+    volumes:
+      - ./crowdsec/acquis.yaml:/etc/crowdsec/acquis.yaml:ro
+      - /var/log:/var/log:ro
+      - /data/hot/crowdsec:/var/lib/crowdsec/data
+    networks:
+      - siem-net
+
   portainer:
     image: portainer/portainer-ce:lts
     container_name: portainer
