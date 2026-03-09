@@ -677,7 +677,7 @@
       },
       "targets": [{
         "bucketAggs": [
-          { "field": "data.jumpcloud_bridge.service.keyword", "id": "2", "settings": { "min_doc_count": "1", "size": "15", "order": "desc", "orderBy": "_count" }, "type": "terms" }
+          { "field": "data.jumpcloud_bridge.service", "id": "2", "settings": { "min_doc_count": "1", "size": "15", "order": "desc", "orderBy": "_count" }, "type": "terms" }
         ],
         "metrics": [{ "id": "1", "type": "count" }],
         "query": "rule.groups:jumpcloud",
@@ -929,8 +929,8 @@
           },
           "targets": [{
             "bucketAggs": [
-              { "field": "data.jumpcloud_bridge.event_type.keyword", "id": "2", "settings": { "min_doc_count": "1", "size": "20", "order": "desc", "orderBy": "_count" }, "type": "terms" },
-              { "field": "data.jumpcloud_bridge.service.keyword", "id": "3", "settings": { "min_doc_count": "1", "size": "5", "order": "desc", "orderBy": "_count" }, "type": "terms" }
+              { "field": "data.jumpcloud_bridge.event_type", "id": "2", "settings": { "min_doc_count": "1", "size": "20", "order": "desc", "orderBy": "_count" }, "type": "terms" },
+              { "field": "data.jumpcloud_bridge.service", "id": "3", "settings": { "min_doc_count": "1", "size": "5", "order": "desc", "orderBy": "_count" }, "type": "terms" }
             ],
             "metrics": [{ "id": "1", "type": "count" }],
             "query": "rule.groups:jumpcloud",
