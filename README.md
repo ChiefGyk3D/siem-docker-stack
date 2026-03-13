@@ -1,5 +1,7 @@
 # SIEM Docker Stack
 
+> **⚠️ Active Development** — This project is under active development and subject to change. Configuration formats, directory layouts, and integration interfaces may evolve between releases. Pin to a specific commit if you need stability.
+
 A production-ready, fully Dockerized SIEM/SOC stack with **hot/warm tiering** for home labs and small-to-medium businesses. Designed to run on a single server with two-tier storage (NVMe + SATA) for cost-effective log retention.
 
 ---
@@ -7,42 +9,56 @@ A production-ready, fully Dockerized SIEM/SOC stack with **hot/warm tiering** fo
 ## Architecture
 
 ```
-                                    ┌──────────────────────────────────────────────────────┐
-                                    │              SIEM Docker Stack                        │
-                                    │              (Docker Compose)                         │
-  ┌─────────────┐                   │                                                      │
-  │   pfSense   │──── Syslog ──────►│  ┌──────────┐   ┌──────────┐   ┌──────────────────┐ │
-  │   Router    │     UDP 514       │  │ Syslog-ng │──►│ Logstash │──►│ OpenSearch (Hot)  │ │
-  │             │                   │  └──────────┘   └──────────┘   │    NVMe SSD       │ │
-  │  Suricata   │── EVE JSON ──────►│       ▲          UDP 5140 ──►  │    0-30 days      │ │
-  │  IDS/IPS    │   UDP 5140        │       │                        └────────┬───────────┘ │
-  │             │                   │       │                                 │ ISM 30d     │
-  │  Telegraf   │── InfluxDB ──────►│  ┌────┴─────┐                   ┌──────▼───────────┐ │
-  │  Metrics    │   HTTP 8086       │  │ InfluxDB │                   │ OpenSearch (Warm) │ │
-  └─────────────┘                   │  └──────────┘                   │    SATA SSD       │ │
-                                    │                                 │    30-365 days    │ │
-  ┌─────────────┐                   │  ┌────────────┐                 └──────────────────┘ │
-  │   UniFi     │── Poller ────────►│  │ Prometheus │                                      │
-  │  Network    │                   │  └────────────┘                 ┌──────────────────┐ │
-  └─────────────┘                   │                                 │     Grafana      │ │
-                                    │  ┌─────────────────────────┐    │   Dashboards     │ │
-  ┌─────────────┐                   │  │    Wazuh (EDR/SIEM)     │    └──────────────────┘ │
-  │   Wazuh     │── Agent ─────────►│  │  Manager + Indexer +    │                         │
-  │   Agents    │   UDP 1514        │  │  Dashboard              │    ┌──────────────────┐ │
-  └─────────────┘                   │  └─────────────────────────┘    │   Portainer      │ │
-                                    │                                 │   (optional)      │ │
-                                    │                                 └──────────────────┘ │
-                                    └──────────────────────────────────────────────────────┘
+  ┌─────────────┐                    ┌──────────────────────────────────────────────────────┐
+  │   pfSense   │──── Syslog ───────►│              SIEM Docker Stack                       │
+  │   Router    │     UDP 514        │                                                      │
+  │             │                    │  ┌──────────┐   ┌──────────┐   ┌──────────────────┐  │
+  │  Suricata   │── EVE JSON ───────►│  │ Syslog-ng │──►│ Logstash │──►│ OpenSearch (Hot)  │  │
+  │  IDS/IPS    │   UDP 5140         │  └──────────┘   └──────────┘   │    NVMe SSD       │  │
+  │             │                    │                                │    0-30 days      │  │
+  │  CrowdSec   │── Wazuh rules ────►│                                └────────┬───────────┘  │
+  │  (edge)     │                    │                                         │ ISM 30d      │
+  │             │                    │  ┌──────────┐                   ┌──────▼───────────┐  │
+  │  Telegraf   │── InfluxDB ───────►│  │ InfluxDB │                   │ OpenSearch (Warm) │  │
+  │  Metrics    │   HTTP 8086        │  └──────────┘                   │    SATA SSD       │  │
+  └─────────────┘                    │                                 │    30-365 days    │  │
+                                     │  ┌────────────┐                 └──────────────────┘  │
+  ┌─────────────┐                    │  │ Prometheus │                                       │
+  │   UniFi     │── Poller ─────────►│  └────────────┘                 ┌──────────────────┐  │
+  │  Network    │                    │                                 │     Grafana      │  │
+  └─────────────┘                    │  ┌──────────────────────────┐   │   Dashboards     │  │
+                                     │  │    Wazuh (EDR/SIEM)      │   │   + Alert Rules  │  │
+  ┌─────────────┐                    │  │  Manager + Indexer +     │   └────────┬─────────┘  │
+  │   Wazuh     │── Agent ──────────►│  │  Dashboard               │            │            │
+  │   Agents    │   TCP 1514         │  │  VirusTotal (cached)     │            │            │
+  └─────────────┘                    │  │  custom-n8n integration  ├──┐         │            │
+                                     │  └──────────────────────────┘  │         │            │
+  ┌─────────────┐                    │                                │         │            │
+  │  JumpCloud  │── Bridge ─────────►│  ┌──────────────────────────┐  │         │            │
+  │  (optional) │   JSONL            │  │       N8N (SOAR)         │◄─┘         │            │
+  └─────────────┘                    │  │  Alert Triage (Wazuh)    │◄───────────┘            │
+                                     │  │  Alert Router (Grafana)  │                         │
+                                     │  │  CrowdSec Enrichment     │──────►  Discord         │
+                                     │  └──────────────────────────┘         Notifications   │
+                                     │                                                       │
+                                     │  ┌──────────────────────────┐                         │
+                                     │  │   Portainer (optional)   │                         │
+                                     │  └──────────────────────────┘                         │
+                                     └───────────────────────────────────────────────────────┘
 ```
 
 ## Features
 
 - **Hot/Warm Tiering** — Automatically migrates indices from NVMe → SATA after 30 days, deletes after 1 year
-- **12+ Services** — OpenSearch (2-node cluster), Logstash, Grafana, InfluxDB, Prometheus, Wazuh (full EDR), Syslog-ng, UniFi Poller, Portainer
-- **Pre-built Dashboards** — 14 dashboards covering Wazuh security/compliance/agents, SIEM overview, network security with GeoIP maps, O365 audit, Docker containers, Prometheus stats
+- **15+ Services** — OpenSearch (2-node hot/warm), Logstash, Grafana, InfluxDB, Prometheus, Wazuh (Manager + Indexer + Dashboard), Syslog-ng, UniFi Poller, N8N, Portainer
+- **N8N SOAR** — 3 automation workflows: Wazuh alert triage, Grafana alert router, CrowdSec enrichment — all route to Discord with severity-based filtering and 90s dedup
+- **VirusTotal Caching** — SQLite-backed cache in the Wazuh integration layer. Verdict-based TTLs (clean 7d, detected 30d) eliminate redundant API calls for repeated FIM hashes
+- **Pre-built Dashboards** — 16 dashboards covering Wazuh security/compliance/agents, SIEM overview, CrowdSec, Suricata IDS, pfSense firewall, UniFi network, Docker, Prometheus
+- **CrowdSec Integration** — Edge enforcement on pfSense, Wazuh decoding/alerting, Grafana dashboards, n8n enrichment with OpenSearch context lookups
 - **Automated Setup** — Numbered scripts (01-06) walk through disk formatting → system tuning → deployment → verification
 - **ISM Lifecycle** — Index State Management handles the hot→warm→delete lifecycle automatically
-- **pfSense Integration** — Suricata IDS/IPS logs, pfBlockerNG, syslog, and Telegraf metrics
+- **pfSense Integration** — Suricata IDS/IPS logs, pfBlockerNG, syslog, CrowdSec, and Telegraf metrics
+- **JumpCloud IdP** — Optional bridge for Directory Insights ingestion with Wazuh decoders/rules
 - **Production-Ready** — Docker daemon tuned, kernel parameters optimized, firewall configured, systemd timers for updates
 
 ---
@@ -81,17 +97,52 @@ This stack was built and tested on the following hardware. You do **not** need i
 
 | Service | Port | Description |
 |---------|------|-------------|
-| **Grafana** | 3000 | Dashboards & visualization |
-| **OpenSearch** | 9200 | Log search & indexing (Hot node API) |
+| **Grafana** | 3000 | Dashboards, visualization, alert rules |
+| **OpenSearch (Hot)** | 9200 | Primary log search & indexing (NVMe, 0-30 days) |
+| **OpenSearch (Warm)** | — | Read-optimized node (SATA, 30-365 days) |
 | **OpenSearch Dashboards** | 5601 | OpenSearch UI |
+| **Wazuh Manager** | 1514/udp | Agent enrollment, EDR, FIM, VirusTotal integration |
+| **Wazuh Indexer** | 9200 (internal) | Dedicated OpenSearch for Wazuh alerts |
 | **Wazuh Dashboard** | 443 | EDR/SIEM dashboard (HTTPS) |
-| **Wazuh Manager** | 1514/udp | Agent enrollment & communication |
 | **Wazuh API** | 55000 | Wazuh RESTful API |
+| **N8N** | 80 | SOAR orchestrator — alert triage, enrichment, Discord routing |
 | **Prometheus** | 9090 | Metrics scraping & alerting |
 | **InfluxDB** | 8086 | Time-series metrics (pfSense, Telegraf, UniFi) |
 | **Logstash** | 5140/udp | Suricata EVE JSON ingestion |
 | **Syslog-ng** | 514/udp+tcp | Centralized syslog receiver |
-| **Portainer** | 9443 | Docker management UI (HTTPS) |
+| **UniFi Poller** | — | Collects UniFi switch/AP telemetry → InfluxDB |
+| **CrowdSec** | — | Optional local LAPI (profile-gated); production runs on pfSense edge |
+| **Portainer** | 9443 | Docker management UI (HTTPS, optional) |
+
+> **Note:** N8N runs as a separate container (not in the main `docker-compose.yml`) on a macvlan network. See [docs/n8n-soar.md](docs/n8n-soar.md) for deployment.
+
+---
+
+## Alert & Notification Architecture
+
+All alerts flow through **N8N** for dedup, severity filtering, and enrichment before reaching Discord. There is no direct Wazuh→Discord or Grafana→Discord path.
+
+```
+  Wazuh Manager ──(custom-n8n webhook)──► N8N Wazuh Alert Triage
+      level 10+                              │
+                                             ├─ Critical (12+) ──► Discord (red embed)
+                                             ├─ High (10-11) ────► Discord (orange embed)
+                                             └─ Medium/Low ──────► Log only (no notification)
+
+  Grafana ──────(contact point webhook)───► N8N Grafana Alert Router
+      alert rules                            │
+                                             ├─ Firing ──────────► Discord (severity embed)
+                                             └─ Resolved ────────► Discord (green embed)
+
+  CrowdSec ────(via Grafana alert rule)───► N8N CrowdSec Enrichment
+      ban decisions                          │
+                                             ├─ OpenSearch lookup (IP context)
+                                             └─ Enriched ────────► Discord (embed with ban details)
+```
+
+**Dedup:** N8N applies a 90-second burst window per rule ID + source IP to prevent alert storms.
+
+**Secrets:** Discord webhook credentials are stored in N8N's encrypted credential store, not in config files.
 
 ---
 
@@ -301,6 +352,27 @@ For pfSense install/config/testing steps, see your pfSense repo runbook:
 
 ---
 
+## VirusTotal Cache
+
+Wazuh's VirusTotal integration triggers on every FIM (syscheck) alert, sending MD5 hashes to the VT API. With many agents and frequent file changes, this burns through the free-tier rate limit quickly.
+
+The cached `virustotal.py` in `wazuh/integrations/` adds an embedded SQLite layer that caches lookup results with verdict-based TTLs:
+
+| Verdict | TTL | Rationale |
+|---------|-----|-----------|
+| `clean` | 7 days | Known-good files rarely change status |
+| `detected` | 30 days | Malicious verdicts are stable |
+| `suspicious` | 1 day | Re-check ambiguous results quickly |
+| `unknown` | 6 hours | File may not have been scanned yet |
+| `not_found` | 1 day | May appear after VT processes it |
+| `error` | 10 min | Transient API failures |
+
+**Deployment:** The script lives on the host at `/data/hot/wazuh/manager/integrations/virustotal.py` and is bind-mounted into the container. This means it survives container upgrades — the host file overlays the container image's stock script. The cache DB is stored at `/var/ossec/integrations/cache/vt_cache.db` (also on the bind mount).
+
+**API Key:** Configured in `ossec.conf` via the standard `<integration><api_key>` block. Wazuh's `integratord` passes it to the script as a CLI argument — the key is never hardcoded in the script itself.
+
+---
+
 ## Optional JumpCloud Bridge
 
 JumpCloud support is intentionally split into a separate optional repo so non-JumpCloud users are not forced to deploy extra components:
@@ -310,6 +382,29 @@ JumpCloud support is intentionally split into a separate optional repo so non-Ju
 The **SIEM+ Overview** dashboard in this repo includes summary JumpCloud panels (auth failures, events by service) that pull from the same Wazuh index. The dedicated JumpCloud IdP Security dashboard (14 panels) lives in the bridge repo.
 
 Wazuh decoders and rules for JumpCloud events are in `wazuh/jumpcloud_decoders.xml` and `wazuh/jumpcloud_rules.xml`.
+
+---
+
+## Secrets Management
+
+### Current State
+
+Secrets are stored in multiple locations depending on the component:
+
+| Secret | Location | Mechanism |
+|--------|----------|-----------|
+| VirusTotal API key | `ossec.conf` on Wazuh Manager | `<integration><api_key>` XML block |
+| Discord webhooks | N8N credential store | Encrypted in N8N's SQLite DB |
+| Grafana admin password | `.env` file | Docker Compose env var |
+| OpenSearch passwords | `.env` + security config | Docker Compose + internal security plugin |
+| Wazuh API password | `.env` + `wazuh.yml` | Docker Compose env var |
+| JumpCloud API key | Doppler (if using bridge) | Doppler CLI / env injection |
+
+### Doppler Migration (Planned)
+
+The goal is to centralize all secrets in [Doppler](https://www.doppler.com/) for rotation, audit logging, and environment-based configs. See [docs/roadmap.md — Phase 1B](docs/roadmap.md) for the full migration plan.
+
+The `.env.example` includes commented-out `DOPPLER_PROJECT` and `DOPPLER_CONFIG` vars. The [jumpcloud-wazuh-bridge](https://github.com/ChiefGyk3D/jumpcloud-wazuh-bridge) already supports Doppler-first secret resolution as a reference implementation.
 
 ---
 
@@ -360,7 +455,14 @@ siem-docker-stack/
 │   └── deploy-grafana-alerts.py          # Deploy Grafana SIEM alert rules
 ├── n8n/
 │   ├── grafana-alert-router.json         # N8N workflow: Grafana → Discord
-│   └── wazuh-alert-triage.json           # N8N workflow: Wazuh → severity triage → Discord
+│   ├── wazuh-alert-triage.json           # N8N workflow: Wazuh → severity triage → Discord
+│   └── crowdsec-alert-enrichment.json    # N8N workflow: CrowdSec → OpenSearch → Discord
+├── wazuh/
+│   ├── integrations/
+│   │   ├── virustotal.py                 # Cached VT integration (SQLite TTL layer)
+│   │   └── custom-n8n                    # Wazuh → N8N webhook bridge
+│   ├── jumpcloud_decoders.xml            # JumpCloud event decoder
+│   └── jumpcloud_rules.xml               # JumpCloud alert rules
 ├── change-passwords.sh                   # Interactive password change tool
 ├── dashboards/
 │   ├── siem_overview.json                # Cross-source SIEM correlation
@@ -380,10 +482,16 @@ siem-docker-stack/
 │   ├── suricata_ids.json
 │   └── unifi_network.json
 ├── docs/
+│   ├── roadmap.md                        # Phased development roadmap with status badges
+│   ├── detection-ownership.md            # Alert rule → workflow mapping reference
+│   ├── alert-enrichment-standard.md      # Enrichment requirements for SOAR
+│   ├── n8n-soar.md                       # N8N SOAR deployment & workflow reference
 │   ├── disk-strategy.md                  # Hot/warm tiering deep dive
 │   ├── maintenance.md                    # Maintenance & backup guide
-│   ├── n8n-soar.md                       # N8N SOAR deployment & workflow reference
-│   └── troubleshooting.md               # Common issues & fixes
+│   ├── troubleshooting.md               # Common issues & fixes
+│   ├── crowdsec.md                       # CrowdSec integration guide
+│   ├── jumpcloud.md                      # JumpCloud IdP bridge setup
+│   └── gpu-monitoring.md                 # NVIDIA GPU Prometheus exporters
 └── media/
   ├── icons/                            # Social media icons for README
   └── screenshots/                      # Stack screenshots used in docs

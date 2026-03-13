@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Wazuh integration with N8n webhook for SOAR-lite automation."""
+import os
+import sys
+
+# Add persisted packages directory to path (survives container restarts)
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "python_packages"))
+
+import json
+import requests
+from datetime import datetime
+
+WEBHOOK_URL = "http://n8n/webhook/wazuh-alerts"
+
+def main():
+    # Wazuh passes: script_path, alert_file
+    alert_file = sys.argv[1]
+
+    with open(alert_file) as f:
+        alert = json.load(f)
+
+    # Build payload
+    payload = {
+        "timestamp": alert.get("timestamp", datetime.utcnow().isoformat()),
+        "rule": {
+            "id": alert.get("rule", {}).get("id", ""),
+            "level": alert.get("rule", {}).get("level", 0),
+            "description": alert.get("rule", {}).get("description", ""),
+            "groups": alert.get("rule", {}).get("groups", []),
+            "mitre": alert.get("rule", {}).get("mitre", {})
+        },
+        "agent": {
+            "id": alert.get("agent", {}).get("id", "000"),
+            "name": alert.get("agent", {}).get("name", "unknown"),
+            "ip": alert.get("agent", {}).get("ip", "")
+        },
+        "source": "wazuh",
+        "full_log": alert.get("full_log", ""),
+        "location": alert.get("location", ""),
+        "srcip": alert.get("data", {}).get("srcip", ""),
+        "dstip": alert.get("data", {}).get("dstip", "")
+    }
+
+    try:
+        response = requests.post(
+            WEBHOOK_URL,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=10
+        )
+        if response.status_code not in (200, 201, 204):
+            sys.exit(1)
+    except Exception as e:
+        print(f"N8n webhook error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
