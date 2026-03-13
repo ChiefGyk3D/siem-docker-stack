@@ -1,6 +1,11 @@
 {
+  "updatedAt": "2026-03-10T02:01:52.000Z",
+  "createdAt": "2026-03-08T19:03:22.526Z",
+  "id": "YOUR_WORKFLOW_ID",
   "name": "CrowdSec SOAR — Alert Enrichment",
-  "active": false,
+  "description": null,
+  "active": true,
+  "isArchived": false,
   "nodes": [
     {
       "parameters": {
@@ -10,8 +15,11 @@
       },
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2.1,
-      "position": [0, 300],
-      "id": "cs-webhook",
+      "position": [
+        0,
+        304
+      ],
+      "id": "4621e572-5b00-400d-9a1a-77a64cb5aeee",
       "name": "CrowdSec Webhook",
       "webhookId": "crowdsec-alerts"
     },
@@ -24,14 +32,18 @@
                 "options": {
                   "caseSensitive": true,
                   "leftValue": "",
-                  "typeValidation": "strict"
+                  "typeValidation": "strict",
+                  "version": 2
                 },
                 "conditions": [
                   {
                     "id": "firing",
                     "leftValue": "={{ $json.body.status }}",
                     "rightValue": "firing",
-                    "operator": { "type": "string", "operation": "equals" }
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
                   }
                 ],
                 "combinator": "and"
@@ -44,14 +56,18 @@
                 "options": {
                   "caseSensitive": true,
                   "leftValue": "",
-                  "typeValidation": "strict"
+                  "typeValidation": "strict",
+                  "version": 2
                 },
                 "conditions": [
                   {
                     "id": "resolved",
                     "leftValue": "={{ $json.body.status }}",
                     "rightValue": "resolved",
-                    "operator": { "type": "string", "operation": "equals" }
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
                   }
                 ],
                 "combinator": "and"
@@ -61,22 +77,30 @@
             }
           ]
         },
-        "options": { "fallbackOutput": "extra" }
+        "options": {
+          "fallbackOutput": "extra"
+        }
       },
       "type": "n8n-nodes-base.switch",
       "typeVersion": 3.2,
-      "position": [300, 300],
-      "id": "cs-status-switch",
+      "position": [
+        304,
+        304
+      ],
+      "id": "055c3a2b-6e32-4f0d-9d60-e4f5d54d5511",
       "name": "Alert Status"
     },
     {
       "parameters": {
         "method": "POST",
-        "url": "OPENSEARCH_URL/crowdsec-events-*/_search",
+        "url": "http://opensearch-hot:9200/crowdsec-events-*/_search",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
-            { "name": "Content-Type", "value": "application/json" }
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
           ]
         },
         "sendBody": true,
@@ -88,8 +112,11 @@
       },
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [600, 200],
-      "id": "cs-opensearch-query",
+      "position": [
+        608,
+        208
+      ],
+      "id": "88986fe0-2b14-4d73-ab44-e124a7415f57",
       "name": "Query OpenSearch Bans"
     },
     {
@@ -98,68 +125,177 @@
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [900, 200],
-      "id": "cs-enrich",
+      "position": [
+        912,
+        208
+      ],
+      "id": "dbda92f8-b453-4ae6-8cca-caf1d87b892f",
       "name": "Enrich Alert Data"
     },
     {
       "parameters": {
-        "method": "POST",
-        "url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            { "name": "Content-Type", "value": "application/json" }
+        "authentication": "webhook",
+        "operation": "sendLegacy",
+        "content": "",
+        "embeds": {
+          "values": [
+            {
+              "title": "=🛡️ CrowdSec — {{ $json.alertName }}",
+              "description": "={{ $json.summary }}",
+              "color": 15105570,
+              "timestamp": "={{ $json.startsAt }}",
+              "fields": [
+                {
+                  "name": "⚠️ Severity",
+                  "value": "={{ $json.severity }}",
+                  "inline": true
+                },
+                {
+                  "name": "📊 Total Bans (1h)",
+                  "value": "=**{{ $json.totalBans }}** bans detected",
+                  "inline": true
+                },
+                {
+                  "name": "🤖 Programs Active",
+                  "value": "={{ $json.programs }}",
+                  "inline": true
+                },
+                {
+                  "name": "🌐 Recently Banned IPs",
+                  "value": "={{ $json.bannedIps }}",
+                  "inline": false
+                },
+                {
+                  "name": "🏠 Source Hosts",
+                  "value": "={{ $json.sources }}",
+                  "inline": false
+                },
+                {
+                  "name": "🕐 Started At",
+                  "value": "={{ $json.startsAt }}",
+                  "inline": true
+                },
+                {
+                  "name": "📋 Description",
+                  "value": "={{ ($json.description || 'N/A').slice(0, 900) }}",
+                  "inline": false
+                },
+                {
+                  "name": "🔗 Dashboard",
+                  "value": "={{ $json.dashboardURL || 'N/A' }}",
+                  "inline": false
+                },
+                {
+                  "name": "📎 Labels",
+                  "value": "={{ Object.entries($json.labels || {}).map(([k,v]) => k + '=' + v).join(', ').slice(0, 400) || 'N/A' }}",
+                  "inline": false
+                }
+              ]
+            }
           ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={\n  \"content\": \"<@YOUR_DISCORD_USER_ID>\",\n  \"embeds\": [\n    {\n      \"title\": \"🛡️ CrowdSec — {{ $json.alertName }}\",\n      \"description\": \"{{ $json.summary }}\",\n      \"color\": 15105570,\n      \"fields\": [\n        {\n          \"name\": \"Severity\",\n          \"value\": \"{{ $json.severity }}\",\n          \"inline\": true\n        },\n        {\n          \"name\": \"Total Bans (1h)\",\n          \"value\": \"{{ $json.totalBans }}\",\n          \"inline\": true\n        },\n        {\n          \"name\": \"Programs Active\",\n          \"value\": \"{{ $json.programs }}\",\n          \"inline\": true\n        },\n        {\n          \"name\": \"Recent Banned IPs\",\n          \"value\": \"{{ $json.bannedIps }}\",\n          \"inline\": false\n        },\n        {\n          \"name\": \"Source Hosts\",\n          \"value\": \"{{ $json.sources }}\",\n          \"inline\": true\n        },\n        {\n          \"name\": \"Started At\",\n          \"value\": \"{{ $json.startsAt }}\",\n          \"inline\": true\n        },\n        {\n          \"name\": \"Details\",\n          \"value\": \"{{ ($json.description || 'N/A').slice(0, 900) }}\",\n          \"inline\": false\n        },\n        {\n          \"name\": \"Dashboard\",\n          \"value\": \"{{ $json.dashboardURL || 'N/A' }}\",\n          \"inline\": false\n        }\n      ],\n      \"timestamp\": \"{{ $json.startsAt }}\"\n    }\n  ]\n}",
-        "options": {}
+        }
       },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [1200, 200],
-      "id": "cs-discord-firing",
-      "name": "Discord — CrowdSec Firing"
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        208
+      ],
+      "id": "06abfa14-f2d5-4233-b6c7-276615f0a471",
+      "name": "Discord — CrowdSec Firing",
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Discord Webhook Alerts"
+        }
+      }
     },
     {
       "parameters": {
-        "method": "POST",
-        "url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            { "name": "Content-Type", "value": "application/json" }
+        "authentication": "webhook",
+        "operation": "sendLegacy",
+        "content": "",
+        "embeds": {
+          "values": [
+            {
+              "title": "=✅ CrowdSec RESOLVED — {{ ($json.body.alerts || [{}])[0].labels?.alertname || 'CrowdSec Alert' }}",
+              "description": "={{ ($json.body.alerts || [{}])[0].annotations?.summary || 'CrowdSec alert resolved — ban rate returned to normal' }}",
+              "color": 3066993,
+              "timestamp": "={{ ($json.body.alerts || [{}])[0].endsAt || new Date().toISOString() }}",
+              "fields": [
+                {
+                  "name": "⚠️ Severity",
+                  "value": "={{ ($json.body.alerts || [{}])[0].labels?.severity || 'unknown' }}",
+                  "inline": true
+                },
+                {
+                  "name": "🕐 Resolved At",
+                  "value": "={{ ($json.body.alerts || [{}])[0].endsAt || 'N/A' }}",
+                  "inline": true
+                },
+                {
+                  "name": "⏱️ Duration",
+                  "value": "={{ (() => { const a = ($json.body.alerts || [{}])[0]; if (!a.startsAt || !a.endsAt) return 'N/A'; const ms = new Date(a.endsAt) - new Date(a.startsAt); const m = Math.floor(ms/60000); const s = Math.floor((ms%60000)/1000); return (m > 0 ? m + 'm ' : '') + s + 's'; })() }}",
+                  "inline": true
+                },
+                {
+                  "name": "📋 Details",
+                  "value": "={{ (($json.body.alerts || [{}])[0].annotations?.description || 'Ban decision rate returned to normal').slice(0, 900) }}",
+                  "inline": false
+                },
+                {
+                  "name": "📎 Labels",
+                  "value": "={{ Object.entries(($json.body.alerts || [{}])[0].labels || {}).map(([k,v]) => k + '=' + v).join(', ').slice(0, 400) || 'N/A' }}",
+                  "inline": false
+                }
+              ]
+            }
           ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={\n  \"embeds\": [\n    {\n      \"title\": \"✅ CrowdSec RESOLVED — {{ ($json.body.alerts || [{}])[0].labels?.alertname || 'CrowdSec Alert' }}\",\n      \"description\": \"{{ ($json.body.alerts || [{}])[0].annotations?.summary || 'CrowdSec alert resolved' }}\",\n      \"color\": 3066993,\n      \"fields\": [\n        {\n          \"name\": \"Severity\",\n          \"value\": \"{{ ($json.body.alerts || [{}])[0].labels?.severity || 'unknown' }}\",\n          \"inline\": true\n        },\n        {\n          \"name\": \"Resolved At\",\n          \"value\": \"{{ ($json.body.alerts || [{}])[0].endsAt || 'N/A' }}\",\n          \"inline\": true\n        },\n        {\n          \"name\": \"Details\",\n          \"value\": \"{{ (($json.body.alerts || [{}])[0].annotations?.description || 'Ban decision rate returned to normal').slice(0, 900) }}\",\n          \"inline\": false\n        }\n      ],\n      \"timestamp\": \"{{ ($json.body.alerts || [{}])[0].endsAt || new Date().toISOString() }}\"\n    }\n  ]\n}",
-        "options": {}
+        }
       },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [600, 450],
-      "id": "cs-discord-resolved",
-      "name": "Discord — CrowdSec Resolved"
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        608,
+        464
+      ],
+      "id": "8f852ecb-960f-4476-afd1-4b315cf06846",
+      "name": "Discord — CrowdSec Resolved",
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Discord Webhook Alerts"
+        }
+      }
     }
   ],
   "connections": {
     "CrowdSec Webhook": {
       "main": [
         [
-          { "node": "Alert Status", "type": "main", "index": 0 }
+          {
+            "node": "Alert Status",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
     "Alert Status": {
       "main": [
         [
-          { "node": "Query OpenSearch Bans", "type": "main", "index": 0 }
+          {
+            "node": "Query OpenSearch Bans",
+            "type": "main",
+            "index": 0
+          }
         ],
         [
-          { "node": "Discord — CrowdSec Resolved", "type": "main", "index": 0 }
+          {
+            "node": "Discord — CrowdSec Resolved",
+            "type": "main",
+            "index": 0
+          }
         ],
         []
       ]
@@ -167,19 +303,59 @@
     "Query OpenSearch Bans": {
       "main": [
         [
-          { "node": "Enrich Alert Data", "type": "main", "index": 0 }
+          {
+            "node": "Enrich Alert Data",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     },
     "Enrich Alert Data": {
       "main": [
         [
-          { "node": "Discord — CrowdSec Firing", "type": "main", "index": 0 }
+          {
+            "node": "Discord — CrowdSec Firing",
+            "type": "main",
+            "index": 0
+          }
         ]
       ]
     }
   },
   "settings": {
-    "executionOrder": "v1"
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "staticData": null,
+  "meta": null,
+  "pinData": {},
+  "activeVersionId": "797618b4-8d3a-476f-b48b-2a961b025583",
+  "versionCounter": 16,
+  "triggerCount": 1,
+  "tags": [],
+  "shared": [
+    {
+      "updatedAt": "2026-03-08T19:03:22.539Z",
+      "createdAt": "2026-03-08T19:03:22.539Z",
+      "role": "workflow:owner",
+      "workflowId": "xCFLuiSSwNihJclh",
+      "projectId": "kafEMdKKgLswaGCu",
+      "project": {
+        "updatedAt": "2026-03-05T23:55:16.170Z",
+        "createdAt": "2026-03-05T23:48:50.092Z",
+        "id": "kafEMdKKgLswaGCu",
+        "name": "Moshe Geek <chief@chiefgyk3d.com>",
+        "type": "personal",
+        "icon": null,
+        "description": null,
+        "creatorId": "850a1525-0d7b-4ff8-ae56-76e699c15b7c"
+      }
+    }
+  ],
+  "versionMetadata": {
+    "name": null,
+    "description": null
   }
 }

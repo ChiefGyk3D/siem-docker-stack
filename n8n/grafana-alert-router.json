@@ -1,6 +1,11 @@
 {
+  "updatedAt": "2026-03-10T02:01:39.000Z",
+  "createdAt": "2026-03-08T01:41:23.474Z",
+  "id": "YOUR_WORKFLOW_ID",
   "name": "Grafana SOAR — Alert Router",
-  "active": false,
+  "description": null,
+  "active": true,
+  "isArchived": false,
   "nodes": [
     {
       "parameters": {
@@ -85,57 +90,204 @@
     },
     {
       "parameters": {
-        "method": "POST",
-        "url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
+        "authentication": "webhook",
+        "operation": "sendLegacy",
+        "content": "",
+        "embeds": {
+          "values": [
             {
-              "name": "Content-Type",
-              "value": "application/json"
+              "title": "=🔥 FIRING — {{ ($json.body.alerts || [{}])[0].labels?.alertname || 'Unknown Alert' }}",
+              "description": "={{ ($json.body.alerts || [{}])[0].annotations?.summary || 'Alert condition is true' }}",
+              "color": 15158332,
+              "timestamp": "={{ ($json.body.alerts || [{}])[0].startsAt || new Date().toISOString() }}",
+              "fields": [
+                {
+                  "name": "🏷️ Alert Name",
+                  "value": "=`{{ ($json.body.alerts || [{}])[0].labels?.alertname || 'N/A' }}`",
+                  "inline": true
+                },
+                {
+                  "name": "⚠️ Severity",
+                  "value": "={{ ($json.body.alerts || [{}])[0].labels?.severity || 'unknown' }}",
+                  "inline": true
+                },
+                {
+                  "name": "🖥️ Instance",
+                  "value": "={{ ($json.body.alerts || [{}])[0].labels?.instance || ($json.body.alerts || [{}])[0].labels?.agent || 'N/A' }}",
+                  "inline": true
+                },
+                {
+                  "name": "📊 Observed Value",
+                  "value": "=```{{ (($json.body.alerts || [{}])[0].valueString || 'N/A').slice(0, 200) }}```",
+                  "inline": false
+                },
+                {
+                  "name": "🔍 Why It Fired",
+                  "value": "={{ ($json.body.alerts || [{}])[0].annotations?.trigger_logic || ($json.body.alerts || [{}])[0].annotations?.description || 'N/A' }}",
+                  "inline": false
+                },
+                {
+                  "name": "📐 Query",
+                  "value": "=`{{ ($json.body.alerts || [{}])[0].annotations?.trigger_query || 'N/A' }}`",
+                  "inline": true
+                },
+                {
+                  "name": "📏 Threshold",
+                  "value": "=`{{ ($json.body.alerts || [{}])[0].annotations?.threshold || 'N/A' }}`",
+                  "inline": true
+                },
+                {
+                  "name": "⏱️ Window",
+                  "value": "={{ ($json.body.alerts || [{}])[0].annotations?.window || 'N/A' }}",
+                  "inline": true
+                },
+                {
+                  "name": "🌐 Source IP",
+                  "value": "={{ ($json.body.alerts || [{}])[0].labels?.srcip || 'N/A' }}",
+                  "inline": true
+                },
+                {
+                  "name": "👤 Job / Exporter",
+                  "value": "={{ ($json.body.alerts || [{}])[0].labels?.job || 'N/A' }}",
+                  "inline": true
+                },
+                {
+                  "name": "🕐 Started At",
+                  "value": "={{ ($json.body.alerts || [{}])[0].startsAt || 'N/A' }}",
+                  "inline": false
+                },
+                {
+                  "name": "📋 Description",
+                  "value": "={{ (($json.body.alerts || [{}])[0].annotations?.description || 'No description provided').slice(0, 800) }}",
+                  "inline": false
+                },
+                {
+                  "name": "🔗 Dashboard",
+                  "value": "={{ ($json.body.alerts || [{}])[0].dashboardURL || 'N/A' }}",
+                  "inline": false
+                },
+                {
+                  "name": "🔗 Panel",
+                  "value": "={{ ($json.body.alerts || [{}])[0].panelURL || ($json.body.alerts || [{}])[0].generatorURL || 'N/A' }}",
+                  "inline": false
+                },
+                {
+                  "name": "🔖 Fingerprint",
+                  "value": "=`{{ ($json.body.alerts || [{}])[0].fingerprint || 'N/A' }}`",
+                  "inline": true
+                },
+                {
+                  "name": "📎 All Labels",
+                  "value": "={{ Object.entries(($json.body.alerts || [{}])[0].labels || {}).map(([k,v]) => k + '=' + v).join(', ').slice(0, 500) || 'N/A' }}",
+                  "inline": false
+                }
+              ]
             }
           ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={\n  \"content\": \"<@YOUR_DISCORD_USER_ID>\",\n  \"embeds\": [\n    {\n      \"title\": \"🔥 FIRING — {{ ($json.body.alerts || [{}])[0].labels?.alertname || 'Grafana Alert' }}\",\n      \"description\": \"{{ ($json.body.alerts || [{}])[0].annotations?.summary || 'Alert condition is true' }}\",\n      \"color\": 15158332,\n      \"fields\": [\n        {\n          \"name\": \"Why Fired\",\n          \"value\": \"{{ ($json.body.alerts || [{}])[0].annotations?.trigger_logic || (($json.body.alerts || [{}])[0].annotations?.description || 'Threshold condition evaluated true.') }}\",\n          \"inline\": false\n        },\n        {\n          \"name\": \"Trigger Query / Threshold / Window\",\n          \"value\": \"Query: `{{ ($json.body.alerts || [{}])[0].annotations?.trigger_query || (($json.body.alerts || [{}])[0].labels?.detection_query || 'N/A') }}`\\nThreshold: `{{ ($json.body.alerts || [{}])[0].annotations?.trigger_threshold || (($json.body.alerts || [{}])[0].labels?.threshold || 'N/A') }}`\\nWindow: `{{ ($json.body.alerts || [{}])[0].annotations?.trigger_window || (($json.body.alerts || [{}])[0].labels?.window || 'N/A') }}`\",\n          \"inline\": false\n        },\n        {\n          \"name\": \"Observed Value(s)\",\n          \"value\": \"{{ (($json.body.alerts || [{}])[0].valueString || JSON.stringify(($json.body.alerts || [{}])[0].values || {})).slice(0, 900) || 'N/A' }}\",\n          \"inline\": false\n        },\n        {\n          \"name\": \"Affected Device / Host\",\n          \"value\": \"{{ ($json.body.alerts || [{}])[0].labels?.agent || ($json.body.alerts || [{}])[0].labels?.agent_name || ($json.body.alerts || [{}])[0].labels?.instance || ($json.body.alerts || [{}])[0].labels?.host || ($json.body.alerts || [{}])[0].labels?.device || 'N/A') }}\",\n          \"inline\": true\n        },\n        {\n          \"name\": \"Source / User / File\",\n          \"value\": \"srcip=`{{ ($json.body.alerts || [{}])[0].labels?.srcip || 'N/A' }}`\\nuser=`{{ ($json.body.alerts || [{}])[0].labels?.user || ($json.body.alerts || [{}])[0].labels?.username || 'N/A' }}`\\npath=`{{ ($json.body.alerts || [{}])[0].labels?.path || ($json.body.alerts || [{}])[0].labels?.file || 'N/A' }}`\",\n          \"inline\": true\n        },\n        {\n          \"name\": \"Severity / Source / Group\",\n          \"value\": \"sev=`{{ ($json.body.alerts || [{}])[0].labels?.severity || 'unknown' }}` src=`{{ ($json.body.alerts || [{}])[0].labels?.source || 'unknown' }}` group=`{{ ($json.body.alerts || [{}])[0].labels?.alert_group || 'N/A' }}`\",\n          \"inline\": false\n        },\n        {\n          \"name\": \"Starts At\",\n          \"value\": \"{{ ($json.body.alerts || [{}])[0].startsAt || 'N/A' }}\",\n          \"inline\": true\n        },\n        {\n          \"name\": \"Dashboard / Panel\",\n          \"value\": \"{{ ($json.body.alerts || [{}])[0].dashboardURL || 'N/A' }}\\n{{ ($json.body.alerts || [{}])[0].panelURL || '' }}\",\n          \"inline\": false\n        },\n        {\n          \"name\": \"Details\",\n          \"value\": \"{{ (($json.body.alerts || [{}])[0].annotations?.description || 'N/A').slice(0, 900) }}\",\n          \"inline\": false\n        }\n      ],\n      \"timestamp\": \"{{ ($json.body.alerts || [{}])[0].startsAt || new Date().toISOString() }}\"\n    }\n  ]\n}",
-        "options": {}
+        }
       },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
       "position": [
         600,
         200
       ],
       "id": "discord---firing",
-      "name": "Discord — Firing"
+      "name": "Discord — Firing",
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Discord Webhook Alerts"
+        }
+      }
     },
     {
       "parameters": {
-        "method": "POST",
-        "url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
+        "authentication": "webhook",
+        "operation": "sendLegacy",
+        "content": "",
+        "embeds": {
+          "values": [
             {
-              "name": "Content-Type",
-              "value": "application/json"
+              "title": "=✅ RESOLVED — {{ ($json.body.alerts || [{}])[0].labels?.alertname || 'Unknown Alert' }}",
+              "description": "={{ ($json.body.alerts || [{}])[0].annotations?.summary || 'Alert condition cleared' }}",
+              "color": 3066993,
+              "timestamp": "={{ ($json.body.alerts || [{}])[0].endsAt || new Date().toISOString() }}",
+              "fields": [
+                {
+                  "name": "🏷️ Alert Name",
+                  "value": "=`{{ ($json.body.alerts || [{}])[0].labels?.alertname || 'N/A' }}`",
+                  "inline": true
+                },
+                {
+                  "name": "⚠️ Severity",
+                  "value": "={{ ($json.body.alerts || [{}])[0].labels?.severity || 'unknown' }}",
+                  "inline": true
+                },
+                {
+                  "name": "🖥️ Instance",
+                  "value": "={{ ($json.body.alerts || [{}])[0].labels?.instance || ($json.body.alerts || [{}])[0].labels?.agent || 'N/A' }}",
+                  "inline": true
+                },
+                {
+                  "name": "📊 Last Value",
+                  "value": "=```{{ (($json.body.alerts || [{}])[0].valueString || 'N/A').slice(0, 200) }}```",
+                  "inline": false
+                },
+                {
+                  "name": "📐 Query / Threshold",
+                  "value": "=Query: `{{ ($json.body.alerts || [{}])[0].annotations?.trigger_query || 'N/A' }}` Threshold: `{{ ($json.body.alerts || [{}])[0].annotations?.threshold || 'N/A' }}`",
+                  "inline": false
+                },
+                {
+                  "name": "⏱️ Duration",
+                  "value": "={{ (() => { const a = ($json.body.alerts || [{}])[0]; if (!a.startsAt || !a.endsAt) return 'N/A'; const ms = new Date(a.endsAt) - new Date(a.startsAt); const m = Math.floor(ms/60000); const s = Math.floor((ms%60000)/1000); return (m > 0 ? m + 'm ' : '') + s + 's'; })() }}",
+                  "inline": true
+                },
+                {
+                  "name": "🕐 Fired At",
+                  "value": "={{ ($json.body.alerts || [{}])[0].startsAt || 'N/A' }}",
+                  "inline": true
+                },
+                {
+                  "name": "🕐 Resolved At",
+                  "value": "={{ ($json.body.alerts || [{}])[0].endsAt || 'N/A' }}",
+                  "inline": true
+                },
+                {
+                  "name": "📋 Description",
+                  "value": "={{ (($json.body.alerts || [{}])[0].annotations?.description || 'No description').slice(0, 600) }}",
+                  "inline": false
+                },
+                {
+                  "name": "🔗 Dashboard",
+                  "value": "={{ ($json.body.alerts || [{}])[0].dashboardURL || 'N/A' }}",
+                  "inline": false
+                },
+                {
+                  "name": "🔖 Fingerprint",
+                  "value": "=`{{ ($json.body.alerts || [{}])[0].fingerprint || 'N/A' }}`",
+                  "inline": true
+                }
+              ]
             }
           ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={\n  \"embeds\": [\n    {\n      \"title\": \"✅ RESOLVED — {{ ($json.body.alerts || [{}])[0].labels?.alertname || 'Grafana Alert' }}\",\n      \"description\": \"{{ ($json.body.alerts || [{}])[0].annotations?.summary || 'Alert condition cleared' }}\",\n      \"color\": 3066993,\n      \"fields\": [\n        {\n          \"name\": \"Why Resolved\",\n          \"value\": \"{{ ($json.body.alerts || [{}])[0].annotations?.resolve_logic || 'Condition is no longer true in the current evaluation window (value <= threshold or prior events aged out).' }}\",\n          \"inline\": false\n        },\n        {\n          \"name\": \"Trigger Query / Threshold / Window\",\n          \"value\": \"Query: `{{ ($json.body.alerts || [{}])[0].annotations?.trigger_query || (($json.body.alerts || [{}])[0].labels?.detection_query || 'N/A') }}`\\nThreshold: `{{ ($json.body.alerts || [{}])[0].annotations?.trigger_threshold || (($json.body.alerts || [{}])[0].labels?.threshold || 'N/A') }}`\\nWindow: `{{ ($json.body.alerts || [{}])[0].annotations?.trigger_window || (($json.body.alerts || [{}])[0].labels?.window || 'N/A') }}`\",\n          \"inline\": false\n        },\n        {\n          \"name\": \"Current Value(s)\",\n          \"value\": \"{{ (($json.body.alerts || [{}])[0].valueString || JSON.stringify(($json.body.alerts || [{}])[0].values || {})).slice(0, 900) || 'N/A' }}\",\n          \"inline\": false\n        },\n        {\n          \"name\": \"Affected Device / Host\",\n          \"value\": \"{{ ($json.body.alerts || [{}])[0].labels?.agent || ($json.body.alerts || [{}])[0].labels?.agent_name || ($json.body.alerts || [{}])[0].labels?.instance || ($json.body.alerts || [{}])[0].labels?.host || ($json.body.alerts || [{}])[0].labels?.device || 'N/A') }}\",\n          \"inline\": true\n        },\n        {\n          \"name\": \"Incident Duration\",\n          \"value\": \"{{ (() => { const a = ($json.body.alerts || [{}])[0]; if (!a?.startsAt || !a?.endsAt) return 'N/A'; const ms = new Date(a.endsAt).getTime() - new Date(a.startsAt).getTime(); if (!Number.isFinite(ms) || ms < 0) return 'N/A'; const mins = Math.round(ms / 60000); return mins + ' minute(s)'; })() }}\",\n          \"inline\": true\n        },\n        {\n          \"name\": \"Resolved At\",\n          \"value\": \"{{ ($json.body.alerts || [{}])[0].endsAt || 'N/A' }}\",\n          \"inline\": true\n        },\n        {\n          \"name\": \"Details\",\n          \"value\": \"{{ (($json.body.alerts || [{}])[0].annotations?.description || 'N/A').slice(0, 900) }}\",\n          \"inline\": false\n        }\n      ],\n      \"timestamp\": \"{{ ($json.body.alerts || [{}])[0].endsAt || new Date().toISOString() }}\"\n    }\n  ]\n}",
-        "options": {}
+        }
       },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
       "position": [
         600,
         400
       ],
       "id": "discord---resolved",
-      "name": "Discord — Resolved"
+      "name": "Discord — Resolved",
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Discord Webhook Alerts"
+        }
+      }
     }
   ],
   "connections": {
@@ -172,5 +324,35 @@
   },
   "settings": {
     "executionOrder": "v1"
+  },
+  "staticData": null,
+  "meta": null,
+  "pinData": null,
+  "activeVersionId": "58a1b240-1062-4690-8737-0f207e5b9f54",
+  "versionCounter": 32,
+  "triggerCount": 1,
+  "tags": [],
+  "shared": [
+    {
+      "updatedAt": "2026-03-08T01:41:23.484Z",
+      "createdAt": "2026-03-08T01:41:23.484Z",
+      "role": "workflow:owner",
+      "workflowId": "dPkyi0TfVeAxoTIW",
+      "projectId": "kafEMdKKgLswaGCu",
+      "project": {
+        "updatedAt": "2026-03-05T23:55:16.170Z",
+        "createdAt": "2026-03-05T23:48:50.092Z",
+        "id": "kafEMdKKgLswaGCu",
+        "name": "Moshe Geek <chief@chiefgyk3d.com>",
+        "type": "personal",
+        "icon": null,
+        "description": null,
+        "creatorId": "850a1525-0d7b-4ff8-ae56-76e699c15b7c"
+      }
+    }
+  ],
+  "versionMetadata": {
+    "name": null,
+    "description": null
   }
 }

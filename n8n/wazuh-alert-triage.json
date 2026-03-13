@@ -1,5 +1,11 @@
 {
-  "name": "Wazuh SOAR \u2014 Alert Triage & Routing",
+  "updatedAt": "2026-03-10T02:01:45.000Z",
+  "createdAt": "2026-03-08T01:43:05.603Z",
+  "id": "YOUR_WORKFLOW_ID",
+  "name": "Wazuh SOAR — Alert Triage & Routing",
+  "description": null,
+  "active": true,
+  "isArchived": false,
   "nodes": [
     {
       "parameters": {
@@ -10,8 +16,8 @@
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2.1,
       "position": [
-        0,
-        300
+        -208,
+        304
       ],
       "id": "webhook-wazuh",
       "name": "Wazuh Webhook",
@@ -19,14 +25,13 @@
     },
     {
       "parameters": {
-        "mode": "runOnceForAllItems",
-        "jsCode": "const WINDOW_MS = 90 * 1000;\nconst state = getWorkflowStaticData('global');\nif (!state.recent) state.recent = {};\nconst now = Date.now();\n\nconst out = [];\nfor (const item of items) {\n  const body = item.json?.body || {};\n  const ruleId = String(body?.rule?.id || 'unknown');\n  const src = String(body?.srcip || body?.data?.srcip || 'unknown');\n  const key = `${ruleId}|${src}`;\n  const last = Number(state.recent[key] || 0);\n\n  if (now - last >= WINDOW_MS) {\n    state.recent[key] = now;\n    out.push(item);\n  }\n}\n\nfor (const k of Object.keys(state.recent)) {\n  if (now - Number(state.recent[k]) > (6 * WINDOW_MS)) delete state.recent[k];\n}\n\nreturn out;"
+        "jsCode": "const WINDOW_MS = 90 * 1000;\nconst state = $getWorkflowStaticData('global');\nif (!state.recent) state.recent = {};\nconst now = Date.now();\n\nconst out = [];\nfor (const item of items) {\n  const body = item.json?.body || {};\n  const ruleId = String(body?.rule?.id || 'unknown');\n  const src = String(body?.srcip || body?.data?.srcip || 'unknown');\n  const key = `${ruleId}|${src}`;\n  const last = Number(state.recent[key] || 0);\n\n  if (now - last >= WINDOW_MS) {\n    state.recent[key] = now;\n    out.push(item);\n  }\n}\n\nfor (const k of Object.keys(state.recent)) {\n  if (now - Number(state.recent[k]) > (6 * WINDOW_MS)) delete state.recent[k];\n}\n\nreturn out;"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        140,
-        300
+        -16,
+        320
       ],
       "id": "dedup-burst-window",
       "name": "Dedup Burst Window"
@@ -113,65 +118,174 @@
       "type": "n8n-nodes-base.switch",
       "typeVersion": 3.2,
       "position": [
-        280,
-        300
+        288,
+        304
       ],
       "id": "switch-severity",
       "name": "Severity Router"
     },
     {
       "parameters": {
-        "method": "POST",
-        "url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
+        "authentication": "webhook",
+        "operation": "sendLegacy",
+        "content": "",
+        "embeds": {
+          "values": [
             {
-              "name": "Content-Type",
-              "value": "application/json"
+              "title": "=🚨 CRITICAL — Wazuh Rule {{ $json.body.rule.id }} (Level {{ $json.body.rule.level }})",
+              "description": "={{ $json.body.rule.description }}",
+              "color": 15158332,
+              "timestamp": "={{ new Date().toISOString() }}",
+              "fields": [
+                {
+                  "name": "⚠️ Severity Level",
+                  "value": "=Level **{{ $json.body.rule.level }}** — CRITICAL",
+                  "inline": true
+                },
+                {
+                  "name": "📜 Rule ID",
+                  "value": "=`{{ $json.body.rule.id }}`",
+                  "inline": true
+                },
+                {
+                  "name": "🖥️ Agent",
+                  "value": "={{ $json.body.agent?.name || 'N/A' }} (`{{ $json.body.agent?.ip || 'N/A' }}`)",
+                  "inline": true
+                },
+                {
+                  "name": "🎯 MITRE ATT&CK",
+                  "value": "=Tactic: {{ ($json.body.rule.mitre?.tactic || []).join(', ') || 'N/A' }}\nTechnique: {{ ($json.body.rule.mitre?.technique || []).join(', ') || 'N/A' }}\nID: {{ ($json.body.rule.mitre?.id || []).join(', ') || 'N/A' }}",
+                  "inline": false
+                },
+                {
+                  "name": "🌐 Source IP",
+                  "value": "={{ $json.body.srcip || $json.body.data?.srcip || 'N/A' }}",
+                  "inline": true
+                },
+                {
+                  "name": "👤 User",
+                  "value": "={{ $json.body.data?.srcuser || $json.body.data?.dstuser || 'N/A' }}",
+                  "inline": true
+                },
+                {
+                  "name": "📦 Groups",
+                  "value": "={{ ($json.body.rule.groups || []).join(', ') || 'N/A' }}",
+                  "inline": false
+                },
+                {
+                  "name": "📁 File / Path",
+                  "value": "=`{{ $json.body.syscheck?.path || 'N/A' }}`",
+                  "inline": true
+                },
+                {
+                  "name": "📍 Location",
+                  "value": "=`{{ $json.body.location || 'N/A' }}`",
+                  "inline": true
+                },
+                {
+                  "name": "📋 Raw Log",
+                  "value": "=```{{ ($json.body.full_log || 'N/A').slice(0, 600) }}```",
+                  "inline": false
+                }
+              ]
             }
           ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={\n  \"content\": \"<@YOUR_DISCORD_USER_ID>\",\n  \"embeds\": [{\n    \"title\": \"\ud83d\udea8 CRITICAL \u2014 Wazuh Alert (Level {{ $json.body.rule.level }})\",\n    \"description\": \"{{ $json.body.rule.description }}\",\n    \"color\": 15158332,\n    \"fields\": [\n      { \"name\": \"Why Fired\", \"value\": \"Wazuh rule {{ $json.body.rule.id }} matched an event at level {{ $json.body.rule.level }}.\", \"inline\": false },\n      { \"name\": \"Rule / Groups\", \"value\": \"rule=`{{ $json.body.rule.id }}` groups=`{{ ($json.body.rule.groups || []).join(', ') || 'N/A' }}`\", \"inline\": false },\n      { \"name\": \"Affected Host\", \"value\": \"{{ $json.body.agent?.name || 'N/A' }} ({{ $json.body.agent?.ip || 'N/A' }})\", \"inline\": true },\n      { \"name\": \"Source / User\", \"value\": \"srcip=`{{ $json.body.srcip || $json.body.data?.srcip || 'N/A' }}`\\nuser=`{{ $json.body.data?.srcuser || $json.body.data?.dstuser || 'N/A' }}`\", \"inline\": true },\n      { \"name\": \"File / Location\", \"value\": \"path=`{{ $json.body.syscheck?.path || 'N/A' }}`\\nloc=`{{ $json.body.location || 'N/A' }}`\", \"inline\": false },\n      { \"name\": \"MITRE\", \"value\": \"{{ ($json.body.rule.mitre?.tactic || []).join(', ') || 'N/A' }}\", \"inline\": false },\n      { \"name\": \"Raw Log (trimmed)\", \"value\": \"```{{ ($json.body.full_log || '').slice(0, 500) || 'N/A' }}```\", \"inline\": false }\n    ],\n    \"timestamp\": \"{{ $json.body.timestamp }}\"\n  }]\n}",
-        "options": {}
+        }
       },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
       "position": [
-        580,
-        100
+        592,
+        112
       ],
       "id": "discord-critical",
-      "name": "Discord \u2014 Critical"
+      "name": "Discord — Critical",
+      "webhookId": "998f96bb-840a-4135-b8a9-0a9a61f3a6ef",
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Discord Webhook Alerts"
+        }
+      }
     },
     {
       "parameters": {
-        "method": "POST",
-        "url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
+        "authentication": "webhook",
+        "operation": "sendLegacy",
+        "content": "",
+        "embeds": {
+          "values": [
             {
-              "name": "Content-Type",
-              "value": "application/json"
+              "title": "=🟠 HIGH — Wazuh Rule {{ $json.body.rule.id }} (Level {{ $json.body.rule.level }})",
+              "description": "={{ $json.body.rule.description }}",
+              "color": 15105570,
+              "timestamp": "={{ new Date().toISOString() }}",
+              "fields": [
+                {
+                  "name": "⚠️ Severity Level",
+                  "value": "=Level **{{ $json.body.rule.level }}**",
+                  "inline": true
+                },
+                {
+                  "name": "📜 Rule ID",
+                  "value": "=`{{ $json.body.rule.id }}`",
+                  "inline": true
+                },
+                {
+                  "name": "🖥️ Agent",
+                  "value": "={{ $json.body.agent?.name || 'N/A' }} (`{{ $json.body.agent?.ip || 'N/A' }}`)",
+                  "inline": true
+                },
+                {
+                  "name": "🎯 MITRE ATT&CK",
+                  "value": "=Tactic: {{ ($json.body.rule.mitre?.tactic || []).join(', ') || 'N/A' }}\nTechnique: {{ ($json.body.rule.mitre?.technique || []).join(', ') || 'N/A' }}",
+                  "inline": false
+                },
+                {
+                  "name": "🌐 Source IP",
+                  "value": "={{ $json.body.srcip || $json.body.data?.srcip || 'N/A' }}",
+                  "inline": true
+                },
+                {
+                  "name": "👤 User",
+                  "value": "={{ $json.body.data?.srcuser || $json.body.data?.dstuser || 'N/A' }}",
+                  "inline": true
+                },
+                {
+                  "name": "📦 Groups",
+                  "value": "={{ ($json.body.rule.groups || []).join(', ') || 'N/A' }}",
+                  "inline": false
+                },
+                {
+                  "name": "📍 Location",
+                  "value": "=`{{ $json.body.location || 'N/A' }}`",
+                  "inline": true
+                },
+                {
+                  "name": "📋 Raw Log",
+                  "value": "=```{{ ($json.body.full_log || 'N/A').slice(0, 500) }}```",
+                  "inline": false
+                }
+              ]
             }
           ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={\n  \"embeds\": [{\n    \"title\": \"\ud83d\udfe0 HIGH \u2014 Wazuh Alert (Level {{ $json.body.rule.level }})\",\n    \"description\": \"{{ $json.body.rule.description }}\",\n    \"color\": 16744448,\n    \"fields\": [\n      { \"name\": \"Rule ID\", \"value\": \"{{ $json.body.rule.id }}\", \"inline\": true },\n      { \"name\": \"Agent\", \"value\": \"{{ $json.body.agent?.name || 'N/A' }} ({{ $json.body.agent?.ip || '' }})\", \"inline\": true },\n      { \"name\": \"Source IP\", \"value\": \"{{ $json.body.srcip || $json.body.data?.srcip || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"MITRE\", \"value\": \"{{ ($json.body.rule.mitre?.tactic || []).join(', ') || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"Groups\", \"value\": \"{{ ($json.body.rule.groups || []).join(', ') }}\", \"inline\": false },\n      { \"name\": \"Location\", \"value\": \"```{{ $json.body.location || 'N/A' }}```\", \"inline\": false }\n    ],\n    \"timestamp\": \"{{ $json.body.timestamp }}\"\n  }]\n}",
-        "options": {}
+        }
       },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
       "position": [
-        860,
+        864,
         400
       ],
       "id": "discord-high",
-      "name": "Discord \u2014 High"
+      "name": "Discord — High",
+      "webhookId": "f375b5b4-52fe-4fe0-912f-581c28d46790",
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Discord Webhook Alerts"
+        }
+      }
     },
     {
       "parameters": {
@@ -220,8 +334,8 @@
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
       "position": [
-        580,
-        500
+        592,
+        512
       ],
       "id": "set-medium",
       "name": "Log Medium"
@@ -267,8 +381,8 @@
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
       "position": [
-        580,
-        700
+        592,
+        704
       ],
       "id": "set-low",
       "name": "Log Low"
@@ -355,48 +469,104 @@
       "type": "n8n-nodes-base.switch",
       "typeVersion": 3.2,
       "position": [
-        860,
-        100
+        864,
+        112
       ],
       "id": "switch-category",
       "name": "Attack Categorizer"
     },
     {
       "parameters": {
-        "method": "POST",
-        "url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
+        "authentication": "webhook",
+        "operation": "sendLegacy",
+        "content": "",
+        "embeds": {
+          "values": [
             {
-              "name": "Content-Type",
-              "value": "application/json"
+              "title": "=🔐 Brute Force Detected — {{ $json.body.agent?.name || 'unknown' }}",
+              "description": "={{ $json.body.rule.description }}",
+              "color": 15548997,
+              "timestamp": "={{ new Date().toISOString() }}",
+              "fields": [
+                {
+                  "name": "⚠️ Severity",
+                  "value": "=Level **{{ $json.body.rule.level }}** — {{ $json.body.rule.level >= 12 ? 'CRITICAL' : 'HIGH' }}",
+                  "inline": true
+                },
+                {
+                  "name": "📜 Rule ID",
+                  "value": "=`{{ $json.body.rule.id }}`",
+                  "inline": true
+                },
+                {
+                  "name": "🖥️ Target Host",
+                  "value": "={{ $json.body.agent?.name || 'N/A' }} (`{{ $json.body.agent?.ip || 'N/A' }}`)",
+                  "inline": true
+                },
+                {
+                  "name": "🌐 Attacker IP",
+                  "value": "=`{{ $json.body.srcip || $json.body.data?.srcip || 'N/A' }}`",
+                  "inline": true
+                },
+                {
+                  "name": "👤 Target User",
+                  "value": "={{ $json.body.data?.srcuser || $json.body.data?.dstuser || 'N/A' }}",
+                  "inline": true
+                },
+                {
+                  "name": "🎯 MITRE ATT&CK",
+                  "value": "=Tactic: {{ ($json.body.rule.mitre?.tactic || []).join(', ') || 'Credential Access' }}\nTechnique: {{ ($json.body.rule.mitre?.technique || []).join(', ') || 'Brute Force' }}\nID: {{ ($json.body.rule.mitre?.id || []).join(', ') || 'T1110' }}",
+                  "inline": false
+                },
+                {
+                  "name": "📦 Groups",
+                  "value": "={{ ($json.body.rule.groups || []).join(', ') || 'N/A' }}",
+                  "inline": false
+                },
+                {
+                  "name": "📍 Log Source",
+                  "value": "=`{{ $json.body.location || 'N/A' }}`",
+                  "inline": true
+                },
+                {
+                  "name": "🛡️ Recommended Action",
+                  "value": "=• Check auth logs for repeat attempts\n• Consider blocking source IP at firewall\n• Review account lockout policies\n• Check for successful logins from this IP",
+                  "inline": false
+                },
+                {
+                  "name": "📋 Raw Log",
+                  "value": "=```{{ ($json.body.full_log || 'N/A').slice(0, 400) }}```",
+                  "inline": false
+                }
+              ]
             }
           ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={\n  \"content\": \"<@YOUR_DISCORD_USER_ID>\",\n  \"embeds\": [{\n    \"title\": \"\ud83d\udd10 Brute Force Detected \u2014 {{ $json.body.agent.name }}\",\n    \"description\": \"{{ $json.body.rule.description }}\",\n    \"color\": 15105570,\n    \"fields\": [\n      { \"name\": \"Source IP\", \"value\": \"{{ $json.body.srcip || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"Agent\", \"value\": \"{{ $json.body.agent.name }}\", \"inline\": true },\n      { \"name\": \"Rule\", \"value\": \"{{ $json.body.rule.id }} (Level {{ $json.body.rule.level }})\", \"inline\": true },\n      { \"name\": \"Action\", \"value\": \"Check auth logs, consider firewall block\", \"inline\": false }\n    ],\n    \"timestamp\": \"{{ $json.body.timestamp }}\"\n  }]\n}",
-        "options": {}
+        }
       },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
       "position": [
-        1140,
+        1152,
         0
       ],
       "id": "discord-brute",
-      "name": "Discord \u2014 Brute Force"
+      "name": "Discord — Brute Force",
+      "webhookId": "bfd25d86-b1d7-4f6f-b803-84b40b32902e",
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Discord Webhook Alerts"
+        }
+      }
     },
     {
       "parameters": {
-        "mode": "runOnceForAllItems",
-        "jsCode": "const WINDOW_MS = 3 * 60 * 1000;\nconst state = getWorkflowStaticData('global');\nif (!state.auth_recent_critical) state.auth_recent_critical = {};\nconst now = Date.now();\n\nconst out = [];\nfor (const item of items) {\n  const body = item.json?.body || {};\n  const src = String(body?.srcip || body?.data?.srcip || 'unknown');\n  const user = String(body?.data?.srcuser || body?.data?.dstuser || 'unknown');\n  const ruleId = String(body?.rule?.id || 'unknown');\n  const key = `${src}|${user}|${ruleId}`;\n  const last = Number(state.auth_recent_critical[key] || 0);\n\n  if (now - last >= WINDOW_MS) {\n    state.auth_recent_critical[key] = now;\n    out.push(item);\n  }\n}\n\nfor (const k of Object.keys(state.auth_recent_critical)) {\n  if (now - Number(state.auth_recent_critical[k]) > (6 * WINDOW_MS)) delete state.auth_recent_critical[k];\n}\n\nreturn out;"
+        "jsCode": "const WINDOW_MS = 3 * 60 * 1000;\nconst state = $getWorkflowStaticData('global');\nif (!state.auth_recent_critical) state.auth_recent_critical = {};\nconst now = Date.now();\n\nconst out = [];\nfor (const item of items) {\n  const body = item.json?.body || {};\n  const src = String(body?.srcip || body?.data?.srcip || 'unknown');\n  const user = String(body?.data?.srcuser || body?.data?.dstuser || 'unknown');\n  const ruleId = String(body?.rule?.id || 'unknown');\n  const key = `${src}|${user}|${ruleId}`;\n  const last = Number(state.auth_recent_critical[key] || 0);\n\n  if (now - last >= WINDOW_MS) {\n    state.auth_recent_critical[key] = now;\n    out.push(item);\n  }\n}\n\nfor (const k of Object.keys(state.auth_recent_critical)) {\n  if (now - Number(state.auth_recent_critical[k]) > (6 * WINDOW_MS)) delete state.auth_recent_critical[k];\n}\n\nreturn out;"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1020,
+        1024,
         0
       ],
       "id": "dedup-auth-critical",
@@ -404,57 +574,186 @@
     },
     {
       "parameters": {
-        "method": "POST",
-        "url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
+        "authentication": "webhook",
+        "operation": "sendLegacy",
+        "content": "",
+        "embeds": {
+          "values": [
             {
-              "name": "Content-Type",
-              "value": "application/json"
+              "title": "=📁 File Integrity Change — {{ $json.body.agent?.name || 'unknown' }}",
+              "description": "={{ $json.body.rule.description }}",
+              "color": 3447003,
+              "timestamp": "={{ new Date().toISOString() }}",
+              "fields": [
+                {
+                  "name": "⚠️ Severity",
+                  "value": "=Level **{{ $json.body.rule.level }}**",
+                  "inline": true
+                },
+                {
+                  "name": "📜 Rule ID",
+                  "value": "=`{{ $json.body.rule.id }}`",
+                  "inline": true
+                },
+                {
+                  "name": "🖥️ Agent",
+                  "value": "={{ $json.body.agent?.name || 'N/A' }} (`{{ $json.body.agent?.ip || 'N/A' }}`)",
+                  "inline": true
+                },
+                {
+                  "name": "📂 File Path",
+                  "value": "=`{{ $json.body.syscheck?.path || 'N/A' }}`",
+                  "inline": false
+                },
+                {
+                  "name": "🔄 Event Type",
+                  "value": "={{ $json.body.syscheck?.event || 'N/A' }}",
+                  "inline": true
+                },
+                {
+                  "name": "👤 Owner (After)",
+                  "value": "={{ $json.body.syscheck?.uname_after || 'N/A' }}:{{ $json.body.syscheck?.gname_after || 'N/A' }}",
+                  "inline": true
+                },
+                {
+                  "name": "🔒 Permissions (After)",
+                  "value": "=`{{ $json.body.syscheck?.perm_after || 'N/A' }}`",
+                  "inline": true
+                },
+                {
+                  "name": "🔑 SHA256 Hash",
+                  "value": "=`{{ ($json.body.syscheck?.sha256_after || 'N/A').slice(0, 20) }}...`",
+                  "inline": true
+                },
+                {
+                  "name": "📏 Size Change",
+                  "value": "={{ $json.body.syscheck?.size_before || '?' }} → {{ $json.body.syscheck?.size_after || '?' }} bytes",
+                  "inline": true
+                },
+                {
+                  "name": "📦 Groups",
+                  "value": "={{ ($json.body.rule.groups || []).join(', ') || 'N/A' }}",
+                  "inline": false
+                },
+                {
+                  "name": "📍 Location",
+                  "value": "=`{{ $json.body.location || 'N/A' }}`",
+                  "inline": true
+                },
+                {
+                  "name": "📋 Raw Log",
+                  "value": "=```{{ ($json.body.full_log || 'N/A').slice(0, 400) }}```",
+                  "inline": false
+                }
+              ]
             }
           ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={\n  \"content\": \"<@YOUR_DISCORD_USER_ID>\",\n  \"embeds\": [{\n    \"title\": \"\ud83d\udcc1 File Integrity Change \u2014 {{ $json.body.agent?.name || 'unknown' }}\",\n    \"description\": \"{{ $json.body.rule.description }}\",\n    \"color\": 3447003,\n    \"fields\": [\n      { \"name\": \"Why Fired\", \"value\": \"FIM/syscheck event `{{ $json.body.syscheck?.event || 'N/A' }}` matched rule {{ $json.body.rule.id }} at level {{ $json.body.rule.level }}.\", \"inline\": false },\n      { \"name\": \"File Path\", \"value\": \"```{{ $json.body.syscheck?.path || 'N/A' }}```\", \"inline\": false },\n      { \"name\": \"Event / Host\", \"value\": \"event=`{{ $json.body.syscheck?.event || 'N/A' }}` host=`{{ $json.body.agent?.name || 'N/A' }}`\", \"inline\": true },\n      { \"name\": \"Owner / Perms\", \"value\": \"{{ $json.body.syscheck?.uname_after || 'N/A' }}:{{ $json.body.syscheck?.gname_after || 'N/A' }} / {{ $json.body.syscheck?.perm_after || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"Hash / Size\", \"value\": \"sha256=`{{ ($json.body.syscheck?.sha256_after || 'N/A').substring(0, 24) }}`\\nsize=`{{ $json.body.syscheck?.size_after || 'N/A' }}`\", \"inline\": false },\n      { \"name\": \"Rule / Groups\", \"value\": \"rule=`{{ $json.body.rule.id }}` groups=`{{ ($json.body.rule.groups || []).join(', ') || 'N/A' }}`\", \"inline\": false }\n    ],\n    \"timestamp\": \"{{ $json.body.timestamp }}\"\n  }]\n}",
-        "options": {}
+        }
       },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
       "position": [
-        1140,
-        200
+        1152,
+        208
       ],
       "id": "discord-fim",
-      "name": "Discord \u2014 FIM Alert"
+      "name": "Discord — FIM Alert",
+      "webhookId": "2dd7802b-80b5-4d3a-8e6e-73bda6ef73b5",
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Discord Webhook Alerts"
+        }
+      }
     },
     {
       "parameters": {
-        "method": "POST",
-        "url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
+        "authentication": "webhook",
+        "operation": "sendLegacy",
+        "content": "",
+        "embeds": {
+          "values": [
             {
-              "name": "Content-Type",
-              "value": "application/json"
+              "title": "=🛡️ Vulnerability Found — {{ $json.body.agent?.name || 'unknown' }}",
+              "description": "={{ $json.body.rule.description }}",
+              "color": 10038562,
+              "timestamp": "={{ new Date().toISOString() }}",
+              "fields": [
+                {
+                  "name": "⚠️ Severity",
+                  "value": "=Level **{{ $json.body.rule.level }}**",
+                  "inline": true
+                },
+                {
+                  "name": "📜 Rule ID",
+                  "value": "=`{{ $json.body.rule.id }}`",
+                  "inline": true
+                },
+                {
+                  "name": "🖥️ Agent",
+                  "value": "={{ $json.body.agent?.name || 'N/A' }} (`{{ $json.body.agent?.ip || 'N/A' }}`)",
+                  "inline": true
+                },
+                {
+                  "name": "🐛 CVE",
+                  "value": "={{ $json.body.data?.vulnerability?.cve || $json.body.data?.cve || 'N/A' }}",
+                  "inline": true
+                },
+                {
+                  "name": "📦 Package",
+                  "value": "={{ $json.body.data?.vulnerability?.package?.name || 'N/A' }} {{ $json.body.data?.vulnerability?.package?.version || '' }}",
+                  "inline": true
+                },
+                {
+                  "name": "🔴 CVSS Score",
+                  "value": "={{ $json.body.data?.vulnerability?.severity || $json.body.data?.vulnerability?.cvss?.score || 'N/A' }}",
+                  "inline": true
+                },
+                {
+                  "name": "💊 Fix Available",
+                  "value": "={{ $json.body.data?.vulnerability?.package?.fix_version || $json.body.data?.vulnerability?.status || 'Check vendor advisory' }}",
+                  "inline": true
+                },
+                {
+                  "name": "🎯 MITRE ATT&CK",
+                  "value": "=Tactic: {{ ($json.body.rule.mitre?.tactic || []).join(', ') || 'N/A' }}\nTechnique: {{ ($json.body.rule.mitre?.technique || []).join(', ') || 'N/A' }}",
+                  "inline": false
+                },
+                {
+                  "name": "📦 Groups",
+                  "value": "={{ ($json.body.rule.groups || []).join(', ') || 'N/A' }}",
+                  "inline": false
+                },
+                {
+                  "name": "🔗 Reference",
+                  "value": "={{ ($json.body.data?.vulnerability?.references || []).slice(0, 2).join('\\n') || $json.body.data?.vulnerability?.reference || 'N/A' }}",
+                  "inline": false
+                },
+                {
+                  "name": "📋 Raw Log",
+                  "value": "=```{{ ($json.body.full_log || 'N/A').slice(0, 400) }}```",
+                  "inline": false
+                }
+              ]
             }
           ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={\n  \"embeds\": [{\n    \"title\": \"\ud83d\udee1\ufe0f Vulnerability Found \u2014 {{ $json.body.agent.name }}\",\n    \"description\": \"{{ $json.body.rule.description }}\",\n    \"color\": 16776960,\n    \"fields\": [\n      { \"name\": \"Agent\", \"value\": \"{{ $json.body.agent.name }}\", \"inline\": true },\n      { \"name\": \"Rule\", \"value\": \"{{ $json.body.rule.id }} (Level {{ $json.body.rule.level }})\", \"inline\": true }\n    ],\n    \"timestamp\": \"{{ $json.body.timestamp }}\"\n  }]\n}",
-        "options": {}
+        }
       },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
       "position": [
-        1140,
+        1152,
         400
       ],
       "id": "discord-vuln",
-      "name": "Discord \u2014 Vulnerability"
+      "name": "Discord — Vulnerability",
+      "webhookId": "5706c65e-974d-4a81-95a0-b7027594ce8a",
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Discord Webhook Alerts"
+        }
+      }
     },
     {
       "parameters": {
@@ -469,34 +768,25 @@
                 },
                 "conditions": [
                   {
-                    "id": "pf-internal",
-                    "leftValue": "={{ ($json.body.rule.groups || []).join(',') + '|' + ($json.body.srcip || $json.body.data?.srcip || '') }}",
-                    "rightValue": "pfsense|192.168.",
+                    "id": "pf-internal-group",
+                    "leftValue": "={{ ($json.body.rule.groups || []).join(',') }}",
+                    "rightValue": "pfsense",
                     "operator": {
                       "type": "string",
                       "operation": "contains"
                     }
                   },
                   {
-                    "id": "pf-internal2",
-                    "leftValue": "={{ ($json.body.rule.groups || []).join(',') + '|' + ($json.body.srcip || $json.body.data?.srcip || '') }}",
-                    "rightValue": "pfsense|10.",
+                    "id": "pf-internal-ip",
+                    "leftValue": "={{ (() => { const ip = $json.body.srcip || $json.body.data?.srcip || ''; return (ip.startsWith('192.168.') || ip.startsWith('10.') || ip.startsWith('172.')) ? 'private' : 'public'; })() }}",
+                    "rightValue": "private",
                     "operator": {
                       "type": "string",
-                      "operation": "contains"
-                    }
-                  },
-                  {
-                    "id": "pf-internal3",
-                    "leftValue": "={{ ($json.body.rule.groups || []).join(',') + '|' + ($json.body.srcip || $json.body.data?.srcip || '') }}",
-                    "rightValue": "pfsense|172.",
-                    "operator": {
-                      "type": "string",
-                      "operation": "contains"
+                      "operation": "equals"
                     }
                   }
                 ],
-                "combinator": "or"
+                "combinator": "and"
               },
               "renameOutput": true,
               "outputKey": "pfSense Internal (log)"
@@ -511,8 +801,8 @@
                 "conditions": [
                   {
                     "id": "pf-external",
-                    "leftValue": "={{ ($json.body.rule.groups || []).join(',') + '|' + ($json.body.srcip || $json.body.data?.srcip || '') }}",
-                    "rightValue": "pfsense|",
+                    "leftValue": "={{ ($json.body.rule.groups || []).join(',') }}",
+                    "rightValue": "pfsense",
                     "operator": {
                       "type": "string",
                       "operation": "contains"
@@ -606,76 +896,189 @@
       "type": "n8n-nodes-base.switch",
       "typeVersion": 3.2,
       "position": [
-        580,
-        300
+        592,
+        304
       ],
       "id": "switch-high-type",
       "name": "High Alert Router"
     },
     {
       "parameters": {
-        "method": "POST",
-        "url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
+        "authentication": "webhook",
+        "operation": "sendLegacy",
+        "content": "",
+        "embeds": {
+          "values": [
             {
-              "name": "Content-Type",
-              "value": "application/json"
+              "title": "=🔥 pfSense — {{ $json.body.data?.action || 'block' }} from {{ $json.body.srcip || $json.body.data?.srcip || 'unknown' }}",
+              "description": "={{ $json.body.rule.description }}",
+              "color": 15844367,
+              "timestamp": "={{ new Date().toISOString() }}",
+              "fields": [
+                {
+                  "name": "⚠️ Severity",
+                  "value": "=Level **{{ $json.body.rule.level }}**",
+                  "inline": true
+                },
+                {
+                  "name": "📜 Rule ID",
+                  "value": "=`{{ $json.body.rule.id }}`",
+                  "inline": true
+                },
+                {
+                  "name": "🌐 Source IP",
+                  "value": "=`{{ $json.body.srcip || $json.body.data?.srcip || 'N/A' }}`",
+                  "inline": true
+                },
+                {
+                  "name": "🎯 Dest IP",
+                  "value": "=`{{ $json.body.data?.dstip || 'N/A' }}`",
+                  "inline": true
+                },
+                {
+                  "name": "🔌 Dest Port",
+                  "value": "={{ $json.body.data?.dstport || 'N/A' }}",
+                  "inline": true
+                },
+                {
+                  "name": "📡 Protocol",
+                  "value": "={{ $json.body.data?.protocol || 'N/A' }}",
+                  "inline": true
+                },
+                {
+                  "name": "🚫 Action",
+                  "value": "=**{{ $json.body.data?.action || 'block' }}**",
+                  "inline": true
+                },
+                {
+                  "name": "🖥️ Agent",
+                  "value": "={{ $json.body.agent?.name || 'N/A' }}",
+                  "inline": true
+                },
+                {
+                  "name": "📦 Groups",
+                  "value": "={{ ($json.body.rule.groups || []).join(', ') || 'N/A' }}",
+                  "inline": false
+                },
+                {
+                  "name": "🏷️ Classification",
+                  "value": "=Recon/scan or policy block",
+                  "inline": false
+                },
+                {
+                  "name": "📋 Raw Log",
+                  "value": "=```{{ ($json.body.full_log || 'N/A').slice(0, 500) }}```",
+                  "inline": false
+                }
+              ]
             }
           ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={\n  \"embeds\": [{\n    \"title\": \"\ud83d\udd25 pfSense \u2014 Blocks from {{ $json.body.srcip || $json.body.data?.srcip || 'unknown' }}\",\n    \"description\": \"{{ $json.body.rule.description }}\",\n    \"color\": 16744448,\n    \"fields\": [\n      { \"name\": \"Source IP\", \"value\": \"{{ $json.body.srcip || $json.body.data?.srcip || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"Dest IP\", \"value\": \"{{ $json.body.data?.dstip || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"Dest Port\", \"value\": \"{{ $json.body.data?.dstport || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"Protocol\", \"value\": \"{{ $json.body.data?.protocol || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"Action\", \"value\": \"{{ $json.body.data?.action || 'block' }}\", \"inline\": true },\n      { \"name\": \"Classification\", \"value\": \"Recon/scan or policy block (not necessarily credential attack)\", \"inline\": false },\n      { \"name\": \"Rule\", \"value\": \"{{ $json.body.rule.id }} (Level {{ $json.body.rule.level }})\", \"inline\": true },\n      { \"name\": \"Agent\", \"value\": \"{{ $json.body.agent?.name || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"Groups\", \"value\": \"{{ ($json.body.rule.groups || []).join(', ') }}\", \"inline\": true },\n      { \"name\": \"Raw Log\", \"value\": \"```{{ ($json.body.full_log || '').substring(0, 500) }}```\", \"inline\": false }\n    ],\n    \"timestamp\": \"{{ $json.body.timestamp }}\"\n  }]\n}",
-        "options": {}
+        }
       },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
       "position": [
-        860,
-        200
+        864,
+        208
       ],
       "id": "discord-pfsense",
-      "name": "Discord \u2014 pfSense"
+      "name": "Discord — pfSense",
+      "webhookId": "5f8a6d97-cfb7-46a3-b8f3-4ac8ec3b0a74",
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Discord Webhook Alerts"
+        }
+      }
     },
     {
       "parameters": {
-        "method": "POST",
-        "url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
+        "authentication": "webhook",
+        "operation": "sendLegacy",
+        "content": "",
+        "embeds": {
+          "values": [
             {
-              "name": "Content-Type",
-              "value": "application/json"
+              "title": "=🔑 Auth Failure — {{ $json.body.agent?.name || 'unknown' }}",
+              "description": "={{ $json.body.rule.description }}",
+              "color": 16776960,
+              "timestamp": "={{ new Date().toISOString() }}",
+              "fields": [
+                {
+                  "name": "⚠️ Severity",
+                  "value": "=Level **{{ $json.body.rule.level }}**",
+                  "inline": true
+                },
+                {
+                  "name": "📜 Rule ID",
+                  "value": "=`{{ $json.body.rule.id }}`",
+                  "inline": true
+                },
+                {
+                  "name": "🖥️ Target Host",
+                  "value": "={{ $json.body.agent?.name || 'N/A' }} (`{{ $json.body.agent?.ip || 'N/A' }}`)",
+                  "inline": true
+                },
+                {
+                  "name": "🌐 Source IP",
+                  "value": "=`{{ $json.body.srcip || $json.body.data?.srcip || 'N/A' }}`",
+                  "inline": true
+                },
+                {
+                  "name": "👤 Username",
+                  "value": "={{ $json.body.data?.srcuser || $json.body.data?.dstuser || 'N/A' }}",
+                  "inline": true
+                },
+                {
+                  "name": "🎯 MITRE ATT&CK",
+                  "value": "=Tactic: {{ ($json.body.rule.mitre?.tactic || []).join(', ') || 'N/A' }}\nTechnique: {{ ($json.body.rule.mitre?.technique || []).join(', ') || 'N/A' }}",
+                  "inline": false
+                },
+                {
+                  "name": "📦 Groups",
+                  "value": "={{ ($json.body.rule.groups || []).join(', ') || 'N/A' }}",
+                  "inline": false
+                },
+                {
+                  "name": "📍 Log Source",
+                  "value": "=`{{ $json.body.location || 'N/A' }}`",
+                  "inline": true
+                },
+                {
+                  "name": "📋 Raw Log",
+                  "value": "=```{{ ($json.body.full_log || 'N/A').slice(0, 500) }}```",
+                  "inline": false
+                }
+              ]
             }
           ]
-        },
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={\n  \"embeds\": [{\n    \"title\": \"\ud83d\udd11 Auth Failure \u2014 {{ $json.body.agent?.name || 'unknown' }}\",\n    \"description\": \"{{ $json.body.rule.description }}\",\n    \"color\": 16744448,\n    \"fields\": [\n      { \"name\": \"Why Fired\", \"value\": \"Authentication failure matched Wazuh rule {{ $json.body.rule.id }} (level {{ $json.body.rule.level }}).\", \"inline\": false },\n      { \"name\": \"Source IP\", \"value\": \"{{ $json.body.srcip || $json.body.data?.srcip || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"Username\", \"value\": \"{{ $json.body.data?.srcuser || $json.body.data?.dstuser || 'N/A' }}\", \"inline\": true },\n      { \"name\": \"Affected Host\", \"value\": \"{{ $json.body.agent?.name || 'N/A' }} ({{ $json.body.agent?.ip || 'N/A' }})\", \"inline\": true },\n      { \"name\": \"Rule / Groups\", \"value\": \"rule=`{{ $json.body.rule.id }}` groups=`{{ ($json.body.rule.groups || []).join(', ') || 'N/A' }}`\", \"inline\": false },\n      { \"name\": \"MITRE\", \"value\": \"{{ ($json.body.rule.mitre?.tactic || []).join(', ') || 'N/A' }}\", \"inline\": false },\n      { \"name\": \"Raw Log (trimmed)\", \"value\": \"```{{ ($json.body.full_log || '').slice(0, 400) || 'N/A' }}```\", \"inline\": false }\n    ],\n    \"timestamp\": \"{{ $json.body.timestamp }}\"\n  }]\n}",
-        "options": {}
+        }
       },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
       "position": [
-        860,
-        500
+        1120,
+        592
       ],
       "id": "discord-auth-high",
-      "name": "Discord \u2014 Auth Failure"
+      "name": "Discord — Auth Failure",
+      "webhookId": "d45bc3d4-dc35-485b-97e9-db82fad5f07d",
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Discord Webhook Alerts"
+        }
+      }
     },
     {
       "parameters": {
-        "mode": "runOnceForAllItems",
-        "jsCode": "const WINDOW_MS = 2 * 60 * 1000;\nconst state = getWorkflowStaticData('global');\nif (!state.auth_recent_high) state.auth_recent_high = {};\nconst now = Date.now();\n\nconst out = [];\nfor (const item of items) {\n  const body = item.json?.body || {};\n  const src = String(body?.srcip || body?.data?.srcip || 'unknown');\n  const user = String(body?.data?.srcuser || body?.data?.dstuser || 'unknown');\n  const ruleId = String(body?.rule?.id || 'unknown');\n  const key = `${src}|${user}|${ruleId}`;\n  const last = Number(state.auth_recent_high[key] || 0);\n\n  if (now - last >= WINDOW_MS) {\n    state.auth_recent_high[key] = now;\n    out.push(item);\n  }\n}\n\nfor (const k of Object.keys(state.auth_recent_high)) {\n  if (now - Number(state.auth_recent_high[k]) > (6 * WINDOW_MS)) delete state.auth_recent_high[k];\n}\n\nreturn out;"
+        "jsCode": "const WINDOW_MS = 2 * 60 * 1000;\nconst state = $getWorkflowStaticData('global');\nif (!state.auth_recent_high) state.auth_recent_high = {};\nconst now = Date.now();\n\nconst out = [];\nfor (const item of items) {\n  const body = item.json?.body || {};\n  const src = String(body?.srcip || body?.data?.srcip || 'unknown');\n  const user = String(body?.data?.srcuser || body?.data?.dstuser || 'unknown');\n  const ruleId = String(body?.rule?.id || 'unknown');\n  const key = `${src}|${user}|${ruleId}`;\n  const last = Number(state.auth_recent_high[key] || 0);\n\n  if (now - last >= WINDOW_MS) {\n    state.auth_recent_high[key] = now;\n    out.push(item);\n  }\n}\n\nfor (const k of Object.keys(state.auth_recent_high)) {\n  if (now - Number(state.auth_recent_high[k]) > (6 * WINDOW_MS)) delete state.auth_recent_high[k];\n}\n\nreturn out;"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        740,
-        500
+        752,
+        512
       ],
       "id": "dedup-auth-high",
       "name": "Dedup Auth High"
@@ -708,7 +1111,7 @@
       "main": [
         [
           {
-            "node": "Discord \u2014 Critical",
+            "node": "Discord — Critical",
             "type": "main",
             "index": 0
           }
@@ -736,7 +1139,7 @@
         ]
       ]
     },
-    "Discord \u2014 Critical": {
+    "Discord — Critical": {
       "main": [
         [
           {
@@ -758,14 +1161,14 @@
         ],
         [
           {
-            "node": "Discord \u2014 FIM Alert",
+            "node": "Discord — FIM Alert",
             "type": "main",
             "index": 0
           }
         ],
         [
           {
-            "node": "Discord \u2014 Vulnerability",
+            "node": "Discord — Vulnerability",
             "type": "main",
             "index": 0
           }
@@ -784,14 +1187,14 @@
         ],
         [
           {
-            "node": "Discord \u2014 pfSense",
+            "node": "Discord — pfSense",
             "type": "main",
             "index": 0
           }
         ],
         [
           {
-            "node": "Discord \u2014 FIM Alert",
+            "node": "Discord — FIM Alert",
             "type": "main",
             "index": 0
           }
@@ -805,7 +1208,7 @@
         ],
         [
           {
-            "node": "Discord \u2014 High",
+            "node": "Discord — High",
             "type": "main",
             "index": 0
           }
@@ -816,7 +1219,7 @@
       "main": [
         [
           {
-            "node": "Discord \u2014 Brute Force",
+            "node": "Discord — Brute Force",
             "type": "main",
             "index": 0
           }
@@ -827,11 +1230,16 @@
       "main": [
         [
           {
-            "node": "Discord \u2014 Auth Failure",
+            "node": "Discord — Auth Failure",
             "type": "main",
             "index": 0
           }
         ]
+      ]
+    },
+    "Log Low": {
+      "main": [
+        []
       ]
     }
   },
@@ -840,5 +1248,35 @@
     "binaryMode": "separate",
     "availableInMCP": false,
     "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "meta": null,
+  "pinData": {},
+  "activeVersionId": "59e7d5d7-214b-437b-b014-09d5b185e2f1",
+  "versionCounter": 43,
+  "triggerCount": 1,
+  "tags": [],
+  "shared": [
+    {
+      "updatedAt": "2026-03-08T01:43:05.612Z",
+      "createdAt": "2026-03-08T01:43:05.612Z",
+      "role": "workflow:owner",
+      "workflowId": "69ZRy9pXLiPIf5d7",
+      "projectId": "kafEMdKKgLswaGCu",
+      "project": {
+        "updatedAt": "2026-03-05T23:55:16.170Z",
+        "createdAt": "2026-03-05T23:48:50.092Z",
+        "id": "kafEMdKKgLswaGCu",
+        "name": "Moshe Geek <chief@chiefgyk3d.com>",
+        "type": "personal",
+        "icon": null,
+        "description": null,
+        "creatorId": "850a1525-0d7b-4ff8-ae56-76e699c15b7c"
+      }
+    }
+  ],
+  "versionMetadata": {
+    "name": null,
+    "description": null
   }
 }
