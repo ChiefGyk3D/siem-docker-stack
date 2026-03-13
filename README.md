@@ -446,10 +446,16 @@ siem-docker-stack/
 
 | Document | Description |
 |----------|-------------|
+| [docs/roadmap.md](docs/roadmap.md) | Phased roadmap with status badges (Wazuh tuning, JumpCloud, CrowdSec, SOAR, LLM) |
+| [docs/detection-ownership.md](docs/detection-ownership.md) | Detection-to-workflow mapping, Grafana alert rules, n8n SOAR reference |
+| [docs/alert-enrichment-standard.md](docs/alert-enrichment-standard.md) | Alert enrichment requirements — context fields, evidence, resolve reasons |
+| [docs/n8n-soar.md](docs/n8n-soar.md) | N8N SOAR deployment, workflow reference, env var setup |
 | [docs/disk-strategy.md](docs/disk-strategy.md) | Hot/warm tiering, directory layout, sizing guidelines |
 | [docs/maintenance.md](docs/maintenance.md) | Systemd timers, backup strategy, service commands |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Common issues, memory budgets, emergency procedures |
-| [docs/n8n-soar.md](docs/n8n-soar.md) | N8N SOAR deployment, workflow reference, env var setup |
+| [docs/crowdsec.md](docs/crowdsec.md) | CrowdSec integration — pfSense deployment, Wazuh rules, n8n enrichment |
+| [docs/jumpcloud.md](docs/jumpcloud.md) | JumpCloud IdP bridge — setup, Wazuh rules, Doppler secrets |
+| [docs/gpu-monitoring.md](docs/gpu-monitoring.md) | NVIDIA GPU monitoring — Prometheus exporters for Linux and Windows |
 | [.env.example](.env.example) | All configurable environment variables with descriptions |
 
 ---

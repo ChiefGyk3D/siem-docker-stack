@@ -1,10 +1,12 @@
 # SIEM Stack Roadmap
 
-Phased plan for Wazuh noise reduction, JumpCloud IdP integration, SOAR expansion, and N8N automations.
+Phased plan for Wazuh noise reduction, JumpCloud IdP integration, SOAR expansion, VirusTotal caching, and N8N automations.
+
+> **Status key:** ✅ DEPLOYED | 🚧 IN PROGRESS | 📋 PLANNED | ❌ REMOVED
 
 ---
 
-## Phase 0 — Wazuh Alert Noise Reduction
+## Phase 0 — Wazuh Alert Noise Reduction 🚧 IN PROGRESS
 
 **Goal:** Reduce alert fatigue without missing real threats.
 
@@ -20,7 +22,7 @@ Phased plan for Wazuh noise reduction, JumpCloud IdP integration, SOAR expansion
 
 ### Actions
 
-1. **Create `config/wazuh/local_rules.xml`** in the repo — override noisy default rules:
+1. **Customize `wazuh/local_rules.xml`** — override noisy default rules:
    - Suppress or reduce level for routine FIM paths (package updates, log rotation)
    - Suppress pfSense routine block noise (rule 87701) from known scanner sources
    - Add frequency-based composite rules for auth failures (alert on pattern, not each event)
@@ -29,9 +31,84 @@ Phased plan for Wazuh noise reduction, JumpCloud IdP integration, SOAR expansion
 4. **N8N dedup/batching** — modify Wazuh triage workflow to batch similar alerts within a time window instead of firing per-event
 
 ### Deliverables
-- `config/wazuh/local_rules.xml` — custom rule overrides
+- `wazuh/local_rules.xml` — custom rule overrides (template provided, customize to your environment)
 - Updated thresholds in deploy scripts
 - Documentation in `docs/n8n-soar.md` for tuning guidance
+
+---
+
+## Phase 0B — VirusTotal Cache Layer ✅ DEPLOYED
+
+**Goal:** Reduce VT API usage by caching hash lookups in SQLite inside the Wazuh manager container.
+
+### Architecture
+
+The stock Wazuh `virustotal.py` integration in `/var/ossec/integrations/` sends every syscheck FIM hash
+to the VT API on every alert. With the free API tier (4 requests/minute), this can saturate the quota
+quickly during a burst of file changes (e.g., a package update touching dozens of binaries).
+
+**Solution:** A drop-in replacement `virustotal.py` with an embedded SQLite cache:
+
+```
+FIM alert → virustotal.py → cache_lookup(md5)
+                              ├─ HIT  → return cached result (no API call)
+                              └─ MISS → query_api(md5)
+                                         → cache_store(md5, response, verdict)
+                                         → return result
+```
+
+### TTL per Verdict
+
+| Verdict | TTL | Rationale |
+|---------|-----|-----------|
+| `clean` | 7 days | Known-good files unlikely to change status |
+| `detected` | 30 days | Confirmed malicious — stable signal |
+| `suspicious` | 1 day | Low positives — recheck soon |
+| `unknown` | 6 hours | VT may receive new scans |
+| `error` | 10 minutes | Transient failures — retry quickly |
+| `not_found` | 1 day | Hash not in VT — recheck after a day |
+
+### Upgrade Safety
+
+The integrations directory is **bind-mounted** from the host (`/data/hot/wazuh/manager/integrations`
+→ `/var/ossec/integrations`). When the Wazuh container image is upgraded, the bind mount overlay
+means the host files win — the stock `virustotal.py` from the new image never overwrites the
+cached version. The SQLite DB lives in a `cache/` subdirectory within the same bind mount.
+
+### Deployment
+
+```bash
+# Copy the cached virustotal.py to the Wazuh integrations volume
+cp wazuh/integrations/virustotal.py /data/hot/wazuh/manager/integrations/virustotal.py
+chown root:wazuh /data/hot/wazuh/manager/integrations/virustotal.py
+chmod 750 /data/hot/wazuh/manager/integrations/virustotal.py
+
+# The cache directory and DB are auto-created on first run
+# Restart Wazuh to pick up the new script
+docker restart wazuh-manager
+```
+
+### Monitoring
+
+```bash
+# Check cache stats from host
+docker exec wazuh-manager python3 -c "
+import sqlite3, os
+db = '/var/ossec/integrations/cache/vt_cache.db'
+if os.path.exists(db):
+    conn = sqlite3.connect(db)
+    print('rows:', conn.execute('SELECT COUNT(*) FROM hash_lookup').fetchone()[0])
+    print('hits:', conn.execute('SELECT SUM(hit_count) FROM hash_lookup').fetchone()[0])
+    for row in conn.execute('SELECT verdict, COUNT(*) FROM hash_lookup GROUP BY verdict'):
+        print(f'  {row[0]}: {row[1]}')
+    conn.close()
+else:
+    print('Cache DB not yet created (no lookups have run)')
+"
+```
+
+### Deliverables
+- `wazuh/integrations/virustotal.py` — cached VT integration (drop-in replacement) ✅
 
 ---
 
@@ -136,7 +213,7 @@ JUMPCLOUD_POLL_INTERVAL=300   # Seconds between polls (default: 5 minutes)
 
 ---
 
-## Phase 1B — Doppler Secrets Migration
+## Phase 1B — Doppler Secrets Migration 📋 PLANNED
 
 **Goal:** Migrate all hardcoded API keys, passwords, and webhook URLs into Doppler
 for centralized secrets management. Keep env var fallbacks for users without Doppler.
@@ -191,11 +268,11 @@ def _get(key, default=None):
 
 ---
 
-## Phase 2 — SOAR Workflow Expansion
+## Phase 2 — SOAR Workflow Expansion 🚧 IN PROGRESS
 
 **Goal:** Expand N8N from alerting-only to multi-channel notifications + automated remediation + LLM-assisted analysis.
 
-### 2A: Multi-Channel Alert Delivery
+### 2A: Multi-Channel Alert Delivery 📋 PLANNED
 
 Currently: Discord only. Add Matrix as a second notification target.
 
@@ -216,7 +293,7 @@ Currently: Discord only. Add Matrix as a second notification target.
 | `grafana-alert-router.json` (updated) | Grafana webhook | Discord + Matrix |
 | `wazuh-alert-triage.json` (updated) | Wazuh integratord | Discord + Matrix |
 
-### 2B: Automated Remediation Actions
+### 2B: Automated Remediation Actions 📋 PLANNED
 
 Safe, reversible actions N8N can perform:
 
@@ -236,7 +313,7 @@ For the pfSense blocklist action:
 - Always notify before and after
 - Never permanent-block without human approval
 
-### 2C: Ollama/LLM-Assisted Analysis
+### 2C: Ollama/LLM-Assisted Analysis 📋 PLANNED
 
 **Prerequisites:** Ollama server accessible from N8N container (network route or Docker network).
 
@@ -277,7 +354,7 @@ Wazuh alert → N8N webhook → Enrich (GeoIP, asset lookup)
 
 ---
 
-## Phase 3 — N8N Utility Automations
+## Phase 3 — N8N Utility Automations 📋 PLANNED
 
 **Goal:** Day-to-day homelab management workflows. Picked from [ideas.md](../n8n/ideas.md) — easy wins first.
 
@@ -351,25 +428,29 @@ These need to go in `.env.example` as the phases roll out:
 Working through this in priority order:
 
 1. **Phase 0** — Tune Wazuh noise (quick, high-value, unblocks everything else)
-2. **Phase 2A** — Add Matrix to existing workflows (quick win, already have Discord working)
-3. **Phase 3 Tier 1 #1** — Daily Homelab Health Brief (high value, no dependencies)
-4. **Phase 1** — JumpCloud integration (needs API key, builds on tuned alerting)
-5. **Phase 2C** — Ollama integration (needs network route, enables Tier 3 workflows)
-6. **Phase 2B** — Automated remediation (needs confidence in alerting quality first)
-7. **Phase 3 Tier 2–3** — Advanced automations (build on everything above)
-8. **Phase 3 Tier 4** — Content/social workflows (nice-to-have, independent)
+2. **Phase 0B** ✅ — VirusTotal cache (reduces API quota pressure)
+3. **Phase 1** ✅ — JumpCloud integration (deployed)
+4. **Phase 1 Add-On** ✅ — CrowdSec integration (deployed)
+5. **Phase 2A** — Add Matrix to existing workflows (quick win, already have Discord working)
+6. **Phase 3 Tier 1 #1** — Daily Homelab Health Brief (high value, no dependencies)
+7. **Phase 2C** — Ollama integration (needs network route, enables Tier 3 workflows)
+8. **Phase 2B** — Automated remediation (needs confidence in alerting quality first)
+9. **Phase 3 Tier 2–3** — Advanced automations (build on everything above)
+10. **Phase 3 Tier 4** — Content/social workflows (nice-to-have, independent)
 
 ---
 
 ## Dependency Graph
 
 ```
-Phase 0 (Noise Reduction)
+Phase 0 (Noise Reduction) + Phase 0B (VT Cache) ✅
   │
   ├──► Phase 2A (Matrix alerts) ──► Phase 2B (Remediation)
   │                                      │
   │                                      ▼
-  ├──► Phase 1 (JumpCloud) ───────► Dashboard + Rules
+  ├──► Phase 1 (JumpCloud) ✅ ────► Dashboard + Rules
+  │
+  ├──► Phase 1 Add-On (CrowdSec) ✅
   │
   └──► Phase 3 Tier 1 (Health Brief, Cert Watch, etc.)
               │
