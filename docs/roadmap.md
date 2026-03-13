@@ -1,6 +1,8 @@
 # SIEM Stack Roadmap
 
-Phased plan for Wazuh noise reduction, JumpCloud IdP integration, SOAR expansion, VirusTotal caching, and N8N automations.
+Phased plan for Wazuh noise reduction, JumpCloud IdP integration, SOAR expansion, VirusTotal caching, N8N automations, threat intelligence, DFIR, and SOC maturity.
+
+> **GitHub Issues:** [#1](https://github.com/ChiefGyk3D/siem-docker-stack/issues/1) N8N Workflows | [#2](https://github.com/ChiefGyk3D/siem-docker-stack/issues/2) Velociraptor | [#3](https://github.com/ChiefGyk3D/siem-docker-stack/issues/3) VT Cache | [#4](https://github.com/ChiefGyk3D/siem-docker-stack/issues/4) Doppler | [#5](https://github.com/ChiefGyk3D/siem-docker-stack/issues/5) MISP | [#6](https://github.com/ChiefGyk3D/siem-docker-stack/issues/6) SOC Enhancement | [#7](https://github.com/ChiefGyk3D/siem-docker-stack/issues/7) Zeek
 
 > **Status key:** ✅ DEPLOYED | 🚧 IN PROGRESS | 📋 PLANNED | ❌ REMOVED
 
@@ -38,6 +40,7 @@ Phased plan for Wazuh noise reduction, JumpCloud IdP integration, SOAR expansion
 ---
 
 ## Phase 0B — VirusTotal Cache Layer ✅ DEPLOYED
+> GitHub Issue: [#3](https://github.com/ChiefGyk3D/siem-docker-stack/issues/3)
 
 **Goal:** Reduce VT API usage by caching hash lookups in SQLite inside the Wazuh manager container.
 
@@ -214,6 +217,7 @@ JUMPCLOUD_POLL_INTERVAL=300   # Seconds between polls (default: 5 minutes)
 ---
 
 ## Phase 1B — Doppler Secrets Migration 📋 PLANNED
+> GitHub Issue: [#4](https://github.com/ChiefGyk3D/siem-docker-stack/issues/4)
 
 **Goal:** Migrate all hardcoded API keys, passwords, and webhook URLs into Doppler
 for centralized secrets management. Keep env var fallbacks for users without Doppler.
@@ -269,6 +273,7 @@ def _get(key, default=None):
 ---
 
 ## Phase 2 — SOAR Workflow Expansion 🚧 IN PROGRESS
+> GitHub Issue: [#1](https://github.com/ChiefGyk3D/siem-docker-stack/issues/1)
 
 **Goal:** Expand N8N from alerting-only to multi-channel notifications + automated remediation + LLM-assisted analysis.
 
@@ -428,15 +433,20 @@ These need to go in `.env.example` as the phases roll out:
 Working through this in priority order:
 
 1. **Phase 0** — Tune Wazuh noise (quick, high-value, unblocks everything else)
-2. **Phase 0B** ✅ — VirusTotal cache (reduces API quota pressure)
+2. **Phase 0B** ✅ — VirusTotal cache ([#3](https://github.com/ChiefGyk3D/siem-docker-stack/issues/3))
 3. **Phase 1** ✅ — JumpCloud integration (deployed)
 4. **Phase 1 Add-On** ✅ — CrowdSec integration (deployed)
-5. **Phase 2A** — Add Matrix to existing workflows (quick win, already have Discord working)
-6. **Phase 3 Tier 1 #1** — Daily Homelab Health Brief (high value, no dependencies)
-7. **Phase 2C** — Ollama integration (needs network route, enables Tier 3 workflows)
-8. **Phase 2B** — Automated remediation (needs confidence in alerting quality first)
-9. **Phase 3 Tier 2–3** — Advanced automations (build on everything above)
-10. **Phase 3 Tier 4** — Content/social workflows (nice-to-have, independent)
+5. **Phase 1B** — Doppler secrets migration ([#4](https://github.com/ChiefGyk3D/siem-docker-stack/issues/4))
+6. **Phase 2** — N8N workflow improvements ([#1](https://github.com/ChiefGyk3D/siem-docker-stack/issues/1)) — Discord alerts, Matrix, enrichment
+7. **Phase 3 Tier 1 #1** — Daily Homelab Health Brief (high value, no dependencies)
+8. **Phase 2C** — Ollama integration (needs network route, enables Tier 3 workflows)
+9. **Phase 2B** — Automated remediation (needs confidence in alerting quality first)
+10. **Phase 3 Tier 2–3** — Advanced automations (build on everything above)
+11. **Phase 4** — Velociraptor DFIR ([#2](https://github.com/ChiefGyk3D/siem-docker-stack/issues/2))
+12. **Phase 5** — MISP threat intelligence ([#5](https://github.com/ChiefGyk3D/siem-docker-stack/issues/5))
+13. **Phase 6** — SOC enhancement / incident management ([#6](https://github.com/ChiefGyk3D/siem-docker-stack/issues/6)) — after #1-5 stable
+14. **Phase 7** — Zeek 10 Gbps network analysis ([#7](https://github.com/ChiefGyk3D/siem-docker-stack/issues/7)) — hardware-blocked
+15. **Phase 3 Tier 4** — Content/social workflows (nice-to-have, independent)
 
 ---
 
@@ -456,4 +466,179 @@ Phase 0 (Noise Reduction) + Phase 0B (VT Cache) ✅
               │
               ▼
        Phase 2C (Ollama) ──► Phase 3 Tier 3 (LLM workflows)
+                                      │
+       Phase 4 (Velociraptor) ◄────────┘
+              │
+       Phase 5 (MISP) ──► Phase 6 (SOC Enhancement)
+              │
+       Phase 7 (Zeek) ← hardware-blocked
 ```
+
+---
+
+## Phase 4 — Velociraptor DFIR 📋 PLANNED
+> GitHub Issue: [#2](https://github.com/ChiefGyk3D/siem-docker-stack/issues/2)
+
+**Goal:** Add Velociraptor for digital forensics and incident response (DFIR) capabilities.
+
+[Velociraptor](https://github.com/Velocidex/velociraptor) is an advanced DFIR tool for endpoint visibility, artifact collection, and live forensic queries using VQL (Velociraptor Query Language).
+
+### Architecture
+
+- **Velociraptor Server:** Docker container on the SIEM server (or dedicated host)
+- **Velociraptor Agents:** Deployed alongside Wazuh agents on managed endpoints
+- **Integration:** Velociraptor → OpenSearch (hunt results), Wazuh alerts → Velociraptor (trigger collections)
+
+### Use Cases
+
+| Use Case | Description |
+|----------|-------------|
+| Endpoint triage | Collect running processes, network connections, autoruns on demand |
+| File collection | Pull suspect files from endpoints for analysis |
+| Live forensics | Query endpoints in real-time with VQL |
+| Hunt campaigns | Search all endpoints for IOCs (hashes, filenames, registry keys) |
+| Incident response | Rapid evidence collection when Wazuh fires critical alerts |
+| Memory analysis | Acquire and analyze volatile memory artifacts |
+
+### N8N Integration (Phase 2 prerequisite)
+
+Once N8N workflows are mature (#1), add an automated response:
+```
+Wazuh critical alert → N8N triage → Velociraptor API → collect artifacts → attach to case
+```
+
+### Deliverables
+- [ ] `docker-compose.velociraptor.yml` — Velociraptor server container
+- [ ] `docs/velociraptor.md` — Deployment and usage guide
+- [ ] Grafana dashboard for Velociraptor hunt results
+- [ ] N8N workflow: Wazuh alert → Velociraptor collection trigger
+- [ ] VQL artifact pack for homelab-relevant collections
+
+---
+
+## Phase 5 — MISP Threat Intelligence 📋 PLANNED
+> GitHub Issue: [#5](https://github.com/ChiefGyk3D/siem-docker-stack/issues/5)
+
+**Goal:** Enhance threat intelligence collection and correlation with MISP (Malware Information Sharing Platform).
+
+[MISP](https://www.misp-project.org/) is an open-source threat intelligence platform for sharing, storing, and correlating IOCs, threat actors, and attack patterns.
+
+### Architecture
+
+- **MISP Server:** Docker container (separate compose or added to stack)
+- **Feeds:** OSINT threat intel feeds (CIRCL, abuse.ch, AlienVault OTX, etc.)
+- **Integration Points:**
+  - MISP → Wazuh: IOC watchlists for file hashes, IPs, domains
+  - MISP → CrowdSec: Reputation enrichment for banned IPs
+  - MISP → N8N: Alert enrichment with threat context
+  - MISP → OpenSearch: Threat intel index for dashboard correlation
+
+### Use Cases
+
+| Use Case | Description |
+|----------|-------------|
+| IOC matching | Compare FIM hashes, network IPs, DNS queries against known-bad indicators |
+| Threat context | Enrich alerts with threat actor, campaign, and TTP information |
+| Community sharing | Consume (and optionally contribute) threat intel from MISP communities |
+| VT enrichment | Cross-reference VirusTotal results with MISP threat data |
+| Historical correlation | Retroactively search logs for newly published IOCs |
+
+### Deliverables
+- [ ] `docker-compose.misp.yml` — MISP server container
+- [ ] `docs/misp.md` — Deployment, feed configuration, and integration guide
+- [ ] Wazuh CDB lists populated from MISP feeds
+- [ ] N8N workflow: MISP feed update → scan recent logs for new IOCs
+- [ ] Grafana dashboard for threat intel overview (feed health, IOC matches, top threat actors)
+
+---
+
+## Phase 6 — SOC Enhancement 📋 PLANNED
+> GitHub Issue: [#6](https://github.com/ChiefGyk3D/siem-docker-stack/issues/6)
+>
+> **Prerequisite:** Issues [#1](https://github.com/ChiefGyk3D/siem-docker-stack/issues/1), [#2](https://github.com/ChiefGyk3D/siem-docker-stack/issues/2), [#3](https://github.com/ChiefGyk3D/siem-docker-stack/issues/3), [#4](https://github.com/ChiefGyk3D/siem-docker-stack/issues/4), [#5](https://github.com/ChiefGyk3D/siem-docker-stack/issues/5) must be stable first.
+
+**Goal:** Build out SOC-level incident management on top of the stable SIEM + SOAR foundation.
+
+After noise reduction, working SOAR workflows, secrets management, threat intel, and DFIR tooling are stable, add a formal incident management layer for tracking, investigating, and closing security cases.
+
+### Candidate Platforms
+
+| Platform | Type | Notes |
+|----------|------|-------|
+| [DFIR-IRIS](https://github.com/dfir-iris/iris-web) | Incident response platform | Open-source, Docker, timeline + evidence + IOC management |
+| [TheHive](https://github.com/TheHive-Project/TheHive) | Case management | Mature, integrates with MISP + Cortex for enrichment |
+| [Shuffle](https://github.com/Shuffle/Shuffle) | SOAR + case mgmt | Could complement or replace N8N for security workflows |
+| Custom (N8N + OpenSearch) | Lightweight | Build case tracking as an OpenSearch index with N8N workflows |
+
+### Capabilities Needed
+
+- **Case creation:** Auto-create from critical Wazuh/Grafana alerts via N8N
+- **Evidence attachment:** Link Velociraptor collections, log excerpts, MISP IOCs to cases
+- **Timeline building:** Chronological event reconstruction from multiple sources
+- **Assignment & tracking:** Owner, status, priority, SLA tracking
+- **Postmortem generation:** Automated incident summary after case closure
+- **Metrics:** MTTR, case volume, alert-to-case ratio, false positive rate
+
+### Deliverables
+- [ ] Evaluate and select incident management platform
+- [ ] Deploy as Docker container
+- [ ] N8N workflow: Critical alert → auto-create case
+- [ ] N8N workflow: Case closed → generate postmortem → Discord summary
+- [ ] Grafana dashboard for SOC metrics (MTTR, case volume, resolution rate)
+- [ ] Documentation: `docs/soc-operations.md`
+
+---
+
+## Phase 7 — Zeek Network Analysis 📋 PLANNED (Hardware-Blocked)
+> GitHub Issue: [#7](https://github.com/ChiefGyk3D/siem-docker-stack/issues/7)
+
+**Goal:** Deploy Zeek for deep network protocol analysis and metadata extraction.
+
+[Zeek](https://zeek.org/) provides behavioral and protocol-level network monitoring that complements Suricata's signature-based IDS. Together they cover both known-bad signatures and anomalous network behavior.
+
+### Hardware Blocker
+
+Zeek at line rate requires a dedicated machine. Current status:
+- **Available:** 2 × 32 GB DDR4 ECC RDIMM sticks
+- **Needed:** Barebones system with 2+ NICs (capture + management), 8+ cores, NVMe storage
+- **Target:** 10 Gbps capture capability (pfSense E300-8D has 2× Intel X552 10GbE SFP+ ports available)
+- **Option:** Repurpose existing hardware if a suitable candidate is identified
+
+### Architecture
+
+```
+Internet → pfSense → SPAN/mirror port → Zeek sensor (dedicated box)
+                                              │
+                                              ▼
+                                         Logstash → OpenSearch (zeek-* indices)
+                                              │
+                                              ▼
+                                         Grafana dashboards
+```
+
+### Zeek Log Types
+
+| Log | Purpose |
+|-----|---------|
+| `conn.log` | Connection summaries (every TCP/UDP/ICMP session) |
+| `dns.log` | DNS queries and responses |
+| `http.log` | HTTP request/response metadata |
+| `ssl.log` | TLS handshake details, certificate info |
+| `files.log` | File transfers with hashes (integrates with VT cache) |
+| `notice.log` | Zeek-generated alerts and anomalies |
+| `weird.log` | Protocol violations and anomalies |
+
+### Integration Points
+
+- **Zeek → Logstash → OpenSearch:** `zeek-*` index pattern
+- **Zeek → Wazuh:** Correlation rules matching Zeek IOCs with Wazuh alerts
+- **Zeek → MISP:** File hashes from `files.log` checked against MISP threat feeds
+- **Zeek + Suricata:** Signature-based (Suricata) + behavioral/protocol (Zeek) dual coverage
+
+### Deliverables
+- [ ] Procure/build dedicated Zeek box (8+ cores, 64 GB RAM, 10GbE NIC, NVMe)
+- [ ] Deploy Zeek with 10 Gbps capture configuration
+- [ ] Logstash pipeline for Zeek JSON logs
+- [ ] Grafana dashboards for Zeek metadata (connections, DNS, TLS, files)
+- [ ] Wazuh correlation rules for Zeek IOCs
+- [ ] Documentation: `docs/zeek.md`
