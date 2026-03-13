@@ -547,6 +547,12 @@ siem-docker-stack/
 - [ ] **Automated Backup Script** — Scheduled OpenSearch snapshots to remote storage
 - [ ] **GeoIP Enrichment** — MaxMind GeoLite2 integration in Logstash pipelines
 - [ ] **Node Exporter** — Add host-level metrics collection to the compose stack
+- [ ] **Doppler Secrets Migration** — Centralize all secrets in Doppler ([#4](https://github.com/ChiefGyk3D/siem-docker-stack/issues/4))
+- [ ] **Matrix Notifications** — Dual-post alerts to Discord + Matrix ([#1](https://github.com/ChiefGyk3D/siem-docker-stack/issues/1))
+- [ ] **Velociraptor DFIR** — Endpoint forensics and artifact collection ([#2](https://github.com/ChiefGyk3D/siem-docker-stack/issues/2))
+- [ ] **MISP Threat Intelligence** — IOC feeds, threat context enrichment ([#5](https://github.com/ChiefGyk3D/siem-docker-stack/issues/5))
+- [ ] **SOC Incident Management** — Case tracking, postmortems, SOC metrics ([#6](https://github.com/ChiefGyk3D/siem-docker-stack/issues/6))
+- [ ] **Zeek Network Analysis** — Deep protocol monitoring on dedicated 10GbE sensor ([#7](https://github.com/ChiefGyk3D/siem-docker-stack/issues/7))
 
 ---
 
@@ -554,7 +560,7 @@ siem-docker-stack/
 
 | Document | Description |
 |----------|-------------|
-| [docs/roadmap.md](docs/roadmap.md) | Phased roadmap with status badges (Wazuh tuning, JumpCloud, CrowdSec, SOAR, LLM) |
+| [docs/roadmap.md](docs/roadmap.md) | Phased roadmap with status badges (Wazuh tuning, JumpCloud, CrowdSec, SOAR, LLM, Velociraptor, MISP, Zeek, SOC) |
 | [docs/detection-ownership.md](docs/detection-ownership.md) | Detection-to-workflow mapping, Grafana alert rules, n8n SOAR reference |
 | [docs/alert-enrichment-standard.md](docs/alert-enrichment-standard.md) | Alert enrichment requirements — context fields, evidence, resolve reasons |
 | [docs/n8n-soar.md](docs/n8n-soar.md) | N8N SOAR deployment, workflow reference, env var setup |
