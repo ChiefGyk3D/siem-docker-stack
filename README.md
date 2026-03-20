@@ -53,7 +53,7 @@ A production-ready, fully Dockerized SIEM/SOC stack with **hot/warm tiering** fo
 - **15+ Services** — OpenSearch (2-node hot/warm), Logstash, Grafana, InfluxDB, Prometheus, Wazuh (Manager + Indexer + Dashboard), Syslog-ng, UniFi Poller, N8N, Portainer
 - **N8N SOAR** — 3 automation workflows: Wazuh alert triage, Grafana alert router, CrowdSec enrichment — all route to Discord with severity-based filtering and 90s dedup
 - **VirusTotal Caching** — SQLite-backed cache in the Wazuh integration layer. Verdict-based TTLs (clean 7d, detected 30d) eliminate redundant API calls for repeated FIM hashes
-- **Pre-built Dashboards** — 18 dashboards covering Wazuh security/compliance/agents, SIEM overview, CrowdSec, Suricata IDS, pfSense firewall, UniFi network, Docker, Prometheus, Twingate ZTNA
+- **Pre-built Dashboards** — 19 dashboards covering Wazuh security/compliance/agents, SIEM overview, CrowdSec, JumpCloud IdP, Suricata IDS, pfSense firewall, UniFi network, Docker, Prometheus, Twingate ZTNA
 - **CrowdSec Integration** — Edge enforcement on pfSense, Wazuh decoding/alerting, Grafana dashboards, n8n enrichment with OpenSearch context lookups
 - **Automated Setup** — Numbered scripts (01-06) walk through disk formatting → system tuning → deployment → verification
 - **ISM Lifecycle** — Index State Management handles the hot→warm→delete lifecycle automatically
@@ -237,6 +237,7 @@ Pre-built Grafana dashboards are included in the `dashboards/` directory:
 | `siem_ztna_overview.json` | Combined SIEM + ZTNA overview — all sources plus Twingate access control, alert distribution, timelines |
 | `twingate_ztna.json` | Twingate ZTNA connector monitoring — access events, STUN health, state transitions, rule breakdown |
 | `crowdsec_overview.json` | CrowdSec ban decisions, bouncer events, LAPI alerts, source analysis |
+| `jumpcloud_security.json` | JumpCloud IdP Security — auth events, service breakdown, user activity, MFA tracking |
 | `docker_container_monitoring.json` | Container CPU, memory, network, disk I/O via cAdvisor/Prometheus |
 | `prometheus_stats.json` | Prometheus self-monitoring and scrape targets |
 | `datasources_reference.json` | Quick reference for all configured datasources |
@@ -382,7 +383,7 @@ JumpCloud support is intentionally split into a separate optional repo so non-Ju
 
 > **[jumpcloud-wazuh-bridge](https://github.com/ChiefGyk3D/jumpcloud-wazuh-bridge)** — Polls JumpCloud Directory Insights and writes JSONL for Wazuh ingestion. Includes its own Grafana dashboard, Dockerfile, Doppler support, and CI/CD.
 
-The **SIEM+ Overview** dashboard in this repo includes summary JumpCloud panels (auth failures, events by service) that pull from the same Wazuh index. The dedicated JumpCloud IdP Security dashboard (14 panels) lives in the bridge repo.
+The **SIEM+ Overview** dashboard in this repo includes summary JumpCloud panels (auth failures, events by service) that pull from the same Wazuh index. The dedicated JumpCloud IdP Security dashboard is also stored in `dashboards/jumpcloud_security.json`.
 
 Wazuh decoders and rules for JumpCloud events are in `wazuh/jumpcloud_decoders.xml` and `wazuh/jumpcloud_rules.xml`.
 
@@ -483,6 +484,7 @@ siem-docker-stack/
 │   ├── siem_ztna_overview.json             # Combined SIEM + ZTNA unified overview
 │   ├── twingate_ztna.json                  # Twingate ZTNA connector health & access control
 │   ├── crowdsec_overview.json              # CrowdSec decisions & bouncer activity
+│   ├── jumpcloud_security.json             # JumpCloud IdP Security
 │   ├── datasources_reference.json         # Datasource UID reference
 │   ├── pfsense_firewall.json
 │   ├── suricata_ids.json
@@ -530,6 +532,14 @@ siem-docker-stack/
 ### Full Stack Verification Script Output
 
 ![05 Verify Output](media/screenshots/05-verify.png)
+
+### Twingate ZTNA
+
+![Twingate ZTNA](media/screenshots/Twingate-ZTNA.png)
+
+### SIEM + ZTNA Overview
+
+![SIEM + ZTNA Overview](media/screenshots/SIEM+ZTNA.png)
 
 ---
 
