@@ -410,7 +410,7 @@
       "options": { "showHeader": true, "sortBy": [{ "desc": true, "displayName": "Count" }] },
       "targets": [{
         "bucketAggs": [
-          { "field": "src_ip.keyword", "id": "3", "type": "terms", "settings": { "order": "desc", "orderBy": "_count", "size": "10" } }
+          { "field": "src_ip", "id": "2", "type": "terms", "settings": { "min_doc_count": "1", "order": "desc", "orderBy": "_count", "size": "20" } }
         ],
         "metrics": [{ "id": "1", "type": "count" }],
         "query": "action:block",
@@ -673,16 +673,40 @@
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 45 },
       "id": 51,
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
-      "targets": [{
-        "bucketAggs": [
-          { "field": "data.Workload.keyword", "id": "3", "type": "terms", "settings": { "order": "desc", "orderBy": "_count", "size": "10" } },
-          { "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }
-        ],
-        "metrics": [{ "id": "1", "type": "count" }],
-        "query": "rule.groups:office365",
-        "refId": "A",
-        "timeField": "@timestamp"
-      }],
+      "targets": [
+        {
+          "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.groups:office365 AND data.office365.Workload:SharePoint",
+          "refId": "A",
+          "timeField": "@timestamp",
+          "alias": "SharePoint"
+        },
+        {
+          "bucketAggs": [{ "field": "@timestamp", "id": "3", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "4", "type": "count" }],
+          "query": "rule.groups:office365 AND data.office365.Workload:Exchange",
+          "refId": "B",
+          "timeField": "@timestamp",
+          "alias": "Exchange"
+        },
+        {
+          "bucketAggs": [{ "field": "@timestamp", "id": "5", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "6", "type": "count" }],
+          "query": "rule.groups:office365 AND data.office365.Workload:AzureActiveDirectory",
+          "refId": "C",
+          "timeField": "@timestamp",
+          "alias": "Azure AD"
+        },
+        {
+          "bucketAggs": [{ "field": "@timestamp", "id": "7", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "8", "type": "count" }],
+          "query": "rule.groups:office365 AND data.office365.Workload:MicrosoftCopilot",
+          "refId": "D",
+          "timeField": "@timestamp",
+          "alias": "Copilot"
+        }
+      ],
       "title": "O365 Events by Workload Over Time",
       "type": "timeseries"
     },
@@ -703,16 +727,16 @@
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 54 },
       "id": 60,
       "options": {
-        "reduceOptions": { "values": false, "calcs": ["sum"] },
-        "legend": { "displayMode": "table", "placement": "right", "values": ["value", "percent"] },
-        "tooltip": { "mode": "single" },
-        "pieType": "donut",
-        "displayLabels": ["percent"]
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": { "calcs": ["sum"], "values": false },
+        "showUnfilled": true,
+        "minVizWidth": 0,
+        "minVizHeight": 10
       },
       "targets": [{
         "bucketAggs": [
-          { "field": "rule.mitre.tactic.keyword", "id": "3", "type": "terms", "settings": { "order": "desc", "orderBy": "_count", "size": "15" } },
-          { "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }
+          { "field": "rule.mitre.tactic", "id": "2", "type": "terms", "settings": { "min_doc_count": "1", "order": "desc", "orderBy": "_count", "size": "20" } }
         ],
         "metrics": [{ "id": "1", "type": "count" }],
         "query": "rule.mitre.tactic:*",
@@ -720,7 +744,7 @@
         "timeField": "@timestamp"
       }],
       "title": "MITRE ATT&CK Tactics",
-      "type": "piechart"
+      "type": "bargauge"
     },
     {
       "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_WAZUH_ALERTS}" },
@@ -735,11 +759,10 @@
       "options": { "showHeader": true, "sortBy": [{ "desc": true, "displayName": "Count" }] },
       "targets": [{
         "bucketAggs": [
-          { "field": "rule.description.keyword", "id": "3", "type": "terms", "settings": { "order": "desc", "orderBy": "_count", "size": "15" } },
-          { "field": "rule.level", "id": "4", "type": "terms", "settings": { "order": "desc", "orderBy": "_count", "size": "1" } }
+          { "field": "rule.description", "id": "2", "type": "terms", "settings": { "min_doc_count": "1", "order": "desc", "orderBy": "_count", "size": "15" } }
         ],
         "metrics": [{ "id": "1", "type": "count" }],
-        "query": "rule.level: >=7",
+        "query": "rule.level: [7 TO 15]",
         "refId": "A",
         "timeField": "@timestamp"
       }],

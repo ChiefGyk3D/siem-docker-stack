@@ -670,10 +670,11 @@
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 34 },
       "id": 502,
       "options": {
-        "legend": { "displayMode": "list", "placement": "right" },
-        "tooltip": { "mode": "single" },
+        "legend": { "displayMode": "list", "placement": "right", "showLegend": true },
+        "tooltip": { "hideZeros": false, "mode": "single", "sort": "none" },
         "pieType": "donut",
-        "reduceOptions": { "calcs": ["sum"], "values": false }
+        "reduceOptions": { "calcs": ["sum"], "fields": "", "values": true },
+        "sort": "desc"
       },
       "targets": [{
         "bucketAggs": [
