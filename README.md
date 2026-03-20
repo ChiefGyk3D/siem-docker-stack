@@ -53,10 +53,11 @@ A production-ready, fully Dockerized SIEM/SOC stack with **hot/warm tiering** fo
 - **15+ Services** — OpenSearch (2-node hot/warm), Logstash, Grafana, InfluxDB, Prometheus, Wazuh (Manager + Indexer + Dashboard), Syslog-ng, UniFi Poller, N8N, Portainer
 - **N8N SOAR** — 3 automation workflows: Wazuh alert triage, Grafana alert router, CrowdSec enrichment — all route to Discord with severity-based filtering and 90s dedup
 - **VirusTotal Caching** — SQLite-backed cache in the Wazuh integration layer. Verdict-based TTLs (clean 7d, detected 30d) eliminate redundant API calls for repeated FIM hashes
-- **Pre-built Dashboards** — 16 dashboards covering Wazuh security/compliance/agents, SIEM overview, CrowdSec, Suricata IDS, pfSense firewall, UniFi network, Docker, Prometheus
+- **Pre-built Dashboards** — 18 dashboards covering Wazuh security/compliance/agents, SIEM overview, CrowdSec, Suricata IDS, pfSense firewall, UniFi network, Docker, Prometheus, Twingate ZTNA
 - **CrowdSec Integration** — Edge enforcement on pfSense, Wazuh decoding/alerting, Grafana dashboards, n8n enrichment with OpenSearch context lookups
 - **Automated Setup** — Numbered scripts (01-06) walk through disk formatting → system tuning → deployment → verification
 - **ISM Lifecycle** — Index State Management handles the hot→warm→delete lifecycle automatically
+- **Twingate ZTNA** — Zero Trust Network Access connector monitoring with Wazuh rules (120700–120750), access control tracking, STUN/relay health, connector state, and per-connector event breakdown
 - **pfSense Integration** — Suricata IDS/IPS logs, pfBlockerNG, syslog, CrowdSec, and Telegraf metrics
 - **JumpCloud IdP** — Optional bridge for Directory Insights ingestion with Wazuh decoders/rules
 - **Production-Ready** — Docker daemon tuned, kernel parameters optimized, firewall configured, systemd timers for updates
@@ -233,6 +234,8 @@ Pre-built Grafana dashboards are included in the `dashboards/` directory:
 | `wazuh_office365.json` | Office 365 SharePoint, Exchange, Azure AD, Copilot audit monitoring |
 | `siem_overview.json` | Unified SIEM overview — cross-source correlation, Suricata, Wazuh, pfSense |
 | `siem_plus_overview.json` | Extended SIEM+ overview — adds CrowdSec, JumpCloud, and Office 365 panels |
+| `siem_ztna_overview.json` | Combined SIEM + ZTNA overview — all sources plus Twingate access control, alert distribution, timelines |
+| `twingate_ztna.json` | Twingate ZTNA connector monitoring — access events, STUN health, state transitions, rule breakdown |
 | `crowdsec_overview.json` | CrowdSec ban decisions, bouncer events, LAPI alerts, source analysis |
 | `docker_container_monitoring.json` | Container CPU, memory, network, disk I/O via cAdvisor/Prometheus |
 | `prometheus_stats.json` | Prometheus self-monitoring and scrape targets |
@@ -462,7 +465,8 @@ siem-docker-stack/
 │   │   ├── virustotal.py                 # Cached VT integration (SQLite TTL layer)
 │   │   └── custom-n8n                    # Wazuh → N8N webhook bridge
 │   ├── jumpcloud_decoders.xml            # JumpCloud event decoder
-│   └── jumpcloud_rules.xml               # JumpCloud alert rules
+│   ├── jumpcloud_rules.xml               # JumpCloud alert rules
+│   └── twingate_rules.xml                # Twingate ZTNA connector rules (120700-120750)
 ├── change-passwords.sh                   # Interactive password change tool
 ├── dashboards/
 │   ├── siem_overview.json                # Cross-source SIEM correlation
@@ -476,6 +480,8 @@ siem-docker-stack/
 │   ├── docker_container_monitoring.json   # Container metrics via cAdvisor
 │   ├── prometheus_stats.json              # Prometheus self-monitoring
 │   ├── siem_plus_overview.json             # Extended SIEM+ with CrowdSec, JumpCloud, O365
+│   ├── siem_ztna_overview.json             # Combined SIEM + ZTNA unified overview
+│   ├── twingate_ztna.json                  # Twingate ZTNA connector health & access control
 │   ├── crowdsec_overview.json              # CrowdSec decisions & bouncer activity
 │   ├── datasources_reference.json         # Datasource UID reference
 │   ├── pfsense_firewall.json
@@ -544,6 +550,8 @@ siem-docker-stack/
 - [x] **CrowdSec Integration** — CrowdSec overview dashboard, alert rules, pfSense deployment
 - [x] **SIEM+ Overview** — Extended overview dashboard with CrowdSec, JumpCloud, and Office 365 panels
 - [x] **JumpCloud Bridge** — Optional [jumpcloud-wazuh-bridge](https://github.com/ChiefGyk3D/jumpcloud-wazuh-bridge) with Wazuh decoders/rules in this repo
+- [x] **Twingate ZTNA** — Wazuh rules (120700–120750), dedicated ZTNA dashboard with access control, connector health, rule breakdown tables
+- [x] **SIEM + ZTNA Overview** — Combined all-source dashboard with Twingate access events alongside Wazuh, Suricata, pfSense, CrowdSec, JumpCloud, O365
 - [ ] **Automated Backup Script** — Scheduled OpenSearch snapshots to remote storage
 - [ ] **GeoIP Enrichment** — MaxMind GeoLite2 integration in Logstash pipelines
 - [ ] **Node Exporter** — Add host-level metrics collection to the compose stack

@@ -1,0 +1,799 @@
+{
+  "annotations": { "list": [] },
+  "description": "Combined SIEM + Twingate ZTNA overview — Wazuh Alerts, Suricata IDS, pfSense Firewall, CrowdSec, JumpCloud IdP, Office 365, and Twingate Zero Trust Network Access.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [
+    { "title": "SIEM+ Overview", "url": "/d/siem-plus-overview", "type": "link" },
+    { "title": "Twingate ZTNA", "url": "/d/twingate-ztna", "type": "link" },
+    { "title": "CrowdSec Overview", "url": "/d/crowdsec-overview", "type": "link" },
+    { "title": "JumpCloud Security", "url": "/d/jumpcloud-security", "type": "link" }
+  ],
+  "tags": ["siem", "ztna", "twingate", "overview", "wazuh", "suricata", "pfsense", "crowdsec", "jumpcloud"],
+  "time": { "from": "now-24h", "to": "now" },
+  "timezone": "browser",
+  "title": "SIEM + ZTNA Overview",
+  "uid": "siem-ztna-overview",
+  "refresh": "5m",
+  "templating": {
+    "list": [
+      { "name": "DS_WAZUH_ALERTS", "type": "datasource", "query": "grafana-opensearch-datasource", "current": {}, "hide": 0, "label": "Wazuh Alerts" },
+      { "name": "DS_SURICATA", "type": "datasource", "query": "grafana-opensearch-datasource", "current": {}, "hide": 0, "label": "Suricata" },
+      { "name": "DS_PFSENSE", "type": "datasource", "query": "grafana-opensearch-datasource", "current": {}, "hide": 0, "label": "pfSense" },
+      { "name": "DS_CROWDSEC", "type": "datasource", "query": "grafana-opensearch-datasource", "current": {}, "hide": 0, "label": "CrowdSec" }
+    ]
+  },
+  "panels": [
+    {
+      "gridPos": { "h": 2, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "options": {
+        "content": "# SIEM + ZTNA Unified Overview\nWazuh Alerts · Suricata IDS · pfSense Firewall · CrowdSec · JumpCloud IdP · Office 365 · **Twingate ZTNA**",
+        "mode": "markdown"
+      },
+      "type": "text",
+      "transparent": true
+    },
+
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_WAZUH_ALERTS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 100 },
+            { "color": "red", "value": 1000 }
+          ]}
+        }
+      },
+      "gridPos": { "h": 4, "w": 3, "x": 0, "y": 2 },
+      "id": 1,
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["sum"] }, "textMode": "auto" },
+      "targets": [{
+        "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "*",
+        "refId": "A",
+        "timeField": "@timestamp"
+      }],
+      "title": "Wazuh Alerts",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_WAZUH_ALERTS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [
+            { "color": "green", "value": null },
+            { "color": "orange", "value": 1 },
+            { "color": "red", "value": 10 }
+          ]}
+        }
+      },
+      "gridPos": { "h": 4, "w": 3, "x": 3, "y": 2 },
+      "id": 2,
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["sum"] }, "textMode": "auto" },
+      "targets": [{
+        "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "rule.level: >=12",
+        "refId": "A",
+        "timeField": "@timestamp"
+      }],
+      "title": "Critical (12+)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_SURICATA}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 50 },
+            { "color": "red", "value": 500 }
+          ]}
+        }
+      },
+      "gridPos": { "h": 4, "w": 3, "x": 6, "y": 2 },
+      "id": 3,
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["sum"] }, "textMode": "auto" },
+      "targets": [{
+        "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "*",
+        "refId": "A",
+        "timeField": "@timestamp"
+      }],
+      "title": "Suricata Alerts",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_PFSENSE}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 500 },
+            { "color": "red", "value": 5000 }
+          ]}
+        }
+      },
+      "gridPos": { "h": 4, "w": 3, "x": 9, "y": 2 },
+      "id": 4,
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["sum"] }, "textMode": "auto" },
+      "targets": [{
+        "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "action:block",
+        "refId": "A",
+        "timeField": "@timestamp"
+      }],
+      "title": "Firewall Blocks",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_CROWDSEC}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [
+            { "color": "green", "value": null },
+            { "color": "orange", "value": 1 },
+            { "color": "red", "value": 50 }
+          ]}
+        }
+      },
+      "gridPos": { "h": 4, "w": 3, "x": 12, "y": 2 },
+      "id": 5,
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["sum"] }, "textMode": "auto" },
+      "targets": [{
+        "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "*",
+        "refId": "A",
+        "timeField": "@timestamp"
+      }],
+      "title": "CrowdSec Events",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_WAZUH_ALERTS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [
+            { "color": "green", "value": null },
+            { "color": "orange", "value": 1 },
+            { "color": "red", "value": 20 }
+          ]}
+        }
+      },
+      "gridPos": { "h": 4, "w": 3, "x": 15, "y": 2 },
+      "id": 6,
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["sum"] }, "textMode": "auto" },
+      "targets": [{
+        "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "rule.groups:jumpcloud AND rule.id:(120610 OR 120611 OR 120612 OR 120640 OR 120641)",
+        "refId": "A",
+        "timeField": "@timestamp"
+      }],
+      "title": "JumpCloud Auth Fails",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 50 },
+            { "color": "orange", "value": 200 }
+          ]}
+        }
+      },
+      "gridPos": { "h": 4, "w": 3, "x": 18, "y": 2 },
+      "id": 7,
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["sum"] }, "textMode": "auto" },
+      "targets": [{
+        "bucketAggs": [{ "field": "timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "rule.groups:twingate",
+        "refId": "A",
+        "timeField": "timestamp"
+      }],
+      "title": "Twingate Events",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [
+            { "color": "green", "value": null },
+            { "color": "red", "value": 1 }
+          ]}
+        }
+      },
+      "gridPos": { "h": 4, "w": 3, "x": 21, "y": 2 },
+      "id": 8,
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["sum"] }, "textMode": "auto" },
+      "targets": [{
+        "bucketAggs": [{ "field": "timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "rule.id:120736",
+        "refId": "A",
+        "timeField": "timestamp"
+      }],
+      "title": "ZTNA Access Denied",
+      "type": "stat"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 6 },
+      "title": "Alert Timelines",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_WAZUH_ALERTS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 30, "stacking": { "mode": "normal" } }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 7 },
+      "id": 10,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.level: [3 TO 6]",
+          "refId": "A",
+          "timeField": "@timestamp",
+          "alias": "Low (3-6)"
+        },
+        {
+          "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.level: [7 TO 9]",
+          "refId": "B",
+          "timeField": "@timestamp",
+          "alias": "Medium (7-9)"
+        },
+        {
+          "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.level: [10 TO 11]",
+          "refId": "C",
+          "timeField": "@timestamp",
+          "alias": "High (10-11)"
+        },
+        {
+          "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.level: >=12",
+          "refId": "D",
+          "timeField": "@timestamp",
+          "alias": "Critical (12+)"
+        }
+      ],
+      "title": "Wazuh Alert Timeline by Severity",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 30, "stacking": { "mode": "normal" } }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Access Events" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "STUN Failures" }, "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "State Changes" }, "properties": [{ "id": "color", "value": { "fixedColor": "blue", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "Warnings / Errors" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "Access Denied" }, "properties": [{ "id": "color", "value": { "fixedColor": "dark-red", "mode": "fixed" } }] }
+        ]
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 7 },
+      "id": 11,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:120735",
+          "refId": "A",
+          "timeField": "timestamp",
+          "alias": "Access Events"
+        },
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:120736",
+          "refId": "B",
+          "timeField": "timestamp",
+          "alias": "Access Denied"
+        },
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:120722",
+          "refId": "C",
+          "timeField": "timestamp",
+          "alias": "STUN Failures"
+        },
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:(120701 OR 120702 OR 120703)",
+          "refId": "D",
+          "timeField": "timestamp",
+          "alias": "State Changes"
+        },
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:(120740 OR 120741 OR 120742 OR 120743)",
+          "refId": "E",
+          "timeField": "timestamp",
+          "alias": "Warnings / Errors"
+        }
+      ],
+      "title": "Twingate ZTNA Event Timeline",
+      "type": "timeseries"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 15 },
+      "title": "Firewall & Network Defense",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_PFSENSE}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 20, "stacking": { "mode": "normal" } }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "id": 20,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "action:block",
+          "refId": "A",
+          "timeField": "@timestamp",
+          "alias": "Blocks"
+        },
+        {
+          "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "action:pass",
+          "refId": "B",
+          "timeField": "@timestamp",
+          "alias": "Pass"
+        }
+      ],
+      "title": "pfSense Firewall Actions Over Time",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_PFSENSE}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "align": "auto" }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "id": 21,
+      "options": { "showHeader": true, "sortBy": [{ "desc": true, "displayName": "Count" }] },
+      "targets": [{
+        "bucketAggs": [
+          { "field": "src_ip.keyword", "id": "3", "type": "terms", "settings": { "order": "desc", "orderBy": "_count", "size": "10" } }
+        ],
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "action:block",
+        "refId": "A",
+        "timeField": "@timestamp"
+      }],
+      "title": "Top Blocked Source IPs",
+      "type": "table"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 },
+      "title": "CrowdSec & Suricata",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_CROWDSEC}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 20 }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 25 },
+      "id": 30,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [{
+        "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "*",
+        "refId": "A",
+        "timeField": "@timestamp",
+        "alias": "CrowdSec Events"
+      }],
+      "title": "CrowdSec Events Over Time",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_SURICATA}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 20 }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 25 },
+      "id": 31,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [{
+        "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "*",
+        "refId": "A",
+        "timeField": "@timestamp",
+        "alias": "Suricata Alerts"
+      }],
+      "title": "Suricata Alert Timeline",
+      "type": "timeseries"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 33 },
+      "title": "Twingate ZTNA — Access Control",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Access Allowed" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "Access Denied" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "STUN Failures" }, "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "Connected" }, "properties": [{ "id": "color", "value": { "fixedColor": "blue", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "Disconnected" }, "properties": [{ "id": "color", "value": { "fixedColor": "light-blue", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "Reconnecting" }, "properties": [{ "id": "color", "value": { "fixedColor": "super-light-blue", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "Warnings" }, "properties": [{ "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "Errors" }, "properties": [{ "id": "color", "value": { "fixedColor": "dark-red", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "HTTP Errors" }, "properties": [{ "id": "color", "value": { "fixedColor": "dark-orange", "mode": "fixed" } }] }
+        ]
+      },
+      "gridPos": { "h": 10, "w": 10, "x": 0, "y": 34 },
+      "id": 40,
+      "options": {
+        "reduceOptions": { "values": false, "calcs": ["sum"] },
+        "legend": { "displayMode": "table", "placement": "bottom", "values": ["value", "percent"] },
+        "tooltip": { "mode": "single" },
+        "pieType": "donut",
+        "displayLabels": ["percent"]
+      },
+      "targets": [
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto" } }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:120735",
+          "refId": "A", "timeField": "timestamp", "alias": "Access Allowed"
+        },
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto" } }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:120736",
+          "refId": "B", "timeField": "timestamp", "alias": "Access Denied"
+        },
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto" } }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:120722",
+          "refId": "C", "timeField": "timestamp", "alias": "STUN Failures"
+        },
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto" } }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:120701",
+          "refId": "D", "timeField": "timestamp", "alias": "Connected"
+        },
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto" } }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:120702",
+          "refId": "E", "timeField": "timestamp", "alias": "Disconnected"
+        },
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto" } }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:120703",
+          "refId": "F", "timeField": "timestamp", "alias": "Reconnecting"
+        },
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto" } }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:120740",
+          "refId": "G", "timeField": "timestamp", "alias": "Warnings"
+        },
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto" } }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:(120741 OR 120742)",
+          "refId": "H", "timeField": "timestamp", "alias": "Errors"
+        },
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto" } }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:120743",
+          "refId": "I", "timeField": "timestamp", "alias": "HTTP Errors"
+        }
+      ],
+      "title": "Twingate Alert Distribution",
+      "type": "piechart"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 5 },
+            { "color": "orange", "value": 7 },
+            { "color": "red", "value": 10 }
+          ]},
+          "custom": { "align": "auto" }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Count" }, "properties": [{ "id": "custom.width", "value": 70 }, { "id": "custom.cellOptions", "value": { "type": "color-background", "mode": "gradient" } }] },
+          { "matcher": { "id": "byName", "options": "Rule" }, "properties": [{ "id": "custom.width", "value": 70 }] },
+          { "matcher": { "id": "byName", "options": "Level" }, "properties": [{ "id": "custom.width", "value": 55 }, { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 5 }, { "color": "orange", "value": 7 }, { "color": "red", "value": 10 }] } }, { "id": "custom.cellOptions", "value": { "type": "color-text" } }] },
+          { "matcher": { "id": "byName", "options": "Description" }, "properties": [{ "id": "custom.width", "value": 300 }] },
+          { "matcher": { "id": "byName", "options": "Connector" }, "properties": [{ "id": "custom.width", "value": 140 }] }
+        ]
+      },
+      "gridPos": { "h": 10, "w": 14, "x": 10, "y": 34 },
+      "id": 41,
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "Count" }],
+        "footer": { "show": true, "reducer": ["sum"], "countRows": false, "fields": ["Count"] }
+      },
+      "targets": [{
+        "bucketAggs": [
+          { "field": "rule.id", "id": "3", "type": "terms", "settings": { "order": "desc", "orderBy": "_count", "size": "20" } },
+          { "field": "rule.description", "id": "4", "type": "terms", "settings": { "order": "desc", "orderBy": "_count", "size": "1" } },
+          { "field": "rule.level", "id": "5", "type": "terms", "settings": { "order": "desc", "orderBy": "_count", "size": "1" } },
+          { "field": "agent.name", "id": "6", "type": "terms", "settings": { "order": "desc", "orderBy": "_count", "size": "5" } }
+        ],
+        "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "rule.groups:twingate",
+        "refId": "A",
+        "timeField": "timestamp"
+      }],
+      "title": "Twingate Rule Breakdown (ID / Description / Severity / Connector)",
+      "type": "table"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 44 },
+      "title": "JumpCloud & Office 365",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_WAZUH_ALERTS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 20 }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 45 },
+      "id": 50,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.groups:jumpcloud AND (rule.id:120600 OR rule.id:120601 OR rule.id:120602)",
+          "refId": "A",
+          "timeField": "@timestamp",
+          "alias": "Login Success"
+        },
+        {
+          "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.groups:jumpcloud AND (rule.id:120610 OR rule.id:120611 OR rule.id:120612)",
+          "refId": "B",
+          "timeField": "@timestamp",
+          "alias": "Login Failure"
+        },
+        {
+          "bucketAggs": [{ "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }],
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.groups:jumpcloud AND (rule.id:120620 OR rule.id:120621 OR rule.id:120622)",
+          "refId": "C",
+          "timeField": "@timestamp",
+          "alias": "User Changes"
+        }
+      ],
+      "title": "JumpCloud Authentication Over Time",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_WAZUH_ALERTS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 20 }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 45 },
+      "id": 51,
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [{
+        "bucketAggs": [
+          { "field": "data.Workload.keyword", "id": "3", "type": "terms", "settings": { "order": "desc", "orderBy": "_count", "size": "10" } },
+          { "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }
+        ],
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "rule.groups:office365",
+        "refId": "A",
+        "timeField": "@timestamp"
+      }],
+      "title": "O365 Events by Workload Over Time",
+      "type": "timeseries"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 53 },
+      "title": "MITRE ATT&CK & Detailed Tables",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_WAZUH_ALERTS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 54 },
+      "id": 60,
+      "options": {
+        "reduceOptions": { "values": false, "calcs": ["sum"] },
+        "legend": { "displayMode": "table", "placement": "right", "values": ["value", "percent"] },
+        "tooltip": { "mode": "single" },
+        "pieType": "donut",
+        "displayLabels": ["percent"]
+      },
+      "targets": [{
+        "bucketAggs": [
+          { "field": "rule.mitre.tactic.keyword", "id": "3", "type": "terms", "settings": { "order": "desc", "orderBy": "_count", "size": "15" } },
+          { "field": "@timestamp", "id": "2", "settings": { "interval": "auto" }, "type": "date_histogram" }
+        ],
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "rule.mitre.tactic:*",
+        "refId": "A",
+        "timeField": "@timestamp"
+      }],
+      "title": "MITRE ATT&CK Tactics",
+      "type": "piechart"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_WAZUH_ALERTS}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "align": "auto" }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 54 },
+      "id": 61,
+      "options": { "showHeader": true, "sortBy": [{ "desc": true, "displayName": "Count" }] },
+      "targets": [{
+        "bucketAggs": [
+          { "field": "rule.description.keyword", "id": "3", "type": "terms", "settings": { "order": "desc", "orderBy": "_count", "size": "15" } },
+          { "field": "rule.level", "id": "4", "type": "terms", "settings": { "order": "desc", "orderBy": "_count", "size": "1" } }
+        ],
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "rule.level: >=7",
+        "refId": "A",
+        "timeField": "@timestamp"
+      }],
+      "title": "Top Wazuh Alert Rules (Level 7+)",
+      "type": "table"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "${DS_SURICATA}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "align": "auto" }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 62 },
+      "id": 62,
+      "options": { "showHeader": true, "sortBy": [{ "desc": true, "displayName": "Count" }] },
+      "targets": [{
+        "bucketAggs": [
+          { "field": "alert.signature.keyword", "id": "3", "type": "terms", "settings": { "order": "desc", "orderBy": "_count", "size": "15" } }
+        ],
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "*",
+        "refId": "A",
+        "timeField": "@timestamp"
+      }],
+      "title": "Top Suricata Signatures",
+      "type": "table"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "align": "auto" }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 62 },
+      "id": 63,
+      "options": { "showHeader": true, "sortBy": [{ "desc": true, "displayName": "Count" }] },
+      "targets": [{
+        "bucketAggs": [
+          { "field": "agent.name", "id": "3", "type": "terms", "settings": { "order": "desc", "orderBy": "_count", "size": "5" } },
+          { "field": "rule.description", "id": "4", "type": "terms", "settings": { "order": "desc", "orderBy": "_count", "size": "10" } }
+        ],
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "rule.groups:twingate AND (rule.id:120735 OR rule.id:120736)",
+        "refId": "A",
+        "timeField": "timestamp"
+      }],
+      "title": "Twingate Access Events by Connector",
+      "type": "table"
+    }
+  ],
+  "version": 1,
+  "schemaVersion": 39
+}
