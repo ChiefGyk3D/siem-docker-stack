@@ -1,0 +1,934 @@
+{
+  "__inputs": [],
+  "__elements": {},
+  "__requires": [],
+  "annotations": {
+    "list": []
+  },
+  "description": "Twingate Zero Trust Network Access — connector health, access flows, STUN failures, and state transitions",
+  "editable": true,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "title": "Overview",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["sum"] }, "textMode": "auto" },
+      "targets": [{
+        "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }],
+        "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "rule.groups:twingate",
+        "refId": "A",
+        "timeField": "timestamp"
+      }],
+      "title": "Total Twingate Alerts",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["sum"] }, "textMode": "auto" },
+      "targets": [{
+        "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }],
+        "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "rule.id:120735",
+        "refId": "A",
+        "timeField": "timestamp"
+      }],
+      "title": "Access Allowed",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
+      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["sum"] }, "textMode": "auto" },
+      "targets": [{
+        "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }],
+        "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "rule.id:120736",
+        "refId": "A",
+        "timeField": "timestamp"
+      }],
+      "title": "Access Denied",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "orange", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
+      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["sum"] }, "textMode": "auto" },
+      "targets": [{
+        "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }],
+        "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "rule.id:120722",
+        "refId": "A",
+        "timeField": "timestamp"
+      }],
+      "title": "STUN Failures",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "yellow", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
+      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["sum"] }, "textMode": "auto" },
+      "targets": [{
+        "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }],
+        "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "rule.id:(120740 OR 120741 OR 120742)",
+        "refId": "A",
+        "timeField": "timestamp"
+      }],
+      "title": "Warnings / Errors",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "purple", "value": null }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+      "options": { "colorMode": "value", "graphMode": "none", "reduceOptions": { "calcs": ["sum"] }, "textMode": "auto" },
+      "targets": [{
+        "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }],
+        "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "rule.id:(120701 OR 120702 OR 120703)",
+        "refId": "A",
+        "timeField": "timestamp"
+      }],
+      "title": "State Changes",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "title": "Timeline",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisBorderShow": false,
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "stacking": { "mode": "normal" },
+            "pointSize": 5,
+            "lineWidth": 1
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 6 },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:120735",
+          "refId": "Access Allowed",
+          "timeField": "timestamp",
+          "alias": "Access Allowed"
+        },
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:120736",
+          "refId": "Access Denied",
+          "timeField": "timestamp",
+          "alias": "Access Denied"
+        },
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:120722",
+          "refId": "STUN Failures",
+          "timeField": "timestamp",
+          "alias": "STUN Failures"
+        },
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:(120701 OR 120702 OR 120703)",
+          "refId": "State Changes",
+          "timeField": "timestamp",
+          "alias": "State Changes"
+        },
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:(120740 OR 120741 OR 120742)",
+          "refId": "Warnings/Errors",
+          "timeField": "timestamp",
+          "alias": "Warnings / Errors"
+        }
+      ],
+      "title": "Twingate Events Over Time",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+      "title": "Access Control",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Access Allowed" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "Access Denied" }, "properties": [{ "id": "color", "value": { "fixedColor": "red", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "STUN Failures" }, "properties": [{ "id": "color", "value": { "fixedColor": "orange", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "State: Connected" }, "properties": [{ "id": "color", "value": { "fixedColor": "blue", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "State: Disconnected" }, "properties": [{ "id": "color", "value": { "fixedColor": "semi-dark-blue", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "State: Reconnecting" }, "properties": [{ "id": "color", "value": { "fixedColor": "light-blue", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "Warnings" }, "properties": [{ "id": "color", "value": { "fixedColor": "yellow", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "Errors" }, "properties": [{ "id": "color", "value": { "fixedColor": "dark-red", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "HTTP Errors" }, "properties": [{ "id": "color", "value": { "fixedColor": "dark-orange", "mode": "fixed" } }] }
+        ]
+      },
+      "gridPos": { "h": 10, "w": 10, "x": 0, "y": 15 },
+      "options": {
+        "reduceOptions": { "values": false, "calcs": ["sum"] },
+        "legend": { "displayMode": "table", "placement": "bottom", "values": ["value", "percent"] },
+        "tooltip": { "mode": "single" },
+        "pieType": "donut",
+        "displayLabels": ["percent"]
+      },
+      "targets": [
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:120735",
+          "refId": "A",
+          "timeField": "timestamp",
+          "alias": "Access Allowed"
+        },
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:120736",
+          "refId": "B",
+          "timeField": "timestamp",
+          "alias": "Access Denied"
+        },
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:120722",
+          "refId": "C",
+          "timeField": "timestamp",
+          "alias": "STUN Failures"
+        },
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:120701",
+          "refId": "D",
+          "timeField": "timestamp",
+          "alias": "State: Connected"
+        },
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:120702",
+          "refId": "E",
+          "timeField": "timestamp",
+          "alias": "State: Disconnected"
+        },
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:120703",
+          "refId": "F",
+          "timeField": "timestamp",
+          "alias": "State: Reconnecting"
+        },
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:120740",
+          "refId": "G",
+          "timeField": "timestamp",
+          "alias": "Warnings"
+        },
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:120741",
+          "refId": "H",
+          "timeField": "timestamp",
+          "alias": "Errors"
+        },
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:120743",
+          "refId": "I",
+          "timeField": "timestamp",
+          "alias": "HTTP Errors"
+        }
+      ],
+      "title": "Alert Distribution by Rule",
+      "type": "piechart"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto", "cellOptions": { "type": "auto" }, "filterable": true },
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 5 },
+            { "color": "orange", "value": 7 },
+            { "color": "red", "value": 10 }
+          ]}
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Count" }, "properties": [{ "id": "custom.width", "value": 70 }, { "id": "custom.cellOptions", "value": { "type": "color-background", "mode": "gradient" } }] },
+          { "matcher": { "id": "byName", "options": "Rule" }, "properties": [{ "id": "custom.width", "value": 70 }] },
+          { "matcher": { "id": "byName", "options": "Level" }, "properties": [{ "id": "custom.width", "value": 55 }, { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "yellow", "value": 5 }, { "color": "orange", "value": 7 }, { "color": "red", "value": 10 }] } }, { "id": "custom.cellOptions", "value": { "type": "color-text" } }] },
+          { "matcher": { "id": "byName", "options": "Description" }, "properties": [{ "id": "custom.width", "value": 400 }] },
+          { "matcher": { "id": "byName", "options": "Connector" }, "properties": [{ "id": "custom.width", "value": 140 }] }
+        ]
+      },
+      "gridPos": { "h": 10, "w": 14, "x": 10, "y": 15 },
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "Count" }],
+        "footer": { "show": true, "reducer": ["sum"], "countRows": false, "fields": ["Count"] }
+      },
+      "targets": [{
+        "bucketAggs": [
+          { "field": "rule.id", "id": "3", "type": "terms", "settings": { "order": "desc", "orderBy": "_count", "size": "20" } },
+          { "field": "rule.description", "id": "4", "type": "terms", "settings": { "order": "desc", "orderBy": "_count", "size": "1" } },
+          { "field": "rule.level", "id": "5", "type": "terms", "settings": { "order": "desc", "orderBy": "_count", "size": "1" } },
+          { "field": "agent.name", "id": "6", "type": "terms", "settings": { "order": "desc", "orderBy": "_count", "size": "5" } }
+        ],
+        "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "rule.groups:twingate",
+        "refId": "A",
+        "timeField": "timestamp"
+      }],
+      "title": "Rule Breakdown (ID / Description / Severity / Connector)",
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 25 },
+      "title": "Connector Insights",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "ZTNA-01: Access" }, "properties": [{ "id": "color", "value": { "fixedColor": "green", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "ZTNA-01: State Changes" }, "properties": [{ "id": "color", "value": { "fixedColor": "light-green", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "ZTNA-01: STUN" }, "properties": [{ "id": "color", "value": { "fixedColor": "semi-dark-green", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "ZTNA-01: Warnings" }, "properties": [{ "id": "color", "value": { "fixedColor": "dark-green", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "ZTNA-02: Access" }, "properties": [{ "id": "color", "value": { "fixedColor": "blue", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "ZTNA-02: State Changes" }, "properties": [{ "id": "color", "value": { "fixedColor": "light-blue", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "ZTNA-02: STUN" }, "properties": [{ "id": "color", "value": { "fixedColor": "semi-dark-blue", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "ZTNA-02: Warnings" }, "properties": [{ "id": "color", "value": { "fixedColor": "dark-blue", "mode": "fixed" } }] }
+        ]
+      },
+      "gridPos": { "h": 10, "w": 12, "x": 0, "y": 26 },
+      "options": {
+        "reduceOptions": { "values": false, "calcs": ["sum"] },
+        "legend": { "displayMode": "table", "placement": "right", "values": ["value", "percent"] },
+        "tooltip": { "mode": "single" },
+        "pieType": "donut",
+        "displayLabels": ["name", "percent"]
+      },
+      "targets": [
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:(120735 OR 120736) AND agent.name:\"Twingate-ZTNA-01\"",
+          "refId": "A",
+          "timeField": "timestamp",
+          "alias": "ZTNA-01: Access"
+        },
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:(120701 OR 120702 OR 120703) AND agent.name:\"Twingate-ZTNA-01\"",
+          "refId": "B",
+          "timeField": "timestamp",
+          "alias": "ZTNA-01: State Changes"
+        },
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:120722 AND agent.name:\"Twingate-ZTNA-01\"",
+          "refId": "C",
+          "timeField": "timestamp",
+          "alias": "ZTNA-01: STUN"
+        },
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:(120740 OR 120741 OR 120742) AND agent.name:\"Twingate-ZTNA-01\"",
+          "refId": "D",
+          "timeField": "timestamp",
+          "alias": "ZTNA-01: Warnings"
+        },
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:(120735 OR 120736) AND agent.name:\"Twingate-ZTNA-02\"",
+          "refId": "E",
+          "timeField": "timestamp",
+          "alias": "ZTNA-02: Access"
+        },
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:(120701 OR 120702 OR 120703) AND agent.name:\"Twingate-ZTNA-02\"",
+          "refId": "F",
+          "timeField": "timestamp",
+          "alias": "ZTNA-02: State Changes"
+        },
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:120722 AND agent.name:\"Twingate-ZTNA-02\"",
+          "refId": "G",
+          "timeField": "timestamp",
+          "alias": "ZTNA-02: STUN"
+        },
+        {
+          "bucketAggs": [{ "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:(120740 OR 120741 OR 120742) AND agent.name:\"Twingate-ZTNA-02\"",
+          "refId": "H",
+          "timeField": "timestamp",
+          "alias": "ZTNA-02: Warnings"
+        }
+      ],
+      "title": "Events by Connector",
+      "type": "piechart"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Time" }, "properties": [{ "id": "custom.width", "value": 170 }] },
+          { "matcher": { "id": "byName", "options": "Connector" }, "properties": [{ "id": "custom.width", "value": 140 }] },
+          { "matcher": { "id": "byName", "options": "Action" }, "properties": [{ "id": "custom.width", "value": 65 }] },
+          { "matcher": { "id": "byName", "options": "Resource" }, "properties": [{ "id": "custom.width", "value": 200 }] }
+        ]
+      },
+      "gridPos": { "h": 10, "w": 12, "x": 12, "y": 26 },
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "Time" }],
+        "footer": { "show": false }
+      },
+      "targets": [{
+        "bucketAggs": [],
+        "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+        "metrics": [{ "id": "1", "type": "raw_data", "settings": { "size": "50" } }],
+        "query": "rule.id:(120735 OR 120736)",
+        "refId": "A",
+        "timeField": "timestamp"
+      }],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "_id": true,
+              "_index": true,
+              "_type": true,
+              "decoder.name": true,
+              "full_log": true,
+              "id": true,
+              "input.type": true,
+              "location": true,
+              "manager.name": true,
+              "rule.firedtimes": true,
+              "rule.mail": true,
+              "data.stream": true,
+              "data.time": true,
+              "data.source": true,
+              "rule.groups": true,
+              "@timestamp": true,
+              "rule.id": true,
+              "rule.level": true,
+              "rule.description": true,
+              "agent.id": true,
+              "agent.ip": true
+            },
+            "indexByName": {
+              "timestamp": 0,
+              "agent.name": 1,
+              "data.log": 2
+            },
+            "renameByName": {
+              "timestamp": "Time",
+              "agent.name": "Connector",
+              "data.log": "Access Flow Detail"
+            }
+          }
+        }
+      ],
+      "title": "Recent Access Flows (Host / Port / Proto / Transport)",
+      "type": "table"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisBorderShow": false,
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "stacking": { "mode": "normal" },
+            "pointSize": 5,
+            "lineWidth": 1
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 36 },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "bucketAggs": [
+            { "field": "agent.name", "id": "3", "type": "terms", "settings": { "order": "desc", "orderBy": "_count", "size": "10" } },
+            { "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }
+          ],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:120735",
+          "refId": "A",
+          "timeField": "timestamp"
+        }
+      ],
+      "title": "Access Flows by Connector Over Time",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 44 },
+      "title": "Connector Health",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisBorderShow": false,
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "stacking": { "mode": "normal" },
+            "pointSize": 5,
+            "lineWidth": 1
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 45 },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "bucketAggs": [
+            { "field": "agent.name", "id": "3", "type": "terms", "settings": { "order": "desc", "orderBy": "_count", "size": "10" } },
+            { "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }
+          ],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:120722",
+          "refId": "A",
+          "timeField": "timestamp"
+        }
+      ],
+      "title": "STUN Failures by Connector",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisBorderShow": false,
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "stacking": { "mode": "normal" },
+            "pointSize": 5,
+            "lineWidth": 1
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 45 },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "bucketAggs": [
+            { "field": "agent.name", "id": "3", "type": "terms", "settings": { "order": "desc", "orderBy": "_count", "size": "10" } },
+            { "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }
+          ],
+          "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+          "metrics": [{ "id": "1", "type": "count" }],
+          "query": "rule.id:(120701 OR 120702 OR 120703)",
+          "refId": "A",
+          "timeField": "timestamp"
+        }
+      ],
+      "title": "State Transitions by Connector",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 53 },
+      "title": "Severity Analysis",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisBorderShow": false,
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "stacking": { "mode": "normal" }
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 54 },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [{
+        "bucketAggs": [
+          { "field": "rule.level", "id": "3", "type": "terms", "settings": { "order": "desc", "orderBy": "_count", "size": "10" } },
+          { "field": "timestamp", "id": "2", "type": "date_histogram", "settings": { "interval": "auto", "min_doc_count": "0", "trimEdges": "0" } }
+        ],
+        "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+        "metrics": [{ "id": "1", "type": "count" }],
+        "query": "rule.groups:twingate",
+        "refId": "A",
+        "timeField": "timestamp"
+      }],
+      "title": "Alerts by Severity Level",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "timestamp" }, "properties": [{ "id": "custom.width", "value": 180 }] },
+          { "matcher": { "id": "byName", "options": "agent.name" }, "properties": [{ "id": "custom.width", "value": 150 }] },
+          { "matcher": { "id": "byName", "options": "rule.level" }, "properties": [{ "id": "custom.width", "value": 60 }] },
+          { "matcher": { "id": "byName", "options": "rule.id" }, "properties": [{ "id": "custom.width", "value": 80 }] }
+        ]
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 54 },
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "timestamp" }],
+        "footer": { "show": false }
+      },
+      "targets": [{
+        "bucketAggs": [],
+        "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+        "metrics": [{ "id": "1", "type": "raw_data", "settings": { "size": "50" } }],
+        "query": "rule.id:(120740 OR 120741 OR 120742 OR 120743)",
+        "refId": "A",
+        "timeField": "timestamp"
+      }],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "_id": true,
+              "_index": true,
+              "_type": true,
+              "decoder.name": true,
+              "full_log": true,
+              "id": true,
+              "input.type": true,
+              "location": true,
+              "manager.name": true,
+              "rule.firedtimes": true,
+              "rule.mail": true,
+              "data.stream": true,
+              "data.time": true,
+              "data.source": true,
+              "rule.groups": true,
+              "@timestamp": true,
+              "rule.description": true
+            },
+            "indexByName": {
+              "timestamp": 0,
+              "agent.name": 1,
+              "rule.level": 2,
+              "rule.id": 3,
+              "data.log": 4
+            },
+            "renameByName": {
+              "timestamp": "Time",
+              "agent.name": "Connector",
+              "rule.level": "Level",
+              "rule.id": "Rule",
+              "data.log": "Log Message"
+            }
+          }
+        }
+      ],
+      "title": "Warning/Error Event Log",
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 62 },
+      "title": "Access Flow Details",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 63 },
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "timestamp" }],
+        "footer": { "show": false }
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "timestamp" }, "properties": [{ "id": "custom.width", "value": 180 }] },
+          { "matcher": { "id": "byName", "options": "agent.name" }, "properties": [{ "id": "custom.width", "value": 160 }] },
+          { "matcher": { "id": "byName", "options": "rule.level" }, "properties": [{ "id": "custom.width", "value": 60 }] },
+          { "matcher": { "id": "byName", "options": "rule.id" }, "properties": [{ "id": "custom.width", "value": 80 }] }
+        ]
+      },
+      "targets": [{
+        "bucketAggs": [],
+        "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+        "metrics": [{
+          "id": "1",
+          "type": "raw_data",
+          "settings": { "size": "100" }
+        }],
+        "query": "rule.id:(120735 OR 120736)",
+        "refId": "A",
+        "timeField": "timestamp"
+      }],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "_id": true,
+              "_index": true,
+              "_type": true,
+              "decoder.name": true,
+              "full_log": true,
+              "id": true,
+              "input.type": true,
+              "location": true,
+              "manager.name": true,
+              "rule.firedtimes": true,
+              "rule.mail": true,
+              "data.stream": true,
+              "data.time": true,
+              "data.source": true,
+              "rule.groups": true,
+              "@timestamp": true
+            },
+            "indexByName": {
+              "timestamp": 0,
+              "agent.name": 1,
+              "rule.level": 2,
+              "rule.id": 3,
+              "data.log": 4,
+              "rule.description": 5
+            },
+            "renameByName": {
+              "timestamp": "Time",
+              "agent.name": "Connector",
+              "rule.level": "Level",
+              "rule.id": "Rule",
+              "data.log": "Log",
+              "rule.description": "Description"
+            }
+          }
+        }
+      ],
+      "title": "Access Flow Event Log",
+      "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 73 },
+      "title": "Recent Events",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 74 },
+      "options": {
+        "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "timestamp" }],
+        "footer": { "show": false }
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "timestamp" }, "properties": [{ "id": "custom.width", "value": 180 }] },
+          { "matcher": { "id": "byName", "options": "agent.name" }, "properties": [{ "id": "custom.width", "value": 160 }] },
+          { "matcher": { "id": "byName", "options": "rule.level" }, "properties": [{ "id": "custom.width", "value": 60 }] },
+          { "matcher": { "id": "byName", "options": "rule.id" }, "properties": [{ "id": "custom.width", "value": 80 }] }
+        ]
+      },
+      "targets": [{
+        "bucketAggs": [],
+        "datasource": { "type": "grafana-opensearch-datasource", "uid": "P75BB31EF98597818" },
+        "metrics": [{
+          "id": "1",
+          "type": "raw_data",
+          "settings": { "size": "200" }
+        }],
+        "query": "rule.groups:twingate AND NOT rule.id:(120735 OR 120736)",
+        "refId": "A",
+        "timeField": "timestamp"
+      }],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "_id": true,
+              "_index": true,
+              "_type": true,
+              "decoder.name": true,
+              "full_log": true,
+              "id": true,
+              "input.type": true,
+              "location": true,
+              "manager.name": true,
+              "rule.firedtimes": true,
+              "rule.mail": true,
+              "data.stream": true,
+              "data.time": true,
+              "data.source": true,
+              "rule.groups": true,
+              "@timestamp": true
+            },
+            "indexByName": {
+              "timestamp": 0,
+              "agent.name": 1,
+              "rule.level": 2,
+              "rule.id": 3,
+              "rule.description": 4,
+              "data.log": 5
+            },
+            "renameByName": {
+              "timestamp": "Time",
+              "agent.name": "Connector",
+              "rule.level": "Level",
+              "rule.id": "Rule",
+              "rule.description": "Description",
+              "data.log": "Log"
+            }
+          }
+        }
+      ],
+      "title": "All Twingate Events (Non-Access)",
+      "type": "table"
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["twingate", "ztna", "wazuh", "security"],
+  "templating": { "list": [] },
+  "time": { "from": "now-24h", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Twingate ZTNA",
+  "uid": "twingate-ztna",
+  "version": 1
+}

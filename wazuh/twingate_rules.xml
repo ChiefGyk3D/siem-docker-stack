@@ -1,0 +1,203 @@
+<!-- Twingate Connector Rules (120700-120750) -->
+<!-- Events arrive as Docker JSON logs with data.source="twingate-docker" -->
+<!-- data.log contains: [LEVEL] [module] message -->
+
+<group name="twingate,">
+
+  <!-- ============================================================ -->
+  <!-- Base rule: any Twingate connector log event                  -->
+  <!-- Level 0 = silent parent — child rules promote as needed      -->
+  <!-- ============================================================ -->
+  <rule id="120700" level="0">
+    <decoded_as>json</decoded_as>
+    <field name="source">twingate-docker</field>
+    <description>Twingate: connector log event</description>
+    <group>twingate,</group>
+  </rule>
+
+  <!-- ============================================================ -->
+  <!-- Connector State Transitions                                  -->
+  <!-- ============================================================ -->
+
+  <!-- State change (any) — informational -->
+  <rule id="120701" level="3">
+    <if_sid>120700</if_sid>
+    <field name="log" type="pcre2">set_state: switching from</field>
+    <description>Twingate: Connector state change — $(log)</description>
+    <group>twingate,state_change,</group>
+  </rule>
+
+  <!-- Connector reached Ready state -->
+  <rule id="120702" level="3">
+    <if_sid>120701</if_sid>
+    <field name="log" type="pcre2">switching from .+ to "Ready"</field>
+    <description>Twingate: Connector reached Ready state</description>
+    <group>twingate,state_change,</group>
+  </rule>
+
+  <!-- Connector left Ready state (potential issue) -->
+  <rule id="120703" level="5">
+    <if_sid>120701</if_sid>
+    <field name="log" type="pcre2">switching from "Ready" to</field>
+    <description>Twingate: Connector left Ready state — possible reconnection</description>
+    <group>twingate,state_change,</group>
+  </rule>
+
+  <!-- ============================================================ -->
+  <!-- Health Checks                                                -->
+  <!-- ============================================================ -->
+
+  <!-- Health check processed -->
+  <rule id="120710" level="0">
+    <if_sid>120700</if_sid>
+    <field name="log" type="pcre2">processing "health" request</field>
+    <description>Twingate: Health check processed</description>
+    <group>twingate,health,</group>
+  </rule>
+
+  <!-- Heartbeat sent -->
+  <rule id="120711" level="0">
+    <if_sid>120700</if_sid>
+    <field name="log" type="pcre2">heartbeat payload:</field>
+    <description>Twingate: Heartbeat sent to control plane</description>
+    <group>twingate,heartbeat,</group>
+  </rule>
+
+  <!-- Heartbeat response received -->
+  <rule id="120712" level="0">
+    <if_sid>120700</if_sid>
+    <field name="log" type="pcre2">heartbeat response:</field>
+    <description>Twingate: Heartbeat response received</description>
+    <group>twingate,heartbeat,</group>
+  </rule>
+
+  <!-- ============================================================ -->
+  <!-- Network / Relay Events                                       -->
+  <!-- ============================================================ -->
+
+  <!-- Relay connection maintenance -->
+  <rule id="120720" level="0">
+    <if_sid>120700</if_sid>
+    <field name="log" type="pcre2">maintain_relay_count:</field>
+    <description>Twingate: Relay connection maintenance</description>
+    <group>twingate,relay,</group>
+  </rule>
+
+  <!-- STUN events (routine) -->
+  <rule id="120721" level="0">
+    <if_sid>120700</if_sid>
+    <field name="log" type="pcre2">\[stun\]</field>
+    <description>Twingate: STUN operation</description>
+    <group>twingate,stun,</group>
+  </rule>
+
+  <!-- STUN failure (network issue) — child of 120721 so it overrides level 0 -->
+  <rule id="120722" level="4">
+    <if_sid>120721</if_sid>
+    <field name="log" type="pcre2">\[WARN\].*\[stun\].*failed</field>
+    <description>Twingate: STUN request failed — possible network issue</description>
+    <group>twingate,stun,network_error,</group>
+  </rule>
+
+  <!-- ============================================================ -->
+  <!-- Authentication / Token Events                                -->
+  <!-- ============================================================ -->
+
+  <!-- Token refresh -->
+  <rule id="120730" level="3">
+    <if_sid>120700</if_sid>
+    <field name="log" type="pcre2">refresh.*token|token.*refresh</field>
+    <description>Twingate: Token refresh event</description>
+    <group>twingate,authentication,</group>
+  </rule>
+
+  <!-- Authentication failure -->
+  <rule id="120731" level="8">
+    <if_sid>120700</if_sid>
+    <field name="log" type="pcre2">\[ERROR\].*auth|authentication.*failed|token.*expired|token.*invalid</field>
+    <description>Twingate: Authentication failure — token may be expired or invalid</description>
+    <group>twingate,authentication_failed,</group>
+  </rule>
+
+  <!-- ============================================================ -->
+  <!-- Access Authorization Events                                  -->
+  <!-- ============================================================ -->
+
+  <!-- Access flow authorized (ALLOW) -->
+  <rule id="120735" level="3">
+    <if_sid>120700</if_sid>
+    <field name="log" type="pcre2">authorize_flow:\s*ALLOW</field>
+    <description>Twingate: Access authorized — $(log)</description>
+    <group>twingate,access_control,access_allowed,</group>
+  </rule>
+
+  <!-- Access flow denied (DENY) -->
+  <rule id="120736" level="7">
+    <if_sid>120700</if_sid>
+    <field name="log" type="pcre2">authorize_flow:\s*DENY</field>
+    <description>Twingate: Access DENIED — $(log)</description>
+    <group>twingate,access_control,access_denied,</group>
+  </rule>
+
+  <!-- ============================================================ -->
+  <!-- Error / Warning Conditions                                   -->
+  <!-- ============================================================ -->
+
+  <!-- Any WARN-level log -->
+  <rule id="120740" level="4">
+    <if_sid>120700</if_sid>
+    <field name="log" type="pcre2">^\[WARN\]</field>
+    <description>Twingate: Warning — $(log)</description>
+    <group>twingate,warning,</group>
+  </rule>
+
+  <!-- Any ERROR-level log -->
+  <rule id="120741" level="7">
+    <if_sid>120700</if_sid>
+    <field name="log" type="pcre2">^\[ERROR\]</field>
+    <description>Twingate: Error — $(log)</description>
+    <group>twingate,error,</group>
+  </rule>
+
+  <!-- Any FATAL-level log -->
+  <rule id="120742" level="12">
+    <if_sid>120700</if_sid>
+    <field name="log" type="pcre2">^\[FATAL\]</field>
+    <description>Twingate: FATAL error — connector may be crashing</description>
+    <group>twingate,critical,</group>
+  </rule>
+
+  <!-- HTTP request failure to control plane -->
+  <rule id="120743" level="6">
+    <if_sid>120700</if_sid>
+    <field name="log" type="pcre2">handle_response:.*(?:4\d{2}|5\d{2})</field>
+    <description>Twingate: HTTP error response from control plane</description>
+    <group>twingate,error,network_error,</group>
+  </rule>
+
+  <!-- ============================================================ -->
+  <!-- Composite / Frequency Rules                                  -->
+  <!-- ============================================================ -->
+
+  <!-- Multiple STUN failures — sustained network problem -->
+  <rule id="120745" level="7" frequency="5" timeframe="120">
+    <if_matched_sid>120722</if_matched_sid>
+    <description>Twingate: Multiple STUN failures (5+ in 2min) — sustained network issue</description>
+    <group>twingate,stun,network_error,</group>
+  </rule>
+
+  <!-- Multiple errors — connector instability -->
+  <rule id="120746" level="10" frequency="5" timeframe="300">
+    <if_matched_sid>120741</if_matched_sid>
+    <description>Twingate: Multiple errors (5+ in 5min) — connector may be unstable</description>
+    <group>twingate,error,</group>
+  </rule>
+
+  <!-- Repeated state transitions — connector flapping -->
+  <rule id="120747" level="8" frequency="6" timeframe="300">
+    <if_matched_sid>120703</if_matched_sid>
+    <description>Twingate: Connector flapping — left Ready state 6+ times in 5min</description>
+    <group>twingate,state_change,flapping,</group>
+  </rule>
+
+</group>

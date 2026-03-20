@@ -41,6 +41,61 @@ scrape_configs:
   #   static_configs:
   #     - targets: ['host.docker.internal:9100']
 
+  # ===========================================================================
+  # Infrastructure Node Exporters
+  # ===========================================================================
+  - job_name: 'twingate-ztna'
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['192.168.68.10:9100']
+        labels:
+          instance_name: 'twingate-ztna-01'
+          role: 'ztna-connector'
+      - targets: ['192.168.68.11:9100']
+        labels:
+          instance_name: 'twingate-ztna-02'
+          role: 'ztna-connector'
+
+  - job_name: 'unifi-controller'
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['192.168.69.10:9100']
+        labels:
+          instance_name: 'unifi-controller'
+          role: 'network-management'
+
+  - job_name: 'Cryptocurrency'
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['192.168.208.10:9100']
+        labels:
+          instance_name: 'pinodexmr'
+          role: 'cryptocurrency-node'
+
+  - job_name: 'AI'
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['192.168.214.10:9100']
+        labels:
+          instance_name: 'llm1'
+          role: 'ai-inference'
+
+  - job_name: 'Security'
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['192.168.210.100:9100']
+        labels:
+          instance_name: 'logarithmic'
+          role: 'siem-server'
+
+  - job_name: 'Computers'
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['192.168.201.20:9100']
+        labels:
+          instance_name: 'project-nos'
+          role: 'workstation'
+
   # Uncomment if you add cAdvisor:
   # - job_name: 'cadvisor'
   #   static_configs:
