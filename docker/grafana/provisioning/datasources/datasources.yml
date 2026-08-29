@@ -8,14 +8,20 @@
 #   1. OpenSearch — Suricata IDS/IPS indices (suricata-*)
 #   2. OpenSearch — Syslog indices (syslog-*, pfsense-*, unifi-*)
 #   3. OpenSearch — pfBlockerNG indices (pfblockerng-*)
-#   4. InfluxDB — pfSense/Telegraf/UniFi metrics
-#   5. Prometheus — Infrastructure metrics
+#   4. OpenSearch — Wazuh alerts (wazuh-alerts-* on the Wazuh indexer)
+#   5. OpenSearch — CrowdSec events (crowdsec-events-*)
+#   6. InfluxDB — pfSense/Telegraf/UniFi metrics
+#   7. Prometheus — Infrastructure metrics
+#
+# $WAZUH_INDEXER_PASSWORD is interpolated by Grafana from the container
+# environment (set in docker-compose.yml from .env).
 
 apiVersion: 1
 
 datasources:
   # --- OpenSearch: Suricata IDS/IPS ---
   - name: OpenSearch-Suricata
+    uid: opensearch-suricata
     type: grafana-opensearch-datasource
     access: proxy
     url: http://opensearch-hot:9200
@@ -30,6 +36,7 @@ datasources:
 
   # --- OpenSearch: Syslog / pfSense / UniFi ---
   - name: OpenSearch-Syslog
+    uid: opensearch-syslog
     type: grafana-opensearch-datasource
     access: proxy
     url: http://opensearch-hot:9200
@@ -41,6 +48,7 @@ datasources:
 
   # --- OpenSearch: pfBlockerNG ---
   - name: OpenSearch-pfBlockerNG
+    uid: opensearch-pfblockerng
     type: grafana-opensearch-datasource
     access: proxy
     url: http://opensearch-hot:9200
@@ -50,8 +58,38 @@ datasources:
       version: "2.19.0"
       flavor: "opensearch"
 
+  # --- OpenSearch: Wazuh alerts (dedicated Wazuh indexer, self-signed TLS) ---
+  - name: OpenSearch-Wazuh
+    uid: opensearch-wazuh
+    type: grafana-opensearch-datasource
+    access: proxy
+    url: https://wazuh-indexer:9200
+    database: "wazuh-alerts-*"
+    basicAuth: true
+    basicAuthUser: admin
+    secureJsonData:
+      basicAuthPassword: $WAZUH_INDEXER_PASSWORD
+    jsonData:
+      timeField: "@timestamp"
+      version: "2.19.0"
+      flavor: "opensearch"
+      tlsSkipVerify: true
+
+  # --- OpenSearch: CrowdSec events ---
+  - name: OpenSearch-CrowdSec
+    uid: opensearch-crowdsec
+    type: grafana-opensearch-datasource
+    access: proxy
+    url: http://opensearch-hot:9200
+    database: "crowdsec-events-*"
+    jsonData:
+      timeField: "@timestamp"
+      version: "2.19.0"
+      flavor: "opensearch"
+
   # --- InfluxDB: pfSense + Telegraf + UniFi Poller ---
   - name: InfluxDB
+    uid: influxdb-pfsense
     type: influxdb
     access: proxy
     url: http://influxdb:8086
@@ -61,6 +99,7 @@ datasources:
 
   # --- InfluxDB: UniFi Poller ---
   - name: InfluxDB-UniFi
+    uid: influxdb-unifi
     type: influxdb
     access: proxy
     url: http://influxdb:8086
@@ -70,6 +109,7 @@ datasources:
 
   # --- Prometheus ---
   - name: Prometheus
+    uid: prometheus
     type: prometheus
     access: proxy
     url: http://prometheus:9090

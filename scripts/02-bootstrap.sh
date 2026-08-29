@@ -151,6 +151,11 @@ echo -e "${GREEN}✓ Deployment directory: ${DEPLOY_DIR}${NC}"
 # ── Firewall ──────────────────────────────────────────────────────────────────
 echo -e "${YELLOW}[6/7] Configuring firewall...${NC}"
 
+# WARNING: Docker-published ports BYPASS UFW — the DOCKER iptables chain is
+# evaluated before ufw's rules, so any port published in docker-compose.yml is
+# reachable regardless of these rules. Internal-only ports are bound to
+# 127.0.0.1 in docker-compose.yml instead; the ufw rules below cover the
+# intentionally exposed services.
 apt install -y ufw
 
 # SSH (critical — don't lock yourself out!)
@@ -164,6 +169,7 @@ ufw allow 8086/tcp comment "InfluxDB"
 ufw allow 9090/tcp comment "Prometheus"
 
 # Wazuh
+ufw allow 1514/tcp comment "Wazuh agent (TCP)"
 ufw allow 1514/udp comment "Wazuh agent"
 ufw allow 1515/tcp comment "Wazuh agent enrollment"
 ufw allow 55000/tcp comment "Wazuh API"

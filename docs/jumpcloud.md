@@ -73,7 +73,7 @@ export JUMPCLOUD_API_KEY=your-key
 export JUMPCLOUD_ORG_ID=             # optional
 export JUMPCLOUD_POLL_SECONDS=300
 export JUMPCLOUD_SERVICES=all
-export JUMPCLOUD_OUTPUT=/var/log/jumpcloud_events.jsonl
+export JUMPCLOUD_OUTPUT_FILE=/var/log/jumpcloud_events.jsonl
 python -m jumpcloud_wazuh_bridge --once
 ```
 
@@ -124,6 +124,9 @@ Restart=on-failure
 RestartSec=30
 User=jumpcloud
 Environment=JUMPCLOUD_API_KEY=changeme
+# The bridge defaults to /tmp paths — pin them so Wazuh's <localfile> works
+Environment=JUMPCLOUD_OUTPUT_FILE=/var/log/jumpcloud_events.jsonl
+Environment=JUMPCLOUD_STATE_FILE=/var/lib/jumpcloud_bridge/cursor.json
 
 [Install]
 WantedBy=multi-user.target
@@ -144,10 +147,10 @@ ExecStart=/usr/bin/doppler run -- python3 -m jumpcloud_wazuh_bridge
 | `JUMPCLOUD_API_KEY` | *(required)* | Read-only API key |
 | `JUMPCLOUD_BASE_URL` | `https://api.jumpcloud.com` | API base URL |
 | `JUMPCLOUD_ORG_ID` | *(empty)* | Multi-tenant org ID |
-| `JUMPCLOUD_LOOKBACK_MINUTES` | `10` | Initial lookback window |
+| `JUMPCLOUD_LOOKBACK_MINUTES` | `15` | Initial lookback window |
 | `JUMPCLOUD_POLL_SECONDS` | `300` | Polling interval |
-| `JUMPCLOUD_OUTPUT` | `/var/log/jumpcloud_events.jsonl` | JSONL output path |
-| `JUMPCLOUD_STATE` | `/var/lib/jumpcloud_bridge/cursor.json` | Cursor state file |
+| `JUMPCLOUD_OUTPUT_FILE` | `/tmp/jumpcloud-events.jsonl` | JSONL output path |
+| `JUMPCLOUD_STATE_FILE` | `/tmp/jumpcloud-cursor.json` | Cursor state file |
 | `JUMPCLOUD_SERVICES` | `all` | Comma-separated: directory,sso,radius,ldap,systems,software,mdm,alerts,all |
 | `JUMPCLOUD_PAGE_LIMIT` | `1000` | Events per API page (max 10000) |
 
@@ -222,7 +225,7 @@ The `jumpcloud_security.json` dashboard includes:
 
 ### Duplicate events
 
-The bridge persists a cursor in `JUMPCLOUD_STATE`. If the state file is
+The bridge persists a cursor in `JUMPCLOUD_STATE_FILE`. If the state file is
 deleted, events since the last `JUMPCLOUD_LOOKBACK_MINUTES` window may repeat.
 This is harmless — Wazuh will index duplicates but rule frequency counts
 reset each analysis cycle.

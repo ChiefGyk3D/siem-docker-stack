@@ -8,3 +8,9 @@ http.host: "0.0.0.0"
 pipeline.workers: 4
 pipeline.batch.size: 250
 pipeline.batch.delay: 50
+
+# Durability — persist the in-flight queue to disk (survives restarts via the
+# /data/hot/logstash bind mount) and keep events that fail to index in a DLQ.
+queue.type: persisted
+queue.max_bytes: 1gb
+dead_letter_queue.enable: true

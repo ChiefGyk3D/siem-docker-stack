@@ -236,7 +236,7 @@ RULES = [
     opensearch_rule(
         title="Wazuh Agent Disconnected",
         group="SIEM — Wazuh",
-        query='rule.groups:"wazuh" AND rule.id:"503"',
+        query='rule.groups:"wazuh" AND rule.id:"504"',
         ds_uid=DS_WAZUH,
         window_secs=600,
         threshold=0,
@@ -245,7 +245,7 @@ RULES = [
         annotations={
             "summary": "Wazuh agent disconnected",
             "description": (
-                "Rule 503 (agent disconnected) fired in the last 10 minutes. "
+                "Rule 504 (agent disconnected) fired in the last 10 minutes. "
                 "Check Agent Health dashboard — is the host up? Is ossec-agentd running?"
             ),
         },

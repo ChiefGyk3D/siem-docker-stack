@@ -4,7 +4,8 @@
 
 ### Docker Health Checks
 
-All services have built-in Docker health checks. Monitor them with:
+The OpenSearch hot and warm nodes have built-in Docker health checks (other
+services currently rely on `restart: unless-stopped`). Monitor status with:
 
 ```bash
 docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
@@ -13,6 +14,13 @@ docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
 ### Recommended Systemd Timers
 
 Set up automated maintenance on your SIEM server:
+
+> **⚠️ Pin image versions before enabling the update timer.** Several images
+> default to floating tags (`latest`), so an unattended weekly
+> `docker compose pull && up -d` can silently apply breaking major upgrades.
+> Set the `GRAFANA_VERSION`, `PROMETHEUS_VERSION`, `SYSLOG_NG_VERSION`,
+> `UNPOLLER_VERSION`, and `CROWDSEC_VERSION` vars in `.env` (see
+> `.env.example`) to specific versions first.
 
 ```bash
 # Create a weekly Docker image update timer

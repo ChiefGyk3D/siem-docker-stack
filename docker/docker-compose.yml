@@ -64,10 +64,13 @@ services:
     volumes:
       - /data/hot/opensearch:/usr/share/opensearch/data
       - ./opensearch/opensearch-hot.yml:/usr/share/opensearch/config/opensearch.yml:ro
+    # NOTE: Docker-published ports bypass UFW (the DOCKER iptables chain is
+    # evaluated before ufw rules) — cluster-internal ports are bound to
+    # loopback so they are not reachable from the network.
     ports:
       - "${OPENSEARCH_PORT:-9200}:9200"
-      - "9300:9300"
-      - "9600:9600"
+      - "127.0.0.1:9300:9300"
+      - "127.0.0.1:9600:9600"
     networks:
       siem-net:
         ipv4_address: 172.20.0.10
@@ -108,7 +111,7 @@ services:
       - ./opensearch/opensearch-warm.yml:/usr/share/opensearch/config/opensearch.yml:ro
     ports:
       - "9201:9200"
-      - "9301:9300"
+      - "127.0.0.1:9301:9300"
     networks:
       siem-net:
         ipv4_address: 172.20.0.11
@@ -162,7 +165,7 @@ services:
 # =============================================================================
 
   grafana:
-    image: grafana/grafana-oss:latest
+    image: grafana/grafana-oss:${GRAFANA_VERSION:-latest}
     container_name: grafana
     restart: unless-stopped
     depends_on:
@@ -173,6 +176,8 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASS:-changeme}
       - GF_INSTALL_PLUGINS=grafana-opensearch-datasource,grafana-clock-panel,grafana-worldmap-panel
       - GF_SERVER_ROOT_URL=http://${SIEM_HOST:-localhost}:3000
+      # Used by datasource provisioning ($WAZUH_INDEXER_PASSWORD interpolation)
+      - WAZUH_INDEXER_PASSWORD=${WAZUH_INDEXER_PASSWORD:-SecretPassword}
     volumes:
       - /data/warm/grafana:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
@@ -218,7 +223,7 @@ services:
 # =============================================================================
 
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:${PROMETHEUS_VERSION:-latest}
     container_name: prometheus
     restart: unless-stopped
     volumes:
@@ -234,6 +239,24 @@ services:
     networks:
       - siem-net
     user: "65534"
+
+# =============================================================================
+# CADVISOR — Docker Container Metrics
+# =============================================================================
+# Feeds the "Docker Container Restart Loop" alert and the Docker Container
+# Monitoring dashboard. Scraped by Prometheus at cadvisor:8080 (no host port).
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: cadvisor
+    restart: unless-stopped
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+    networks:
+      - siem-net
 
 # =============================================================================
 # WAZUH — EDR/SIEM
@@ -274,6 +297,7 @@ services:
       - ./wazuh/certs/filebeat.pem:/etc/ssl/filebeat.pem:ro
       - ./wazuh/certs/filebeat-key.pem:/etc/ssl/filebeat-key.pem:ro
     ports:
+      - "${WAZUH_MANAGER_PORT:-1514}:1514/tcp"
       - "${WAZUH_MANAGER_PORT:-1514}:1514/udp"
       - "1515:1515"
       - "${WAZUH_API_PORT:-55000}:55000"
@@ -334,7 +358,7 @@ services:
 # See: https://github.com/unpoller/unpoller
 
   unifi-poller:
-    image: ghcr.io/unpoller/unpoller:latest
+    image: ghcr.io/unpoller/unpoller:${UNPOLLER_VERSION:-latest}
     container_name: unifi-poller
     restart: unless-stopped
     depends_on:
@@ -356,7 +380,7 @@ services:
 # =============================================================================
 
   syslog-ng:
-    image: balabit/syslog-ng:latest
+    image: balabit/syslog-ng:${SYSLOG_NG_VERSION:-latest}
     container_name: syslog-ng
     restart: unless-stopped
     depends_on:
@@ -375,7 +399,7 @@ services:
 # =============================================================================
 
   crowdsec:
-    image: crowdsecurity/crowdsec:latest
+    image: crowdsecurity/crowdsec:${CROWDSEC_VERSION:-latest}
     container_name: crowdsec
     restart: unless-stopped
     profiles: ["crowdsec"]

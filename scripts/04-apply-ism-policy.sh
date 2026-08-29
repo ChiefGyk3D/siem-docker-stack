@@ -87,7 +87,7 @@ echo -e "${YELLOW}[4/5] Applying Syslog index template...${NC}"
 curl -sf -X PUT "${OPENSEARCH_URL}/_index_template/syslog-template" \
     -H 'Content-Type: application/json' \
     -d '{
-  "index_patterns": ["syslog-*", "pfsense-*", "unifi-syslog-*"],
+  "index_patterns": ["syslog-*", "pfsense-*", "unifi-syslog-*", "crowdsec-events-*"],
   "template": {
     "settings": {
       "number_of_shards": 1,
@@ -132,7 +132,8 @@ echo -e "${GREEN}╔════════════════════
 echo -e "${GREEN}║  ISM Policy & Templates Applied          ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════╝${NC}"
 echo ""
-echo "New indices matching suricata-*, syslog-*, pfblockerng-* will:"
+echo "New indices matching suricata-*, syslog-*, pfblockerng-*, pfsense-*,"
+echo "unifi-syslog-*, crowdsec-events-* will:"
 echo "  1. Start on HOT tier (NVMe) — opensearch-hot node"
 echo "  2. Move to WARM tier (SATA) after 30 days — opensearch-warm node"
 echo "  3. Force-merge to 1 segment on WARM for read performance"

@@ -53,7 +53,7 @@ A production-ready, fully Dockerized SIEM/SOC stack with **hot/warm tiering** fo
 - **15+ Services** — OpenSearch (2-node hot/warm), Logstash, Grafana, InfluxDB, Prometheus, Wazuh (Manager + Indexer + Dashboard), Syslog-ng, UniFi Poller, N8N, Portainer
 - **N8N SOAR** — 3 automation workflows: Wazuh alert triage, Grafana alert router, CrowdSec enrichment — all route to Discord with severity-based filtering and 90s dedup
 - **VirusTotal Caching** — SQLite-backed cache in the Wazuh integration layer. Verdict-based TTLs (clean 7d, detected 30d) eliminate redundant API calls for repeated FIM hashes
-- **Pre-built Dashboards** — 19 dashboards covering Wazuh security/compliance/agents, SIEM overview, CrowdSec, JumpCloud IdP, Suricata IDS, pfSense firewall, UniFi network, Docker, Prometheus, Twingate ZTNA
+- **Pre-built Dashboards** — 17 dashboards covering Wazuh security/compliance/agents, SIEM overview, CrowdSec, JumpCloud IdP, Docker, Prometheus, NVIDIA GPU, Twingate ZTNA
 - **CrowdSec Integration** — Edge enforcement on pfSense, Wazuh decoding/alerting, Grafana dashboards, n8n enrichment with OpenSearch context lookups
 - **Automated Setup** — Numbered scripts (01-06) walk through disk formatting → system tuning → deployment → verification
 - **ISM Lifecycle** — Index State Management handles the hot→warm→delete lifecycle automatically
@@ -187,6 +187,10 @@ bash scripts/04-apply-ism-policy.sh http://localhost:9200
 
 # 8. Verify everything is healthy
 bash scripts/05-verify.sh localhost
+
+# 9. Import the Grafana dashboards (file-based provisioning is not wired up —
+#    dashboards are deployed via the Grafana API)
+python3 scripts/deploy-dashboards.py
 ```
 
 ### After Installation
@@ -239,15 +243,19 @@ Pre-built Grafana dashboards are included in the `dashboards/` directory:
 | `crowdsec_overview.json` | CrowdSec ban decisions, bouncer events, LAPI alerts, source analysis |
 | `jumpcloud_security.json` | JumpCloud IdP Security — auth events, service breakdown, user activity, MFA tracking |
 | `docker_container_monitoring.json` | Container CPU, memory, network, disk I/O via cAdvisor/Prometheus |
+| `nvidia_gpu_monitoring.json` | NVIDIA GPU utilization, temperature, memory via DCGM/nvidia_gpu_exporter |
 | `prometheus_stats.json` | Prometheus self-monitoring and scrape targets |
 | `datasources_reference.json` | Quick reference for all configured datasources |
-| `pfsense_firewall.json` | pfSense firewall rules, traffic by interface/protocol, blocked connections, pfBlockerNG |
-| `suricata_ids.json` | Suricata IDS alerts, severity breakdown, GeoIP map, top signatures, protocol analysis |
-| `unifi_network.json` | UniFi AP/switch metrics, client count, throughput, errors, rogue APs |
 
 ### Importing Dashboards
 
-Dashboards are automatically provisioned via Grafana's provisioning system. If you need to import manually:
+File-based dashboard provisioning is not wired up — import via the deploy script:
+
+```bash
+python3 scripts/deploy-dashboards.py
+```
+
+Or manually via the Grafana API:
 
 ```bash
 # Via Grafana API
@@ -454,9 +462,13 @@ siem-docker-stack/
 │   ├── 04-apply-ism-policy.sh            # Apply ISM policy & templates
 │   ├── 05-verify.sh                      # Health check all services
 │   ├── 06-generate-wazuh-certs.sh        # Generate Wazuh TLS certs
+│   ├── 08-crowdsec-smoketest.sh          # CrowdSec integration smoke test
+│   ├── 09-test-crowdsec-pfsense-ingest.sh # Replay pfSense CrowdSec fixture logs
 │   ├── deploy-n8n-soar.sh               # Deploy N8N workflows + Grafana alerts
 │   ├── deploy-n8n-grafana-router.py      # Deploy Grafana alert router to N8N
-│   └── deploy-grafana-alerts.py          # Deploy Grafana SIEM alert rules
+│   ├── deploy-grafana-alerts.py          # Deploy Grafana SIEM alert rules
+│   ├── deploy-dashboards.py              # Import all dashboards via Grafana API
+│   └── deploy-crowdsec-dashboard.py      # Import the CrowdSec dashboard
 ├── n8n/
 │   ├── grafana-alert-router.json         # N8N workflow: Grafana → Discord
 │   ├── wazuh-alert-triage.json           # N8N workflow: Wazuh → severity triage → Discord
@@ -485,10 +497,8 @@ siem-docker-stack/
 │   ├── twingate_ztna.json                  # Twingate ZTNA connector health & access control
 │   ├── crowdsec_overview.json              # CrowdSec decisions & bouncer activity
 │   ├── jumpcloud_security.json             # JumpCloud IdP Security
-│   ├── datasources_reference.json         # Datasource UID reference
-│   ├── pfsense_firewall.json
-│   ├── suricata_ids.json
-│   └── unifi_network.json
+│   ├── nvidia_gpu_monitoring.json          # NVIDIA GPU metrics
+│   └── datasources_reference.json         # Datasource UID reference
 ├── docs/
 │   ├── roadmap.md                        # Phased development roadmap with status badges
 │   ├── detection-ownership.md            # Alert rule → workflow mapping reference
@@ -545,9 +555,9 @@ siem-docker-stack/
 
 ## Roadmap
 
-- [x] **Suricata Dashboard** — IDS/IPS alerts with GeoIP map, severity breakdown, protocol analysis
-- [x] **pfSense Firewall Dashboard** — Firewall rule visualization, traffic analysis, pfBlockerNG stats
-- [x] **UniFi Network Dashboard** — AP/switch metrics, client monitoring, throughput analysis
+- [ ] **Suricata Dashboard** — IDS/IPS alerts with GeoIP map, severity breakdown, protocol analysis
+- [ ] **pfSense Firewall Dashboard** — Firewall rule visualization, traffic analysis, pfBlockerNG stats
+- [ ] **UniFi Network Dashboard** — AP/switch metrics, client monitoring, throughput analysis
 - [x] **SIEM Overview Dashboard** — Unified cross-source threat overview with correlation
 - [x] **Wazuh Agent Health Dashboard** — Agent status, SCA compliance, Docker events, VirusTotal, O365
 - [x] **Wazuh Compliance Dashboard** — PCI DSS, NIST 800-53, HIPAA, GDPR compliance panels
@@ -556,7 +566,7 @@ siem-docker-stack/
 - [x] **Dashboard Templating** — All dashboards use datasource template variables (portable across instances)
 - [x] **Password Management** — Interactive script to change all default passwords safely
 - [x] **N8N SOAR Integration** — Automated alert triage and Discord notification workflows via N8N webhooks
-- [x] **Alerting** — 7 Grafana alert rules for Wazuh, Suricata, pfSense, and Docker events
+- [x] **Alerting** — 8 Grafana alert rules for Wazuh, Suricata, pfSense, CrowdSec, and Docker events
 - [x] **CrowdSec Integration** — CrowdSec overview dashboard, alert rules, pfSense deployment
 - [x] **SIEM+ Overview** — Extended overview dashboard with CrowdSec, JumpCloud, and Office 365 panels
 - [x] **JumpCloud Bridge** — Optional [jumpcloud-wazuh-bridge](https://github.com/ChiefGyk3D/jumpcloud-wazuh-bridge) with Wazuh decoders/rules in this repo

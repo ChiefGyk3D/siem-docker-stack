@@ -2,6 +2,8 @@
 
 Phased plan for Wazuh noise reduction, JumpCloud IdP integration, SOAR expansion, VirusTotal caching, N8N automations, threat intelligence, DFIR, and SOC maturity.
 
+> **Strategy layer:** [game-plan.md](game-plan.md) (2026-08) is the cross-stack plan covering this repo, pfsense-siem-stack, and jumpcloud-wazuh-bridge. It inserts a **Phase F — Foundation** (SIEM self-defense: OpenSearch auth/TLS, Doppler, independent alerting, snapshots/restore, reproducible n8n, CI) ahead of the feature phases below, and maps every GitHub issue. Read it first when deciding what to build next.
+
 > **GitHub Issues:** [#1](https://github.com/ChiefGyk3D/siem-docker-stack/issues/1) N8N Workflows | [#2](https://github.com/ChiefGyk3D/siem-docker-stack/issues/2) Velociraptor | [#3](https://github.com/ChiefGyk3D/siem-docker-stack/issues/3) VT Cache | [#4](https://github.com/ChiefGyk3D/siem-docker-stack/issues/4) Doppler | [#5](https://github.com/ChiefGyk3D/siem-docker-stack/issues/5) MISP | [#6](https://github.com/ChiefGyk3D/siem-docker-stack/issues/6) SOC Enhancement | [#7](https://github.com/ChiefGyk3D/siem-docker-stack/issues/7) Zeek | Twingate ZTNA
 
 > **Status key:** ✅ DEPLOYED | 🚧 IN PROGRESS | 📋 PLANNED | ❌ REMOVED

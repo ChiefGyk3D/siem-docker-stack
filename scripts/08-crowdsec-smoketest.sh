@@ -13,8 +13,15 @@ GRAFANA_URL="${GRAFANA_URL:-http://localhost:3000}"
 GRAFANA_USER="${GRAFANA_USER:-admin}"
 GRAFANA_PASS="${GRAFANA_PASS:-changeme}"
 
-IDX="crowdsec-events-$(date +%Y.%m.%d)"
+# Use a dedicated smoketest index so the live crowdsec-events-YYYY.MM.dd
+# indices are never polluted; it is deleted again on exit.
+IDX="crowdsec-events-smoketest"
 DOC_ID="crowdsec-smoke-$(date +%s)"
+
+cleanup() {
+  curl -sf -X DELETE "${OPENSEARCH_URL}/${IDX}" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
 
 payload=$(cat <<JSON
 {
