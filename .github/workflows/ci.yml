@@ -1,0 +1,104 @@
+# =============================================================================
+# CI — validate configs, rules, scripts, and Python tooling
+# =============================================================================
+# Jobs:
+#   - compose:    docker compose config syntax check
+#   - prometheus: promtool check config (with example file_sd targets staged)
+#   - logstash:   pipeline syntax check (--config.test_and_exit)
+#   - wazuh:      XML well-formedness + custom rule ID range/duplicate check
+#   - shellcheck: error-severity lint over shell scripts
+#   - python:     pytest suite (alert rules, VT cache, dashboard/workflow JSON)
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  compose:
+    name: Docker Compose validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate docker-compose.yml
+        working-directory: docker
+        run: docker compose -f docker-compose.yml config --quiet
+
+  prometheus:
+    name: Prometheus config check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Stage config with example file_sd targets
+        run: |
+          stage=$(mktemp -d)
+          cp -r docker/prometheus/. "$stage/"
+          cd "$stage/targets"
+          for f in *.example.json; do
+            cp "$f" "${f%.example.json}.json"
+          done
+          echo "STAGE=$stage" >> "$GITHUB_ENV"
+      - name: promtool check config
+        run: |
+          docker run --rm --entrypoint promtool \
+            -v "$STAGE":/etc/prometheus:ro \
+            prom/prometheus:v2.53.0 \
+            check config /etc/prometheus/prometheus.yml
+
+  logstash:
+    name: Logstash pipeline check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: logstash --config.test_and_exit
+        run: |
+          docker run --rm \
+            -v "$PWD/docker/logstash/pipeline":/usr/share/logstash/pipeline:ro \
+            -v "$PWD/docker/logstash/logstash.yml":/usr/share/logstash/config/logstash.yml:ro \
+            opensearchproject/logstash-oss-with-opensearch-output-plugin:8.9.0 \
+            logstash --config.test_and_exit
+
+  wazuh:
+    name: Wazuh rules & decoders
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install xmllint
+        run: sudo apt-get update -q && sudo apt-get install -y -q libxml2-utils
+      - name: XML well-formedness (files are multi-root fragments — wrap them)
+        run: |
+          status=0
+          for f in $(find wazuh -name '*.xml'); do
+            if { echo '<ossec_wrapper>'; cat "$f"; echo '</ossec_wrapper>'; } | xmllint --noout -; then
+              echo "OK   $f"
+            else
+              echo "FAIL $f"
+              status=1
+            fi
+          done
+          exit $status
+      - name: Rule ID range & duplicate check
+        run: python3 scripts/check-wazuh-rule-ids.py wazuh
+
+  shellcheck:
+    name: ShellCheck (errors)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck --severity=error
+        run: shellcheck --severity=error scripts/*.sh change-passwords.sh
+
+  python:
+    name: Python tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install test dependencies
+        run: pip install pytest requests
+      - name: pytest
+        run: pytest tests/python -q

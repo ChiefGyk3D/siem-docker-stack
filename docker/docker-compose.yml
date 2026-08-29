@@ -229,6 +229,7 @@ services:
     volumes:
       - /data/hot/prometheus:/prometheus
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/targets:/etc/prometheus/targets:ro
     ports:
       - "${PROMETHEUS_PORT:-9090}:9090"
     command:
