@@ -52,7 +52,7 @@ Phase 2 SOAR workflows ([#1](https://github.com/ChiefGyk3D/siem-docker-stack/iss
 |-------|--------|------|
 | [#1](https://github.com/ChiefGyk3D/siem-docker-stack/issues/1) n8n workflows (Discord/Matrix) | Open | Blocked on F5 (reproducible n8n); alert-rule correctness fixes landed in review PR |
 | [#2](https://github.com/ChiefGyk3D/siem-docker-stack/issues/2) Velociraptor | Open | After Phase F; n8n integration needs Phase 2 |
-| [#3](https://github.com/ChiefGyk3D/siem-docker-stack/issues/3) VT caching | **Done — close it** | Shipped as Phase 0B (SQLite TTL cache in `wazuh/integrations/virustotal.py`) |
+| [#3](https://github.com/ChiefGyk3D/siem-docker-stack/issues/3) VT caching | **Closed (completed)** | Shipped as Phase 0B (SQLite TTL cache in `wazuh/integrations/virustotal.py`) |
 | [#4](https://github.com/ChiefGyk3D/siem-docker-stack/issues/4) Doppler | Open | Promoted to F2; the bridge repo already implements the Doppler pattern to copy |
 | [#5](https://github.com/ChiefGyk3D/siem-docker-stack/issues/5) MISP | Open | After Phase F; feeds Wazuh + n8n enrichment; coordinate with pfSense threat-intel plans |
 | [#6](https://github.com/ChiefGyk3D/siem-docker-stack/issues/6) SOC enhancement | Open | Its own precondition ("stable foundation") = Phase F + Phase 0; then DFIR-IRIS vs TheHive eval |
