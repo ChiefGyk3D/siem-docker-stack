@@ -1,0 +1,9 @@
+[
+  {
+    "targets": ["192.0.2.80:9835"],
+    "labels": {
+      "instance_name": "streaming-pc",
+      "gpu_role": "streaming"
+    }
+  }
+]

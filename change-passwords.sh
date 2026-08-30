@@ -16,7 +16,6 @@ set -e
 
 COMPOSE_DIR="/opt/siem"
 COMPOSE_FILE="${COMPOSE_DIR}/docker-compose.yml"
-DATASOURCES_FILE="${COMPOSE_DIR}/grafana/provisioning/datasources/datasources.yml"
 WAZUH_YML_PATH="/usr/share/wazuh-dashboard/data/wazuh/config/wazuh.yml"
 HASH_TOOL="/usr/share/wazuh-indexer/plugins/opensearch-security/tools/hash.sh"
 SEC_TOOL="/usr/share/wazuh-indexer/plugins/opensearch-security/tools/securityadmin.sh"
@@ -126,11 +125,9 @@ print('  internal_users.yml updated.')
     sed -i "s|DASHBOARD_PASSWORD=.*|DASHBOARD_PASSWORD=${COMPOSE_SAFE_INDEXER}|g" "$COMPOSE_FILE"
     echo "  docker-compose.yml updated."
 
-    # Update Grafana datasource provisioning (plain password, YAML handles it)
-    if [[ -f "$DATASOURCES_FILE" ]]; then
-        sed -i "s|basicAuthPassword: .*|basicAuthPassword: \"${INDEXER_PASS}\"|g" "$DATASOURCES_FILE"
-        echo "  Grafana datasources updated."
-    fi
+    # Grafana's Wazuh datasource reads $WAZUH_INDEXER_PASSWORD via provisioning
+    # env interpolation — the compose sed above rotates that env var too, and
+    # grafana is recreated below so provisioning picks up the new value.
 
     SERVICES_TO_RECREATE+=(wazuh-dashboard wazuh-manager grafana)
 fi
@@ -285,6 +282,7 @@ echo "  - If you use N8N webhooks, update the Wazuh"
 echo "    credentials in your N8N workflows."
 echo "  - Wazuh Dashboard may take ~30s to fully"
 echo "    reconnect to the API after a password change."
-echo "  - Grafana datasources are auto-updated for"
-echo "    Wazuh Indexer password changes."
+echo "  - The Grafana Wazuh datasource picks up new"
+echo "    Indexer passwords via env interpolation on"
+echo "    the grafana container recreate."
 echo "============================================"

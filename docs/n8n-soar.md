@@ -70,11 +70,11 @@ Routes Wazuh alerts by severity level with attack-type categorization:
 
 ## Grafana Alert Rules
 
-The deployment creates 7 alert rules across 4 rule groups:
+The deployment creates 8 alert rules across 5 rule groups:
 
 | Rule | Group | Severity | Condition |
 |------|-------|----------|-----------|
-| Wazuh Agent Disconnected | SIEM — Wazuh | Critical | rule.id 503, 5m evaluation |
+| Wazuh Agent Disconnected | SIEM — Wazuh | Critical | rule.id 504, 5m evaluation |
 | High-Severity Alert Burst | SIEM — Wazuh | Critical | >50 alerts with level ≥10 in 5m |
 | Authentication Failure Burst | SIEM — Wazuh | Critical | >20 auth failures in 5m |
 | Critical File Integrity Change | SIEM — Wazuh | Warning | FIM syscheck level ≥7 in 10m |

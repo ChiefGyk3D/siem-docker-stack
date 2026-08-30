@@ -1,0 +1,9 @@
+[
+  {
+    "targets": ["192.0.2.40:9100"],
+    "labels": {
+      "instance_name": "llm-server-01",
+      "role": "ai-inference"
+    }
+  }
+]

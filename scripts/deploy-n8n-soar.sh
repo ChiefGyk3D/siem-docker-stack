@@ -17,8 +17,10 @@ SIEM_SERVER="${1:-10.0.0.100}"
 N8N_IP="172.20.0.16"          # N8N on siem-net (use docker inspect to verify)
 N8N_PORT="80"
 N8N_BASE="http://${N8N_IP}:${N8N_PORT}"
-GRAFANA_URL="http://admin:changeme@localhost:3000"
-SSH_USER="${SIEM_USER:-siem}"
+GRAFANA_URL="${GRAFANA_URL:-http://localhost:3000}"
+GRAFANA_USER="${GRAFANA_USER:-admin}"
+GRAFANA_PASS="${GRAFANA_PASS:-changeme}"
+SSH_USER="${SIEM_USER:-$(whoami)}"
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 N8N_DIR="${SCRIPT_DIR}/n8n"
 
@@ -30,26 +32,61 @@ if [[ -z "${N8N_API_KEY:-}" ]]; then
 fi
 
 # Grafana alert folder — create this in Grafana UI first, then copy the UID
-ALERT_FOLDER_UID="${ALERT_FOLDER_UID:-YOUR_ALERT_FOLDER_UID}"  # "SIEM Alerts"
+ALERT_FOLDER_UID="${ALERT_FOLDER_UID:-}"  # "SIEM Alerts"
+
+# Datasource UIDs — same env vars as deploy-grafana-alerts.py.
+# Find these in Grafana → Connections → Data Sources → (select) → URL contains the UID
+DS_WAZUH="${DS_WAZUH:-}"
+DS_SURICATA="${DS_SURICATA:-}"
+DS_PROMETHEUS="${DS_PROMETHEUS:-}"
+
+MISSING_VARS=()
+[[ -z "$ALERT_FOLDER_UID" ]] && MISSING_VARS+=("ALERT_FOLDER_UID")
+[[ -z "$DS_WAZUH" ]] && MISSING_VARS+=("DS_WAZUH")
+[[ -z "$DS_SURICATA" ]] && MISSING_VARS+=("DS_SURICATA")
+[[ -z "$DS_PROMETHEUS" ]] && MISSING_VARS+=("DS_PROMETHEUS")
+if (( ${#MISSING_VARS[@]} > 0 )); then
+  echo "ERROR: required environment variables not set: ${MISSING_VARS[*]}"
+  echo "Set the Grafana alert folder UID and datasource UIDs before deploying,"
+  echo "e.g.: ALERT_FOLDER_UID=... DS_WAZUH=... DS_SURICATA=... DS_PROMETHEUS=... $0"
+  exit 1
+fi
 
 # ---------------------------------------------------------------------------
-# Helper
+# Helpers
 # ---------------------------------------------------------------------------
+# Secrets (N8N API key, Grafana credentials) are piped to the remote curl as a
+# curl config on stdin (-K -) so they never appear in the remote command line.
 n8n_api() {
   local method="$1" endpoint="$2"; shift 2
-  ssh "${SSH_USER}@${SIEM_SERVER}" "curl -sf -X ${method} \
-    -H 'Content-Type: application/json' \
-    -H 'X-N8N-API-KEY: ${N8N_API_KEY}' \
-    '${N8N_BASE}${endpoint}' \
-    $*" 2>/dev/null
+  printf 'header = "X-N8N-API-KEY: %s"\n' "${N8N_API_KEY}" | \
+    ssh "${SSH_USER}@${SIEM_SERVER}" "curl -sf -K - -X ${method} \
+      -H 'Content-Type: application/json' \
+      '${N8N_BASE}${endpoint}' \
+      $*" 2>/dev/null
+}
+
+# Like n8n_api, but reads the request body from stdin. The API key config and
+# the payload are streamed together; the remote side splits them into temp
+# files so neither the key nor the body land on the remote argv.
+n8n_api_stdin() {
+  local method="$1" endpoint="$2"
+  { printf 'header = "X-N8N-API-KEY: %s"\n' "${N8N_API_KEY}"; cat; } | \
+    ssh "${SSH_USER}@${SIEM_SERVER}" "tmp=\$(mktemp); IFS= read -r cfg; \
+      printf '%s\n' \"\$cfg\" > \"\$tmp\"; cat > \"\$tmp.d\"; \
+      curl -sf -K \"\$tmp\" -X ${method} \
+        -H 'Content-Type: application/json' \
+        '${N8N_BASE}${endpoint}' \
+        -d @\"\$tmp.d\"; rc=\$?; rm -f \"\$tmp\" \"\$tmp.d\"; exit \$rc" 2>/dev/null
 }
 
 grafana_api() {
   local method="$1" endpoint="$2"; shift 2
-  ssh "${SSH_USER}@${SIEM_SERVER}" "curl -sf -X ${method} \
-    -H 'Content-Type: application/json' \
-    '${GRAFANA_URL}${endpoint}' \
-    $*" 2>/dev/null
+  printf 'user = "%s:%s"\n' "${GRAFANA_USER}" "${GRAFANA_PASS}" | \
+    ssh "${SSH_USER}@${SIEM_SERVER}" "curl -sf -K - -X ${method} \
+      -H 'Content-Type: application/json' \
+      '${GRAFANA_URL}${endpoint}' \
+      $*" 2>/dev/null
 }
 
 echo "=== N8N SOAR & Grafana Alerting Deployment ==="
@@ -89,27 +126,18 @@ if [[ -f "${N8N_DIR}/wazuh-alert-triage.json" ]]; then
   WF_JSON=$(cat "${N8N_DIR}/wazuh-alert-triage.json")
   if [[ -n "$WAZUH_WF_ID" ]]; then
     echo "  Updating existing Wazuh SOAR workflow (ID: ${WAZUH_WF_ID})..."
-    echo "$WF_JSON" | ssh "${SSH_USER}@${SIEM_SERVER}" "curl -sf -X PUT \
-      -H 'Content-Type: application/json' \
-      -H 'X-N8N-API-KEY: ${N8N_API_KEY}' \
-      '${N8N_BASE}/api/v1/workflows/${WAZUH_WF_ID}' \
-      -d @-" >/dev/null && echo "  ✓ Updated" || echo "  ✗ Failed"
+    echo "$WF_JSON" | n8n_api_stdin PUT "/api/v1/workflows/${WAZUH_WF_ID}" \
+      >/dev/null && echo "  ✓ Updated" || echo "  ✗ Failed"
   else
     echo "  Creating Wazuh SOAR workflow..."
-    RESULT=$(echo "$WF_JSON" | ssh "${SSH_USER}@${SIEM_SERVER}" "curl -sf -X POST \
-      -H 'Content-Type: application/json' \
-      -H 'X-N8N-API-KEY: ${N8N_API_KEY}' \
-      '${N8N_BASE}/api/v1/workflows' \
-      -d @-" 2>/dev/null)
+    RESULT=$(echo "$WF_JSON" | n8n_api_stdin POST "/api/v1/workflows")
     WAZUH_WF_ID=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
     echo "  ✓ Created (ID: ${WAZUH_WF_ID})"
   fi
 
   # Activate the workflow
   if [[ -n "$WAZUH_WF_ID" ]]; then
-    ssh "${SSH_USER}@${SIEM_SERVER}" "curl -sf -X POST \
-      -H 'X-N8N-API-KEY: ${N8N_API_KEY}' \
-      '${N8N_BASE}/api/v1/workflows/${WAZUH_WF_ID}/activate'" >/dev/null 2>&1 && \
+    n8n_api POST "/api/v1/workflows/${WAZUH_WF_ID}/activate" >/dev/null 2>&1 && \
       echo "  ✓ Activated" || echo "  (already active or activation skipped)"
   fi
 fi
@@ -119,27 +147,18 @@ if [[ -f "${N8N_DIR}/grafana-alert-router.json" ]]; then
   WF_JSON=$(cat "${N8N_DIR}/grafana-alert-router.json")
   if [[ -n "$GRAFANA_WF_ID" ]]; then
     echo "  Updating existing Grafana Alert Router (ID: ${GRAFANA_WF_ID})..."
-    echo "$WF_JSON" | ssh "${SSH_USER}@${SIEM_SERVER}" "curl -sf -X PUT \
-      -H 'Content-Type: application/json' \
-      -H 'X-N8N-API-KEY: ${N8N_API_KEY}' \
-      '${N8N_BASE}/api/v1/workflows/${GRAFANA_WF_ID}' \
-      -d @-" >/dev/null && echo "  ✓ Updated" || echo "  ✗ Failed"
+    echo "$WF_JSON" | n8n_api_stdin PUT "/api/v1/workflows/${GRAFANA_WF_ID}" \
+      >/dev/null && echo "  ✓ Updated" || echo "  ✗ Failed"
   else
     echo "  Creating Grafana Alert Router workflow..."
-    RESULT=$(echo "$WF_JSON" | ssh "${SSH_USER}@${SIEM_SERVER}" "curl -sf -X POST \
-      -H 'Content-Type: application/json' \
-      -H 'X-N8N-API-KEY: ${N8N_API_KEY}' \
-      '${N8N_BASE}/api/v1/workflows' \
-      -d @-" 2>/dev/null)
+    RESULT=$(echo "$WF_JSON" | n8n_api_stdin POST "/api/v1/workflows")
     GRAFANA_WF_ID=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
     echo "  ✓ Created (ID: ${GRAFANA_WF_ID})"
   fi
 
   # Activate
   if [[ -n "$GRAFANA_WF_ID" ]]; then
-    ssh "${SSH_USER}@${SIEM_SERVER}" "curl -sf -X POST \
-      -H 'X-N8N-API-KEY: ${N8N_API_KEY}' \
-      '${N8N_BASE}/api/v1/workflows/${GRAFANA_WF_ID}/activate'" >/dev/null 2>&1 && \
+    n8n_api POST "/api/v1/workflows/${GRAFANA_WF_ID}/activate" >/dev/null 2>&1 && \
       echo "  ✓ Activated" || echo "  (already active or activation skipped)"
   fi
 fi
@@ -165,27 +184,18 @@ json.dump(wf, sys.stdout)
 ")
   if [[ -n "$CROWDSEC_WF_ID" ]]; then
     echo "  Updating existing CrowdSec SOAR workflow (ID: ${CROWDSEC_WF_ID})..."
-    echo "$WF_JSON" | ssh "${SSH_USER}@${SIEM_SERVER}" "curl -sf -X PUT \
-      -H 'Content-Type: application/json' \
-      -H 'X-N8N-API-KEY: ${N8N_API_KEY}' \
-      '${N8N_BASE}/api/v1/workflows/${CROWDSEC_WF_ID}' \
-      -d @-" >/dev/null && echo "  ✓ Updated" || echo "  ✗ Failed"
+    echo "$WF_JSON" | n8n_api_stdin PUT "/api/v1/workflows/${CROWDSEC_WF_ID}" \
+      >/dev/null && echo "  ✓ Updated" || echo "  ✗ Failed"
   else
     echo "  Creating CrowdSec SOAR workflow..."
-    RESULT=$(echo "$WF_JSON" | ssh "${SSH_USER}@${SIEM_SERVER}" "curl -sf -X POST \
-      -H 'Content-Type: application/json' \
-      -H 'X-N8N-API-KEY: ${N8N_API_KEY}' \
-      '${N8N_BASE}/api/v1/workflows' \
-      -d @-" 2>/dev/null)
+    RESULT=$(echo "$WF_JSON" | n8n_api_stdin POST "/api/v1/workflows")
     CROWDSEC_WF_ID=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
     echo "  ✓ Created (ID: ${CROWDSEC_WF_ID})"
   fi
 
   # Activate
   if [[ -n "$CROWDSEC_WF_ID" ]]; then
-    ssh "${SSH_USER}@${SIEM_SERVER}" "curl -sf -X POST \
-      -H 'X-N8N-API-KEY: ${N8N_API_KEY}' \
-      '${N8N_BASE}/api/v1/workflows/${CROWDSEC_WF_ID}/activate'" >/dev/null 2>&1 && \
+    n8n_api POST "/api/v1/workflows/${CROWDSEC_WF_ID}/activate" >/dev/null 2>&1 && \
       echo "  ✓ Activated" || echo "  (already active or activation skipped)"
   fi
 fi
@@ -289,9 +299,9 @@ create_alert_rule "Wazuh Agent Disconnected" '{
     {
       "refId": "A",
       "relativeTimeRange": { "from": 600, "to": 0 },
-      "datasourceUid": "YOUR_WAZUH_DS_UID",
+      "datasourceUid": "'"${DS_WAZUH}"'",
       "model": {
-        "query": "rule.groups:\"wazuh\" AND rule.id:\"503\"",
+        "query": "rule.groups:\"wazuh\" AND rule.id:\"504\"",
         "timeField": "@timestamp",
         "bucketAggs": [{ "type": "date_histogram", "field": "@timestamp", "id": "2", "settings": { "interval": "auto" } }],
         "metrics": [{ "type": "count", "id": "1" }],
@@ -334,7 +344,7 @@ create_alert_rule "High-Severity Alert Burst" '{
     {
       "refId": "A",
       "relativeTimeRange": { "from": 300, "to": 0 },
-      "datasourceUid": "YOUR_WAZUH_DS_UID",
+      "datasourceUid": "'"${DS_WAZUH}"'",
       "model": {
         "query": "rule.level:>=10",
         "timeField": "@timestamp",
@@ -379,7 +389,7 @@ create_alert_rule "Suricata Critical Alert" '{
     {
       "refId": "A",
       "relativeTimeRange": { "from": 300, "to": 0 },
-      "datasourceUid": "YOUR_SURICATA_DS_UID",
+      "datasourceUid": "'"${DS_SURICATA}"'",
       "model": {
         "query": "alert.severity:1",
         "timeField": "@timestamp",
@@ -424,7 +434,7 @@ create_alert_rule "pfSense Firewall Block Surge" '{
     {
       "refId": "A",
       "relativeTimeRange": { "from": 300, "to": 0 },
-      "datasourceUid": "YOUR_WAZUH_DS_UID",
+      "datasourceUid": "'"${DS_WAZUH}"'",
       "model": {
         "query": "rule.id:\"87701\"",
         "timeField": "@timestamp",
@@ -469,7 +479,7 @@ create_alert_rule "Docker Container Restart Loop" '{
     {
       "refId": "A",
       "relativeTimeRange": { "from": 600, "to": 0 },
-      "datasourceUid": "YOUR_PROMETHEUS_DS_UID",
+      "datasourceUid": "'"${DS_PROMETHEUS}"'",
       "model": {
         "expr": "increase(container_start_time_seconds{name=~\".+\"}[10m]) > 0 and count_over_time(container_start_time_seconds{name=~\".+\"}[10m]) >= 3",
         "instant": true,
@@ -512,7 +522,7 @@ create_alert_rule "Authentication Failure Burst" '{
     {
       "refId": "A",
       "relativeTimeRange": { "from": 300, "to": 0 },
-      "datasourceUid": "YOUR_WAZUH_DS_UID",
+      "datasourceUid": "'"${DS_WAZUH}"'",
       "model": {
         "query": "rule.groups:\"authentication_failed\" OR rule.groups:\"authentication_failures\"",
         "timeField": "@timestamp",
@@ -557,7 +567,7 @@ create_alert_rule "Critical File Integrity Change" '{
     {
       "refId": "A",
       "relativeTimeRange": { "from": 600, "to": 0 },
-      "datasourceUid": "YOUR_WAZUH_DS_UID",
+      "datasourceUid": "'"${DS_WAZUH}"'",
       "model": {
         "query": "rule.groups:\"syscheck\" AND rule.level:>=7",
         "timeField": "@timestamp",
@@ -589,38 +599,47 @@ create_alert_rule "Critical File Integrity Change" '{
 echo ""
 
 # ---------------------------------------------------------------------------
-# 4. Update notification policy to include N8N
+# 4. Update notification policy to include N8N (opt-in — destructive!)
 # ---------------------------------------------------------------------------
 echo "--- Step 4: Notification policy ---"
 
-grafana_api PUT "/api/v1/provisioning/policies" \
-  "-d '{
-    \"receiver\": \"Discord-SIEM\",
-    \"group_by\": [\"grafana_folder\", \"alertname\"],
-    \"group_wait\": \"30s\",
-    \"group_interval\": \"5m\",
-    \"repeat_interval\": \"4h\",
-    \"routes\": [
-      {
-        \"receiver\": \"N8N-CrowdSec\",
-        \"matchers\": [\"source=crowdsec\"],
-        \"continue\": true,
-        \"group_wait\": \"10s\"
-      },
-      {
-        \"receiver\": \"N8N-SOAR\",
-        \"matchers\": [\"source=wazuh\"],
-        \"continue\": true,
-        \"group_wait\": \"10s\"
-      },
-      {
-        \"receiver\": \"N8N-SOAR\",
-        \"matchers\": [\"source=suricata\"],
-        \"continue\": true,
-        \"group_wait\": \"10s\"
-      }
-    ]
-  }'" && echo "  ✓ Updated notification policy — SIEM alerts routed to Discord, N8N-SOAR, and N8N-CrowdSec" || echo "  ✗ Failed to update notification policy"
+# WARNING: PUT /api/v1/provisioning/policies REPLACES the entire root
+# notification policy tree, discarding any routes/receivers configured in the
+# Grafana UI. It is therefore gated behind APPLY_NOTIFICATION_POLICY=true and
+# only routes to receivers this script creates (N8N-SOAR, N8N-CrowdSec).
+if [[ "${APPLY_NOTIFICATION_POLICY:-false}" == "true" ]]; then
+  grafana_api PUT "/api/v1/provisioning/policies" \
+    "-d '{
+      \"receiver\": \"N8N-SOAR\",
+      \"group_by\": [\"grafana_folder\", \"alertname\"],
+      \"group_wait\": \"30s\",
+      \"group_interval\": \"5m\",
+      \"repeat_interval\": \"4h\",
+      \"routes\": [
+        {
+          \"receiver\": \"N8N-CrowdSec\",
+          \"matchers\": [\"source=crowdsec\"],
+          \"continue\": true,
+          \"group_wait\": \"10s\"
+        },
+        {
+          \"receiver\": \"N8N-SOAR\",
+          \"matchers\": [\"source=wazuh\"],
+          \"continue\": true,
+          \"group_wait\": \"10s\"
+        },
+        {
+          \"receiver\": \"N8N-SOAR\",
+          \"matchers\": [\"source=suricata\"],
+          \"continue\": true,
+          \"group_wait\": \"10s\"
+        }
+      ]
+    }'" && echo "  ✓ Replaced notification policy — SIEM alerts routed to N8N-SOAR and N8N-CrowdSec" || echo "  ✗ Failed to update notification policy"
+else
+  echo "  Skipped (set APPLY_NOTIFICATION_POLICY=true to apply)."
+  echo "  WARNING: applying REPLACES the entire root notification policy tree."
+fi
 
 echo ""
 echo "=== Deployment complete ==="
@@ -639,8 +658,8 @@ echo "  - Docker Container Restart Loop (3+ in 10m, warning)"
 echo "  - Authentication Failure Burst (>20 in 5m, critical)"
 echo "  - Critical File Integrity Change (level 7+, warning)"
 echo ""
-echo "Notification routing:"
-echo "  - All alerts → Discord-SIEM (default)"
+echo "Notification routing (only if APPLY_NOTIFICATION_POLICY=true):"
+echo "  - All alerts → N8N-SOAR (default)"
 echo "  - source=crowdsec → N8N-CrowdSec (enriched alerts with OpenSearch lookup)"
 echo "  - source=wazuh|suricata → N8N-SOAR (additional, continue=true)"
 echo ""

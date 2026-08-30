@@ -3,15 +3,21 @@
 # =============================================================================
 # Scrape targets for the SIEM stack. Add additional targets as needed.
 #
+# Container-internal targets (resolve on the docker network) are defined
+# inline below. Host/LAN targets (node_exporter on your machines, GPU
+# exporters, etc.) are loaded from JSON files in /etc/prometheus/targets/
+# via file_sd_configs so your real IPs stay out of version control.
+#
+# See docker/prometheus/targets/README.md: copy each *.example.json to the
+# real filename (e.g. twingate-ztna.example.json → twingate-ztna.json),
+# enter your IPs, and reload Prometheus. Real target files are gitignored.
+#
 # Default targets:
 #   - Prometheus self-monitoring (:9090)
 #   - OpenSearch hot node (:9200)
 #   - OpenSearch warm node (:9201)
 #   - Grafana (:3000)
-#
-# Optional targets (uncomment as needed):
-#   - node_exporter (:9100) — installed on the host
-#   - cAdvisor (:8080) — Docker container metrics
+#   - cAdvisor (:8080)
 
 global:
   scrape_interval: 15s
@@ -36,70 +42,50 @@ scrape_configs:
     static_configs:
       - targets: ['grafana:3000']
 
-  # Uncomment if you install node_exporter on the host:
-  # - job_name: 'node'
-  #   static_configs:
-  #     - targets: ['host.docker.internal:9100']
+  # node_exporter on the SIEM host itself (optional):
+  # copy targets/node.example.json → targets/node.json and adjust.
+  - job_name: 'node'
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/node.json']
 
   # ===========================================================================
   # Infrastructure Node Exporters
   # ===========================================================================
+  # Targets and per-host labels (instance_name, role) live in the JSON files.
   - job_name: 'twingate-ztna'
     scrape_interval: 15s
-    static_configs:
-      - targets: ['192.0.2.10:9100']
-        labels:
-          instance_name: 'twingate-connector-01'
-          role: 'ztna-connector'
-      - targets: ['192.0.2.11:9100']
-        labels:
-          instance_name: 'twingate-connector-02'
-          role: 'ztna-connector'
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/twingate-ztna.json']
 
   - job_name: 'unifi-controller'
     scrape_interval: 15s
-    static_configs:
-      - targets: ['192.0.2.10:9100']
-        labels:
-          instance_name: 'unifi-controller'
-          role: 'network-management'
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/unifi-controller.json']
 
   - job_name: 'Cryptocurrency'
     scrape_interval: 15s
-    static_configs:
-      - targets: ['192.0.2.10:9100']
-        labels:
-          instance_name: 'pi-node-01'
-          role: 'cryptocurrency-node'
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/Cryptocurrency.json']
 
   - job_name: 'AI'
     scrape_interval: 15s
-    static_configs:
-      - targets: ['192.0.2.10:9100']
-        labels:
-          instance_name: 'gpu-host-01'
-          role: 'ai-inference'
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/AI.json']
 
   - job_name: 'Security'
     scrape_interval: 15s
-    static_configs:
-      - targets: ['192.0.2.100:9100']
-        labels:
-          instance_name: 'host-01'
-          role: 'siem-server'
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/Security.json']
 
   - job_name: 'Computers'
     scrape_interval: 15s
-    static_configs:
-      - targets: ['192.0.2.20:9100']
-        labels:
-          instance_name: 'workstation-02'
-          role: 'workstation'
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/Computers.json']
 
-  # Uncomment if you add cAdvisor:
-  # - job_name: 'cadvisor'
-  #   static_configs:
-  #     - targets: ['cadvisor:8080']
+  # cAdvisor — container metrics (service defined in docker-compose.yml)
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
 
   # ===========================================================================
   # NVIDIA GPU Monitoring
@@ -107,28 +93,16 @@ scrape_configs:
   # Linux machines use dcgm-exporter (:9400)
   # Windows machines use nvidia_gpu_exporter (:9835)
   # See docs/gpu-monitoring.md for installation instructions.
-
+  #
+  # These jobs scrape nothing until you create the target files:
+  # copy targets/nvidia-dcgm.example.json → targets/nvidia-dcgm.json (and the
+  # Windows equivalent) and fill in the real exporter IPs.
   - job_name: 'nvidia-dcgm'
     scrape_interval: 15s
-    static_configs:
-      - targets: ['GPU_WORKSTATION_IP:9400']      # .env → GPU_WORKSTATION_IP
-        labels:
-          instance_name: 'workstation'
-          gpu_role: 'desktop'
-      - targets: ['GPU_LLM_SERVER_IP:9400']       # .env → GPU_LLM_SERVER_IP
-        labels:
-          instance_name: 'llm-server'
-          gpu_role: 'inference'
-      # Uncomment when transcoding server VLAN is ready:
-      # - targets: ['TRANSCODE_SERVER_IP:9400']
-      #   labels:
-      #     instance_name: 'transcode-server'
-      #     gpu_role: 'transcode'
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/nvidia-dcgm.json']
 
   - job_name: 'nvidia-gpu-windows'
     scrape_interval: 15s
-    static_configs:
-      - targets: ['GPU_WINDOWS_STREAMING_IP:9835']  # .env → GPU_WINDOWS_STREAMING_IP
-        labels:
-          instance_name: 'streaming-pc'
-          gpu_role: 'streaming'
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/nvidia-gpu-windows.json']

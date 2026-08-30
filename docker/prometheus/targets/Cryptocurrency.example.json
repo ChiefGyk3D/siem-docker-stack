@@ -1,0 +1,9 @@
+[
+  {
+    "targets": ["192.0.2.30:9100"],
+    "labels": {
+      "instance_name": "crypto-node-01",
+      "role": "cryptocurrency-node"
+    }
+  }
+]

@@ -1,0 +1,16 @@
+[
+  {
+    "targets": ["192.0.2.10:9100"],
+    "labels": {
+      "instance_name": "twingate-connector-01",
+      "role": "ztna-connector"
+    }
+  },
+  {
+    "targets": ["192.0.2.11:9100"],
+    "labels": {
+      "instance_name": "twingate-connector-02",
+      "role": "ztna-connector"
+    }
+  }
+]

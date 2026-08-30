@@ -149,10 +149,16 @@ curl http://localhost:9835/metrics
 
 ## Prometheus Configuration
 
-Already configured in `docker/prometheus/prometheus.yml`:
+The scrape jobs are already defined in `docker/prometheus/prometheus.yml`:
 
 - **Job `nvidia-dcgm`** — scrapes dcgm-exporter on Linux machines (port 9400)
 - **Job `nvidia-gpu-windows`** — scrapes nvidia_gpu_exporter on Windows (port 9835)
+
+Targets are loaded from `docker/prometheus/targets/` via file-based service
+discovery so your real IPs stay out of git. Copy
+`targets/nvidia-dcgm.example.json` → `targets/nvidia-dcgm.json` (and the
+Windows equivalent) and fill in your exporter IPs — see
+`docker/prometheus/targets/README.md`.
 
 Labels applied: `instance_name` (human-readable) and `gpu_role`
 (desktop/inference/streaming/transcode).
@@ -186,5 +192,6 @@ When the new VLAN is ready:
 
 1. Install NVIDIA drivers + nvidia-container-toolkit on the transcode server
 2. Deploy dcgm-exporter (same Docker Compose snippet above)
-3. Uncomment the transcode target in `docker/prometheus/prometheus.yml`
+3. Add the transcode target (with `gpu_role: transcode`) to
+   `docker/prometheus/targets/nvidia-dcgm.json`
 4. Reload Prometheus

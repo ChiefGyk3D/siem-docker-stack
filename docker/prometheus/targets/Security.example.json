@@ -1,0 +1,9 @@
+[
+  {
+    "targets": ["192.0.2.50:9100"],
+    "labels": {
+      "instance_name": "siem-server-01",
+      "role": "siem-server"
+    }
+  }
+]

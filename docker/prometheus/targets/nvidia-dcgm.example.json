@@ -1,0 +1,16 @@
+[
+  {
+    "targets": ["192.0.2.70:9400"],
+    "labels": {
+      "instance_name": "workstation",
+      "gpu_role": "desktop"
+    }
+  },
+  {
+    "targets": ["192.0.2.71:9400"],
+    "labels": {
+      "instance_name": "llm-server",
+      "gpu_role": "inference"
+    }
+  }
+]

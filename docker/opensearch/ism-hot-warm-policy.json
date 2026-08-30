@@ -14,6 +14,18 @@
       {
         "index_patterns": ["pfblockerng-*"],
         "priority": 100
+      },
+      {
+        "index_patterns": ["pfsense-*"],
+        "priority": 100
+      },
+      {
+        "index_patterns": ["unifi-syslog-*"],
+        "priority": 100
+      },
+      {
+        "index_patterns": ["crowdsec-events-*"],
+        "priority": 100
       }
     ],
     "states": [

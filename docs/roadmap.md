@@ -2,6 +2,8 @@
 
 Phased plan for Wazuh noise reduction, JumpCloud IdP integration, SOAR expansion, VirusTotal caching, N8N automations, threat intelligence, DFIR, and SOC maturity.
 
+> **Strategy layer:** [game-plan.md](game-plan.md) (2026-08) is the cross-stack plan covering this repo, pfsense-siem-stack, and jumpcloud-wazuh-bridge. It inserts a **Phase F — Foundation** (SIEM self-defense: OpenSearch auth/TLS, Doppler, independent alerting, snapshots/restore, reproducible n8n, CI) ahead of the feature phases below, and maps every GitHub issue. Read it first when deciding what to build next.
+
 > **GitHub Issues:** [#1](https://github.com/ChiefGyk3D/siem-docker-stack/issues/1) N8N Workflows | [#2](https://github.com/ChiefGyk3D/siem-docker-stack/issues/2) Velociraptor | [#3](https://github.com/ChiefGyk3D/siem-docker-stack/issues/3) VT Cache | [#4](https://github.com/ChiefGyk3D/siem-docker-stack/issues/4) Doppler | [#5](https://github.com/ChiefGyk3D/siem-docker-stack/issues/5) MISP | [#6](https://github.com/ChiefGyk3D/siem-docker-stack/issues/6) SOC Enhancement | [#7](https://github.com/ChiefGyk3D/siem-docker-stack/issues/7) Zeek | Twingate ZTNA
 
 > **Status key:** ✅ DEPLOYED | 🚧 IN PROGRESS | 📋 PLANNED | ❌ REMOVED
@@ -179,7 +181,7 @@ JUMPCLOUD_POLL_INTERVAL=300   # Seconds between polls (default: 5 minutes)
 
 ### Phase 1 Add-On — CrowdSec ✅ DEPLOYED
 
-**Status:** CrowdSec v1.7.6 installed and running on pfSense (2026-03-08).
+**Status:** CrowdSec v1.7.6 installed and running on pfSense.
 
 **Deployment:**
 - **pfSense** (`PFSENSE_HOST`): Full "Large" setup — Remediation bouncer + Log Processor + Local API (port 8088)
@@ -202,11 +204,11 @@ JUMPCLOUD_POLL_INTERVAL=300   # Seconds between polls (default: 5 minutes)
 - [ ] CrowdSec Console web enrollment (optional — `cscli console enroll <key>`)
 - [ ] Capstone docs: architecture diagram, baseline metrics
 
-**CAPI Status (2026-03-08):**
+**CAPI Status:**
 - Registered with Central API — sharing signals and pulling community blocklists
 - All console options enabled: custom ✅, manual ✅, tainted ✅, context ✅
 
-**N8N Integration (2026-03-08):**
+**N8N Integration:**
 - Workflow: `CrowdSec SOAR — Alert Enrichment` (n8n/crowdsec-alert-enrichment.json)
 - Webhook: `/crowdsec-alerts` — triggered by Grafana `source=crowdsec` alerts
 - Enrichment: queries OpenSearch `crowdsec-events-*` for recent ban decisions, banned IPs, programs
@@ -220,72 +222,75 @@ JUMPCLOUD_POLL_INTERVAL=300   # Seconds between polls (default: 5 minutes)
 
 **Goal:** Integrate Twingate connector logs, health metrics, and access events into the SIEM
 for correlation, alerting, and dashboarding. Two Twingate connectors run on dedicated Raspberry Pi 4
-nodes (`192.0.2.10` + `192.0.2.11`) providing zero-trust network access to internal resources.
+nodes on their own VLAN, providing zero-trust network access to internal resources.
+
+> Placeholders below: `CONNECTOR1_IP` / `CONNECTOR2_IP` are the two connector Pis,
+> `SIEM_IP` is the SIEM host, and the connectors live on a dedicated `TWINGATE_VLAN` subnet.
 
 ### Current State
 
 | Component | Host | Status |
 |-----------|------|--------|
-| Twingate Connector 1 (`twingate-connector-a`) | `192.0.2.10` (twingate-connector-01) | ✅ Running, host networking, debug logging |
-| Twingate Connector 2 (`twingate-connector-b`) | `192.0.2.11` (twingate-connector-02) | ✅ Running, host networking, debug logging |
+| Twingate Connector 1 | `CONNECTOR1_IP` | ✅ Running, host networking, debug logging |
+| Twingate Connector 2 | `CONNECTOR2_IP` | ✅ Running, host networking, debug logging |
 | Persistent sysctl tuning | Both Pis | ✅ `/etc/sysctl.d/99-rpi-twingate.conf` |
-| Wazuh agent | Both Pis | ✅ Deployed — agents, reporting to 192.0.2.100:1514 |
-| Prometheus node_exporter | Both Pis | ✅ Deployed — scrape job `twingate-ztna` in prometheus.yml |
+| Wazuh agent | Both Pis | ✅ Deployed — reporting to `SIEM_IP:1514` |
+| Prometheus node_exporter | Both Pis | ✅ Deployed — scrape job `twingate-ztna` |
 | Docker log rotation | Both Pis | ✅ `/etc/docker/daemon.json` — max-size 10m, max-file 3 |
 | Docker JSON log collection | Both Pis | ✅ Wazuh localfile glob on `/var/lib/docker/containers/*/*-json.log` |
 | Wazuh custom rules | Wazuh manager | ✅ `twingate_rules.xml` — rules 120700–120750 deployed |
-| pfSense firewall hardening | `192.0.2.1` | ✅ Applied — aliases + rules on VLAN 68 interface |
+| pfSense firewall hardening | pfSense | ✅ Applied — aliases + rules on the Twingate VLAN interface |
 
-### pfSense Firewall Rules — Twingate Connector VLAN (192.0.2.0/24)
+### pfSense Firewall Rules — Twingate Connector VLAN
 
 Per Twingate's requirements, connectors only need **outbound** internet access. Inbound is neither
-required nor recommended. The following rules should be applied on the VLAN 68 interface:
+required nor recommended. The following rules should be applied on the Twingate VLAN interface:
 
 **Required — Twingate Outbound:**
 
 | # | Action | Protocol | Source | Dest | Port(s) | Description |
 |---|--------|----------|--------|------|---------|-------------|
-| 1 | Pass | TCP | 192.0.2.10-11 | any | 443 | Twingate control plane (TLS) |
-| 2 | Pass | TCP | 192.0.2.10-11 | any | 30000-31000 | Twingate relay connections |
-| 3 | Pass | UDP | 192.0.2.10-11 | any | 1-65535 | Twingate QUIC/HTTP3 + STUN |
+| 1 | Pass | TCP | Twingate_Connectors | any | 443 | Twingate control plane (TLS) |
+| 2 | Pass | TCP | Twingate_Connectors | any | 30000-31000 | Twingate relay connections |
+| 3 | Pass | UDP | Twingate_Connectors | any | 1-65535 | Twingate QUIC/HTTP3 + STUN |
 
 **Required — SIEM Reporting:**
 
 | # | Action | Protocol | Source | Dest | Port(s) | Description |
 |---|--------|----------|--------|------|---------|-------------|
-| 4 | Pass | TCP | 192.0.2.10-11 | 192.0.2.100 | 1514 | Wazuh agent enrollment + events |
-| 5 | Pass | TCP | 192.0.2.10-11 | 192.0.2.100 | 55000 | Wazuh API (agent management) |
-| 6 | Pass | TCP | 192.0.2.100 | 192.0.2.10-11 | 9100 | Prometheus node_exporter scrape |
+| 4 | Pass | TCP | Twingate_Connectors | SIEM_Server | 1514 | Wazuh agent enrollment + events |
+| 5 | Pass | TCP | Twingate_Connectors | SIEM_Server | 55000 | Wazuh API (agent management) |
+| 6 | Pass | TCP | SIEM_Server | Twingate_Connectors | 9100 | Prometheus node_exporter scrape |
 
 **Required — Management:**
 
 | # | Action | Protocol | Source | Dest | Port(s) | Description |
 |---|--------|----------|--------|------|---------|-------------|
-| 7 | Pass | TCP | admin_hosts | 192.0.2.10-11 | 22 | SSH management (restrict to admin IPs) |
-| 8 | Pass | ICMP | 192.0.2.100 | 192.0.2.10-11 | — | SIEM health monitoring (ping) |
+| 7 | Pass | TCP | admin_hosts | Twingate_Connectors | 22 | SSH management (restrict to admin IPs) |
+| 8 | Pass | ICMP | SIEM_Server | Twingate_Connectors | — | SIEM health monitoring (ping) |
 
 **Deny — Everything Else:**
 
 | # | Action | Protocol | Source | Dest | Port(s) | Description |
 |---|--------|----------|--------|------|---------|-------------|
-| 9 | Block | any | 192.0.2.0/24 | any | any | Default deny all other traffic |
+| 9 | Block | any | TWINGATE_VLAN subnet | any | any | Default deny all other traffic |
 
-> **Note:** Create a pfSense alias `Twingate_Connectors` containing `192.0.2.10` and
-> `192.0.2.11` to simplify rule management. Create an alias `SIEM_Server` for `192.0.2.100`.
+> **Note:** Create a pfSense alias `Twingate_Connectors` containing `CONNECTOR1_IP` and
+> `CONNECTOR2_IP` to simplify rule management. Create an alias `SIEM_Server` for `SIEM_IP`.
 
 ### Wazuh Agent Deployment (Both Pis)
 
 Deploy Wazuh agent on each Pi to report security events:
 
 ```bash
-# On each Pi (192.0.2.10 and .11):
+# On each connector Pi:
 curl -s https://packages.wazuh.com/key/GPG-KEY-WAZUH | sudo gpg --dearmor -o /usr/share/keyrings/wazuh.gpg
 echo "deb [signed-by=/usr/share/keyrings/wazuh.gpg] https://packages.wazuh.com/4.x/apt/ stable main" | \
   sudo tee /etc/apt/sources.list.d/wazuh.list
 sudo apt update && sudo apt install -y wazuh-agent
 
-# Configure agent to point to SIEM
-sudo sed -i 's/MANAGER_IP/192.0.2.100/' /var/ossec/etc/ossec.conf
+# Configure agent to point to SIEM (substitute your SIEM host IP)
+sudo sed -i 's/MANAGER_IP/SIEM_IP/' /var/ossec/etc/ossec.conf
 sudo systemctl enable --now wazuh-agent
 ```
 
@@ -304,19 +309,15 @@ sudo systemctl enable --now prometheus-node-exporter
 # Exposes :9100 — Prometheus on SIEM scrapes this
 ```
 
-Add to `docker/prometheus/prometheus.yml`:
-```yaml
-  - job_name: 'twingate-nodes'
-    scrape_interval: 30s
-    static_configs:
-      - targets: ['192.0.2.10:9100']
-        labels:
-          instance_name: 'twingate-connector-01'
-          role: 'twingate-connector'
-      - targets: ['192.0.2.11:9100']
-        labels:
-          instance_name: 'twingate-connector-02'
-          role: 'twingate-connector'
+Host scrape targets live in `docker/prometheus/targets/` (gitignored — copy the shipped
+`*.example.json` files and fill in your IPs). Example target entry:
+```json
+[
+  { "targets": ["CONNECTOR1_IP:9100"],
+    "labels": { "instance_name": "twingate-connector-01", "role": "ztna-connector" } },
+  { "targets": ["CONNECTOR2_IP:9100"],
+    "labels": { "instance_name": "twingate-connector-02", "role": "ztna-connector" } }
+]
 ```
 
 ### Twingate Log Collection
@@ -382,7 +383,7 @@ natively. The `<label key="source">` tag in the localfile config adds the discri
 ### Deliverables
 
 - [x] pfSense alias + firewall rules for Twingate VLAN
-- [x] Wazuh agent installed on both Pis (agents)
+- [x] Wazuh agent installed on both Pis
 - [x] Prometheus node_exporter on both Pis
 - [x] Prometheus scrape config for Twingate nodes (`twingate-ztna` job)
 - [x] Docker log rotation on both Pis (`/etc/docker/daemon.json`)

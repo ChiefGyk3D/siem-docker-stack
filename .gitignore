@@ -5,6 +5,11 @@ config.env
 # Wazuh TLS certificates (generated per-deployment)
 docker/wazuh/certs/*.pem
 
+# Prometheus file_sd targets (contain real LAN IPs/hostnames)
+# The *.example.json templates stay tracked.
+docker/prometheus/targets/*.json
+!docker/prometheus/targets/*.example.json
+
 # OpenSearch data
 /data/
 
