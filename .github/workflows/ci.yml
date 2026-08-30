@@ -13,7 +13,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
 
 jobs:
@@ -39,6 +39,8 @@ jobs:
           for f in *.example.json; do
             cp "$f" "${f%.example.json}.json"
           done
+          # promtool runs as 'nobody' in the container; mktemp dirs are 0700
+          chmod -R a+rX "$stage"
           echo "STAGE=$stage" >> "$GITHUB_ENV"
       - name: promtool check config
         run: |
