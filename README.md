@@ -527,18 +527,6 @@ siem-docker-stack/
 
 ![Wazuh Security Overview](media/screenshots/Wazuh_Security_Overview.png)
 
-### Wazuh Vulnerability Detection
-
-![Wazuh Vulnerability Detection](media/screenshots/Wazuh_Vulnerability_Detection.png)
-
-### Docker Container Monitoring
-
-![Docker Container Monitoring](media/screenshots/Docker_Container_monitoring.png)
-
-### Docker Compose Service Status
-
-![Docker Compose Service Status](media/screenshots/docker_ps.png)
-
 ### Full Stack Verification Script Output
 
 ![05 Verify Output](media/screenshots/05-verify.png)
