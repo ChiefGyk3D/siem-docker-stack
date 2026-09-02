@@ -14,8 +14,8 @@
 #
 # Default targets:
 #   - Prometheus self-monitoring (:9090)
-#   - OpenSearch hot node (:9200)
-#   - OpenSearch warm node (:9201)
+#   - Alertmanager (:9093)
+#   - elasticsearch-exporter (:9114) — OpenSearch cluster/index metrics
 #   - Grafana (:3000)
 #   - cAdvisor (:8080)
 
@@ -23,20 +23,39 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
+# Phase F3 — independent alerting path: rules evaluated here, delivered via
+# Alertmanager (see docker/prometheus/rules/ and docker/alertmanager/).
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ['alertmanager:9093']
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
 scrape_configs:
   - job_name: 'prometheus'
     static_configs:
       - targets: ['localhost:9090']
 
-  - job_name: 'opensearch-hot'
-    metrics_path: '/_prometheus/metrics'
+  - job_name: 'alertmanager'
     static_configs:
-      - targets: ['opensearch-hot:9200']
+      - targets: ['alertmanager:9093']
 
-  - job_name: 'opensearch-warm'
-    metrics_path: '/_prometheus/metrics'
+  # OpenSearch cluster metrics via prometheus-community/elasticsearch_exporter
+  # (service elasticsearch-exporter in docker-compose.yml). The exporter holds
+  # the readonly credentials via env vars, so no secrets live in this file.
+  #
+  # NOTE: the old direct scrapes of opensearch-{hot,warm}:9200 at
+  # /_prometheus/metrics required the aiven prometheus-exporter plugin, which
+  # the stock opensearchproject image does not ship — they never returned
+  # metrics. If you install that plugin, re-add the jobs with:
+  #   scheme: https
+  #   tls_config: { insecure_skip_verify: true }   # self-signed cluster certs
+  #   basic_auth: { username: readonly, password_file: <mounted secret> }
+  - job_name: 'elasticsearch-exporter'
     static_configs:
-      - targets: ['opensearch-warm:9200']
+      - targets: ['elasticsearch-exporter:9114']
 
   - job_name: 'grafana'
     static_configs:

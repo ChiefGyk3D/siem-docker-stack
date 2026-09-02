@@ -130,10 +130,10 @@ echo ""
 echo -e "${YELLOW}Creating directory structure...${NC}"
 
 # HOT tier directories (fast, frequently accessed data)
-mkdir -p "${HOT_MOUNT}"/{opensearch,influxdb,prometheus,wazuh/{indexer,manager/{data,etc,logs,queue,integrations,active-response}},logstash}
+mkdir -p "${HOT_MOUNT}"/{opensearch,influxdb,prometheus,alertmanager,wazuh/{indexer,manager/{data,etc,logs,queue,integrations,active-response}},logstash}
 
 # WARM tier directories (older data, archives, backups)
-mkdir -p "${WARM_MOUNT}"/{opensearch,grafana,archives/{syslog,suricata},backups,wazuh-archives}
+mkdir -p "${WARM_MOUNT}"/{opensearch,grafana,archives/{syslog,suricata},backups,wazuh-archives,snapshots}
 
 # Set ownership for container UIDs
 # OpenSearch runs as UID 1000

@@ -1,0 +1,5 @@
+# No custom tenants — the implicit Global tenant is enough for this stack.
+# File must exist for securityadmin -cd.
+_meta:
+  type: "tenants"
+  config_version: 2

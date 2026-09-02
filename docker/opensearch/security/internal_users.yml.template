@@ -1,0 +1,32 @@
+# =============================================================================
+# OpenSearch Security — Internal users TEMPLATE (main SIEM cluster)
+# =============================================================================
+# DO NOT edit hashes here by hand. scripts/08b-init-opensearch-security.sh
+# renders this template to internal_users.yml (gitignored), replacing the
+# __*_HASH__ tokens with bcrypt hashes of the OPENSEARCH_*_PASSWORD values
+# from .env, then applies it with securityadmin.sh.
+_meta:
+  type: "internalusers"
+  config_version: 2
+
+admin:
+  hash: "__ADMIN_HASH__"
+  reserved: true
+  backend_roles:
+    - "admin"
+  description: "Cluster admin (OPENSEARCH_ADMIN_PASSWORD)"
+
+kibanaserver:
+  hash: "__DASHBOARDS_HASH__"
+  reserved: true
+  description: "OpenSearch Dashboards server user (OPENSEARCH_DASHBOARDS_PASSWORD)"
+
+logstash:
+  hash: "__LOGSTASH_HASH__"
+  reserved: false
+  description: "Logstash ingest user (OPENSEARCH_LOGSTASH_PASSWORD)"
+
+readonly:
+  hash: "__READONLY_HASH__"
+  reserved: false
+  description: "Read-only user for Grafana/exporters (OPENSEARCH_READONLY_PASSWORD)"

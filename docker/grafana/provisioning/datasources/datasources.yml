@@ -13,8 +13,13 @@
 #   6. InfluxDB — pfSense/Telegraf/UniFi metrics
 #   7. Prometheus — Infrastructure metrics
 #
-# $WAZUH_INDEXER_PASSWORD is interpolated by Grafana from the container
+# $WAZUH_INDEXER_PASSWORD, $OPENSEARCH_READONLY_PASSWORD, $INFLUXDB_ADMIN_USER
+# and $INFLUXDB_ADMIN_PASSWORD are interpolated by Grafana from the container
 # environment (set in docker-compose.yml from .env).
+#
+# Phase F1: the main OpenSearch cluster is secured — datasources use HTTPS
+# with the read-only "readonly" user; tlsSkipVerify because the cluster uses
+# self-signed certs. InfluxDB auth is enabled — admin credentials are used.
 
 apiVersion: 1
 
@@ -24,13 +29,18 @@ datasources:
     uid: opensearch-suricata
     type: grafana-opensearch-datasource
     access: proxy
-    url: http://opensearch-hot:9200
+    url: https://opensearch-hot:9200
     database: "suricata-*"
+    basicAuth: true
+    basicAuthUser: readonly
+    secureJsonData:
+      basicAuthPassword: $OPENSEARCH_READONLY_PASSWORD
     isDefault: true
     jsonData:
       timeField: "@timestamp"
       version: "2.19.0"
       flavor: "opensearch"
+      tlsSkipVerify: true
       logMessageField: ""
       logLevelField: ""
 
@@ -39,24 +49,34 @@ datasources:
     uid: opensearch-syslog
     type: grafana-opensearch-datasource
     access: proxy
-    url: http://opensearch-hot:9200
+    url: https://opensearch-hot:9200
     database: "syslog-*"
+    basicAuth: true
+    basicAuthUser: readonly
+    secureJsonData:
+      basicAuthPassword: $OPENSEARCH_READONLY_PASSWORD
     jsonData:
       timeField: "@timestamp"
       version: "2.19.0"
       flavor: "opensearch"
+      tlsSkipVerify: true
 
   # --- OpenSearch: pfBlockerNG ---
   - name: OpenSearch-pfBlockerNG
     uid: opensearch-pfblockerng
     type: grafana-opensearch-datasource
     access: proxy
-    url: http://opensearch-hot:9200
+    url: https://opensearch-hot:9200
     database: "pfblockerng-*"
+    basicAuth: true
+    basicAuthUser: readonly
+    secureJsonData:
+      basicAuthPassword: $OPENSEARCH_READONLY_PASSWORD
     jsonData:
       timeField: "@timestamp"
       version: "2.19.0"
       flavor: "opensearch"
+      tlsSkipVerify: true
 
   # --- OpenSearch: Wazuh alerts (dedicated Wazuh indexer, self-signed TLS) ---
   - name: OpenSearch-Wazuh
@@ -80,12 +100,17 @@ datasources:
     uid: opensearch-crowdsec
     type: grafana-opensearch-datasource
     access: proxy
-    url: http://opensearch-hot:9200
+    url: https://opensearch-hot:9200
     database: "crowdsec-events-*"
+    basicAuth: true
+    basicAuthUser: readonly
+    secureJsonData:
+      basicAuthPassword: $OPENSEARCH_READONLY_PASSWORD
     jsonData:
       timeField: "@timestamp"
       version: "2.19.0"
       flavor: "opensearch"
+      tlsSkipVerify: true
 
   # --- InfluxDB: pfSense + Telegraf + UniFi Poller ---
   - name: InfluxDB
@@ -94,6 +119,9 @@ datasources:
     access: proxy
     url: http://influxdb:8086
     database: pfsense
+    user: $INFLUXDB_ADMIN_USER
+    secureJsonData:
+      password: $INFLUXDB_ADMIN_PASSWORD
     jsonData:
       httpMode: GET
 
@@ -104,6 +132,9 @@ datasources:
     access: proxy
     url: http://influxdb:8086
     database: unpoller
+    user: $INFLUXDB_ADMIN_USER
+    secureJsonData:
+      password: $INFLUXDB_ADMIN_PASSWORD
     jsonData:
       httpMode: GET
 

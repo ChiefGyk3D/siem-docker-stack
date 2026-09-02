@@ -51,7 +51,10 @@ services:
       - discovery.seed_hosts=opensearch-hot,opensearch-warm
       - cluster.initial_cluster_manager_nodes=opensearch-hot
       - bootstrap.memory_lock=true
-      - plugins.security.disabled=true
+      # Security plugin is ENABLED (Phase F1) — TLS + user config come from
+      # opensearch-hot.yml and the mounted certs/security dirs. The image's
+      # demo-config installer must stay off (our opensearch.yml is read-only).
+      - DISABLE_INSTALL_DEMO_CONFIG=true
       - "OPENSEARCH_JAVA_OPTS=-Xms${OPENSEARCH_HOT_HEAP:-12g} -Xmx${OPENSEARCH_HOT_HEAP:-12g}"
       - plugins.index_state_management.enabled=true
     ulimits:
@@ -64,6 +67,17 @@ services:
     volumes:
       - /data/hot/opensearch:/usr/share/opensearch/data
       - ./opensearch/opensearch-hot.yml:/usr/share/opensearch/config/opensearch.yml:ro
+      # TLS certs (scripts/07-generate-opensearch-certs.sh)
+      - ./opensearch/certs/root-ca.pem:/usr/share/opensearch/config/certs/root-ca.pem:ro
+      - ./opensearch/certs/opensearch-hot.pem:/usr/share/opensearch/config/certs/opensearch-hot.pem:ro
+      - ./opensearch/certs/opensearch-hot-key.pem:/usr/share/opensearch/config/certs/opensearch-hot-key.pem:ro
+      - ./opensearch/certs/admin.pem:/usr/share/opensearch/config/certs/admin.pem:ro
+      - ./opensearch/certs/admin-key.pem:/usr/share/opensearch/config/certs/admin-key.pem:ro
+      # Security config (users/roles) — internal_users.yml is rendered by
+      # scripts/08b-init-opensearch-security.sh
+      - ./opensearch/security:/usr/share/opensearch/config/opensearch-security:ro
+      # Snapshots (Phase F4) — warm-tier disk, registered by 10-snapshot-setup.sh
+      - /data/warm/snapshots:/mnt/snapshots
     # NOTE: Docker-published ports bypass UFW (the DOCKER iptables chain is
     # evaluated before ufw rules) — cluster-internal ports are bound to
     # loopback so they are not reachable from the network.
@@ -75,7 +89,11 @@ services:
       siem-net:
         ipv4_address: 172.20.0.10
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      # 200 would mean security is off; 401 means TLS+auth are up and
+      # rejecting anonymous requests — both prove the node answers HTTPS.
+      # (503 = security index not initialized yet → stays unhealthy until
+      # 08b-init-opensearch-security.sh has run once.)
+      test: ["CMD-SHELL", "curl -sk -o /dev/null -w '%{http_code}' https://localhost:9200/ | grep -qE '^(200|401)$$' || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -97,7 +115,7 @@ services:
       - discovery.seed_hosts=opensearch-hot,opensearch-warm
       - cluster.initial_cluster_manager_nodes=opensearch-hot
       - bootstrap.memory_lock=true
-      - plugins.security.disabled=true
+      - DISABLE_INSTALL_DEMO_CONFIG=true
       - "OPENSEARCH_JAVA_OPTS=-Xms${OPENSEARCH_WARM_HEAP:-4g} -Xmx${OPENSEARCH_WARM_HEAP:-4g}"
     ulimits:
       memlock:
@@ -109,6 +127,12 @@ services:
     volumes:
       - /data/warm/opensearch:/usr/share/opensearch/data
       - ./opensearch/opensearch-warm.yml:/usr/share/opensearch/config/opensearch.yml:ro
+      # TLS certs (scripts/07-generate-opensearch-certs.sh)
+      - ./opensearch/certs/root-ca.pem:/usr/share/opensearch/config/certs/root-ca.pem:ro
+      - ./opensearch/certs/opensearch-warm.pem:/usr/share/opensearch/config/certs/opensearch-warm.pem:ro
+      - ./opensearch/certs/opensearch-warm-key.pem:/usr/share/opensearch/config/certs/opensearch-warm-key.pem:ro
+      # Snapshots (Phase F4) — warm-tier disk, registered by 10-snapshot-setup.sh
+      - /data/warm/snapshots:/mnt/snapshots
     ports:
       - "9201:9200"
       - "127.0.0.1:9301:9300"
@@ -116,7 +140,7 @@ services:
       siem-net:
         ipv4_address: 172.20.0.11
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      test: ["CMD-SHELL", "curl -sk -o /dev/null -w '%{http_code}' https://localhost:9200/ | grep -qE '^(200|401)$$' || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -130,8 +154,14 @@ services:
       opensearch-hot:
         condition: service_healthy
     environment:
-      - 'OPENSEARCH_HOSTS=["http://opensearch-hot:9200"]'
-      - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true
+      # Secured cluster (Phase F1): the dashboards security plugin stays
+      # ENABLED and connects as the kibanaserver service user; humans log in
+      # with admin / $OPENSEARCH_ADMIN_PASSWORD. Self-signed certs → the
+      # backend TLS check is disabled (verificationMode none).
+      - 'OPENSEARCH_HOSTS=["https://opensearch-hot:9200"]'
+      - OPENSEARCH_USERNAME=kibanaserver
+      - OPENSEARCH_PASSWORD=${OPENSEARCH_DASHBOARDS_PASSWORD:-changeme-dashboards}
+      - OPENSEARCH_SSL_VERIFICATIONMODE=none
     ports:
       - "${OPENSEARCH_DASHBOARDS_PORT:-5601}:5601"
     networks:
@@ -150,10 +180,14 @@ services:
         condition: service_healthy
     environment:
       - "LS_JAVA_OPTS=-Xms${LOGSTASH_HEAP:-2g} -Xmx${LOGSTASH_HEAP:-2g}"
+      # OpenSearch output credentials (interpolated in pipeline/*.conf)
+      - OPENSEARCH_LOGSTASH_PASSWORD=${OPENSEARCH_LOGSTASH_PASSWORD:-changeme-logstash}
     volumes:
       - ./logstash/pipeline:/usr/share/logstash/pipeline:ro
       - ./logstash/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
       - /data/hot/logstash:/usr/share/logstash/data
+      # Cluster CA so outputs can verify the OpenSearch TLS cert
+      - ./opensearch/certs/root-ca.pem:/etc/logstash/certs/root-ca.pem:ro
     ports:
       - "${LOGSTASH_UDP_PORT:-5140}:5140/udp"
       - "${LOGSTASH_BEATS_PORT:-5044}:5044"
@@ -176,8 +210,12 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASS:-changeme}
       - GF_INSTALL_PLUGINS=grafana-opensearch-datasource,grafana-clock-panel,grafana-worldmap-panel
       - GF_SERVER_ROOT_URL=http://${SIEM_HOST:-localhost}:3000
-      # Used by datasource provisioning ($WAZUH_INDEXER_PASSWORD interpolation)
+      # Used by datasource provisioning ($WAZUH_INDEXER_PASSWORD etc.
+      # interpolation in provisioning/datasources/datasources.yml)
       - WAZUH_INDEXER_PASSWORD=${WAZUH_INDEXER_PASSWORD:-SecretPassword}
+      - OPENSEARCH_READONLY_PASSWORD=${OPENSEARCH_READONLY_PASSWORD:-changeme-readonly}
+      - INFLUXDB_ADMIN_USER=${INFLUXDB_ADMIN_USER:-admin}
+      - INFLUXDB_ADMIN_PASSWORD=${INFLUXDB_ADMIN_PASSWORD:-changeme-influx}
     volumes:
       - /data/warm/grafana:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
@@ -197,7 +235,14 @@ services:
     restart: unless-stopped
     environment:
       - INFLUXDB_DB=${INFLUXDB_DB:-pfsense}
-      - INFLUXDB_HTTP_AUTH_ENABLED=false
+      # Auth ENABLED (Phase F1). MIGRATION NOTE for live deployments: create
+      # the admin user BEFORE flipping this on — see docs/phase-f-testing.md.
+      - INFLUXDB_HTTP_AUTH_ENABLED=true
+      - INFLUXDB_ADMIN_USER=${INFLUXDB_ADMIN_USER:-admin}
+      - INFLUXDB_ADMIN_PASSWORD=${INFLUXDB_ADMIN_PASSWORD:-changeme-influx}
+      # The influx CLI in the bootstrap command below reads these natively.
+      - INFLUX_USERNAME=${INFLUXDB_ADMIN_USER:-admin}
+      - INFLUX_PASSWORD=${INFLUXDB_ADMIN_PASSWORD:-changeme-influx}
       - INFLUXDB_DATA_MAX_SERIES_PER_DATABASE=0
       - INFLUXDB_DATA_MAX_VALUES_PER_TAG=0
       - INFLUXDB_REPORTING_DISABLED=true
@@ -206,7 +251,14 @@ services:
       - -c
       - |
         influxd &
-        until influx -execute 'SHOW DATABASES' &>/dev/null; do sleep 1; done
+        # With auth on and no users yet, InfluxDB 1.8 only accepts CREATE USER
+        # (bootstrap exception) — so the until-loop passes once either the
+        # admin user exists (authenticated SHOW DATABASES works) or it was
+        # just created.
+        until influx -execute 'SHOW DATABASES' > /dev/null 2>&1 || \
+              influx -execute "CREATE USER \"$$INFLUX_USERNAME\" WITH PASSWORD '$$INFLUX_PASSWORD' WITH ALL PRIVILEGES" > /dev/null 2>&1; do
+          sleep 1
+        done
         influx -execute 'CREATE DATABASE pfsense'
         influx -execute 'CREATE DATABASE unpoller'
         influx -execute 'CREATE DATABASE telegraf'
@@ -230,6 +282,7 @@ services:
       - /data/hot/prometheus:/prometheus
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./prometheus/targets:/etc/prometheus/targets:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
     ports:
       - "${PROMETHEUS_PORT:-9090}:9090"
     command:
@@ -240,6 +293,57 @@ services:
     networks:
       - siem-net
     user: "65534"
+
+# =============================================================================
+# ALERTMANAGER — Independent Alert Delivery (Phase F3)
+# =============================================================================
+# Receives alerts from Prometheus rule evaluation (docker/prometheus/rules/)
+# so pipeline-health alerting works even when Grafana is down. Routes to the
+# n8n webhook — see docker/alertmanager/alertmanager.yml (rendered from
+# alertmanager.yml.template by scripts/render-alertmanager-config.sh).
+
+  alertmanager:
+    image: prom/alertmanager:${ALERTMANAGER_VERSION:-v0.27.0}
+    container_name: alertmanager
+    restart: unless-stopped
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - /data/hot/alertmanager:/alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    # Loopback only — no reason to expose the Alertmanager API on the LAN.
+    ports:
+      - "127.0.0.1:${ALERTMANAGER_PORT:-9093}:9093"
+    networks:
+      - siem-net
+    user: "65534"
+
+# =============================================================================
+# ELASTICSEARCH EXPORTER — OpenSearch cluster metrics (Phase F3)
+# =============================================================================
+# prometheus-community/elasticsearch_exporter works against OpenSearch.
+# This is Prometheus' metrics path into the (now secured) cluster — it holds
+# the readonly credentials via env vars so no secrets live in prometheus.yml.
+# Scraped at elasticsearch-exporter:9114 (no host port).
+
+  elasticsearch-exporter:
+    image: quay.io/prometheuscommunity/elasticsearch-exporter:${ES_EXPORTER_VERSION:-v1.7.0}
+    container_name: elasticsearch-exporter
+    restart: unless-stopped
+    depends_on:
+      opensearch-hot:
+        condition: service_healthy
+    environment:
+      - ES_USERNAME=readonly
+      - ES_PASSWORD=${OPENSEARCH_READONLY_PASSWORD:-changeme-readonly}
+    command:
+      - '--es.uri=https://opensearch-hot:9200'
+      - '--es.all'
+      - '--es.indices'
+      - '--es.ssl-skip-verify'
+    networks:
+      - siem-net
 
 # =============================================================================
 # CADVISOR — Docker Container Metrics
@@ -367,6 +471,9 @@ services:
     environment:
       - UP_INFLUXDB_URL=http://influxdb:8086
       - UP_INFLUXDB_DB=${UNIFI_INFLUXDB:-unpoller}
+      # InfluxDB auth (Phase F1)
+      - UP_INFLUXDB_USER=${INFLUXDB_ADMIN_USER:-admin}
+      - UP_INFLUXDB_PASS=${INFLUXDB_ADMIN_PASSWORD:-changeme-influx}
       - UP_UNIFI_DEFAULT_URL=${UNIFI_URL:-https://unifi.example.com}
       - UP_UNIFI_DEFAULT_USER=${UNIFI_USER:-unpoller}
       - UP_UNIFI_DEFAULT_PASS=${UNIFI_PASS:-changeme}

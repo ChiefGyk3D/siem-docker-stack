@@ -48,17 +48,46 @@ jobs:
             -v "$STAGE":/etc/prometheus:ro \
             prom/prometheus:v2.53.0 \
             check config /etc/prometheus/prometheus.yml
+      - name: promtool check rules
+        run: |
+          # sh -c so the glob expands inside the container (promtool has no
+          # shell entrypoint and does not glob its arguments itself)
+          docker run --rm --entrypoint /bin/sh \
+            -v "$STAGE":/etc/prometheus:ro \
+            prom/prometheus:v2.53.0 \
+            -c 'promtool check rules /etc/prometheus/rules/*.yml'
+
+  alertmanager:
+    name: Alertmanager config check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: amtool check-config
+        run: |
+          docker run --rm --entrypoint amtool \
+            -v "$PWD/docker/alertmanager/alertmanager.yml":/tmp/am.yml:ro \
+            prom/alertmanager:v0.27.0 \
+            check-config /tmp/am.yml
 
   logstash:
     name: Logstash pipeline check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Stage throwaway CA cert (pipelines reference a mounted cacert)
+        run: |
+          mkdir -p /tmp/logstash-certs
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -subj "/CN=ci-throwaway-ca" \
+            -keyout /tmp/logstash-certs/root-ca-key.pem \
+            -out /tmp/logstash-certs/root-ca.pem
+          chmod -R a+rX /tmp/logstash-certs
       - name: logstash --config.test_and_exit
         run: |
           docker run --rm \
             -v "$PWD/docker/logstash/pipeline":/usr/share/logstash/pipeline:ro \
             -v "$PWD/docker/logstash/logstash.yml":/usr/share/logstash/config/logstash.yml:ro \
+            -v "/tmp/logstash-certs/root-ca.pem":/etc/logstash/certs/root-ca.pem:ro \
             opensearchproject/logstash-oss-with-opensearch-output-plugin:8.9.0 \
             logstash --config.test_and_exit
 
@@ -101,6 +130,6 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install test dependencies
-        run: pip install pytest requests
+        run: pip install pytest requests pyyaml
       - name: pytest
         run: pytest tests/python -q

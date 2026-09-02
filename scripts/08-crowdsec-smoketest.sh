@@ -8,10 +8,29 @@
 
 set -euo pipefail
 
-OPENSEARCH_URL="${OPENSEARCH_URL:-http://localhost:9200}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="${SCRIPT_DIR}/.."
+
+# Load OPENSEARCH_ADMIN_PASSWORD (and Grafana creds) from .env when present.
+for envf in /opt/siem/.env "${REPO_DIR}/.env" "${REPO_DIR}/docker/.env"; do
+  if [ -f "$envf" ]; then
+    # shellcheck disable=SC1090
+    set -a; source "$envf"; set +a
+    break
+  fi
+done
+
+OPENSEARCH_URL="${OPENSEARCH_URL:-https://localhost:9200}"
 GRAFANA_URL="${GRAFANA_URL:-http://localhost:3000}"
 GRAFANA_USER="${GRAFANA_USER:-admin}"
-GRAFANA_PASS="${GRAFANA_PASS:-changeme}"
+GRAFANA_PASS="${GRAFANA_PASS:-${GRAFANA_ADMIN_PASS:-changeme}}"
+
+if [ -z "${OPENSEARCH_ADMIN_PASSWORD:-}" ]; then
+  echo "ERROR: OPENSEARCH_ADMIN_PASSWORD not set (env or .env). See .env.example."
+  exit 1
+fi
+# -k: self-signed cluster certs (scripts/07-generate-opensearch-certs.sh)
+OS_CURL=(curl -sk -u "admin:${OPENSEARCH_ADMIN_PASSWORD}")
 
 # Use a dedicated smoketest index so the live crowdsec-events-YYYY.MM.dd
 # indices are never polluted; it is deleted again on exit.
@@ -19,7 +38,7 @@ IDX="crowdsec-events-smoketest"
 DOC_ID="crowdsec-smoke-$(date +%s)"
 
 cleanup() {
-  curl -sf -X DELETE "${OPENSEARCH_URL}/${IDX}" >/dev/null 2>&1 || true
+  "${OS_CURL[@]}" -f -X DELETE "${OPENSEARCH_URL}/${IDX}" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -34,12 +53,12 @@ JSON
 )
 
 echo "[1/4] Index synthetic CrowdSec doc: ${IDX}/${DOC_ID}"
-curl -sf -X PUT "${OPENSEARCH_URL}/${IDX}/_doc/${DOC_ID}?refresh=wait_for" \
+"${OS_CURL[@]}" -f -X PUT "${OPENSEARCH_URL}/${IDX}/_doc/${DOC_ID}?refresh=wait_for" \
   -H 'Content-Type: application/json' \
   -d "${payload}" >/dev/null
 
 echo "[2/4] Verify doc query count"
-count=$(curl -sf -X POST "${OPENSEARCH_URL}/${IDX}/_count" \
+count=$("${OS_CURL[@]}" -f -X POST "${OPENSEARCH_URL}/${IDX}/_count" \
   -H 'Content-Type: application/json' \
   -d '{"query":{"bool":{"should":[{"term":{"event.module.keyword":"crowdsec"}},{"term":{"event.module":"crowdsec"}},{"match":{"event.module":"crowdsec"}}],"minimum_should_match":1}}}' | python3 -c 'import sys,json; print(json.load(sys.stdin).get("count",0))')
 if [[ "${count}" -lt 1 ]]; then

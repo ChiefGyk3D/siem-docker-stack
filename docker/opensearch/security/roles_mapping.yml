@@ -1,0 +1,31 @@
+# =============================================================================
+# OpenSearch Security — Role mappings (main SIEM cluster)
+# =============================================================================
+# Maps internal users (see internal_users.yml.template) to roles.
+_meta:
+  type: "rolesmapping"
+  config_version: 2
+
+all_access:
+  reserved: true
+  users:
+    - "admin"
+  description: "Cluster admin"
+
+kibana_server:
+  reserved: true
+  users:
+    - "kibanaserver"
+  description: "OpenSearch Dashboards server user"
+
+logstash_writer:
+  reserved: false
+  users:
+    - "logstash"
+  description: "Logstash ingest"
+
+siem_readonly:
+  reserved: false
+  users:
+    - "readonly"
+  description: "Grafana + exporters"
