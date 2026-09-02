@@ -99,7 +99,7 @@ This stack was built and tested on the following hardware. You do **not** need i
 | Service | Port | Description |
 |---------|------|-------------|
 | **Grafana** | 3000 | Dashboards, visualization, alert rules |
-| **OpenSearch (Hot)** | 9200 | Primary log search & indexing (NVMe, 0-30 days) |
+| **OpenSearch (Hot)** | 9200 | Primary log search & indexing (HTTPS + auth, NVMe, 0-30 days) |
 | **OpenSearch (Warm)** | — | Read-optimized node (SATA, 30-365 days) |
 | **OpenSearch Dashboards** | 5601 | OpenSearch UI |
 | **Wazuh Manager** | 1514/udp | Agent enrollment, EDR, FIM, VirusTotal integration |
@@ -108,7 +108,9 @@ This stack was built and tested on the following hardware. You do **not** need i
 | **Wazuh API** | 55000 | Wazuh RESTful API |
 | **N8N** | 80 | SOAR orchestrator — alert triage, enrichment, Discord routing |
 | **Prometheus** | 9090 | Metrics scraping & alerting |
-| **InfluxDB** | 8086 | Time-series metrics (pfSense, Telegraf, UniFi) |
+| **Alertmanager** | 9093 (loopback) | Independent alert delivery (Prometheus rules → n8n) |
+| **elasticsearch-exporter** | — | OpenSearch cluster/index metrics for Prometheus (internal :9114) |
+| **InfluxDB** | 8086 | Time-series metrics (pfSense, Telegraf, UniFi) — auth enabled |
 | **Logstash** | 5140/udp | Suricata EVE JSON ingestion |
 | **Syslog-ng** | 514/udp+tcp | Centralized syslog receiver |
 | **UniFi Poller** | — | Collects UniFi switch/AP telemetry → InfluxDB |
