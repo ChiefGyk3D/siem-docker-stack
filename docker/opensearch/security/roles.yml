@@ -1,0 +1,62 @@
+# =============================================================================
+# OpenSearch Security — Custom roles (main SIEM cluster)
+# =============================================================================
+# Built-in static roles (all_access, kibana_server, kibana_user, ...) are
+# compiled into the plugin and are NOT defined here — this file only adds
+# the stack's custom roles. Applied via securityadmin.sh (see
+# scripts/08b-init-opensearch-security.sh).
+_meta:
+  type: "roles"
+  config_version: 2
+
+# Logstash ingest — write + create-index on the SIEM indices, plus index
+# template management so pipelines can bootstrap their own templates.
+logstash_writer:
+  reserved: false
+  description: "Logstash: write SIEM event indices + manage index templates"
+  cluster_permissions:
+    - "cluster_monitor"
+    - "cluster_composite_ops"
+    - "indices:admin/template/get"
+    - "indices:admin/template/put"
+    - "indices:admin/index_template/get"
+    - "indices:admin/index_template/put"
+  index_permissions:
+    - index_patterns:
+        - "suricata-*"
+        - "syslog-*"
+        - "pfsense-*"
+        - "pfblockerng-*"
+        - "unifi-syslog-*"
+        - "crowdsec-events-*"
+      allowed_actions:
+        - "create_index"
+        - "write"
+        - "indices:admin/mapping/put"
+        - "indices:data/write/bulk*"
+
+# Read-only role for Grafana dashboards and monitoring (prometheus
+# elasticsearch-exporter). Read on SIEM indices, monitor on everything.
+siem_readonly:
+  reserved: false
+  description: "Read-only: Grafana datasources + metrics exporters"
+  cluster_permissions:
+    - "cluster_monitor"
+    - "cluster_composite_ops_ro"
+  index_permissions:
+    - index_patterns:
+        - "suricata-*"
+        - "syslog-*"
+        - "pfsense-*"
+        - "pfblockerng-*"
+        - "unifi-syslog-*"
+        - "crowdsec-events-*"
+      allowed_actions:
+        - "read"
+        - "indices:admin/mappings/get"
+        - "indices:admin/get"
+        - "indices:monitor/*"
+    - index_patterns:
+        - "*"
+      allowed_actions:
+        - "indices_monitor"

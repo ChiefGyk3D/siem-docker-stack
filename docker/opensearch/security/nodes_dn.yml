@@ -1,0 +1,6 @@
+# Dynamic nodes_dn is unused — node DNs are pinned statically via
+# plugins.security.nodes_dn in opensearch-hot.yml / opensearch-warm.yml.
+# File must exist for securityadmin -cd.
+_meta:
+  type: "nodesdn"
+  config_version: 2

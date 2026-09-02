@@ -4,7 +4,8 @@ set -e
 # =============================================================================
 # SIEM Stack Password Change Tool
 # =============================================================================
-# Changes passwords for Wazuh Indexer, Wazuh API, and Grafana.
+# Changes passwords for Wazuh Indexer, Wazuh API, Grafana, and the main
+# OpenSearch cluster users (admin/logstash/readonly/kibanaserver — Phase F1).
 # Run this script ON the SIEM server (where docker compose is running).
 #
 # IMPORTANT:
@@ -21,6 +22,11 @@ HASH_TOOL="/usr/share/wazuh-indexer/plugins/opensearch-security/tools/hash.sh"
 SEC_TOOL="/usr/share/wazuh-indexer/plugins/opensearch-security/tools/securityadmin.sh"
 CERTS="/usr/share/wazuh-indexer/config/certs"
 SEC_CFG="/usr/share/wazuh-indexer/config/opensearch-security"
+
+# Main OpenSearch cluster (Phase F1) — paths inside opensearch-hot
+OS_SEC_CFG="/usr/share/opensearch/config/opensearch-security"
+OS_CERTS="/usr/share/opensearch/config/certs"
+OS_INTERNAL_USERS_HOST="${COMPOSE_DIR}/opensearch/security/internal_users.yml"
 
 echo "============================================"
 echo "  Wazuh SIEM Stack Password Change Tool"
@@ -48,8 +54,22 @@ read -sp "New Wazuh API password for wazuh-wui (leave blank to skip): " API_PASS
 echo ""
 read -sp "New Grafana admin password (leave blank to skip): " GRAFANA_PASS
 echo ""
+echo ""
+echo "Main OpenSearch cluster users (Phase F1 — see .env OPENSEARCH_*_PASSWORD):"
+read -sp "New OpenSearch admin password (leave blank to skip): " OS_ADMIN_PASS
+echo ""
+read -sp "New OpenSearch logstash password (leave blank to skip): " OS_LOGSTASH_PASS
+echo ""
+read -sp "New OpenSearch readonly password (leave blank to skip): " OS_READONLY_PASS
+echo ""
+read -sp "New OpenSearch dashboards (kibanaserver) password (leave blank to skip): " OS_DASHBOARDS_PASS
+echo ""
 
-if [[ -z "$INDEXER_PASS" && -z "$API_PASS" && -z "$GRAFANA_PASS" ]]; then
+any_change() {
+    [[ -n "$INDEXER_PASS" || -n "$API_PASS" || -n "$GRAFANA_PASS" ||        -n "$OS_ADMIN_PASS" || -n "$OS_LOGSTASH_PASS" || -n "$OS_READONLY_PASS" ||        -n "$OS_DASHBOARDS_PASS" ]]
+}
+
+if ! any_change; then
     echo "Nothing to change. Exiting."
     exit 0
 fi
@@ -57,8 +77,12 @@ fi
 # Validate passwords for problematic characters
 [[ -n "$INDEXER_PASS" ]] && { validate_password "$INDEXER_PASS" "Indexer" || INDEXER_PASS=""; }
 [[ -n "$API_PASS" ]]     && { validate_password "$API_PASS" "API" || API_PASS=""; }
+[[ -n "$OS_ADMIN_PASS" ]]      && { validate_password "$OS_ADMIN_PASS" "OpenSearch admin" || OS_ADMIN_PASS=""; }
+[[ -n "$OS_LOGSTASH_PASS" ]]   && { validate_password "$OS_LOGSTASH_PASS" "OpenSearch logstash" || OS_LOGSTASH_PASS=""; }
+[[ -n "$OS_READONLY_PASS" ]]   && { validate_password "$OS_READONLY_PASS" "OpenSearch readonly" || OS_READONLY_PASS=""; }
+[[ -n "$OS_DASHBOARDS_PASS" ]] && { validate_password "$OS_DASHBOARDS_PASS" "OpenSearch dashboards" || OS_DASHBOARDS_PASS=""; }
 
-if [[ -z "$INDEXER_PASS" && -z "$API_PASS" && -z "$GRAFANA_PASS" ]]; then
+if ! any_change; then
     echo "Nothing to change. Exiting."
     exit 0
 fi
@@ -68,6 +92,10 @@ echo "=== Changes to apply ==="
 [[ -n "$INDEXER_PASS" ]] && echo "  * Wazuh Indexer admin password"
 [[ -n "$API_PASS" ]]     && echo "  * Wazuh API (wazuh-wui) password"
 [[ -n "$GRAFANA_PASS" ]] && echo "  * Grafana admin password"
+[[ -n "$OS_ADMIN_PASS" ]]      && echo "  * OpenSearch (main cluster) admin password"
+[[ -n "$OS_LOGSTASH_PASS" ]]   && echo "  * OpenSearch (main cluster) logstash password"
+[[ -n "$OS_READONLY_PASS" ]]   && echo "  * OpenSearch (main cluster) readonly password"
+[[ -n "$OS_DASHBOARDS_PASS" ]] && echo "  * OpenSearch (main cluster) kibanaserver password"
 echo ""
 read -p "Proceed? (y/N): " CONFIRM
 [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]] && echo "Aborted." && exit 0
@@ -219,6 +247,91 @@ if [[ -n "$GRAFANA_PASS" ]]; then
     SERVICES_TO_RECREATE+=(grafana)
 fi
 
+# ---- STEP 4: Main OpenSearch cluster passwords (Phase F1) ----
+if [[ -n "$OS_ADMIN_PASS" || -n "$OS_LOGSTASH_PASS" || -n "$OS_READONLY_PASS" || -n "$OS_DASHBOARDS_PASS" ]]; then
+    echo ""
+    echo "[4/4] Changing main OpenSearch cluster passwords..."
+
+    if [[ ! -f "$OS_INTERNAL_USERS_HOST" ]]; then
+        echo "  ERROR: ${OS_INTERNAL_USERS_HOST} not found."
+        echo "  Run scripts/08b-init-opensearch-security.sh first."
+        exit 1
+    fi
+
+    os_hash() {
+        docker exec -e HASH_PASS="$1" opensearch-hot bash -c \
+            'plugins/opensearch-security/tools/hash.sh -p "$HASH_PASS"' 2>/dev/null | grep -E '^\$2[aby]\$' | tail -1
+    }
+
+    os_update_user_hash() {
+        local user="$1" pass="$2"
+        local hash
+        hash=$(os_hash "$pass")
+        if [[ -z "$hash" ]]; then
+            echo "  ERROR: bcrypt hashing failed for ${user}. Aborting."
+            exit 1
+        fi
+        NEW_HASH="$hash" TARGET_USER="$user" python3 - "$OS_INTERNAL_USERS_HOST" <<'PYEOF'
+import os, re, sys
+path = sys.argv[1]
+user = os.environ["TARGET_USER"]
+new_hash = os.environ["NEW_HASH"]
+with open(path, encoding="utf-8") as f:
+    content = f.read()
+pattern = re.compile(r'(^%s:\s*\n\s*hash:\s*)"[^"]*"' % re.escape(user), re.M)
+content, n = pattern.subn(lambda m: m.group(1) + '"' + new_hash + '"', content, count=1)
+if n != 1:
+    sys.exit("could not find user %s in %s" % (user, path))
+with open(path, "w", encoding="utf-8") as f:
+    f.write(content)
+print("  internal_users.yml updated for %s." % user)
+PYEOF
+    }
+
+    cp "$OS_INTERNAL_USERS_HOST" "${OS_INTERNAL_USERS_HOST}.bak"
+
+    [[ -n "$OS_ADMIN_PASS" ]]      && os_update_user_hash "admin" "$OS_ADMIN_PASS"
+    [[ -n "$OS_LOGSTASH_PASS" ]]   && os_update_user_hash "logstash" "$OS_LOGSTASH_PASS"
+    [[ -n "$OS_READONLY_PASS" ]]   && os_update_user_hash "readonly" "$OS_READONLY_PASS"
+    [[ -n "$OS_DASHBOARDS_PASS" ]] && os_update_user_hash "kibanaserver" "$OS_DASHBOARDS_PASS"
+
+    # Apply just the internal users to the running cluster via admin cert
+    docker exec opensearch-hot bash -c "plugins/opensearch-security/tools/securityadmin.sh \
+        -f ${OS_SEC_CFG}/internal_users.yml \
+        -t internalusers \
+        -cacert ${OS_CERTS}/root-ca.pem \
+        -cert ${OS_CERTS}/admin.pem \
+        -key ${OS_CERTS}/admin-key.pem \
+        -h localhost -p 9200 \
+        -icl -nhnv" 2>&1 | tail -5
+    echo "  Security config applied to main cluster."
+
+    # Update .env so container env interpolation picks up new values
+    ENV_FILE="${COMPOSE_DIR}/.env"
+    if [[ -f "$ENV_FILE" ]]; then
+        update_env_var() {
+            local key="$1" value="$2"
+            if grep -q "^${key}=" "$ENV_FILE"; then
+                sed -i "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
+            else
+                echo "${key}=${value}" >> "$ENV_FILE"
+            fi
+        }
+        [[ -n "$OS_ADMIN_PASS" ]]      && update_env_var "OPENSEARCH_ADMIN_PASSWORD" "$OS_ADMIN_PASS"
+        [[ -n "$OS_LOGSTASH_PASS" ]]   && update_env_var "OPENSEARCH_LOGSTASH_PASSWORD" "$OS_LOGSTASH_PASS"
+        [[ -n "$OS_READONLY_PASS" ]]   && update_env_var "OPENSEARCH_READONLY_PASSWORD" "$OS_READONLY_PASS"
+        [[ -n "$OS_DASHBOARDS_PASS" ]] && update_env_var "OPENSEARCH_DASHBOARDS_PASSWORD" "$OS_DASHBOARDS_PASS"
+        echo "  .env updated."
+    else
+        echo "  WARNING: ${ENV_FILE} not found — update OPENSEARCH_*_PASSWORD manually."
+    fi
+
+    # Recreate every consumer of the changed credentials
+    [[ -n "$OS_LOGSTASH_PASS" ]]   && SERVICES_TO_RECREATE+=(logstash)
+    [[ -n "$OS_READONLY_PASS" ]]   && SERVICES_TO_RECREATE+=(grafana elasticsearch-exporter)
+    [[ -n "$OS_DASHBOARDS_PASS" ]] && SERVICES_TO_RECREATE+=(opensearch-dashboards)
+fi
+
 # ---- Recreate affected services (picks up new env vars) ----
 echo ""
 echo "=== Recreating affected services ==="
@@ -259,6 +372,17 @@ if [[ -n "$API_PASS" ]]; then
         echo "  [OK] Wazuh API: wazuh-wui password verified"
     else
         echo "  [FAIL] Wazuh API: wazuh-wui password NOT working"
+    fi
+fi
+
+if [[ -n "$OS_ADMIN_PASS" ]]; then
+    OS_CHECK=$(docker exec opensearch-hot curl -sk \
+        -u "admin:${OS_ADMIN_PASS}" \
+        "https://localhost:9200/_cluster/health?pretty" 2>/dev/null | grep -c '"status"')
+    if [[ "$OS_CHECK" -gt 0 ]]; then
+        echo "  [OK] OpenSearch (main): admin password verified"
+    else
+        echo "  [FAIL] OpenSearch (main): admin password NOT working"
     fi
 fi
 

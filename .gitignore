@@ -5,6 +5,15 @@ config.env
 # Wazuh TLS certificates (generated per-deployment)
 docker/wazuh/certs/*.pem
 
+# OpenSearch main-cluster TLS certificates (scripts/07-generate-opensearch-certs.sh)
+docker/opensearch/certs/*.pem
+docker/opensearch/certs/*.key
+docker/opensearch/certs/*.srl
+
+# OpenSearch security bootstrap output — bcrypt hashes of your passwords
+# (rendered from internal_users.yml.template by 08b-init-opensearch-security.sh)
+docker/opensearch/security/internal_users.yml
+
 # Prometheus file_sd targets (contain real LAN IPs/hostnames)
 # The *.example.json templates stay tracked.
 docker/prometheus/targets/*.json

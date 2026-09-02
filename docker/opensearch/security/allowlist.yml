@@ -1,0 +1,8 @@
+# API allowlisting disabled — access control is handled by roles.
+# File must exist for securityadmin -cd.
+_meta:
+  type: "allowlist"
+  config_version: 2
+
+config:
+  enabled: false

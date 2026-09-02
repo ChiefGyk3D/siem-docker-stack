@@ -1,0 +1,5 @@
+# No custom action groups — built-in static groups (read, write, create_index,
+# cluster_monitor, ...) are sufficient. File must exist for securityadmin -cd.
+_meta:
+  type: "actiongroups"
+  config_version: 2

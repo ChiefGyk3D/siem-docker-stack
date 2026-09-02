@@ -86,8 +86,12 @@ if $LOCAL_MODE; then
     # Local: just copy
     cp -r "${REPO_DIR}/docker/"* "${DEPLOY_DIR}/"
 else
-    # Remote: rsync
+    # Remote: rsync. Protect generated/secret files on the server from
+    # --delete when they don't exist in the repo working tree
+    # (opensearch security bootstrap output — see 08b-init-opensearch-security.sh).
     rsync -avz --delete \
+        --filter='P opensearch/security/internal_users.yml' \
+        --filter='P opensearch/certs/*' \
         "${REPO_DIR}/docker/" \
         "${SIEM_USER}@${SIEM_HOST}:${DEPLOY_DIR}/"
 fi
@@ -115,6 +119,15 @@ run_on_server "
     sudo chown -R 472:472 /data/warm/grafana 2>/dev/null || true
     sudo chown -R 65534:65534 /data/hot/prometheus 2>/dev/null || true
     sudo chown -R 1000:1000 /data/hot/wazuh/indexer 2>/dev/null || true
+    # Alertmanager storage (Phase F3) + OpenSearch snapshots (Phase F4)
+    sudo mkdir -p /data/hot/alertmanager /data/warm/snapshots 2>/dev/null || true
+    sudo chown -R 65534:65534 /data/hot/alertmanager 2>/dev/null || true
+    sudo chown -R 1000:1000 /data/warm/snapshots 2>/dev/null || true
+    # OpenSearch TLS keys must be readable by the container user (uid 1000)
+    if ls ${DEPLOY_DIR}/opensearch/certs/*-key.pem > /dev/null 2>&1; then
+        sudo chown 1000:1000 ${DEPLOY_DIR}/opensearch/certs/*-key.pem 2>/dev/null || true
+        sudo chmod 640 ${DEPLOY_DIR}/opensearch/certs/*-key.pem 2>/dev/null || true
+    fi
 "
 echo -e "${GREEN}✓ Permissions set${NC}"
 
@@ -137,14 +150,18 @@ fi
 
 echo "Services starting at http://${HOST_DISPLAY}:"
 echo "  Grafana:               :3000"
-echo "  OpenSearch:             :9200"
+echo "  OpenSearch:             :9200 (HTTPS + auth)"
 echo "  OpenSearch Dashboards:  :5601"
 echo "  Wazuh Dashboard:        :443  (HTTPS)"
 echo "  Prometheus:             :9090"
-echo "  InfluxDB:               :8086"
+echo "  Alertmanager:           :9093 (loopback only)"
+echo "  InfluxDB:               :8086 (auth)"
 echo "  Portainer:              :9443 (HTTPS)"
 echo ""
 echo "Next steps:"
 echo "  1. Wait ~2 minutes for all services to start"
-echo "  2. Run: bash scripts/04-apply-ism-policy.sh http://${HOST_DISPLAY}:9200"
-echo "  3. Run: bash scripts/05-verify.sh ${HOST_DISPLAY}"
+echo "  2. First deploy only: bash scripts/08b-init-opensearch-security.sh"
+echo "     (initializes OpenSearch users/roles from .env passwords)"
+echo "  3. Run: bash scripts/04-apply-ism-policy.sh https://${HOST_DISPLAY}:9200"
+echo "  4. Run: bash scripts/05-verify.sh ${HOST_DISPLAY}"
+echo "  5. Snapshots: bash scripts/10-snapshot-setup.sh"

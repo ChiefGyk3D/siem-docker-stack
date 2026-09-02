@@ -16,6 +16,21 @@ set -uo pipefail
 
 SIEM_HOST="${1:-${SIEM_HOST:-localhost}}"
 SIEM_USER="${2:-${SIEM_USER:-$(whoami)}}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="${SCRIPT_DIR}/.."
+
+# Load credentials from .env when present (OPENSEARCH_ADMIN_PASSWORD,
+# INFLUXDB_ADMIN_USER/PASSWORD) — Phase F1 secured the cluster and InfluxDB.
+for envf in /opt/siem/.env "${REPO_DIR}/.env" "${REPO_DIR}/docker/.env"; do
+    if [ -f "$envf" ]; then
+        # shellcheck disable=SC1090
+        set -a; source "$envf"; set +a
+        break
+    fi
+done
+OPENSEARCH_ADMIN_PASSWORD="${OPENSEARCH_ADMIN_PASSWORD:-}"
+OS_AUTH="admin:${OPENSEARCH_ADMIN_PASSWORD}"
+OS_URL="https://${SIEM_HOST}:9200"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -69,10 +84,16 @@ check_https() {
 
 # ── OpenSearch Cluster ────────────────────────────────────────────────────────
 echo -e "${YELLOW}OpenSearch Cluster:${NC}"
-check_http "OpenSearch API (hot)" "http://${SIEM_HOST}:9200"
+if [ -z "$OPENSEARCH_ADMIN_PASSWORD" ]; then
+    echo -e "  ${YELLOW}⚠ OPENSEARCH_ADMIN_PASSWORD not set — authenticated checks will fail${NC}"
+    ((WARN++))
+fi
+check_https "OpenSearch API (hot, authenticated)" "${OS_URL}" "200" "$OS_AUTH"
+# Security regression check: anonymous access MUST be rejected now.
+check_https "OpenSearch API (unauthenticated → 401)" "${OS_URL}" "401"
 check_http "OpenSearch Dashboards" "http://${SIEM_HOST}:5601" "302"
 
-CLUSTER_HEALTH=$(curl -sf "http://${SIEM_HOST}:9200/_cluster/health" 2>/dev/null || echo "")
+CLUSTER_HEALTH=$(curl -sk -u "$OS_AUTH" "${OS_URL}/_cluster/health" 2>/dev/null || echo "")
 if [ -n "$CLUSTER_HEALTH" ]; then
     CS=$(echo "$CLUSTER_HEALTH" | jq -r '.status')
     NODES=$(echo "$CLUSTER_HEALTH" | jq -r '.number_of_nodes')
@@ -84,7 +105,7 @@ if [ -n "$CLUSTER_HEALTH" ]; then
     esac
 
     echo -e "  Node tiers:"
-    curl -sf "http://${SIEM_HOST}:9200/_cat/nodeattrs?h=node,attr,value" 2>/dev/null | grep "temp" | while read -r line; do
+    curl -sk -u "$OS_AUTH" "${OS_URL}/_cat/nodeattrs?h=node,attr,value" 2>/dev/null | grep "temp" | while read -r line; do
         echo -e "    ${CYAN}${line}${NC}"
     done
 fi
@@ -92,7 +113,7 @@ fi
 # ── Wazuh Stack ───────────────────────────────────────────────────────────────
 echo ""
 echo -e "${YELLOW}Wazuh Stack:${NC}"
-check_https "Wazuh Indexer" "https://${SIEM_HOST}:9202" "200" "admin:SecretPassword"
+check_https "Wazuh Indexer" "https://${SIEM_HOST}:9202" "200" "admin:${WAZUH_INDEXER_PASSWORD:-SecretPassword}"
 check_https "Wazuh Dashboard" "https://${SIEM_HOST}:443" "any"
 
 echo -e "  ${YELLOW}NOTE: Change default Wazuh passwords after deployment!${NC}"
@@ -103,11 +124,15 @@ echo -e "${YELLOW}Services:${NC}"
 check_http "Grafana" "http://${SIEM_HOST}:3000/api/health"
 check_http "InfluxDB" "http://${SIEM_HOST}:8086/ping" "204"
 check_http "Prometheus" "http://${SIEM_HOST}:9090/-/healthy"
+# Alertmanager is bound to loopback — only checkable on the SIEM host itself.
+if [ "$SIEM_HOST" = "localhost" ] || [ "$SIEM_HOST" = "127.0.0.1" ]; then
+    check_http "Alertmanager" "http://127.0.0.1:9093/-/healthy"
+fi
 
 # ── Docker Containers ────────────────────────────────────────────────────────
 echo ""
 echo -e "${YELLOW}Docker Containers:${NC}"
-EXPECTED_CONTAINERS="grafana influxdb logstash opensearch-dashboards opensearch-hot opensearch-warm portainer prometheus syslog-ng unifi-poller wazuh-dashboard wazuh-indexer wazuh-manager"
+EXPECTED_CONTAINERS="alertmanager cadvisor elasticsearch-exporter grafana influxdb logstash opensearch-dashboards opensearch-hot opensearch-warm portainer prometheus syslog-ng unifi-poller wazuh-dashboard wazuh-indexer wazuh-manager"
 
 # Try local docker first, then SSH
 if docker ps > /dev/null 2>&1; then
@@ -156,7 +181,7 @@ fi
 # ── ISM Policy ────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${YELLOW}ISM Policy:${NC}"
-ISM_POLICIES=$(curl -sf "http://${SIEM_HOST}:9200/_plugins/_ism/policies" 2>/dev/null || echo "")
+ISM_POLICIES=$(curl -sk -u "$OS_AUTH" "${OS_URL}/_plugins/_ism/policies" 2>/dev/null || echo "")
 if [ -n "$ISM_POLICIES" ]; then
     COUNT=$(echo "$ISM_POLICIES" | jq -r '.total_policies // 0')
     if [ "$COUNT" -gt 0 ]; then
@@ -169,7 +194,7 @@ fi
 # ── InfluxDB Databases ───────────────────────────────────────────────────────
 echo ""
 echo -e "${YELLOW}InfluxDB Databases:${NC}"
-INFLUX_DBS=$(curl -sf "http://${SIEM_HOST}:8086/query?q=SHOW+DATABASES" 2>/dev/null || echo "")
+INFLUX_DBS=$(curl -sf -u "${INFLUXDB_ADMIN_USER:-admin}:${INFLUXDB_ADMIN_PASSWORD:-}" "http://${SIEM_HOST}:8086/query?q=SHOW+DATABASES" 2>/dev/null || echo "")
 if [ -n "$INFLUX_DBS" ]; then
     echo "$INFLUX_DBS" | jq -r '.results[0].series[0].values[][0]' 2>/dev/null | while read -r db; do
         echo -e "  ${GREEN}✓${NC} ${db}"

@@ -1,0 +1,114 @@
+# =============================================================================
+# Prometheus Alert Rules — SIEM Pipeline Health (Phase F3)
+# =============================================================================
+# The independent alerting path: these rules are evaluated by Prometheus and
+# delivered via Alertmanager → n8n, so pipeline-health alerting keeps working
+# when Grafana (or OpenSearch) is down.
+#
+# Metric sources:
+#   - elasticsearch_* : elasticsearch-exporter service (scrapes opensearch-hot)
+#   - container_*     : cadvisor v0.49
+#   - node_*          : node_exporter on file_sd host targets (only fires for
+#                       hosts you actually configured in prometheus/targets/)
+#
+# Validate: promtool check rules docker/prometheus/rules/siem-health.yml
+
+groups:
+  - name: siem-cluster-health
+    rules:
+      - alert: ClusterStatusRed
+        expr: elasticsearch_cluster_health_status{color="red"} == 1
+        for: 2m
+        labels:
+          severity: critical
+          source: siem-health
+        annotations:
+          summary: "OpenSearch cluster {{ $labels.cluster }} is RED"
+          description: "At least one primary shard is unassigned — data is unavailable and ingest may be failing. Check: curl -sk -u admin:... https://localhost:9200/_cluster/allocation/explain"
+
+      - alert: ClusterStatusYellow
+        expr: elasticsearch_cluster_health_status{color="yellow"} == 1
+        for: 15m
+        labels:
+          severity: warning
+          source: siem-health
+        annotations:
+          summary: "OpenSearch cluster {{ $labels.cluster }} is YELLOW"
+          description: "Replica shards are unassigned for 15m. Expected briefly after restarts; sustained yellow usually means a node is missing or allocation is stuck."
+
+      - alert: IngestRateZero
+        # Cluster-wide indexing counter flat for 15m — a silent pipeline looks
+        # identical to a quiet network, so alert on "nothing indexed at all".
+        # (Per-index rates exist as elasticsearch_index_stats_indexing_index_total
+        # via --es.indices if you want per-source silence alerts later.)
+        expr: sum(rate(elasticsearch_indices_indexing_index_total[15m])) == 0
+        for: 15m
+        labels:
+          severity: critical
+          source: siem-health
+        annotations:
+          summary: "SIEM ingest rate is zero"
+          description: "No documents were indexed into the OpenSearch cluster for at least 15 minutes. Check Logstash (docker logs logstash), syslog-ng, and upstream forwarders."
+
+  - name: siem-stack-health
+    rules:
+      - alert: TargetDown
+        expr: up{job=~"prometheus|alertmanager|elasticsearch-exporter|grafana|cadvisor"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          source: siem-health
+        annotations:
+          summary: "Scrape target {{ $labels.job }} ({{ $labels.instance }}) is down"
+          description: "Prometheus has been unable to scrape {{ $labels.job }} for 5 minutes — a core SIEM service is down or unreachable."
+
+      - alert: ContainerRestarting
+        # cadvisor v0.49 exports container_start_time_seconds; a restart
+        # bumps the start time, so >2 changes in 30m = restart loop.
+        expr: changes(container_start_time_seconds{name!=""}[30m]) > 2
+        for: 0m
+        labels:
+          severity: warning
+          source: siem-health
+        annotations:
+          summary: "Container {{ $labels.name }} is restarting repeatedly"
+          description: "{{ $labels.name }} restarted more than twice in 30 minutes — likely a crash loop. Check: docker logs {{ $labels.name }}"
+
+      - alert: PrometheusRuleEvaluationFailures
+        expr: increase(prometheus_rule_evaluation_failures_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          source: siem-health
+        annotations:
+          summary: "Prometheus rule evaluation failures"
+          description: "Prometheus failed to evaluate alerting/recording rules in the last 5 minutes — 'monitoring the monitoring' is degraded. Check the Prometheus UI → Status → Rules."
+
+  - name: siem-host-disk
+    rules:
+      # NOTE: node_exporter is not a default service in this stack — these
+      # only fire for hosts configured via prometheus/targets/*.json (SIEM
+      # host itself via the 'node' job, Twingate Pis, etc.).
+      - alert: FilesystemFillingUp
+        expr: |
+          (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs", mountpoint!=""}
+            / node_filesystem_size_bytes) < 0.15
+        for: 30m
+        labels:
+          severity: warning
+          source: siem-health
+        annotations:
+          summary: "Filesystem {{ $labels.mountpoint }} on {{ $labels.instance }} below 15% free"
+          description: "{{ $labels.mountpoint }} on {{ $labels.instance }} has less than 15% space left. For /data/hot or /data/warm this threatens evidence retention — check ISM rollover/deletes."
+
+      - alert: FilesystemCritical
+        expr: |
+          (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs", mountpoint!=""}
+            / node_filesystem_size_bytes) < 0.05
+        for: 10m
+        labels:
+          severity: critical
+          source: siem-health
+        annotations:
+          summary: "Filesystem {{ $labels.mountpoint }} on {{ $labels.instance }} below 5% free"
+          description: "{{ $labels.mountpoint }} on {{ $labels.instance }} is nearly full. OpenSearch will hit flood-stage watermarks and force indices read-only."

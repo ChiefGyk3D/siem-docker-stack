@@ -1,0 +1,58 @@
+# =============================================================================
+# Alertmanager Configuration — TEMPLATE (Phase F3)
+# =============================================================================
+# Alertmanager does NOT interpolate environment variables, so this template is
+# rendered to alertmanager.yml by scripts/render-alertmanager-config.sh
+# (envsubst) using N8N_ALERTMANAGER_WEBHOOK_URL from .env.
+#
+# The tracked alertmanager.yml is the default rendering
+# (http://n8n/webhook/alertmanager-siem) — edit .env and re-run the render
+# script to point at your n8n instance, then: docker compose restart alertmanager
+#
+# Validate:
+#   docker run --rm --entrypoint amtool \
+#     -v "$PWD/docker/alertmanager/alertmanager.yml":/tmp/am.yml:ro \
+#     prom/alertmanager:v0.27.0 check-config /tmp/am.yml
+
+route:
+  receiver: "null"
+  group_by: ["alertname", "severity"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    # Critical pipeline-health alerts — deliver fast, repeat often.
+    - receiver: n8n-webhook
+      matchers:
+        - severity = "critical"
+      group_wait: 15s
+      repeat_interval: 1h
+      continue: false
+    # Warnings — batched and repeated less aggressively.
+    - receiver: n8n-webhook
+      matchers:
+        - severity = "warning"
+      group_wait: 2m
+      repeat_interval: 12h
+      continue: false
+
+receivers:
+  # Default: drop anything without a severity route match.
+  - name: "null"
+
+  # n8n SOAR webhook — n8n formats and fans out to Discord/Matrix.
+  # Payload format: Alertmanager webhook v4 (JSON, {alerts: [...]}).
+  - name: n8n-webhook
+    webhook_configs:
+      - url: "${N8N_ALERTMANAGER_WEBHOOK_URL}"
+        send_resolved: true
+        max_alerts: 20
+
+inhibit_rules:
+  # A critical alert for the same alertname/instance silences its warning twin
+  # (e.g. FilesystemCritical inhibits FilesystemFillingUp).
+  - source_matchers:
+      - severity = "critical"
+    target_matchers:
+      - severity = "warning"
+    equal: ["alertname", "instance"]

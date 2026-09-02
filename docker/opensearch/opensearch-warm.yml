@@ -6,6 +6,9 @@
 #
 # The warm node is NOT a cluster manager — it only acts as
 # data + ingest.
+#
+# Security (Phase F1): the security plugin is ENABLED — transport + HTTP TLS
+# with certs from scripts/07-generate-opensearch-certs.sh.
 
 cluster.name: siem-cluster
 node.name: opensearch-warm
@@ -30,5 +33,48 @@ network.host: 0.0.0.0
 http.port: 9200
 transport.port: 9300
 
-# Security disabled (internal network only)
-plugins.security.disabled: true
+# ── Security plugin ──────────────────────────────────────────────────────────
+
+# TLS — transport layer (node-to-node, required)
+plugins.security.ssl.transport.pemcert_filepath: /usr/share/opensearch/config/certs/opensearch-warm.pem
+plugins.security.ssl.transport.pemkey_filepath: /usr/share/opensearch/config/certs/opensearch-warm-key.pem
+plugins.security.ssl.transport.pemtrustedcas_filepath: /usr/share/opensearch/config/certs/root-ca.pem
+plugins.security.ssl.transport.enforce_hostname_verification: false
+
+# TLS — HTTP layer
+plugins.security.ssl.http.enabled: true
+plugins.security.ssl.http.pemcert_filepath: /usr/share/opensearch/config/certs/opensearch-warm.pem
+plugins.security.ssl.http.pemkey_filepath: /usr/share/opensearch/config/certs/opensearch-warm-key.pem
+plugins.security.ssl.http.pemtrustedcas_filepath: /usr/share/opensearch/config/certs/root-ca.pem
+
+# DNs must match the certs from 07-generate-opensearch-certs.sh (RFC2253)
+plugins.security.authcz.admin_dn:
+  - "CN=admin,OU=SIEM,O=siem-docker-stack,C=US"
+plugins.security.nodes_dn:
+  - "CN=opensearch-hot,OU=SIEM,O=siem-docker-stack,C=US"
+  - "CN=opensearch-warm,OU=SIEM,O=siem-docker-stack,C=US"
+
+# Audit log into the cluster itself
+plugins.security.audit.type: internal_opensearch
+
+plugins.security.system_indices.enabled: true
+plugins.security.system_indices.indices:
+  - ".plugins-ml-*"
+  - ".opendistro-alerting-config"
+  - ".opendistro-alerting-alert*"
+  - ".opendistro-anomaly-results*"
+  - ".opendistro-anomaly-detector*"
+  - ".opendistro-anomaly-checkpoints"
+  - ".opendistro-anomaly-detection-state"
+  - ".opendistro-reports-*"
+  - ".opensearch-notifications-*"
+  - ".opensearch-notebooks"
+  - ".opensearch-observability"
+  - ".ql-datasources"
+  - ".opendistro-asynchronous-search-response*"
+  - ".replication-metadata-store"
+
+# Snapshots (Phase F4) — /data/warm/snapshots bind-mounted at /mnt/snapshots.
+# Repository registered by scripts/10-snapshot-setup.sh.
+path.repo:
+  - /mnt/snapshots

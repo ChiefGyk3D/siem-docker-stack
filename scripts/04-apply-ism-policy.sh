@@ -9,16 +9,37 @@
 #   2. Applies index templates for Suricata, pfBlockerNG, and Syslog
 #   3. Verifies everything was applied correctly
 #
+# The cluster is secured (Phase F1): requests use HTTPS + admin basic auth.
+# OPENSEARCH_ADMIN_PASSWORD is read from the environment or .env.
+#
 # Usage:
-#   bash scripts/04-apply-ism-policy.sh http://10.0.0.100:9200
-#   bash scripts/04-apply-ism-policy.sh   # defaults to localhost
+#   bash scripts/04-apply-ism-policy.sh https://10.0.0.100:9200
+#   bash scripts/04-apply-ism-policy.sh   # defaults to https://localhost:9200
 # =============================================================================
 
 set -euo pipefail
 
-OPENSEARCH_URL="${1:-http://localhost:9200}"
+OPENSEARCH_URL="${1:-https://localhost:9200}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="${SCRIPT_DIR}/.."
 OPENSEARCH_DIR="${SCRIPT_DIR}/../docker/opensearch"
+
+# Load OPENSEARCH_ADMIN_PASSWORD from .env if not already set
+if [ -z "${OPENSEARCH_ADMIN_PASSWORD:-}" ]; then
+    for envf in /opt/siem/.env "${REPO_DIR}/.env" "${REPO_DIR}/docker/.env"; do
+        if [ -f "$envf" ]; then
+            # shellcheck disable=SC1090
+            set -a; source "$envf"; set +a
+            break
+        fi
+    done
+fi
+if [ -z "${OPENSEARCH_ADMIN_PASSWORD:-}" ]; then
+    echo "ERROR: OPENSEARCH_ADMIN_PASSWORD not set (env or .env). See .env.example."
+    exit 1
+fi
+# -k: cluster certs are self-signed (see scripts/07-generate-opensearch-certs.sh)
+CURL=(curl -sk -u "admin:${OPENSEARCH_ADMIN_PASSWORD}")
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -32,8 +53,8 @@ echo ""
 # Wait for OpenSearch
 echo -e "${YELLOW}Waiting for OpenSearch...${NC}"
 for i in {1..30}; do
-    if curl -sf "${OPENSEARCH_URL}/_cluster/health" > /dev/null 2>&1; then
-        HEALTH=$(curl -sf "${OPENSEARCH_URL}/_cluster/health" | jq -r '.status')
+    if "${CURL[@]}" -f "${OPENSEARCH_URL}/_cluster/health" > /dev/null 2>&1; then
+        HEALTH=$("${CURL[@]}" -f "${OPENSEARCH_URL}/_cluster/health" | jq -r '.status')
         echo -e "${GREEN}✓ OpenSearch is up (cluster health: ${HEALTH})${NC}"
         break
     fi
@@ -41,12 +62,12 @@ for i in {1..30}; do
     sleep 5
 done
 
-if ! curl -sf "${OPENSEARCH_URL}/_cluster/health" > /dev/null 2>&1; then
+if ! "${CURL[@]}" -f "${OPENSEARCH_URL}/_cluster/health" > /dev/null 2>&1; then
     echo -e "${RED}ERROR: OpenSearch not reachable at ${OPENSEARCH_URL}${NC}"
     exit 1
 fi
 
-CLUSTER_INFO=$(curl -sf "${OPENSEARCH_URL}/_cluster/health")
+CLUSTER_INFO=$("${CURL[@]}" -f "${OPENSEARCH_URL}/_cluster/health")
 NODE_COUNT=$(echo "$CLUSTER_INFO" | jq -r '.number_of_nodes')
 echo "  Nodes: ${NODE_COUNT}"
 
@@ -54,7 +75,7 @@ echo "  Nodes: ${NODE_COUNT}"
 echo ""
 echo -e "${YELLOW}[1/5] Applying ISM hot/warm/delete policy...${NC}"
 
-curl -sf -X PUT "${OPENSEARCH_URL}/_plugins/_ism/policies/siem-hot-warm-delete" \
+"${CURL[@]}" -f -X PUT "${OPENSEARCH_URL}/_plugins/_ism/policies/siem-hot-warm-delete" \
     -H 'Content-Type: application/json' \
     -d @"${OPENSEARCH_DIR}/ism-hot-warm-policy.json" | jq .
 
@@ -64,7 +85,7 @@ echo -e "${GREEN}✓ ISM policy applied${NC}"
 echo ""
 echo -e "${YELLOW}[2/5] Applying Suricata index template...${NC}"
 
-curl -sf -X PUT "${OPENSEARCH_URL}/_index_template/suricata-template" \
+"${CURL[@]}" -f -X PUT "${OPENSEARCH_URL}/_index_template/suricata-template" \
     -H 'Content-Type: application/json' \
     -d @"${OPENSEARCH_DIR}/index-template-suricata.json" | jq .
 
@@ -74,7 +95,7 @@ echo -e "${GREEN}✓ Suricata template applied${NC}"
 echo ""
 echo -e "${YELLOW}[3/5] Applying pfBlockerNG index template...${NC}"
 
-curl -sf -X PUT "${OPENSEARCH_URL}/_index_template/pfblockerng" \
+"${CURL[@]}" -f -X PUT "${OPENSEARCH_URL}/_index_template/pfblockerng" \
     -H 'Content-Type: application/json' \
     -d @"${OPENSEARCH_DIR}/index-template-pfblockerng.json" | jq .
 
@@ -84,7 +105,7 @@ echo -e "${GREEN}✓ pfBlockerNG template applied${NC}"
 echo ""
 echo -e "${YELLOW}[4/5] Applying Syslog index template...${NC}"
 
-curl -sf -X PUT "${OPENSEARCH_URL}/_index_template/syslog-template" \
+"${CURL[@]}" -f -X PUT "${OPENSEARCH_URL}/_index_template/syslog-template" \
     -H 'Content-Type: application/json' \
     -d '{
   "index_patterns": ["syslog-*", "pfsense-*", "unifi-syslog-*", "crowdsec-events-*"],
@@ -117,15 +138,15 @@ echo ""
 echo -e "${YELLOW}[5/5] Verifying...${NC}"
 
 echo "  ISM policies:"
-curl -sf "${OPENSEARCH_URL}/_plugins/_ism/policies" | jq -r '.policies[].policy.description' 2>/dev/null || echo "    (none yet)"
+"${CURL[@]}" -f "${OPENSEARCH_URL}/_plugins/_ism/policies" | jq -r '.policies[].policy.description' 2>/dev/null || echo "    (none yet)"
 
 echo ""
 echo "  Index templates:"
-curl -sf "${OPENSEARCH_URL}/_index_template" | jq -r '.index_templates[].name' 2>/dev/null || echo "    (none yet)"
+"${CURL[@]}" -f "${OPENSEARCH_URL}/_index_template" | jq -r '.index_templates[].name' 2>/dev/null || echo "    (none yet)"
 
 echo ""
 echo "  Cluster allocation tags:"
-curl -sf "${OPENSEARCH_URL}/_cat/nodeattrs?v&h=node,attr,value" 2>/dev/null | grep temp || echo "    (waiting for nodes)"
+"${CURL[@]}" -f "${OPENSEARCH_URL}/_cat/nodeattrs?v&h=node,attr,value" 2>/dev/null | grep temp || echo "    (waiting for nodes)"
 
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════╗${NC}"

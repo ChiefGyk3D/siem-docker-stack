@@ -1,0 +1,37 @@
+# =============================================================================
+# OpenSearch Security — Authentication configuration (main SIEM cluster)
+# =============================================================================
+# Applied by scripts/08b-init-opensearch-security.sh via securityadmin.sh.
+# Basic auth against the internal users database + TLS client-cert auth
+# (used by securityadmin.sh with the admin cert).
+_meta:
+  type: "config"
+  config_version: 2
+
+config:
+  dynamic:
+    http:
+      anonymous_auth_enabled: false
+    authc:
+      basic_internal_auth_domain:
+        description: "HTTP basic auth against the internal users database"
+        http_enabled: true
+        transport_enabled: true
+        order: 0
+        http_authenticator:
+          type: basic
+          challenge: true
+        authentication_backend:
+          type: internal
+      clientcert_auth_domain:
+        description: "TLS client certificate authentication"
+        http_enabled: true
+        transport_enabled: true
+        order: 1
+        http_authenticator:
+          type: clientcert
+          config:
+            username_attribute: cn
+          challenge: false
+        authentication_backend:
+          type: noop
