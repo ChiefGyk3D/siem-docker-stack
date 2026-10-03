@@ -55,9 +55,12 @@ jobs:
           -v "$certs/root-ca.pem":/etc/logstash/certs/root-ca.pem:ro \
           opensearchproject/logstash-oss-with-opensearch-output-plugin:8.9.0 \
           logstash --config.test_and_exit
-        # Wazuh files are multi-root fragments, so wrap them for xmllint
+        # Wazuh files are multi-root fragments, so wrap them for xmllint (through a
+        # file: a pipe into xmllint can end early and break the pipe under pipefail)
+        wrapped=$(mktemp)
         while IFS= read -r f; do
-          { echo '<ossec_wrapper>'; cat "$f"; echo '</ossec_wrapper>'; } | xmllint --noout - || { echo "FAIL $f"; exit 1; }
+          { echo '<ossec_wrapper>'; cat "$f"; echo '</ossec_wrapper>'; } > "$wrapped"
+          xmllint --noout "$wrapped" || { echo "FAIL $f"; exit 1; }
           echo "OK   $f"
         done < <(find wazuh -name '*.xml')
         python3 scripts/check-wazuh-rule-ids.py wazuh
