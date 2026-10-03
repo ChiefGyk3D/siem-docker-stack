@@ -55,14 +55,22 @@ jobs:
           -v "$certs/root-ca.pem":/etc/logstash/certs/root-ca.pem:ro \
           opensearchproject/logstash-oss-with-opensearch-output-plugin:8.9.0 \
           logstash --config.test_and_exit
-        # Wazuh files are multi-root fragments, so wrap them for xmllint (through a
-        # file: a pipe into xmllint can end early and break the pipe under pipefail)
-        wrapped=$(mktemp)
-        while IFS= read -r f; do
-          { echo '<ossec_wrapper>'; cat "$f"; echo '</ossec_wrapper>'; } > "$wrapped"
-          xmllint --noout "$wrapped" || { echo "FAIL $f"; exit 1; }
-          echo "OK   $f"
-        done < <(find wazuh -name '*.xml')
+        # Wazuh files are multi-root fragments, so wrap them before parsing. This is
+        # the old xmllint well-formedness check in the standard library: xmllint is
+        # not on the runner and installing it would need an apt mirror in the allow-list.
+        python3 - <<'PY'
+        import pathlib, sys
+        import xml.etree.ElementTree as ET
+        bad = 0
+        for f in sorted(pathlib.Path("wazuh").rglob("*.xml")):
+            try:
+                ET.fromstring("<ossec_wrapper>" + f.read_text(encoding="utf-8") + "</ossec_wrapper>")
+                print("OK  ", f)
+            except ET.ParseError as e:
+                print("FAIL", f, e)
+                bad = 1
+        sys.exit(bad)
+        PY
         python3 scripts/check-wazuh-rule-ids.py wazuh
         python3 -m pytest tests/python -q
       # x86_64 only: the test pulls Docker Hub images (logstash-oss-with-opensearch-output-plugin
