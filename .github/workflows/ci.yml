@@ -22,4 +22,50 @@ jobs:
       contents: read
     with:
       shfmt-args: -i 4 -ci
+      # Pre-existing findings, visible but not failing until the scripts are
+      # cleaned up: 6 shellcheck warnings in 5 files and 60 shfmt hunks in
+      # 13 of 14 scripts (per-file counts in the pull request). The old gate
+      # was shellcheck at --severity=error, which is clean.
+      shellcheck-continue-on-error: true
+      shfmt-continue-on-error: true
+      # The old ci.yml's non-shell checks, kept as the test, in its own order:
+      # compose, promtool, amtool, logstash, Wazuh XML and rule ids, pytest.
+      test-install-command: python3 -m pip install --user pytest requests pyyaml
+      test-command: |
+        (cd docker && docker compose -f docker-compose.yml config --quiet)
+        stage=$(mktemp -d)
+        cp -r docker/prometheus/. "$stage/"
+        for f in "$stage"/targets/*.example.json; do cp "$f" "${f%.example.json}.json"; done
+        # promtool runs as nobody in the container; mktemp dirs are 0700
+        chmod -R a+rX "$stage"
+        docker run --rm --entrypoint promtool -v "$stage":/etc/prometheus:ro \
+          prom/prometheus:v2.53.0 check config /etc/prometheus/prometheus.yml
+        docker run --rm --entrypoint /bin/sh -v "$stage":/etc/prometheus:ro \
+          prom/prometheus:v2.53.0 -c 'promtool check rules /etc/prometheus/rules/*.yml'
+        docker run --rm --entrypoint amtool \
+          -v "$PWD/docker/alertmanager/alertmanager.yml":/tmp/am.yml:ro \
+          prom/alertmanager:v0.27.0 check-config /tmp/am.yml
+        certs=$(mktemp -d)
+        openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=ci-throwaway-ca" \
+          -keyout "$certs/root-ca-key.pem" -out "$certs/root-ca.pem"
+        chmod -R a+rX "$certs"
+        docker run --rm \
+          -v "$PWD/docker/logstash/pipeline":/usr/share/logstash/pipeline:ro \
+          -v "$PWD/docker/logstash/logstash.yml":/usr/share/logstash/config/logstash.yml:ro \
+          -v "$certs/root-ca.pem":/etc/logstash/certs/root-ca.pem:ro \
+          opensearchproject/logstash-oss-with-opensearch-output-plugin:8.9.0 \
+          logstash --config.test_and_exit
+        # Wazuh files are multi-root fragments, so wrap them for xmllint
+        while IFS= read -r f; do
+          { echo '<ossec_wrapper>'; cat "$f"; echo '</ossec_wrapper>'; } | xmllint --noout - || { echo "FAIL $f"; exit 1; }
+          echo "OK   $f"
+        done < <(find wazuh -name '*.xml')
+        python3 scripts/check-wazuh-rule-ids.py wazuh
+        python3 -m pytest tests/python -q
+      # x86_64 only: the test pulls Docker Hub images (logstash-oss-with-opensearch-output-plugin
+      # is not published for arm64). No distros: the checks are about this stack's configs, not an OS.
+      runners: '["ubuntu-24.04"]'
       egress-policy: block
+      # Docker Hub for the test's images (the list python-ci.yml measured), and the
+      # four hosts the workflow-lint job needs (actionlint matcher and npm, zizmor image)
+      extra-allowed-endpoints: auth.docker.io:443 ghcr.io:443 pkg-containers.githubusercontent.com:443 production.cloudfront.docker.com:443 raw.githubusercontent.com:443 registry-1.docker.io:443 registry.npmjs.org:443
