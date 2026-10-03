@@ -1,135 +1,25 @@
-# =============================================================================
-# CI — validate configs, rules, scripts, and Python tooling
-# =============================================================================
-# Jobs:
-#   - compose:    docker compose config syntax check
-#   - prometheus: promtool check config (with example file_sd targets staged)
-#   - logstash:   pipeline syntax check (--config.test_and_exit)
-#   - wazuh:      XML well-formedness + custom rule ID range/duplicate check
-#   - shellcheck: error-severity lint over shell scripts
-#   - python:     pytest suite (alert rules, VT cache, dashboard/workflow JSON)
-
+# CI for siem-docker-stack. The jobs live in ChiefGyk3D/git-your-ship-together; this file
+# says only what is specific to this repository.
 name: CI
 
 on:
   push:
     branches: [master]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  compose:
-    name: Docker Compose validation
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Validate docker-compose.yml
-        working-directory: docker
-        run: docker compose -f docker-compose.yml config --quiet
-
-  prometheus:
-    name: Prometheus config check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Stage config with example file_sd targets
-        run: |
-          stage=$(mktemp -d)
-          cp -r docker/prometheus/. "$stage/"
-          cd "$stage/targets"
-          for f in *.example.json; do
-            cp "$f" "${f%.example.json}.json"
-          done
-          # promtool runs as 'nobody' in the container; mktemp dirs are 0700
-          chmod -R a+rX "$stage"
-          echo "STAGE=$stage" >> "$GITHUB_ENV"
-      - name: promtool check config
-        run: |
-          docker run --rm --entrypoint promtool \
-            -v "$STAGE":/etc/prometheus:ro \
-            prom/prometheus:v2.53.0 \
-            check config /etc/prometheus/prometheus.yml
-      - name: promtool check rules
-        run: |
-          # sh -c so the glob expands inside the container (promtool has no
-          # shell entrypoint and does not glob its arguments itself)
-          docker run --rm --entrypoint /bin/sh \
-            -v "$STAGE":/etc/prometheus:ro \
-            prom/prometheus:v2.53.0 \
-            -c 'promtool check rules /etc/prometheus/rules/*.yml'
-
-  alertmanager:
-    name: Alertmanager config check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: amtool check-config
-        run: |
-          docker run --rm --entrypoint amtool \
-            -v "$PWD/docker/alertmanager/alertmanager.yml":/tmp/am.yml:ro \
-            prom/alertmanager:v0.27.0 \
-            check-config /tmp/am.yml
-
-  logstash:
-    name: Logstash pipeline check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Stage throwaway CA cert (pipelines reference a mounted cacert)
-        run: |
-          mkdir -p /tmp/logstash-certs
-          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
-            -subj "/CN=ci-throwaway-ca" \
-            -keyout /tmp/logstash-certs/root-ca-key.pem \
-            -out /tmp/logstash-certs/root-ca.pem
-          chmod -R a+rX /tmp/logstash-certs
-      - name: logstash --config.test_and_exit
-        run: |
-          docker run --rm \
-            -v "$PWD/docker/logstash/pipeline":/usr/share/logstash/pipeline:ro \
-            -v "$PWD/docker/logstash/logstash.yml":/usr/share/logstash/config/logstash.yml:ro \
-            -v "/tmp/logstash-certs/root-ca.pem":/etc/logstash/certs/root-ca.pem:ro \
-            opensearchproject/logstash-oss-with-opensearch-output-plugin:8.9.0 \
-            logstash --config.test_and_exit
-
-  wazuh:
-    name: Wazuh rules & decoders
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install xmllint
-        run: sudo apt-get update -q && sudo apt-get install -y -q libxml2-utils
-      - name: XML well-formedness (files are multi-root fragments — wrap them)
-        run: |
-          status=0
-          for f in $(find wazuh -name '*.xml'); do
-            if { echo '<ossec_wrapper>'; cat "$f"; echo '</ossec_wrapper>'; } | xmllint --noout -; then
-              echo "OK   $f"
-            else
-              echo "FAIL $f"
-              status=1
-            fi
-          done
-          exit $status
-      - name: Rule ID range & duplicate check
-        run: python3 scripts/check-wazuh-rule-ids.py wazuh
-
-  shellcheck:
-    name: ShellCheck (errors)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: shellcheck --severity=error
-        run: shellcheck --severity=error scripts/*.sh change-passwords.sh
-
-  python:
-    name: Python tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Install test dependencies
-        run: pip install pytest requests pyyaml
-      - name: pytest
-        run: pytest tests/python -q
+  ci:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/bash-ci.yml@0e58a0e61ea8b3800d1cb0e6ed81bb860ace2094 # v1.6.3
+    permissions:
+      contents: read
+    with:
+      shfmt-args: -i 4 -ci
+      egress-policy: block
