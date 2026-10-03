@@ -23,7 +23,7 @@ jobs:
     with:
       shfmt-args: -i 4 -ci
       # Pre-existing findings, visible but not failing until the scripts are
-      # cleaned up: 6 shellcheck warnings in 5 files and 60 shfmt hunks in
+      # cleaned up: 7 shellcheck warnings in 6 files and 60 shfmt hunks in
       # 13 of 14 scripts (per-file counts in the pull request). The old gate
       # was shellcheck at --severity=error, which is clean.
       shellcheck-continue-on-error: true
