@@ -1,0 +1,23 @@
+# gitleaks findings reviewed by the maintainer on 2026-10-08 and accepted as false positives.
+# Every entry is a documentation or script example: the OpenSearch default admin login that the docs
+# say to change before production, a literal '...' or ${VAR} / your-password placeholder, or a sample
+# key in .env.example. None is a live credential. Exact fingerprints (commit:file:rule:line), so any
+# new finding, including one in these same files, still fails the scan.
+
+# .env.example
+5da4169ce54551c4ce18296943e871f3135c2b2e:.env.example:generic-api-key:59
+# change-passwords.sh
+719651a51f900a4ed5d51cac02a5effa4ec08a99:change-passwords.sh:curl-auth-user:148
+8685040928edc02190ed11f2962a867f149a21f9:change-passwords.sh:curl-auth-user:148
+# docker/prometheus/rules/siem-health.yml
+545895aaf7ca76a2ed2c75b670f49b6f9009c389:docker/prometheus/rules/siem-health.yml:curl-auth-user:27
+# docs/maintenance.md
+5da4169ce54551c4ce18296943e871f3135c2b2e:docs/maintenance.md:curl-auth-user:165
+# docs/phase-f-testing.md
+3f7edfd6b46027a1c42a0884be16b7d779abd8bb:docs/phase-f-testing.md:curl-auth-user:222
+# docs/troubleshooting.md
+5da4169ce54551c4ce18296943e871f3135c2b2e:docs/troubleshooting.md:curl-auth-user:142
+# scripts/05-verify.sh
+4cf105aec0866f4d7f455103ad7114be25403a7b:scripts/05-verify.sh:curl-auth-user:197
+# scripts/10-snapshot-setup.sh
+3f7edfd6b46027a1c42a0884be16b7d779abd8bb:scripts/10-snapshot-setup.sh:curl-auth-user:175
