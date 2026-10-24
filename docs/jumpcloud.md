@@ -123,7 +123,8 @@ WorkingDirectory=/opt/jumpcloud-wazuh-bridge
 Restart=on-failure
 RestartSec=30
 User=jumpcloud
-Environment=JUMPCLOUD_API_KEY=changeme
+# Keep the key out of the unit file: put JUMPCLOUD_API_KEY=<your key> in this file (mode 600, owned by root)
+EnvironmentFile=/etc/jumpcloud-wazuh-bridge.env
 # The bridge defaults to /tmp paths — pin them so Wazuh's <localfile> works
 Environment=JUMPCLOUD_OUTPUT_FILE=/var/log/jumpcloud_events.jsonl
 Environment=JUMPCLOUD_STATE_FILE=/var/lib/jumpcloud_bridge/cursor.json
