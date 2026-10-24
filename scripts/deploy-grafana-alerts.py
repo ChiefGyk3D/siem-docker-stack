@@ -11,7 +11,7 @@ Or copy to server and run locally:
 Required environment variables (or edit the Configuration section below):
     GRAFANA_URL         Grafana base URL (default: http://localhost:3000)
     GRAFANA_USER        Grafana admin username (default: admin)
-    GRAFANA_PASS        Grafana admin password (default: changeme)
+    GRAFANA_PASS        Grafana admin password (REQUIRED, no default; a missing or placeholder value is refused)
     ALERT_FOLDER_UID    Grafana folder UID for alert rules
     DS_WAZUH            Datasource UID for Wazuh alerts
     DS_SURICATA         Datasource UID for Suricata alerts
@@ -20,15 +20,34 @@ Required environment variables (or edit the Configuration section below):
 import base64
 import json
 import os
+import re
 import urllib.request
 import urllib.error
+
+# ── Secrets: no defaults ───────────────────────────────────────────────
+# One placeholder rule, kept identical in every deploy-*.py (these scripts are
+# also piped over ssh, so they cannot import a sibling module) and in
+# scripts/lib-secrets.sh; tests/python/test_required_secrets.py keeps them in step.
+_PLACEHOLDER = re.compile(r"(|change[_-]?me.*|your[_-].*|<.*|xxx.*|example.*|placeholder.*|secretpassword|mys3cr3tp4ssw0rd|kibanaserver|admin|password|.*your-password.*|.*strong-password.*)", re.I | re.S)  # placeholder-rule
+
+
+def is_placeholder(value):
+    return _PLACEHOLDER.fullmatch((value or "").strip()) is not None
+
+
+def require_secret(name, value):
+    """Return value, or exit naming the variable (never the value) if it is unusable."""
+    if is_placeholder(value):
+        raise SystemExit(f"ERROR: {name} is missing, empty, or a placeholder. "
+                         "Set a real value (see README, Required secrets).")
+    return value
+
 
 # ── Configuration ──────────────────────────────────────────────────────
 # Set these via environment variables or edit the defaults below.
 GRAFANA_URL = os.environ.get("GRAFANA_URL", "http://localhost:3000")
 _GRAFANA_USER = os.environ.get("GRAFANA_USER", "admin")
-_GRAFANA_PASS = os.environ.get("GRAFANA_PASS", "changeme")
-GRAFANA_AUTH = base64.b64encode(f"{_GRAFANA_USER}:{_GRAFANA_PASS}".encode()).decode()
+_GRAFANA_PASS = os.environ.get("GRAFANA_PASS")  # required, checked in main()
 ALERT_FOLDER = os.environ.get("ALERT_FOLDER_UID", "YOUR_ALERT_FOLDER_UID")  # Grafana folder UID
 
 # Datasource UIDs — find these in Grafana → Connections → Data Sources → (select) → URL contains the UID
@@ -37,10 +56,7 @@ DS_SURICATA = os.environ.get("DS_SURICATA", "YOUR_SURICATA_DS_UID")
 DS_PROMETHEUS = os.environ.get("DS_PROMETHEUS", "YOUR_PROMETHEUS_DS_UID")
 DS_EXPR = "__expr__"
 
-_HEADERS = {
-    "Content-Type": "application/json",
-    "Authorization": f"Basic {GRAFANA_AUTH}",
-}
+_HEADERS = {"Content-Type": "application/json"}
 
 
 def grafana_post(endpoint, data):
@@ -386,7 +402,15 @@ RULES = [
 ]
 
 
+def _init_auth():
+    """Refuse a missing or placeholder password, then build the Basic auth header."""
+    password = require_secret("GRAFANA_PASS", _GRAFANA_PASS)
+    token = base64.b64encode(f"{_GRAFANA_USER}:{password}".encode()).decode()
+    _HEADERS["Authorization"] = f"Basic {token}"
+
+
 def main():
+    _init_auth()
     alert_folder_uid = resolve_alert_folder_uid()
 
     # Get existing rules and map title -> uid for idempotent updates.
