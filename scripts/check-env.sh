@@ -26,16 +26,10 @@ REQUIRED=(
     UNIFI_PASS
 )
 
-# Lower-cased exact matches and prefixes that are known defaults or examples.
-is_placeholder() {
-    local v
-    v="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
-    case "$v" in
-        changeme* | secretpassword | my[s]3cr3tp4ssw0rd | kibanaserver | admin | password | \
-            "<"* | *"your-password"* | *"strong-password"*) return 0 ;;
-    esac
-    return 1
-}
+# One placeholder rule for every shell script lives in lib-secrets.sh.
+# shellcheck source=scripts/lib-secrets.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib-secrets.sh"
+is_placeholder() { secret_is_placeholder "$1"; }
 
 bad=0
 for var in "${REQUIRED[@]}"; do
@@ -52,7 +46,7 @@ for var in "${REQUIRED[@]}"; do
 done
 
 if [ "$bad" -ne 0 ]; then
-    echo "check-env: set strong unique values in $ENV_FILE (see README, Upgrade notes)" >&2
+    echo "check-env: set strong unique values in $ENV_FILE (see README, Required secrets)" >&2
     exit 1
 fi
 echo "check-env: all required secrets are set and none is a known default"

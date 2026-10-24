@@ -23,7 +23,10 @@ done
 OPENSEARCH_URL="${OPENSEARCH_URL:-https://localhost:9200}"
 GRAFANA_URL="${GRAFANA_URL:-http://localhost:3000}"
 GRAFANA_USER="${GRAFANA_USER:-admin}"
-GRAFANA_PASS="${GRAFANA_PASS:-${GRAFANA_ADMIN_PASS:-changeme}}"
+GRAFANA_PASS="${GRAFANA_PASS:-${GRAFANA_ADMIN_PASS:-}}"
+# shellcheck source=scripts/lib-secrets.sh
+source "${SCRIPT_DIR}/lib-secrets.sh"
+require_secret GRAFANA_PASS "$GRAFANA_PASS" || { echo "Set GRAFANA_PASS (or GRAFANA_ADMIN_PASS in .env)." >&2; exit 1; }
 
 if [ -z "${OPENSEARCH_ADMIN_PASSWORD:-}" ]; then
   echo "ERROR: OPENSEARCH_ADMIN_PASSWORD not set (env or .env). See .env.example."

@@ -207,7 +207,7 @@ Reach them from your workstation with an SSH tunnel, for example
 4. **Portainer** (only if enabled) → `https://127.0.0.1:9443`
 
 > There are no default passwords: compose refuses to start until every
-> required secret in `.env` is set (see [Upgrade notes](#upgrade-notes)).
+> required secret in `.env` is set (see [Required secrets](#required-secrets)).
 
 ### Changing Default Passwords
 
@@ -229,6 +229,60 @@ The script handles:
 - Verifies each password change worked before finishing
 
 > **TIP:** Avoid using `$` in passwords — it causes escaping issues across YAML, shell, Docker Compose, and JSON layers.
+
+---
+
+## Required secrets
+
+There are no default passwords. Every secret below is required: it ships empty
+in `.env.example`, and a missing, empty or placeholder value stops the stack or
+script that needs it. Values are never printed in an error message; the
+message names the variable. Use strong, unique values and avoid `$`.
+
+Before `docker compose up`, run `bash scripts/check-env.sh .env`; `scripts/03-deploy.sh`
+runs it for you. It rejects an empty value or a placeholder (the old well-known
+defaults and obvious fill-ins such as `your_*`, `<...>`, `example*`,
+`placeholder*`, `xxx*`, `admin` and `password`), compared case-insensitively. The
+exact rule lives in `scripts/lib-secrets.sh`, and each `scripts/deploy-*.py`
+carries the same one.
+
+**Stack secrets (`.env`, mode 600).** Compose interpolates the whole file, so
+if any of these is unset `docker compose` refuses to run and names the
+variable. A value that is set but still a placeholder is caught by
+`check-env.sh`, not by compose.
+
+| Secret | Protects | Without it |
+|--------|----------|------------|
+| `OPENSEARCH_ADMIN_PASSWORD` | OpenSearch `admin` (main cluster), used by the 04, 05, 08, 09 and 10 scripts | Those scripts exit with an error (05 skips its authenticated checks); `check-env.sh` fails |
+| `OPENSEARCH_LOGSTASH_PASSWORD` | Logstash write account on OpenSearch | Compose refuses to run |
+| `OPENSEARCH_READONLY_PASSWORD` | Read-only OpenSearch account used by Grafana and the Elasticsearch exporter | Compose refuses to run |
+| `OPENSEARCH_DASHBOARDS_PASSWORD` | OpenSearch Dashboards service account | Compose refuses to run |
+| `GRAFANA_ADMIN_PASS` | Grafana `admin` login | Compose refuses to run |
+| `INFLUXDB_ADMIN_PASSWORD` | InfluxDB admin (only InfluxDB itself holds it) | Compose refuses to run |
+| `GRAFANA_INFLUX_PASSWORD` | Read-only InfluxDB account `grafana_ro` for Grafana | Compose refuses to run |
+| `UNPOLLER_INFLUX_PASSWORD` | Write-only InfluxDB account `unpoller_wo` for unifi-poller | Compose refuses to run |
+| `WAZUH_INDEXER_PASSWORD` | Wazuh indexer `admin`, used by the manager and dashboard | Compose refuses to run |
+| `WAZUH_API_PASSWORD` | Wazuh API user `wazuh-wui` | Compose refuses to run |
+| `WAZUH_DASHBOARD_PASSWORD` | Wazuh dashboard service account (`kibanaserver` on the indexer) | Compose refuses to run |
+| `WAZUH_GRAFANA_RO_PASSWORD` | Read-only Wazuh indexer user for Grafana (`scripts/11-wazuh-grafana-readonly.sh` creates it) | Compose refuses to run; script 11 exits with an error |
+| `UNIFI_PASS` | The UniFi controller account unifi-poller logs in with | Compose refuses to run |
+
+**Client-side secrets (environment, not the stack `.env`).** The deploy scripts
+have no fallback: unset, empty or placeholder, they exit with an error before
+sending any request.
+
+| Secret | Needed by | Without it |
+|--------|-----------|------------|
+| `GRAFANA_PASS` (the smoke test also accepts `GRAFANA_ADMIN_PASS`) | `deploy-dashboards.py`, `deploy-grafana-alerts.py`, `deploy-crowdsec-dashboard.py`, `deploy-n8n-soar.sh`, `08-crowdsec-smoketest.sh` | Script exits 1, naming `GRAFANA_PASS` |
+| `N8N_API_KEY` | `deploy-n8n-soar.sh`, `deploy-n8n-grafana-router.py` | Script exits 1 |
+| `N8N_PASSWORD` | `deploy-n8n-grafana-router.py` (n8n login) | Script exits 1 |
+| `DISCORD_WEBHOOK_URL` | `deploy-n8n-grafana-router.py` | Script exits 1 |
+
+Where to keep them: `.env` on the SIEM host for the stack secrets, and your
+shell, a secrets manager or Doppler for the client-side ones (see
+[Secrets Management](#secrets-management)). Do not commit either. Optional
+integration keys (VirusTotal, JumpCloud, alert-delivery webhooks) are not
+required to run the stack; the feature is simply off until they are set.
 
 ---
 
@@ -302,8 +356,9 @@ stops with a message naming the missing variable.
    ```
 
    `OPENSEARCH_ADMIN_PASSWORD` is also checked by `check-env.sh`. If your
-   `.env` was copied from `.env.example`, replace every `changeme*`,
-   `SecretPassword` and `MyS3cr3tP4ssw0rd` value; `check-env.sh` rejects them.
+   `.env` was copied from an old `.env.example`, replace every well-known
+   default value; `check-env.sh` rejects them. The full list, with what each
+   secret protects, is in [Required secrets](#required-secrets).
 2. **Log ingestion stops until you set `INGEST_BIND_ADDR`.** Firewalls,
    sensors and Wazuh agents on other hosts can no longer reach 514, 5140,
    5044, 1514, 1515 or 8086 until `INGEST_BIND_ADDR` is set to the SIEM

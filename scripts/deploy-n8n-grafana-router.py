@@ -12,27 +12,47 @@ Usage:
 
 Required environment variables (or edit the Configuration section below):
     N8N_BASE            N8N base URL (e.g. http://172.20.0.16:80)
-    N8N_API_KEY         N8N public API key
+    N8N_API_KEY         N8N public API key (required, no default)
     N8N_EMAIL           N8N login email
-    N8N_PASSWORD        N8N login password
-    DISCORD_WEBHOOK_URL Discord incoming-webhook URL
+    N8N_PASSWORD        N8N login password (required, no default)
+    DISCORD_WEBHOOK_URL Discord incoming-webhook URL (required)
     DISCORD_MENTION     Discord user/role mention (e.g. <@USER_ID>)
 """
 import json
 import os
+import re
 import urllib.request
 import urllib.error
 import http.cookiejar
 import uuid
 
+# ── Secrets: no defaults ───────────────────────────────────────────────
+# One placeholder rule, kept identical in every deploy-*.py (these scripts are
+# also piped over ssh, so they cannot import a sibling module) and in
+# scripts/lib-secrets.sh; tests/python/test_required_secrets.py keeps them in step.
+_PLACEHOLDER = re.compile(r"(|change[_-]?me.*|your[_-].*|<.*|xxx.*|example.*|placeholder.*|secretpassword|mys3cr3tp4ssw0rd|kibanaserver|admin|password|.*your-password.*|.*strong-password.*)", re.I | re.S)  # placeholder-rule
+
+
+def is_placeholder(value):
+    return _PLACEHOLDER.fullmatch((value or "").strip()) is not None
+
+
+def require_secret(name, value):
+    """Return value, or exit naming the variable (never the value) if it is unusable."""
+    if is_placeholder(value):
+        raise SystemExit(f"ERROR: {name} is missing, empty, or a placeholder. "
+                         "Set a real value (see README, Required secrets).")
+    return value
+
+
 # ── Configuration ──────────────────────────────────────────────────────
 # Set these via environment variables or edit the defaults below.
 N8N_BASE = os.environ.get("N8N_BASE", "http://172.20.0.16:80")
 N8N_API = f"{N8N_BASE}/api/v1"
-N8N_KEY = os.environ.get("N8N_API_KEY", "YOUR_N8N_API_KEY")
+N8N_KEY = os.environ.get("N8N_API_KEY")  # required, checked in main()
 N8N_EMAIL = os.environ.get("N8N_EMAIL", "admin@example.com")
-N8N_PASSWORD = os.environ.get("N8N_PASSWORD", "changeme")
-DISCORD_URL = os.environ.get("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN")
+N8N_PASSWORD = os.environ.get("N8N_PASSWORD")  # required, checked in main()
+DISCORD_URL = os.environ.get("DISCORD_WEBHOOK_URL")  # required, checked in main()
 DISCORD_MENTION = os.environ.get("DISCORD_MENTION", "<@YOUR_DISCORD_USER_ID>")
 WORKFLOW_NAME = "Grafana SOAR — Alert Router"
 
@@ -157,6 +177,12 @@ def build_full_workflow(wf_id, version_id):
 
 
 def main():
+    # No defaults for secrets: refuse before any request is made.
+    global N8N_KEY, N8N_PASSWORD, DISCORD_URL
+    N8N_KEY = require_secret("N8N_API_KEY", N8N_KEY)
+    N8N_PASSWORD = require_secret("N8N_PASSWORD", N8N_PASSWORD)
+    DISCORD_URL = require_secret("DISCORD_WEBHOOK_URL", DISCORD_URL)
+    API_HEADERS["X-N8N-API-KEY"] = N8N_KEY
     # Step 1: Check if workflow already exists (by name)
     list_req = urllib.request.Request(f"{N8N_API}/workflows?limit=50", headers=API_HEADERS)
     existing = json.loads(urllib.request.urlopen(list_req).read())
