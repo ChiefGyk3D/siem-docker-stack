@@ -1,0 +1,1760 @@
+{
+  "version": "2.6.2",
+  "summary": {
+    "title": "siem-docker-stack threat model",
+    "owner": "",
+    "description": "Threat model of the docker-compose SIEM stack (OpenSearch hot/warm, Logstash, syslog-ng, Grafana, InfluxDB, Prometheus, Alertmanager, Wazuh, optional CrowdSec/UniFi Poller/Portainer) built from docker/docker-compose.yml, docker/*/ configs, scripts/ and n8n/ workflows at origin/master. No LLM or AI component exists in the stack (n8n/ideas.md mentions local LLMs only as ideas)."
+  },
+  "detail": {
+    "diagrams": [
+      {
+        "id": 0,
+        "title": "SIEM stack data flow",
+        "diagramType": "STRIDE",
+        "cells": [
+          {
+            "id": "tb_lan",
+            "shape": "trust-boundary-box",
+            "data": {
+              "name": "Untrusted network (LAN, log senders, agents, operators)",
+              "description": "Everything that can reach the published host ports. Docker-published ports bypass UFW (comment in docker/docker-compose.yml opensearch-hot; scripts/02-bootstrap.sh firewall section), so the host firewall is not a reliable boundary."
+            },
+            "position": {
+              "x": 20,
+              "y": 20
+            },
+            "size": {
+              "width": 420,
+              "height": 1100
+            }
+          },
+          {
+            "id": "tb_siem",
+            "shape": "trust-boundary-box",
+            "data": {
+              "name": "SIEM host: Docker siem-net (single flat bridge)",
+              "description": "One bridge network for all services (networks.siem-net in docker/docker-compose.yml). No per-service network segmentation."
+            },
+            "position": {
+              "x": 480,
+              "y": 20
+            },
+            "size": {
+              "width": 1560,
+              "height": 1020
+            }
+          },
+          {
+            "id": "tb_host",
+            "shape": "trust-boundary-box",
+            "data": {
+              "name": "Host OS and Docker daemon (bind mounts, secrets, key material)",
+              "description": "Bind-mounted /data/hot, /data/warm, .env, certs and the Docker socket. Evidence: volumes sections in docker/docker-compose.yml."
+            },
+            "position": {
+              "x": 480,
+              "y": 1070
+            },
+            "size": {
+              "width": 1560,
+              "height": 330
+            }
+          },
+          {
+            "id": "tb_ext",
+            "shape": "trust-boundary-box",
+            "data": {
+              "name": "External services (not defined in compose)",
+              "description": "n8n, Discord, VirusTotal, UniFi controller. n8n is referenced as http://n8n/webhook/... (wazuh/integrations/custom-n8n, docker/alertmanager/alertmanager.yml) but is not a service in docker/docker-compose.yml."
+            },
+            "position": {
+              "x": 2100,
+              "y": 20
+            },
+            "size": {
+              "width": 420,
+              "height": 900
+            }
+          },
+          {
+            "id": "tb_sc",
+            "shape": "trust-boundary-box",
+            "data": {
+              "name": "Supply chain and CI",
+              "description": "Container registries and GitHub Actions (.github/workflows/*.yml)."
+            },
+            "position": {
+              "x": 2100,
+              "y": 960
+            },
+            "size": {
+              "width": 420,
+              "height": 440
+            }
+          },
+          {
+            "id": "a_dev",
+            "shape": "actor",
+            "data": {
+              "name": "Network devices (pfSense, Suricata, UniFi)",
+              "description": "Send syslog (UDP/TCP 514) and Suricata EVE JSON (UDP 5140). Evidence: docker/syslog-ng/syslog-ng.conf sources; docker/logstash/pipeline/01-suricata.conf header.",
+              "threats": []
+            },
+            "position": {
+              "x": 60,
+              "y": 100
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "a_lan",
+            "shape": "actor",
+            "data": {
+              "name": "Arbitrary LAN host or attacker",
+              "description": "Any host that can reach the published ports. Syslog and EVE ingestion have no sender authentication (syslog-ng.conf s_network_udp/s_network_tcp; 01-suricata.conf udp input).",
+              "threats": []
+            },
+            "position": {
+              "x": 60,
+              "y": 300
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "a_agent",
+            "shape": "actor",
+            "data": {
+              "name": "Wazuh agents",
+              "description": "Connect to 1514 (events) and 1515 (enrollment) published by wazuh-manager in docker/docker-compose.yml.",
+              "threats": []
+            },
+            "position": {
+              "x": 60,
+              "y": 500
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "a_op",
+            "shape": "actor",
+            "data": {
+              "name": "Operator / analyst browser",
+              "description": "Uses Grafana :3000, OpenSearch Dashboards :5601, Wazuh Dashboard :443, Prometheus :9090, Portainer :9443 (ports in docker/docker-compose.yml).",
+              "threats": []
+            },
+            "position": {
+              "x": 60,
+              "y": 700
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "a_maint",
+            "shape": "actor",
+            "data": {
+              "name": "Maintainer (deploy over SSH)",
+              "description": "Runs scripts/03-deploy.sh over SSH, change-passwords.sh and 08b-init-opensearch-security.sh on the host; pushes PRs.",
+              "threats": []
+            },
+            "position": {
+              "x": 60,
+              "y": 900
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "p_syslog",
+            "shape": "process",
+            "data": {
+              "name": "syslog-ng",
+              "description": "balabit/syslog-ng:${SYSLOG_NG_VERSION:-latest}; receives 514 UDP/TCP raw (flags(no-parse)), archives, forwards to Logstash and Wazuh. No user: directive, owner(root) in syslog-ng.conf options. Evidence: docker/docker-compose.yml syslog-ng; docker/syslog-ng/syslog-ng.conf.",
+              "threats": [
+                {
+                  "id": "t06",
+                  "number": 6,
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Elevation of privilege",
+                  "title": "syslog-ng runs as root with default container privileges",
+                  "description": "Evidence: syslog-ng.conf options owner(root); docker/docker-compose.yml syslog-ng has no user:, cap_drop or read_only. It parses untrusted network input. Impact bounded by the container, but no hardening directives exist anywhere in docker/docker-compose.yml (searched for cap_drop, security_opt, read_only, privileged, mem_limit, pids_limit: none).",
+                  "mitigation": ""
+                }
+              ]
+            },
+            "position": {
+              "x": 540,
+              "y": 100
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "p_logstash",
+            "shape": "process",
+            "data": {
+              "name": "Logstash",
+              "description": "opensearch logstash-oss 8.9.0; inputs udp 5140 (json) and tcp 5045 (json_lines); filter dissect/grok/kv/json; opensearch output as user logstash with CA-verified TLS. Evidence: docker/logstash/pipeline/*.conf; logstash.yml (http.host 0.0.0.0, persisted queue 1gb, DLQ).",
+              "threats": [
+                {
+                  "id": "t03",
+                  "number": 3,
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Tampering",
+                  "title": "Message-embedded headers override program/host and steer routing and parsing",
+                  "description": "Evidence: 02-syslog.conf. When message starts with <PRI>1, dissect/grok output replaces program, source_host and message (mutate replace), and routing keys on program == filterlog, program =~ crowdsec and source_host =~ pfsense|unifi. Sender-controlled text therefore selects the index and the CrowdSec json/kv parsing path, and kv/json-parsed fields (crowdsec.source_ip, crowdsec.value) are promoted to source.ip. Fabricated entries can pollute alert counts and enrichment queries (the n8n crowdsec workflow aggregates message.keyword). No validation or allowlist of those fields in the pipeline.",
+                  "mitigation": ""
+                },
+                {
+                  "id": "t04",
+                  "number": 4,
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Denial of service",
+                  "title": "Flooding UDP/TCP ingest and regex cost on attacker-controlled text",
+                  "description": "Evidence: no rate limiting in syslog-ng.conf or the pipelines; persisted queue capped at 1gb and DLQ enabled (logstash.yml), so a flood fills the queue and applies backpressure or drops UDP. grok/dissect/kv run on attacker text (02-syslog.conf); UNVERIFIED whether any pattern backtracks badly. Detective control only: Prometheus alerts IngestRateZero and FilesystemFillingUp (docker/prometheus/rules/siem-health.yml).",
+                  "mitigation": ""
+                },
+                {
+                  "id": "t05",
+                  "number": 5,
+                  "status": "Mitigated",
+                  "severity": "Low",
+                  "type": "Elevation of privilege",
+                  "title": "Logstash to OpenSearch uses TLS with CA verification and a scoped role",
+                  "description": "Evidence: outputs in 01-suricata.conf and 02-syslog.conf; docker/opensearch/security/roles.yml logstash_writer.",
+                  "mitigation": "01-suricata.conf and 02-syslog.conf outputs set ssl_certificate_verification true with cacert; roles.yml logstash_writer is limited to write/create_index on the SIEM index patterns plus template put; roles_mapping.yml maps only user logstash."
+                }
+              ]
+            },
+            "position": {
+              "x": 840,
+              "y": 100
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "p_osh",
+            "shape": "process",
+            "data": {
+              "name": "OpenSearch hot node",
+              "description": "opensearchproject/opensearch 2.19.0; security plugin on, HTTP and transport TLS, anonymous auth off. Evidence: docker/opensearch/opensearch-hot.yml; docker/opensearch/security/config.yml.",
+              "threats": [
+                {
+                  "id": "t10",
+                  "number": 10,
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Spoofing",
+                  "title": "Anonymous or unauthenticated access to the main OpenSearch cluster",
+                  "description": "Evidence: docker/opensearch/security/config.yml, opensearch-hot.yml, healthcheck in docker/docker-compose.yml expects 401.",
+                  "mitigation": "security/config.yml sets anonymous_auth_enabled false; HTTP and transport TLS enabled in opensearch-hot.yml/opensearch-warm.yml; nodes_dn and admin_dn pinned; users hashed with bcrypt via scripts/08b-init-opensearch-security.sh and internal_users.yml is gitignored; scripts/08b verifies an unauthenticated request returns 401."
+                },
+                {
+                  "id": "t11",
+                  "number": 11,
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Spoofing",
+                  "title": "Credential guessing against exposed OpenSearch login with no lockout or MFA configured",
+                  "description": "Evidence: 9200 published on all interfaces (docker/docker-compose.yml); security/config.yml defines only basic and clientcert authc, no auth_failure_listeners/blocking and no SSO/MFA; same applies to 9201 (warm) and 9202 (Wazuh indexer).",
+                  "mitigation": ""
+                },
+                {
+                  "id": "t12",
+                  "number": 12,
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Elevation of privilege",
+                  "title": "Admin client key is mounted into the running hot node and CA/admin certs are long-lived",
+                  "description": "Evidence: docker/docker-compose.yml opensearch-hot mounts admin.pem and admin-key.pem; opensearch-hot.yml authcz.admin_dn trusts CN=admin; scripts/07-generate-opensearch-certs.sh issues 3650-day RSA-2048 certs and chmod 640 on keys. Anyone who reads those key files from the container or host gets all_access via client-cert auth (clientcert_auth_domain in config.yml). The Wazuh indexer mounts its admin key similarly.",
+                  "mitigation": ""
+                },
+                {
+                  "id": "t13",
+                  "number": 13,
+                  "status": "Open",
+                  "severity": "Low",
+                  "type": "Tampering",
+                  "title": "Node transport hostname verification disabled",
+                  "description": "Evidence: enforce_hostname_verification: false in opensearch-hot.yml and opensearch-warm.yml. Mitigating context: nodes_dn pins the allowed node DNs and certs come from one private CA.",
+                  "mitigation": ""
+                }
+              ]
+            },
+            "position": {
+              "x": 1140,
+              "y": 100
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "p_osw",
+            "shape": "process",
+            "data": {
+              "name": "OpenSearch warm node",
+              "description": "Data/ingest node; port 9201 published on all interfaces; transport TLS to hot node. Evidence: docker/docker-compose.yml opensearch-warm; opensearch-warm.yml.",
+              "threats": [
+                {
+                  "id": "t14",
+                  "number": 14,
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Information disclosure",
+                  "title": "Warm node HTTP port published on all interfaces",
+                  "description": "Evidence: docker/docker-compose.yml opensearch-warm ports 9201:9200 with no 127.0.0.1 prefix, unlike the transport ports. Protected only by the security plugin (basic auth).",
+                  "mitigation": ""
+                }
+              ]
+            },
+            "position": {
+              "x": 1440,
+              "y": 100
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "p_grafana",
+            "shape": "process",
+            "data": {
+              "name": "Grafana",
+              "description": "grafana-oss:${GRAFANA_VERSION:-latest}, user 472, installs plugins at start (GF_INSTALL_PLUGINS). Admin password from GRAFANA_ADMIN_PASS with fallback. Evidence: docker/docker-compose.yml grafana.",
+              "threats": [
+                {
+                  "id": "t17",
+                  "number": 17,
+                  "status": "Open",
+                  "severity": "High",
+                  "type": "Elevation of privilege",
+                  "title": "Grafana holds InfluxDB and Wazuh indexer admin credentials",
+                  "description": "Evidence: docker/docker-compose.yml grafana env sets WAZUH_INDEXER_PASSWORD and INFLUXDB_ADMIN_*; datasources.yml uses the Wazuh indexer admin and InfluxDB admin users (the OpenSearch datasources correctly use the readonly role). A Grafana compromise (published :3000, latest image, plugins installed at start) yields write/delete on the Wazuh indices and Influx, i.e. the ability to erase evidence.",
+                  "mitigation": ""
+                },
+                {
+                  "id": "t18",
+                  "number": 18,
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Tampering",
+                  "title": "Unpinned Grafana image and plugins installed at container start",
+                  "description": "Evidence: grafana/grafana-oss:${GRAFANA_VERSION:-latest}; GF_INSTALL_PLUGINS=grafana-opensearch-datasource,grafana-clock-panel,grafana-worldmap-panel with no versions, fetched on each start from the plugin catalog.",
+                  "mitigation": ""
+                },
+                {
+                  "id": "t19",
+                  "number": 19,
+                  "status": "Open",
+                  "severity": "Low",
+                  "type": "Tampering",
+                  "title": "Log content rendered in dashboards (stored XSS or panel injection)",
+                  "description": "UNVERIFIED: log fields such as message and source_host are stored unmodified (02-syslog.conf does no sanitizing) and rendered by Grafana and OpenSearch Dashboards panels. Whether current versions escape every panel type was not tested here.",
+                  "mitigation": ""
+                },
+                {
+                  "id": "t29",
+                  "number": 29,
+                  "status": "Open",
+                  "severity": "High",
+                  "type": "Spoofing",
+                  "title": "Known fallback passwords across the stack (Grafana, OpenSearch users, Influx, UniFi)",
+                  "description": "Evidence: docker/docker-compose.yml uses ${GRAFANA_ADMIN_PASS:-changeme}, ${OPENSEARCH_DASHBOARDS_PASSWORD:-changeme-dashboards}, ${OPENSEARCH_LOGSTASH_PASSWORD:-changeme-logstash}, ${OPENSEARCH_READONLY_PASSWORD:-changeme-readonly}, ${INFLUXDB_ADMIN_PASSWORD:-changeme-influx}, ${UNIFI_PASS:-changeme}; logstash pipelines default to changeme-logstash; deploy scripts default GRAFANA_PASS to changeme. 08b-init-opensearch-security.sh refuses to run with missing OpenSearch passwords (it checks each variable), but the compose file itself does not, so containers can start with the public defaults for the other services.",
+                  "mitigation": ""
+                }
+              ]
+            },
+            "position": {
+              "x": 840,
+              "y": 320
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "p_osd",
+            "shape": "process",
+            "data": {
+              "name": "OpenSearch Dashboards",
+              "description": "opensearch-dashboards 2.19.0 on :5601; no TLS config for the server side in repo; connects to hot node as kibanaserver with OPENSEARCH_SSL_VERIFICATIONMODE=none. Evidence: docker/docker-compose.yml opensearch-dashboards.",
+              "threats": [
+                {
+                  "id": "t16",
+                  "number": 16,
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Information disclosure",
+                  "title": "Operator logins to Dashboards and Grafana travel over cleartext HTTP",
+                  "description": "Evidence: no server.ssl for the main Dashboards container; GF_SERVER_ROOT_URL=http://...; no Grafana TLS settings; ports published on all interfaces (docker/docker-compose.yml). Basic-auth admin credentials cross the LAN unencrypted unless a reverse proxy the repo does not provide is added.",
+                  "mitigation": ""
+                }
+              ]
+            },
+            "position": {
+              "x": 1140,
+              "y": 320
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "p_influx",
+            "shape": "process",
+            "data": {
+              "name": "InfluxDB 1.8",
+              "description": "influxdb:1.8 on :8086, HTTP auth enabled, admin user bootstrapped by the container command. Evidence: docker/docker-compose.yml influxdb.",
+              "threats": [
+                {
+                  "id": "t20",
+                  "number": 20,
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Spoofing",
+                  "title": "InfluxDB published with a shared admin account",
+                  "description": "Evidence: 8086 published on all interfaces and opened in ufw (02-bootstrap.sh); auth enabled (INFLUXDB_HTTP_AUTH_ENABLED=true); the same admin identity is reused by Grafana and unifi-poller, no per-service users. Plain HTTP (f_gf_inf, f_unifi_inf).",
+                  "mitigation": ""
+                }
+              ]
+            },
+            "position": {
+              "x": 540,
+              "y": 320
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "p_unifi",
+            "shape": "process",
+            "data": {
+              "name": "UniFi Poller (optional)",
+              "description": "ghcr.io/unpoller/unpoller:${UNPOLLER_VERSION:-latest}; writes to InfluxDB as the InfluxDB admin; UP_UNIFI_DEFAULT_VERIFY_SSL=false. Evidence: docker/docker-compose.yml unifi-poller.",
+              "threats": [
+                {
+                  "id": "t34",
+                  "number": 34,
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Spoofing",
+                  "title": "UniFi controller TLS verification disabled; shared InfluxDB admin credentials",
+                  "description": "Evidence: UP_UNIFI_DEFAULT_VERIFY_SSL=false, UNIFI_PASS fallback changeme, UP_INFLUXDB_USER/PASS use the InfluxDB admin (docker/docker-compose.yml unifi-poller). Image tag defaults to latest.",
+                  "mitigation": ""
+                }
+              ]
+            },
+            "position": {
+              "x": 540,
+              "y": 520
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "p_prom",
+            "shape": "process",
+            "data": {
+              "name": "Prometheus",
+              "description": "prom/prometheus:${PROMETHEUS_VERSION:-latest} on :9090 with --web.enable-lifecycle; no auth or TLS configured. Evidence: docker/docker-compose.yml prometheus; docker/prometheus/prometheus.yml.",
+              "threats": [
+                {
+                  "id": "t21",
+                  "number": 21,
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Denial of service",
+                  "title": "Unauthenticated Prometheus with lifecycle API on a published port",
+                  "description": "Evidence: docker/docker-compose.yml prometheus publishes 9090 on all interfaces with --web.enable-lifecycle and no web config file; scripts/02-bootstrap.sh ufw allows 9090. Any reachable host can read inventory (targets, labels, alert state) and POST /-/quit or /-/reload to stop or disrupt monitoring.",
+                  "mitigation": ""
+                }
+              ]
+            },
+            "position": {
+              "x": 840,
+              "y": 520
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "p_am",
+            "shape": "process",
+            "data": {
+              "name": "Alertmanager",
+              "description": "prom/alertmanager v0.27.0, bound to 127.0.0.1:9093; routes critical and warning alerts to an n8n webhook. Evidence: docker/docker-compose.yml alertmanager; docker/alertmanager/alertmanager.yml.template.",
+              "threats": [
+                {
+                  "id": "t22",
+                  "number": 22,
+                  "status": "Mitigated",
+                  "severity": "Low",
+                  "type": "Spoofing",
+                  "title": "Alertmanager API exposure",
+                  "description": "Evidence: docker/docker-compose.yml alertmanager ports.",
+                  "mitigation": "Port bound to 127.0.0.1 only (docker/docker-compose.yml alertmanager ports: 127.0.0.1:${ALERTMANAGER_PORT:-9093}:9093 with the comment 'no reason to expose')."
+                }
+              ]
+            },
+            "position": {
+              "x": 1140,
+              "y": 520
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "p_esx",
+            "shape": "process",
+            "data": {
+              "name": "elasticsearch-exporter",
+              "description": "quay.io/prometheuscommunity/elasticsearch-exporter v1.7.0; holds the readonly password in env; --es.ssl-skip-verify. No host port. Evidence: docker/docker-compose.yml elasticsearch-exporter.",
+              "threats": []
+            },
+            "position": {
+              "x": 1440,
+              "y": 520
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "p_cadv",
+            "shape": "process",
+            "data": {
+              "name": "cAdvisor",
+              "description": "gcr.io/cadvisor/cadvisor v0.49.1; mounts /, /var/run, /sys, /var/lib/docker read-only; no host port, not privileged in compose. Evidence: docker/docker-compose.yml cadvisor.",
+              "threats": [
+                {
+                  "id": "t33",
+                  "number": 33,
+                  "status": "Open",
+                  "severity": "Low",
+                  "type": "Information disclosure",
+                  "title": "cAdvisor reads host root filesystem and Docker state",
+                  "description": "Evidence: docker/docker-compose.yml cadvisor mounts /, /var/run, /sys and /var/lib/docker read-only; no host port, so reachable only from siem-net (Prometheus scrapes cadvisor:8080 per prometheus.yml). A compromised container on the network could read host paths through it. Not privileged in compose.",
+                  "mitigation": ""
+                }
+              ]
+            },
+            "position": {
+              "x": 1440,
+              "y": 320
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "p_wm",
+            "shape": "process",
+            "data": {
+              "name": "Wazuh manager",
+              "description": "wazuh/wazuh-manager 4.9.2; publishes 1514 tcp/udp, 1515, 55000; env INDEXER_PASSWORD fallback SecretPassword; custom integrations dir bind-mounted writable. Evidence: docker/docker-compose.yml wazuh-manager.",
+              "threats": [
+                {
+                  "id": "t27",
+                  "number": 27,
+                  "status": "Open",
+                  "severity": "High",
+                  "type": "Spoofing",
+                  "title": "Default Wazuh credentials used when .env is incomplete",
+                  "description": "Evidence: docker/docker-compose.yml wazuh-manager/dashboard fall back to INDEXER_PASSWORD SecretPassword and API_PASSWORD MyS3cr3tP4ssw0rd via ${VAR:-default}; the compose file warns to change them. 1515, 55000 and the indexer port 9202 are published on all interfaces. A stack started without .env runs with publicly known credentials and compose does not fail.",
+                  "mitigation": ""
+                }
+              ]
+            },
+            "position": {
+              "x": 540,
+              "y": 720
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "p_wi",
+            "shape": "process",
+            "data": {
+              "name": "Wazuh indexer",
+              "description": "wazuh/wazuh-indexer 4.9.2; single node, TLS on; published on ${WAZUH_INDEXER_PORT:-9202} on all interfaces. Evidence: docker/docker-compose.yml wazuh-indexer; docker/wazuh/wazuh-indexer.yml.",
+              "threats": []
+            },
+            "position": {
+              "x": 840,
+              "y": 720
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "p_wd",
+            "shape": "process",
+            "data": {
+              "name": "Wazuh dashboard",
+              "description": "wazuh/wazuh-dashboard 4.9.2 on :443 with TLS; connects to the indexer as kibanaserver with literal password kibanaserver in compose and opensearch_dashboards.yml. Evidence: docker/docker-compose.yml wazuh-dashboard; docker/wazuh/opensearch_dashboards.yml.",
+              "threats": [
+                {
+                  "id": "t28",
+                  "number": 28,
+                  "status": "Open",
+                  "severity": "High",
+                  "type": "Spoofing",
+                  "title": "Hard-coded kibanaserver/kibanaserver for the Wazuh dashboard",
+                  "description": "Evidence: DASHBOARD_USERNAME=kibanaserver and DASHBOARD_PASSWORD=kibanaserver in docker/docker-compose.yml wazuh-dashboard, and opensearch.password: kibanaserver in docker/wazuh/opensearch_dashboards.yml. This is not read from .env; it changes only if change-passwords.sh is run (it seds DASHBOARD_PASSWORD in the compose file). Until then the default credential for the indexer service account is known and the indexer port 9202 is published on all interfaces. UNVERIFIED: whether the stock Wazuh indexer user database still holds the same default hash (not in the repo).",
+                  "mitigation": ""
+                }
+              ]
+            },
+            "position": {
+              "x": 1140,
+              "y": 720
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "p_crowd",
+            "shape": "process",
+            "data": {
+              "name": "CrowdSec (optional, profile crowdsec)",
+              "description": "crowdsecurity/crowdsec:${CROWDSEC_VERSION:-latest}; mounts host /var/log read-only; no user: directive. Evidence: docker/docker-compose.yml crowdsec; docker/crowdsec/acquis.yaml.",
+              "threats": []
+            },
+            "position": {
+              "x": 1440,
+              "y": 720
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "p_port",
+            "shape": "process",
+            "data": {
+              "name": "Portainer CE",
+              "description": "portainer/portainer-ce:lts, mounts /var/run/docker.sock read-write, publishes 9443 on all interfaces. Labeled Optional in a comment but has no profile, so it starts with the default stack. Evidence: docker/docker-compose.yml portainer.",
+              "threats": [
+                {
+                  "id": "t32",
+                  "number": 32,
+                  "status": "Open",
+                  "severity": "High",
+                  "type": "Elevation of privilege",
+                  "title": "Portainer with read-write Docker socket starts by default on a public port",
+                  "description": "Evidence: docker/docker-compose.yml portainer mounts /var/run/docker.sock read-write, publishes 9443 on all interfaces, has no profile (the crowdsec service has one; portainer does not) although commented Optional; scripts/02-bootstrap.sh leaves the 9443 ufw rule commented but Docker publishing bypasses ufw. Control of this UI is root on the host. Portainer's own first-run admin setup is the only gate (UNVERIFIED which timeout/lockdown applies in the lts image).",
+                  "mitigation": ""
+                }
+              ]
+            },
+            "position": {
+              "x": 540,
+              "y": 920
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "p_dockerd",
+            "shape": "process",
+            "data": {
+              "name": "Docker daemon",
+              "description": "Host daemon behind /var/run/docker.sock; full control of the host for whoever can talk to it. Evidence: portainer and cadvisor volume mounts in docker/docker-compose.yml.",
+              "threats": [
+                {
+                  "id": "t36",
+                  "number": 36,
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Elevation of privilege",
+                  "title": "Flat siem-net lets a compromised container reach every other service",
+                  "description": "Evidence: single bridge network, no network segmentation; internal APIs (OpenSearch, InfluxDB, Prometheus, Logstash API with http.host 0.0.0.0 per logstash.yml, cAdvisor) are reachable from every container. Logstash 9600 has no ports entry in docker/docker-compose.yml so it is not published to the host, but is reachable in-network.",
+                  "mitigation": ""
+                },
+                {
+                  "id": "t37",
+                  "number": 37,
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Elevation of privilege",
+                  "title": "No container hardening directives",
+                  "description": "Evidence: searching docker/docker-compose.yml for cap_drop, security_opt, read_only, privileged, mem_limit and pids_limit found none. Containers keep Docker's default capability set; syslog-ng, crowdsec and others run with the image's default user. Only grafana (472), prometheus and alertmanager (65534) set user.",
+                  "mitigation": ""
+                }
+              ]
+            },
+            "position": {
+              "x": 1740,
+              "y": 1170
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "s_archive",
+            "shape": "store",
+            "data": {
+              "name": "Syslog archive (/data/warm/archives/syslog)",
+              "description": "Raw archived syslog files written by syslog-ng, perm 0640 owner root. Evidence: syslog-ng.conf options and destinations; docker/docker-compose.yml syslog-ng volumes. The config comment says rotated daily but no rotation config is in the repo.",
+              "threats": [
+                {
+                  "id": "t07",
+                  "number": 7,
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Denial of service",
+                  "title": "Unbounded archive growth fills the data disk",
+                  "description": "Evidence: syslog-ng.conf writes per-day files with no size limit; the comment claims daily rotation but no rotation config exists in the repo. The only control is the Prometheus FilesystemFillingUp/FilesystemCritical alerts (siem-health.yml), which are detective.",
+                  "mitigation": ""
+                },
+                {
+                  "id": "t08",
+                  "number": 8,
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Repudiation",
+                  "title": "Audit and archive integrity depends on the same host and cluster",
+                  "description": "Evidence: opensearch-hot.yml plugins.security.audit.type: internal_opensearch stores the audit log inside the cluster an admin can modify; archives are plain files with no signing or off-host copy in the repo; snapshots go to /data/warm/snapshots on the same host (opensearch-hot.yml path.repo, docker/docker-compose.yml volumes). An attacker with admin or root can alter evidence.",
+                  "mitigation": ""
+                }
+              ]
+            },
+            "position": {
+              "x": 540,
+              "y": 1170
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "s_env",
+            "shape": "store",
+            "data": {
+              "name": "Secrets: .env and compose file",
+              "description": "Passwords come from .env (gitignored per .gitignore) via ${VAR:-fallback} interpolation in docker/docker-compose.yml; change-passwords.sh also rewrites the compose file in place. Prometheus file_sd target files with LAN addresses are gitignored.",
+              "threats": [
+                {
+                  "id": "t30",
+                  "number": 30,
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Information disclosure",
+                  "title": "Passwords live in container environment, compose file edits and command lines",
+                  "description": "Evidence: secrets are env vars in docker/docker-compose.yml (visible via docker inspect to anyone with Docker access); change-passwords.sh passes the new password inside docker exec command strings (hash.sh -p '...', grafana cli admin reset-admin-password) so it appears in the host process list, and writes plaintext passwords into docker-compose.yml with sed (INDEXER_PASSWORD, DASHBOARD_PASSWORD, API_PASSWORD) and into .env (GRAFANA_ADMIN_PASS). Passwords containing quotes or | can also break the quoting. 08b-init-opensearch-security.sh is better: it passes HASH_PASS through docker exec -e.",
+                  "mitigation": ""
+                },
+                {
+                  "id": "t31",
+                  "number": 31,
+                  "status": "Mitigated",
+                  "severity": "Low",
+                  "type": "Information disclosure",
+                  "title": "Secrets and LAN addresses committed to git",
+                  "description": "Evidence: .gitignore, .github/workflows/security.yml.",
+                  "mitigation": ".gitignore excludes .env, generated certs/keys, docker/opensearch/security/internal_users.yml (bcrypt hashes) and docker/prometheus/targets/*.json (real IPs); the template is tracked instead; security.yml (GYST) runs gitleaks per its header comment. Residual: the .gitleaksignore content was not reviewed."
+                }
+              ]
+            },
+            "position": {
+              "x": 800,
+              "y": 1170
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "s_certs",
+            "shape": "store",
+            "data": {
+              "name": "TLS key material (docker/opensearch/certs, docker/wazuh/certs)",
+              "description": "Root CA, node and admin keys generated by scripts/07-generate-opensearch-certs.sh and the Wazuh cert generator; gitignored (*.pem, *.key). 3650-day RSA-2048 certs.",
+              "threats": []
+            },
+            "position": {
+              "x": 1060,
+              "y": 1170
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "s_data",
+            "shape": "store",
+            "data": {
+              "name": "Index and snapshot data (/data/hot, /data/warm)",
+              "description": "OpenSearch indices, Wazuh data, InfluxDB, Prometheus TSDB, Grafana state, snapshots at /data/warm/snapshots. Evidence: volumes in docker/docker-compose.yml.",
+              "threats": []
+            },
+            "position": {
+              "x": 1320,
+              "y": 1170
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "e_n8n",
+            "shape": "process",
+            "data": {
+              "name": "n8n (external)",
+              "description": "Receives webhooks wazuh-alerts, grafana-alerts, crowdsec-alerts, alertmanager-siem (n8n/*.json, custom-n8n). Webhook nodes carry no authentication parameter. n8n's own deployment is not in this repo: UNVERIFIED how it is exposed.",
+              "threats": [
+                {
+                  "id": "t25",
+                  "number": 25,
+                  "status": "Open",
+                  "severity": "Low",
+                  "type": "Denial of service",
+                  "title": "CrowdSec enrichment workflow queries OpenSearch without TLS or credentials",
+                  "description": "Evidence: n8n/crowdsec-alert-enrichment.json node 'Query OpenSearch Bans' posts to http://opensearch-hot:9200/... with no credential, but the cluster now requires HTTPS and auth (config.yml). The enrichment path fails or is silently degraded, and fixing it by weakening cluster security would be a regression.",
+                  "mitigation": ""
+                }
+              ]
+            },
+            "position": {
+              "x": 2200,
+              "y": 100
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "e_discord",
+            "shape": "actor",
+            "data": {
+              "name": "Discord (webhook)",
+              "description": "Alert destination; credential referenced as n8n credential discordWebhookApi (n8n/*.json shows placeholder id YOUR_CREDENTIAL_ID).",
+              "threats": [
+                {
+                  "id": "t26",
+                  "number": 26,
+                  "status": "Mitigated",
+                  "severity": "Low",
+                  "type": "Information disclosure",
+                  "title": "Discord webhook secret kept out of the repo",
+                  "description": "Evidence: n8n/*.json discord nodes reference credential discordWebhookApi with placeholder id YOUR_CREDENTIAL_ID.",
+                  "mitigation": "Workflow templates in n8n/*.json contain a credential reference placeholder, not the webhook URL; the URL lives in n8n's credential store."
+                }
+              ]
+            },
+            "position": {
+              "x": 2200,
+              "y": 300
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "e_vt",
+            "shape": "actor",
+            "data": {
+              "name": "VirusTotal API",
+              "description": "wazuh/integrations/virustotal.py calls https://www.virustotal.com/vtapi/v2/file/report with the file hash.",
+              "threats": [
+                {
+                  "id": "t35",
+                  "number": 35,
+                  "status": "Open",
+                  "severity": "Low",
+                  "type": "Information disclosure",
+                  "title": "File hashes sent to VirusTotal; local cache is a trust input",
+                  "description": "Evidence: wazuh/integrations/virustotal.py posts the hash to virustotal.com and caches results in SQLite under the manager's integrations directory (writable bind mount /data/hot/wazuh/manager/integrations). Hash disclosure to a third party is by design; anyone able to write the cache DB can pin a clean verdict for up to 7 days (TTL_MAP).",
+                  "mitigation": ""
+                }
+              ]
+            },
+            "position": {
+              "x": 2200,
+              "y": 500
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "e_unifi",
+            "shape": "actor",
+            "data": {
+              "name": "UniFi controller",
+              "description": "Polled by unifi-poller using UNIFI_USER/UNIFI_PASS (fallback changeme).",
+              "threats": []
+            },
+            "position": {
+              "x": 2200,
+              "y": 700
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "e_reg",
+            "shape": "actor",
+            "data": {
+              "name": "Container registries and Grafana plugin catalog",
+              "description": "Docker Hub, quay.io, ghcr.io, gcr.io, grafana.com plugins pulled at deploy/start. Evidence: image: lines and GF_INSTALL_PLUGINS in docker/docker-compose.yml.",
+              "threats": []
+            },
+            "position": {
+              "x": 2200,
+              "y": 1040
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "p_ci",
+            "shape": "process",
+            "data": {
+              "name": "GitHub Actions CI (GYST callers)",
+              "description": "ci.yml, security.yml, dependabot-auto-merge.yml call ChiefGyk3D/git-your-ship-together reusable workflows pinned by commit SHA with version comment; permissions contents: read; egress-policy block.",
+              "threats": [
+                {
+                  "id": "t39",
+                  "number": 39,
+                  "status": "Mitigated",
+                  "severity": "Medium",
+                  "type": "Tampering",
+                  "title": "Compromised workflow dependency or over-privileged CI token",
+                  "description": "Evidence: .github/workflows/ci.yml, security.yml, dependabot-auto-merge.yml.",
+                  "mitigation": "Reusable workflows are pinned to a commit SHA with a version comment; top-level permissions contents: read with per-job grants; egress-policy block with an explicit endpoint list (ci.yml, security.yml); security.yml adds CodeQL (actions), dependency review and Scorecard. Residual: dependabot-auto-merge enables auto-merge on Dependabot PRs once the gate is green."
+                },
+                {
+                  "id": "t40",
+                  "number": 40,
+                  "status": "Open",
+                  "severity": "Low",
+                  "type": "Tampering",
+                  "title": "Shell lint findings do not block CI",
+                  "description": "Evidence: ci.yml sets the shellcheck and shfmt jobs to non-blocking (inputs shellcheck-continue-on-error and shfmt-continue-on-error, set to true) with a comment citing pre-existing findings. Script defects (for example quoting in change-passwords.sh) can merge unflagged.",
+                  "mitigation": ""
+                }
+              ]
+            },
+            "position": {
+              "x": 2200,
+              "y": 1240
+            },
+            "size": {
+              "width": 160,
+              "height": 80
+            }
+          },
+          {
+            "id": "f_dev_sys",
+            "shape": "flow",
+            "source": {
+              "cell": "a_dev"
+            },
+            "target": {
+              "cell": "p_syslog"
+            },
+            "data": {
+              "name": "Syslog UDP/TCP 514",
+              "description": "Plaintext syslog from devices. Published as ${SYSLOG_UDP_PORT:-514}/${SYSLOG_TCP_PORT:-514} on all interfaces (docker/docker-compose.yml syslog-ng).",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_dev_ls",
+            "shape": "flow",
+            "source": {
+              "cell": "a_dev"
+            },
+            "target": {
+              "cell": "p_logstash"
+            },
+            "data": {
+              "name": "Suricata EVE JSON UDP 5140",
+              "description": "Plaintext UDP, json codec, published on all interfaces (01-suricata.conf; docker/docker-compose.yml logstash).",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_lan_sys",
+            "shape": "flow",
+            "source": {
+              "cell": "a_lan"
+            },
+            "target": {
+              "cell": "p_syslog"
+            },
+            "data": {
+              "name": "Forged/flooded syslog",
+              "description": "Same ports as f_dev_sys; the only source filter (f_network netmask 192.168.0.0/16) is applied to the Wazuh log path only, not to the Logstash/archive path (syslog-ng.conf log paths).",
+              "threats": [
+                {
+                  "id": "t01",
+                  "number": 1,
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Spoofing",
+                  "title": "Unauthenticated syslog lets any LAN host forge events",
+                  "description": "Evidence: syslog-ng.conf s_network_udp/s_network_tcp accept anyone; the netmask filter is attached only to the Wazuh path; docker/docker-compose.yml publishes 514/udp and 514/tcp on all interfaces. A sender can impersonate pfSense or UniFi (host and program fields are sender-controlled) and inject fake firewall, auth or CrowdSec events that appear in dashboards and alerts. Syslog has no sender authentication; the repo has no allowlist at the published ports.",
+                  "mitigation": ""
+                }
+              ]
+            }
+          },
+          {
+            "id": "f_lan_ls",
+            "shape": "flow",
+            "source": {
+              "cell": "a_lan"
+            },
+            "target": {
+              "cell": "p_logstash"
+            },
+            "data": {
+              "name": "Forged/flooded EVE JSON UDP 5140",
+              "description": "No sender authentication on the udp input (01-suricata.conf).",
+              "threats": [
+                {
+                  "id": "t02",
+                  "number": 2,
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Tampering",
+                  "title": "Unauthenticated EVE JSON on UDP 5140 allows field injection",
+                  "description": "Evidence: 01-suricata.conf udp input with json codec, no auth, published on all interfaces. Attacker-supplied JSON keys become event fields (timestamp, event_type, nested objects). UNVERIFIED: the input type setting does not overwrite an existing type field per Logstash documentation, so a sender may choose type and cause events to be dropped by the type == suricata output conditional; not run here.",
+                  "mitigation": ""
+                }
+              ]
+            }
+          },
+          {
+            "id": "f_sys_ls",
+            "shape": "flow",
+            "source": {
+              "cell": "p_syslog"
+            },
+            "target": {
+              "cell": "p_logstash"
+            },
+            "data": {
+              "name": "JSON over TCP 5045",
+              "description": "Plaintext TCP on siem-net (syslog-ng.conf d_logstash; 02-syslog.conf tcp input). Not published to the host.",
+              "threats": [
+                {
+                  "id": "t09",
+                  "number": 9,
+                  "status": "Open",
+                  "severity": "Low",
+                  "type": "Information disclosure",
+                  "title": "Syslog forwarding to Logstash and Wazuh is plaintext on siem-net",
+                  "description": "Evidence: syslog-ng.conf d_logstash tcp and d_wazuh udp have no TLS. Only reachable from containers on siem-net, so exposure needs a compromised container (see flat network threat).",
+                  "mitigation": ""
+                }
+              ]
+            }
+          },
+          {
+            "id": "f_sys_arch",
+            "shape": "flow",
+            "source": {
+              "cell": "p_syslog"
+            },
+            "target": {
+              "cell": "s_archive"
+            },
+            "data": {
+              "name": "Write archive files",
+              "description": "syslog-ng.conf d_archive_all/d_archive_pfsense/d_archive_unifi.",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_sys_wm",
+            "shape": "flow",
+            "source": {
+              "cell": "p_syslog"
+            },
+            "target": {
+              "cell": "p_wm"
+            },
+            "data": {
+              "name": "BSD syslog UDP 514 to Wazuh",
+              "description": "syslog-ng.conf d_wazuh; plaintext UDP on siem-net; only netmask-filtered sources.",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_ls_osh",
+            "shape": "flow",
+            "source": {
+              "cell": "p_logstash"
+            },
+            "target": {
+              "cell": "p_osh"
+            },
+            "data": {
+              "name": "HTTPS bulk index (user logstash)",
+              "description": "02-syslog.conf and 01-suricata.conf outputs: ssl true, ssl_certificate_verification true, cacert root-ca.pem. Role logstash_writer limited to SIEM index patterns (roles.yml).",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_agent_wm",
+            "shape": "flow",
+            "source": {
+              "cell": "a_agent"
+            },
+            "target": {
+              "cell": "p_wm"
+            },
+            "data": {
+              "name": "Agent events 1514, enrollment 1515",
+              "description": "Published in docker/docker-compose.yml wazuh-manager. Whether enrollment requires a password is set in Wazuh manager config not in this repo: UNVERIFIED.",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_wm_wi",
+            "shape": "flow",
+            "source": {
+              "cell": "p_wm"
+            },
+            "target": {
+              "cell": "p_wi"
+            },
+            "data": {
+              "name": "Filebeat to indexer (HTTPS)",
+              "description": "FILEBEAT_SSL_VERIFICATION_MODE=full with mounted CA and client cert (docker/docker-compose.yml wazuh-manager env).",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_wd_wi",
+            "shape": "flow",
+            "source": {
+              "cell": "p_wd"
+            },
+            "target": {
+              "cell": "p_wi"
+            },
+            "data": {
+              "name": "Dashboard to indexer (HTTPS)",
+              "description": "opensearch.ssl.verificationMode: certificate, kibanaserver credentials (opensearch_dashboards.yml).",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_wd_wm",
+            "shape": "flow",
+            "source": {
+              "cell": "p_wd"
+            },
+            "target": {
+              "cell": "p_wm"
+            },
+            "data": {
+              "name": "Dashboard to Wazuh API (55000)",
+              "description": "WAZUH_API_URL=https://wazuh-manager, API user wazuh-wui with fallback password (docker/docker-compose.yml wazuh-dashboard).",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_op_gf",
+            "shape": "flow",
+            "source": {
+              "cell": "a_op"
+            },
+            "target": {
+              "cell": "p_grafana"
+            },
+            "data": {
+              "name": "Grafana login (HTTP 3000)",
+              "description": "GF_SERVER_ROOT_URL is http://; no TLS configured for Grafana in repo (docker/docker-compose.yml grafana).",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_op_osd",
+            "shape": "flow",
+            "source": {
+              "cell": "a_op"
+            },
+            "target": {
+              "cell": "p_osd"
+            },
+            "data": {
+              "name": "Dashboards login (HTTP 5601)",
+              "description": "No server.ssl settings for the main Dashboards container (docker/docker-compose.yml opensearch-dashboards).",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_op_wd",
+            "shape": "flow",
+            "source": {
+              "cell": "a_op"
+            },
+            "target": {
+              "cell": "p_wd"
+            },
+            "data": {
+              "name": "Wazuh Dashboard (HTTPS 443)",
+              "description": "server.ssl.enabled true (opensearch_dashboards.yml).",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_op_port",
+            "shape": "flow",
+            "source": {
+              "cell": "a_op"
+            },
+            "target": {
+              "cell": "p_port"
+            },
+            "data": {
+              "name": "Portainer UI (HTTPS 9443)",
+              "description": "Published on all interfaces (docker/docker-compose.yml portainer).",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_op_prom",
+            "shape": "flow",
+            "source": {
+              "cell": "a_op"
+            },
+            "target": {
+              "cell": "p_prom"
+            },
+            "data": {
+              "name": "Prometheus UI/API (HTTP 9090)",
+              "description": "No auth/TLS config; --web.enable-lifecycle; ufw rule allows 9090 (scripts/02-bootstrap.sh).",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_op_osh",
+            "shape": "flow",
+            "source": {
+              "cell": "a_op"
+            },
+            "target": {
+              "cell": "p_osh"
+            },
+            "data": {
+              "name": "OpenSearch REST 9200 (HTTPS)",
+              "description": "Published as ${OPENSEARCH_PORT:-9200}; basic auth, anonymous disabled (security/config.yml).",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_gf_osh",
+            "shape": "flow",
+            "source": {
+              "cell": "p_grafana"
+            },
+            "target": {
+              "cell": "p_osh"
+            },
+            "data": {
+              "name": "Grafana to OpenSearch (readonly)",
+              "description": "datasources.yml: https, basicAuthUser readonly, tlsSkipVerify true.",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_gf_wi",
+            "shape": "flow",
+            "source": {
+              "cell": "p_grafana"
+            },
+            "target": {
+              "cell": "p_wi"
+            },
+            "data": {
+              "name": "Grafana to Wazuh indexer (admin)",
+              "description": "datasources.yml OpenSearch-Wazuh: basicAuthUser admin, tlsSkipVerify true.",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_gf_inf",
+            "shape": "flow",
+            "source": {
+              "cell": "p_grafana"
+            },
+            "target": {
+              "cell": "p_influx"
+            },
+            "data": {
+              "name": "Grafana to InfluxDB (admin, HTTP)",
+              "description": "datasources.yml: http://influxdb:8086 with INFLUXDB_ADMIN_USER/PASSWORD.",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_gf_prom",
+            "shape": "flow",
+            "source": {
+              "cell": "p_grafana"
+            },
+            "target": {
+              "cell": "p_prom"
+            },
+            "data": {
+              "name": "Grafana to Prometheus",
+              "description": "datasources.yml: http://prometheus:9090, no auth.",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_osd_osh",
+            "shape": "flow",
+            "source": {
+              "cell": "p_osd"
+            },
+            "target": {
+              "cell": "p_osh"
+            },
+            "data": {
+              "name": "Dashboards to OpenSearch (kibanaserver)",
+              "description": "OPENSEARCH_SSL_VERIFICATIONMODE=none (docker/docker-compose.yml).",
+              "threats": [
+                {
+                  "id": "t15",
+                  "number": 15,
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Spoofing",
+                  "title": "Dashboards and exporter skip TLS verification to the cluster",
+                  "description": "Evidence: OPENSEARCH_SSL_VERIFICATIONMODE=none (docker/docker-compose.yml opensearch-dashboards), --es.ssl-skip-verify (elasticsearch-exporter) and tlsSkipVerify: true on every OpenSearch datasource in datasources.yml. A container on siem-net could impersonate opensearch-hot and capture kibanaserver/readonly/Wazuh admin credentials.",
+                  "mitigation": ""
+                }
+              ]
+            }
+          },
+          {
+            "id": "f_prom_esx",
+            "shape": "flow",
+            "source": {
+              "cell": "p_prom"
+            },
+            "target": {
+              "cell": "p_esx"
+            },
+            "data": {
+              "name": "Scrape exporter",
+              "description": "prometheus.yml job elasticsearch-exporter, plain HTTP :9114.",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_esx_osh",
+            "shape": "flow",
+            "source": {
+              "cell": "p_esx"
+            },
+            "target": {
+              "cell": "p_osh"
+            },
+            "data": {
+              "name": "Exporter to OpenSearch (readonly)",
+              "description": "--es.uri=https://opensearch-hot:9200 --es.ssl-skip-verify (docker/docker-compose.yml).",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_prom_am",
+            "shape": "flow",
+            "source": {
+              "cell": "p_prom"
+            },
+            "target": {
+              "cell": "p_am"
+            },
+            "data": {
+              "name": "Alerts to Alertmanager",
+              "description": "prometheus.yml alerting.alertmanagers, http://alertmanager:9093.",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_am_n8n",
+            "shape": "flow",
+            "source": {
+              "cell": "p_am"
+            },
+            "target": {
+              "cell": "e_n8n"
+            },
+            "data": {
+              "name": "Alertmanager webhook to n8n",
+              "description": "alertmanager.yml.template receiver n8n-webhook, URL from N8N_ALERTMANAGER_WEBHOOK_URL, default http://n8n/webhook/alertmanager-siem (plain HTTP, no auth header).",
+              "threats": [
+                {
+                  "id": "t23",
+                  "number": 23,
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Spoofing",
+                  "title": "n8n webhooks accept unauthenticated alert posts over plain HTTP",
+                  "description": "Evidence: n8n/*.json webhook nodes define only httpMethod and path, no authentication; callers (alertmanager.yml.template, wazuh/integrations/custom-n8n, deploy-n8n-soar.sh) use http:// with no auth header. Anyone who can reach the n8n webhook can forge alerts (alert fatigue, hiding real alerts via the dedup windows in wazuh-alert-triage.json) or replay payloads. UNVERIFIED: n8n network exposure and any reverse-proxy auth are outside this repo.",
+                  "mitigation": ""
+                }
+              ]
+            }
+          },
+          {
+            "id": "f_wm_n8n",
+            "shape": "flow",
+            "source": {
+              "cell": "p_wm"
+            },
+            "target": {
+              "cell": "e_n8n"
+            },
+            "data": {
+              "name": "Wazuh integration to n8n",
+              "description": "wazuh/integrations/custom-n8n: requests.post to http://n8n/webhook/wazuh-alerts, no auth header, alert full_log included in payload.",
+              "threats": [
+                {
+                  "id": "t24",
+                  "number": 24,
+                  "status": "Open",
+                  "severity": "Low",
+                  "type": "Information disclosure",
+                  "title": "Alert payloads (full_log, agent name/ip, rule data) go to n8n and Discord",
+                  "description": "Evidence: custom-n8n builds payload including full_log, srcip, dstip, agent ip; n8n/*.json Discord nodes post rule and agent fields to a third-party service. By design, but log content leaves the trust boundary and may contain sensitive data.",
+                  "mitigation": ""
+                }
+              ]
+            }
+          },
+          {
+            "id": "f_gf_n8n",
+            "shape": "flow",
+            "source": {
+              "cell": "p_grafana"
+            },
+            "target": {
+              "cell": "e_n8n"
+            },
+            "data": {
+              "name": "Grafana contact points to n8n",
+              "description": "scripts/deploy-n8n-soar.sh creates webhook contact points http://n8n/webhook/grafana-alerts and crowdsec-alerts.",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_n8n_dc",
+            "shape": "flow",
+            "source": {
+              "cell": "e_n8n"
+            },
+            "target": {
+              "cell": "e_discord"
+            },
+            "data": {
+              "name": "n8n to Discord",
+              "description": "n8n/*.json discord nodes, authentication webhook, embeds built from alert fields.",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_unifi_up",
+            "shape": "flow",
+            "source": {
+              "cell": "p_unifi"
+            },
+            "target": {
+              "cell": "e_unifi"
+            },
+            "data": {
+              "name": "Poll controller",
+              "description": "UP_UNIFI_DEFAULT_VERIFY_SSL=false and UNIFI_PASS fallback changeme (docker/docker-compose.yml).",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_unifi_inf",
+            "shape": "flow",
+            "source": {
+              "cell": "p_unifi"
+            },
+            "target": {
+              "cell": "p_influx"
+            },
+            "data": {
+              "name": "Write metrics (HTTP, admin)",
+              "description": "UP_INFLUXDB_URL=http://influxdb:8086 with the InfluxDB admin credentials.",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_wm_vt",
+            "shape": "flow",
+            "source": {
+              "cell": "p_wm"
+            },
+            "target": {
+              "cell": "e_vt"
+            },
+            "data": {
+              "name": "Hash lookup",
+              "description": "virustotal.py:383 request to the VirusTotal v2 report endpoint; API key passed by the Wazuh manager integration config (not in repo).",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_osh_osw",
+            "shape": "flow",
+            "source": {
+              "cell": "p_osh"
+            },
+            "target": {
+              "cell": "p_osw"
+            },
+            "data": {
+              "name": "Cluster transport (TLS)",
+              "description": "Transport TLS with nodes_dn pinned, enforce_hostname_verification false (opensearch-hot.yml, opensearch-warm.yml).",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_port_dock",
+            "shape": "flow",
+            "source": {
+              "cell": "p_port"
+            },
+            "target": {
+              "cell": "p_dockerd"
+            },
+            "data": {
+              "name": "Docker socket (read-write)",
+              "description": "volumes: /var/run/docker.sock:/var/run/docker.sock in docker/docker-compose.yml portainer.",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_cadv_dock",
+            "shape": "flow",
+            "source": {
+              "cell": "p_cadv"
+            },
+            "target": {
+              "cell": "p_dockerd"
+            },
+            "data": {
+              "name": "Host fs and docker state (read-only)",
+              "description": "volumes: /, /var/run, /sys, /var/lib/docker :ro in docker/docker-compose.yml cadvisor.",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_osh_data",
+            "shape": "flow",
+            "source": {
+              "cell": "p_osh"
+            },
+            "target": {
+              "cell": "s_data"
+            },
+            "data": {
+              "name": "Indices and snapshots",
+              "description": "volumes /data/hot/opensearch, /data/warm/snapshots (docker/docker-compose.yml).",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_env_dock",
+            "shape": "flow",
+            "source": {
+              "cell": "s_env"
+            },
+            "target": {
+              "cell": "p_dockerd"
+            },
+            "data": {
+              "name": "Secret injection as env vars",
+              "description": "Compose interpolates .env into container environment blocks (docker/docker-compose.yml).",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_certs_osh",
+            "shape": "flow",
+            "source": {
+              "cell": "s_certs"
+            },
+            "target": {
+              "cell": "p_osh"
+            },
+            "data": {
+              "name": "Mount certs including admin client key",
+              "description": "volumes mount root-ca, node key, admin.pem and admin-key.pem into opensearch-hot (docker/docker-compose.yml).",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_maint_env",
+            "shape": "flow",
+            "source": {
+              "cell": "a_maint"
+            },
+            "target": {
+              "cell": "s_env"
+            },
+            "data": {
+              "name": "Edit .env, run change-passwords.sh",
+              "description": "change-passwords.sh rewrites INDEXER_PASSWORD/API_PASSWORD/DASHBOARD_PASSWORD with sed in the compose file.",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_maint_dock",
+            "shape": "flow",
+            "source": {
+              "cell": "a_maint"
+            },
+            "target": {
+              "cell": "p_dockerd"
+            },
+            "data": {
+              "name": "Deploy over SSH and docker compose",
+              "description": "scripts/03-deploy.sh run_on_server via ssh.",
+              "threats": [
+                {
+                  "id": "t41",
+                  "number": 41,
+                  "status": "Open",
+                  "severity": "Low",
+                  "type": "Spoofing",
+                  "title": "Deploy over SSH and secrets on the command line",
+                  "description": "Evidence: scripts/03-deploy.sh runs remote commands via ssh with BatchMode; deploy-n8n-soar.sh pipes secrets as a curl config on stdin so they stay off the remote command line (mitigating); GRAFANA_PASS defaults to changeme in deploy-n8n-soar.sh and deploy-grafana-alerts.py. Host key checking policy is the user's ssh config (not set in the scripts).",
+                  "mitigation": ""
+                }
+              ]
+            }
+          },
+          {
+            "id": "f_reg_dock",
+            "shape": "flow",
+            "source": {
+              "cell": "e_reg"
+            },
+            "target": {
+              "cell": "p_dockerd"
+            },
+            "data": {
+              "name": "Image pull",
+              "description": "image: references in docker/docker-compose.yml; several use :latest.",
+              "threats": [
+                {
+                  "id": "t38",
+                  "number": 38,
+                  "status": "Open",
+                  "severity": "Medium",
+                  "type": "Tampering",
+                  "title": "Unpinned images and no image scanning or digest pinning",
+                  "description": "Evidence: :latest or floating tags for grafana, prometheus, syslog-ng, unifi-poller, crowdsec (via ${..:-latest}), crowdsec/metabase and portainer lts in docker/docker-compose.yml and docker/crowdsec/docker-compose.crowdsec.yml; wazuh certs generated with wazuh/wazuh-certs-generator:latest. Pinned by tag (not digest): opensearch 2.19.0, logstash 8.9.0, wazuh 4.9.2, influxdb 1.8, alertmanager v0.27.0, exporter v1.7.0, cadvisor v0.49.1. .github/dependabot.yml covers github-actions only, so image tags are not auto-bumped; no image scan job is in the workflows.",
+                  "mitigation": ""
+                }
+              ]
+            }
+          },
+          {
+            "id": "f_maint_ci",
+            "shape": "flow",
+            "source": {
+              "cell": "a_maint"
+            },
+            "target": {
+              "cell": "p_ci"
+            },
+            "data": {
+              "name": "Push and PR",
+              "description": "Workflows trigger on push to master and pull_request (.github/workflows/ci.yml).",
+              "threats": []
+            }
+          },
+          {
+            "id": "f_ci_reg",
+            "shape": "flow",
+            "source": {
+              "cell": "p_ci"
+            },
+            "target": {
+              "cell": "e_reg"
+            },
+            "data": {
+              "name": "CI pulls test images",
+              "description": "ci.yml test-command docker run of prom/prometheus v2.53.0, prom/alertmanager v0.27.0, logstash 8.9.0.",
+              "threats": []
+            }
+          }
+        ]
+      }
+    ],
+    "threatTop": 41
+  }
+}
