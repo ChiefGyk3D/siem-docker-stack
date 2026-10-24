@@ -23,13 +23,27 @@ JSON file. Source of truth is `docker/docker-compose.yml`, `docker/*/` configs,
 
 ## Open High or Critical threats
 
-- 17 Grafana holds InfluxDB and Wazuh indexer admin credentials
-- 27 Default Wazuh credentials used when `.env` is incomplete
-- 28 Hard-coded kibanaserver/kibanaserver for the Wazuh dashboard
-- 29 Known fallback passwords across the stack (`${VAR:-changeme}` in compose)
-- 32 Portainer with read-write Docker socket starts by default on a public port
+- 17 Grafana holds the Wazuh indexer admin credential (the InfluxDB half is
+  fixed: Grafana now reads InfluxDB with a read-only account). Open because
+  the repo has no read-only role for the Wazuh indexer.
 
-No Critical threats are recorded. 41 threats in total: 35 Open, 6 Mitigated.
+No Critical threats are recorded. 41 threats in total: 30 Open, 11 Mitigated.
+
+## Mitigated by issue #32
+
+- 27 Default Wazuh credentials: `WAZUH_*_PASSWORD` are required variables
+  (`${VAR:?}`) in `docker/docker-compose.yml`; `scripts/check-env.sh` rejects
+  known defaults.
+- 28 Hard-coded kibanaserver: `docker/wazuh/opensearch_dashboards.yml` reads
+  `${DASHBOARD_PASSWORD}` from `WAZUH_DASHBOARD_PASSWORD`.
+- 29 Fallback passwords: no secret has a `:-` default in compose or in the
+  Logstash pipelines; `tests/python/test_compose_security.py` enforces it.
+- 32 Portainer: behind the `portainer` compose profile, loopback bind.
+- 14 Warm node port: binds to `BIND_ADDR` (loopback by default).
+
+Also reduced but still Open: 11, 20, 21 (exposure now opt-in), 30 (secrets
+now only in `.env`; Grafana CLI reset still uses a command-line password),
+34 (UniFi poller uses a write-only InfluxDB account; TLS verify still off).
 
 ## UNVERIFIED items
 
@@ -38,7 +52,8 @@ No Critical threats are recorded. 41 threats in total: 35 Open, 6 Mitigated.
 - Logstash `type` handling for attacker-supplied JSON on UDP 5140 (not run).
 - Possible regex backtracking in the grok/dissect patterns (not tested).
 - Stored XSS or panel injection from log fields in Grafana/Dashboards (not tested).
-- Whether the stock Wazuh indexer user database keeps the default kibanaserver hash.
+- Whether `change-passwords.sh` rotates the kibanaserver hash correctly on a live Wazuh 4.9 indexer (written, not run: no containers were started).
+- Whether Logstash 8.9 and the Wazuh dashboard expand `${VAR}` exactly as the changes assume (CI runs `logstash --config.test_and_exit` with a throwaway value set, so it proves the syntax, not the unset failure).
 - Portainer first-run admin lockdown behavior in the `lts` image.
 
 ## Not covered

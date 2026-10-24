@@ -3,7 +3,7 @@
   "summary": {
     "title": "siem-docker-stack threat model",
     "owner": "",
-    "description": "Threat model of the docker-compose SIEM stack (OpenSearch hot/warm, Logstash, syslog-ng, Grafana, InfluxDB, Prometheus, Alertmanager, Wazuh, optional CrowdSec/UniFi Poller/Portainer) built from docker/docker-compose.yml, docker/*/ configs, scripts/ and n8n/ workflows at origin/master. No LLM or AI component exists in the stack (n8n/ideas.md mentions local LLMs only as ideas)."
+    "description": "Threat model of the docker-compose SIEM stack (OpenSearch hot/warm, Logstash, syslog-ng, Grafana, InfluxDB, Prometheus, Alertmanager, Wazuh, optional CrowdSec/UniFi Poller/Portainer) built from docker/docker-compose.yml, docker/*/ configs, scripts/ and n8n/ workflows at origin/master. No LLM or AI component exists in the stack (n8n/ideas.md mentions local LLMs only as ideas). Updated for issue #32: threats 14, 27, 28, 29 and 32 are Mitigated; other descriptions that say a port is published on all interfaces describe the stack before that change."
   },
   "detail": {
     "diagrams": [
@@ -277,7 +277,7 @@
                   "severity": "Medium",
                   "type": "Spoofing",
                   "title": "Credential guessing against exposed OpenSearch login with no lockout or MFA configured",
-                  "description": "Evidence: 9200 published on all interfaces (docker/docker-compose.yml); security/config.yml defines only basic and clientcert authc, no auth_failure_listeners/blocking and no SSO/MFA; same applies to 9201 (warm) and 9202 (Wazuh indexer).",
+                  "description": "Evidence: 9200 published on all interfaces (docker/docker-compose.yml); security/config.yml defines only basic and clientcert authc, no auth_failure_listeners/blocking and no SSO/MFA; same applies to 9201 (warm) and 9202 (Wazuh indexer). UPDATE (issue #32): OpenSearch 9200 and Dashboards 5601 now bind to BIND_ADDR (127.0.0.1 default); no lockout or MFA was added.",
                   "mitigation": ""
                 },
                 {
@@ -321,12 +321,12 @@
                 {
                   "id": "t14",
                   "number": 14,
-                  "status": "Open",
+                  "status": "Mitigated",
                   "severity": "Medium",
                   "type": "Information disclosure",
                   "title": "Warm node HTTP port published on all interfaces",
                   "description": "Evidence: docker/docker-compose.yml opensearch-warm ports 9201:9200 with no 127.0.0.1 prefix, unlike the transport ports. Protected only by the security plugin (basic auth).",
-                  "mitigation": ""
+                  "mitigation": "docker/docker-compose.yml: opensearch-warm publishes ${BIND_ADDR:-127.0.0.1}:9201:9200, loopback by default; widening is an explicit BIND_ADDR change (README, Network exposure). Guarded by tests/python/test_compose_security.py."
                 }
               ]
             },
@@ -353,7 +353,7 @@
                   "severity": "High",
                   "type": "Elevation of privilege",
                   "title": "Grafana holds InfluxDB and Wazuh indexer admin credentials",
-                  "description": "Evidence: docker/docker-compose.yml grafana env sets WAZUH_INDEXER_PASSWORD and INFLUXDB_ADMIN_*; datasources.yml uses the Wazuh indexer admin and InfluxDB admin users (the OpenSearch datasources correctly use the readonly role). A Grafana compromise (published :3000, latest image, plugins installed at start) yields write/delete on the Wazuh indices and Influx, i.e. the ability to erase evidence.",
+                  "description": "Evidence: docker/docker-compose.yml grafana env sets WAZUH_INDEXER_PASSWORD and INFLUXDB_ADMIN_*; datasources.yml uses the Wazuh indexer admin and InfluxDB admin users (the OpenSearch datasources correctly use the readonly role). A Grafana compromise (published :3000, latest image, plugins installed at start) yields write/delete on the Wazuh indices and Influx, i.e. the ability to erase evidence. UPDATE (issue #32): the InfluxDB half is fixed. Grafana now uses a read-only account (GRAFANA_INFLUX_USER, GRANT READ on pfsense/unpoller/telegraf) created by the influxdb bootstrap in docker/docker-compose.yml and referenced from datasources.yml; it no longer receives INFLUXDB_ADMIN_*. STILL OPEN: the OpenSearch-Wazuh datasource authenticates as the Wazuh indexer admin; the repo defines no read-only role for the Wazuh indexer (docker/opensearch/security/roles.yml covers only the main cluster), so adding one needs new security provisioning for that indexer. Port 3000 now binds to BIND_ADDR (127.0.0.1 default), which lowers reachability but not impact.",
                   "mitigation": ""
                 },
                 {
@@ -379,12 +379,12 @@
                 {
                   "id": "t29",
                   "number": 29,
-                  "status": "Open",
+                  "status": "Mitigated",
                   "severity": "High",
                   "type": "Spoofing",
                   "title": "Known fallback passwords across the stack (Grafana, OpenSearch users, Influx, UniFi)",
                   "description": "Evidence: docker/docker-compose.yml uses ${GRAFANA_ADMIN_PASS:-changeme}, ${OPENSEARCH_DASHBOARDS_PASSWORD:-changeme-dashboards}, ${OPENSEARCH_LOGSTASH_PASSWORD:-changeme-logstash}, ${OPENSEARCH_READONLY_PASSWORD:-changeme-readonly}, ${INFLUXDB_ADMIN_PASSWORD:-changeme-influx}, ${UNIFI_PASS:-changeme}; logstash pipelines default to changeme-logstash; deploy scripts default GRAFANA_PASS to changeme. 08b-init-opensearch-security.sh refuses to run with missing OpenSearch passwords (it checks each variable), but the compose file itself does not, so containers can start with the public defaults for the other services.",
-                  "mitigation": ""
+                  "mitigation": "docker/docker-compose.yml: every secret (GRAFANA_ADMIN_PASS, OPENSEARCH_*_PASSWORD, INFLUXDB_ADMIN_PASSWORD, UNIFI_PASS, WAZUH_*_PASSWORD) uses ${VAR:?}, so `docker compose config` fails with a message naming the variable; docker/logstash/pipeline/*.conf read ${OPENSEARCH_LOGSTASH_PASSWORD} with no default (Logstash fails to start if unset); scripts/05-verify.sh requires WAZUH_INDEXER_PASSWORD. scripts/check-env.sh rejects placeholders; tests/python/test_compose_security.py fails on any secret-named `:-` fallback. Residual: client-side deploy scripts (scripts/deploy-*.py, deploy-n8n-soar.sh, 08-crowdsec-smoketest.sh) still default GRAFANA_PASS to changeme, which only matters if the server uses that password; .env.example still contains the old placeholder values (check-env.sh rejects them)."
                 }
               ]
             },
@@ -439,7 +439,7 @@
                   "severity": "Medium",
                   "type": "Spoofing",
                   "title": "InfluxDB published with a shared admin account",
-                  "description": "Evidence: 8086 published on all interfaces and opened in ufw (02-bootstrap.sh); auth enabled (INFLUXDB_HTTP_AUTH_ENABLED=true); the same admin identity is reused by Grafana and unifi-poller, no per-service users. Plain HTTP (f_gf_inf, f_unifi_inf).",
+                  "description": "Evidence: 8086 published on all interfaces and opened in ufw (02-bootstrap.sh); auth enabled (INFLUXDB_HTTP_AUTH_ENABLED=true); the same admin identity is reused by Grafana and unifi-poller, no per-service users. Plain HTTP (f_gf_inf, f_unifi_inf). UPDATE (issue #32): port 8086 now binds to INGEST_BIND_ADDR (127.0.0.1 default) and Grafana and unifi-poller use read-only and write-only accounts; the admin account still exists and any pfSense Telegraf writer set up outside the repo may still use it.",
                   "mitigation": ""
                 }
               ]
@@ -467,7 +467,7 @@
                   "severity": "Medium",
                   "type": "Spoofing",
                   "title": "UniFi controller TLS verification disabled; shared InfluxDB admin credentials",
-                  "description": "Evidence: UP_UNIFI_DEFAULT_VERIFY_SSL=false, UNIFI_PASS fallback changeme, UP_INFLUXDB_USER/PASS use the InfluxDB admin (docker/docker-compose.yml unifi-poller). Image tag defaults to latest.",
+                  "description": "Evidence: UP_UNIFI_DEFAULT_VERIFY_SSL=false, UNIFI_PASS fallback changeme, UP_INFLUXDB_USER/PASS use the InfluxDB admin (docker/docker-compose.yml unifi-poller). Image tag defaults to latest. UPDATE (issue #32): the UNIFI_PASS fallback is gone (required variable) and the poller now writes InfluxDB as UNPOLLER_INFLUX_USER (GRANT WRITE on unpoller only) instead of the admin. STILL OPEN: UP_UNIFI_DEFAULT_VERIFY_SSL=false and the latest image tag.",
                   "mitigation": ""
                 }
               ]
@@ -495,7 +495,7 @@
                   "severity": "Medium",
                   "type": "Denial of service",
                   "title": "Unauthenticated Prometheus with lifecycle API on a published port",
-                  "description": "Evidence: docker/docker-compose.yml prometheus publishes 9090 on all interfaces with --web.enable-lifecycle and no web config file; scripts/02-bootstrap.sh ufw allows 9090. Any reachable host can read inventory (targets, labels, alert state) and POST /-/quit or /-/reload to stop or disrupt monitoring.",
+                  "description": "Evidence: docker/docker-compose.yml prometheus publishes 9090 on all interfaces with --web.enable-lifecycle and no web config file; scripts/02-bootstrap.sh ufw allows 9090. Any reachable host can read inventory (targets, labels, alert state) and POST /-/quit or /-/reload to stop or disrupt monitoring. UPDATE (issue #32): Prometheus 9090 now binds to BIND_ADDR (127.0.0.1 default); it is still unauthenticated with the lifecycle API enabled.",
                   "mitigation": ""
                 }
               ]
@@ -592,12 +592,12 @@
                 {
                   "id": "t27",
                   "number": 27,
-                  "status": "Open",
+                  "status": "Mitigated",
                   "severity": "High",
                   "type": "Spoofing",
                   "title": "Default Wazuh credentials used when .env is incomplete",
                   "description": "Evidence: docker/docker-compose.yml wazuh-manager/dashboard fall back to INDEXER_PASSWORD SecretPassword and API_PASSWORD MyS3cr3tP4ssw0rd via ${VAR:-default}; the compose file warns to change them. 1515, 55000 and the indexer port 9202 are published on all interfaces. A stack started without .env runs with publicly known credentials and compose does not fail.",
-                  "mitigation": ""
+                  "mitigation": "docker/docker-compose.yml: WAZUH_INDEXER_PASSWORD and WAZUH_API_PASSWORD are required variables (${VAR:?}), so compose refuses to start when .env is missing or incomplete; no SecretPassword/MyS3cr3tP4ssw0rd fallback remains. 1515/1514 bind to INGEST_BIND_ADDR and 55000/9202 to BIND_ADDR, both defaulting to 127.0.0.1. scripts/check-env.sh (run by scripts/03-deploy.sh) rejects empty values and the old defaults; tests/python/test_compose_security.py guards both. Residual: a value copied from the old .env.example that is not one of the listed defaults passes; `wazuh:wazuh` default API admin is still tried by change-passwords.sh."
                 }
               ]
             },
@@ -637,12 +637,12 @@
                 {
                   "id": "t28",
                   "number": 28,
-                  "status": "Open",
+                  "status": "Mitigated",
                   "severity": "High",
                   "type": "Spoofing",
                   "title": "Hard-coded kibanaserver/kibanaserver for the Wazuh dashboard",
                   "description": "Evidence: DASHBOARD_USERNAME=kibanaserver and DASHBOARD_PASSWORD=kibanaserver in docker/docker-compose.yml wazuh-dashboard, and opensearch.password: kibanaserver in docker/wazuh/opensearch_dashboards.yml. This is not read from .env; it changes only if change-passwords.sh is run (it seds DASHBOARD_PASSWORD in the compose file). Until then the default credential for the indexer service account is known and the indexer port 9202 is published on all interfaces. UNVERIFIED: whether the stock Wazuh indexer user database still holds the same default hash (not in the repo).",
-                  "mitigation": ""
+                  "mitigation": "docker/docker-compose.yml: DASHBOARD_PASSWORD=${WAZUH_DASHBOARD_PASSWORD:?...} (required) and docker/wazuh/opensearch_dashboards.yml: opensearch.password: \"${DASHBOARD_PASSWORD}\" read from the environment; change-passwords.sh sets the matching kibanaserver hash on the Wazuh indexer and writes .env (not the compose file). Indexer port 9202 binds to BIND_ADDR (127.0.0.1 by default). Residual: on an existing deployment the indexer keeps the old hash until change-passwords.sh is run (README, Upgrade notes); UNVERIFIED against a live Wazuh indexer (no containers were run)."
                 }
               ]
             },
@@ -682,12 +682,12 @@
                 {
                   "id": "t32",
                   "number": 32,
-                  "status": "Open",
+                  "status": "Mitigated",
                   "severity": "High",
                   "type": "Elevation of privilege",
                   "title": "Portainer with read-write Docker socket starts by default on a public port",
                   "description": "Evidence: docker/docker-compose.yml portainer mounts /var/run/docker.sock read-write, publishes 9443 on all interfaces, has no profile (the crowdsec service has one; portainer does not) although commented Optional; scripts/02-bootstrap.sh leaves the 9443 ufw rule commented but Docker publishing bypasses ufw. Control of this UI is root on the host. Portainer's own first-run admin setup is the only gate (UNVERIFIED which timeout/lockdown applies in the lts image).",
-                  "mitigation": ""
+                  "mitigation": "docker/docker-compose.yml: portainer has profiles: [\"portainer\"] so it does not start by default (`docker compose --profile portainer up -d portainer` to opt in) and publishes 9443 on ${PORTAINER_BIND_ADDR:-127.0.0.1}. README \"Portainer (opt-in)\" documents enabling it. Residual: when enabled, the Docker socket is still mounted read-write, so anyone who can reach the UI (loopback by default) is root on the host."
                 }
               ]
             },
@@ -790,7 +790,7 @@
                   "severity": "Medium",
                   "type": "Information disclosure",
                   "title": "Passwords live in container environment, compose file edits and command lines",
-                  "description": "Evidence: secrets are env vars in docker/docker-compose.yml (visible via docker inspect to anyone with Docker access); change-passwords.sh passes the new password inside docker exec command strings (hash.sh -p '...', grafana cli admin reset-admin-password) so it appears in the host process list, and writes plaintext passwords into docker-compose.yml with sed (INDEXER_PASSWORD, DASHBOARD_PASSWORD, API_PASSWORD) and into .env (GRAFANA_ADMIN_PASS). Passwords containing quotes or | can also break the quoting. 08b-init-opensearch-security.sh is better: it passes HASH_PASS through docker exec -e.",
+                  "description": "Evidence: secrets are env vars in docker/docker-compose.yml (visible via docker inspect to anyone with Docker access); change-passwords.sh passes the new password inside docker exec command strings (hash.sh -p '...', grafana cli admin reset-admin-password) so it appears in the host process list, and writes plaintext passwords into docker-compose.yml with sed (INDEXER_PASSWORD, DASHBOARD_PASSWORD, API_PASSWORD) and into .env (GRAFANA_ADMIN_PASS). Passwords containing quotes or | can also break the quoting. 08b-init-opensearch-security.sh is better: it passes HASH_PASS through docker exec -e. UPDATE (issue #32): change-passwords.sh no longer seds plaintext passwords into docker-compose.yml (all secrets are written to .env) and sends bcrypt-hash inputs, curl credentials and the wazuh.yml update to containers on stdin. STILL OPEN: secrets remain container environment variables (docker inspect), and the Grafana CLI reset still passes the new password on the docker exec command line.",
                   "mitigation": ""
                 },
                 {
