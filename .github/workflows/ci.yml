@@ -51,6 +51,7 @@ jobs:
           -keyout "$certs/root-ca-key.pem" -out "$certs/root-ca.pem"
         chmod -R a+rX "$certs"
         docker run --rm \
+          -e OPENSEARCH_LOGSTASH_PASSWORD=ci-only-placeholder \
           -v "$PWD/docker/logstash/pipeline":/usr/share/logstash/pipeline:ro \
           -v "$PWD/docker/logstash/logstash.yml":/usr/share/logstash/config/logstash.yml:ro \
           -v "$certs/root-ca.pem":/etc/logstash/certs/root-ca.pem:ro \
