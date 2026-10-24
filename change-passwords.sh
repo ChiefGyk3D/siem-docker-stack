@@ -193,12 +193,13 @@ if [[ -n "$INDEXER_PASS" ]]; then
 
     wazuh_set_user_hash admin "$INDEXER_PASS"
 
-    # Every consumer reads WAZUH_INDEXER_PASSWORD from .env (manager, dashboard
-    # and Grafana's Wazuh datasource), so one variable rotates all of them.
+    # The manager and dashboard read WAZUH_INDEXER_PASSWORD from .env, so one
+    # variable rotates both. Grafana uses its own read-only account
+    # (WAZUH_GRAFANA_RO_PASSWORD, scripts/11-wazuh-grafana-readonly.sh).
     update_env_var "WAZUH_INDEXER_PASSWORD" "$INDEXER_PASS"
     echo "  .env updated (WAZUH_INDEXER_PASSWORD)."
 
-    SERVICES_TO_RECREATE+=(wazuh-dashboard wazuh-manager grafana)
+    SERVICES_TO_RECREATE+=(wazuh-dashboard wazuh-manager)
 fi
 
 # ---- STEP 1b: Wazuh dashboard service account (kibanaserver) ----

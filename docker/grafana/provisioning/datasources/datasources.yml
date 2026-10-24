@@ -13,17 +13,18 @@
 #   6. InfluxDB — pfSense/Telegraf/UniFi metrics
 #   7. Prometheus — Infrastructure metrics
 #
-# $WAZUH_INDEXER_PASSWORD, $OPENSEARCH_READONLY_PASSWORD, $GRAFANA_INFLUX_USER
-# and $GRAFANA_INFLUX_PASSWORD are interpolated by Grafana from the container
+# $WAZUH_GRAFANA_RO_USER, $WAZUH_GRAFANA_RO_PASSWORD, $OPENSEARCH_READONLY_PASSWORD,
+# $GRAFANA_INFLUX_USER and $GRAFANA_INFLUX_PASSWORD are interpolated by Grafana from the container
 # environment (set in docker-compose.yml from .env).
 #
 # Phase F1: the main OpenSearch cluster is secured — datasources use HTTPS
 # with the read-only "readonly" user; tlsSkipVerify because the cluster uses
 # self-signed certs. InfluxDB auth is enabled — Grafana uses a READ-only
 # InfluxDB account ($GRAFANA_INFLUX_USER, created by the influxdb service).
-# KNOWN GAP: the Wazuh datasource still authenticates as the Wazuh indexer
-# admin; the repo defines no read-only role for that indexer (see
-# docs/threat-model, threat 17).
+# The Wazuh datasource uses a READ-only Wazuh indexer account
+# ($WAZUH_GRAFANA_RO_USER, default grafana_ro; role wazuh_grafana_readonly),
+# created by scripts/11-wazuh-grafana-readonly.sh. No datasource uses an admin
+# account.
 
 apiVersion: 1
 
@@ -90,9 +91,9 @@ datasources:
     url: https://wazuh-indexer:9200
     database: "wazuh-alerts-*"
     basicAuth: true
-    basicAuthUser: admin
+    basicAuthUser: $WAZUH_GRAFANA_RO_USER
     secureJsonData:
-      basicAuthPassword: $WAZUH_INDEXER_PASSWORD
+      basicAuthPassword: $WAZUH_GRAFANA_RO_PASSWORD
     jsonData:
       timeField: "@timestamp"
       version: "2.19.0"

@@ -1,0 +1,7 @@
+# Maps the Grafana read-only user to wazuh_grafana_readonly. The user name is
+# WAZUH_GRAFANA_RO_USER (default grafana_ro); the script fills the token.
+wazuh_grafana_readonly:
+  reserved: false
+  users:
+    - "__GRAFANA_RO_USER__"
+  description: "Grafana Wazuh datasource"

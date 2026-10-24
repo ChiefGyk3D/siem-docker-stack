@@ -293,6 +293,7 @@ stops with a message naming the missing variable.
    UNIFI_PASS=
    # new
    WAZUH_DASHBOARD_PASSWORD=     # kibanaserver on the Wazuh indexer
+   WAZUH_GRAFANA_RO_PASSWORD=    # read-only Wazuh indexer user for Grafana
    GRAFANA_INFLUX_PASSWORD=      # read-only InfluxDB user for Grafana
    UNPOLLER_INFLUX_PASSWORD=     # write-only InfluxDB user for unifi-poller
    # optional
@@ -330,9 +331,24 @@ stops with a message naming the missing variable.
    environment or `.env` and no longer expects the portainer container.
    `02-bootstrap.sh` opens no SIEM ports in ufw unless `SIEM_ALLOWED_CIDR` is set.
 
-Still open (tracked in `docs/threat-model`): the Grafana Wazuh datasource uses
-the Wazuh indexer admin account, because the repo defines no read-only role for
-that indexer.
+8. **Grafana reads the Wazuh indexer with a read-only account.** The Wazuh
+   datasource no longer uses the indexer `admin` user, and Grafana no longer
+   receives `WAZUH_INDEXER_PASSWORD`. Set `WAZUH_GRAFANA_RO_PASSWORD` in `.env`
+   (name configurable with `WAZUH_GRAFANA_RO_USER`, default `grafana_ro`),
+   start the stack, then run `bash scripts/11-wazuh-grafana-readonly.sh` and
+   `docker compose up -d grafana`. The Wazuh indexer keeps its security config
+   inside the container, so the script bcrypt-hashes the password there (on
+   stdin), adds the user, the `wazuh_grafana_readonly` role (read on
+   `wazuh-alerts-*`, `-archives-*`, `-monitoring-*`, `-statistics-*`) and the
+   mapping to the container's `internal_users.yml`, `roles.yml` and
+   `roles_mapping.yml`, applies each with `securityadmin.sh`, and checks that
+   the account can read and gets 403 on a delete. No hash or password is in a
+   tracked file. Until you run it, Grafana's Wazuh panels fail to log in.
+   Re-run it after recreating the `wazuh-indexer` container or changing the
+   password. Rotate the password by editing `.env`, re-running the script and
+   recreating grafana.
+
+No default-stack Grafana datasource uses an admin account any more.
 
 ---
 

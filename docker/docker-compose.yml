@@ -212,9 +212,11 @@ services:
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASS:?set GRAFANA_ADMIN_PASS in .env (see README upgrade notes)}
       - GF_INSTALL_PLUGINS=grafana-opensearch-datasource,grafana-clock-panel,grafana-worldmap-panel
       - GF_SERVER_ROOT_URL=http://${SIEM_HOST:-localhost}:3000
-      # Used by datasource provisioning ($WAZUH_INDEXER_PASSWORD etc.
-      # interpolation in provisioning/datasources/datasources.yml)
-      - WAZUH_INDEXER_PASSWORD=${WAZUH_INDEXER_PASSWORD:?set WAZUH_INDEXER_PASSWORD in .env (see README upgrade notes)}
+      # Used by datasource provisioning ($WAZUH_GRAFANA_RO_PASSWORD etc.
+      # interpolation in provisioning/datasources/datasources.yml).
+      # Read-only Wazuh indexer account, created by scripts/11-wazuh-grafana-readonly.sh
+      - WAZUH_GRAFANA_RO_USER=${WAZUH_GRAFANA_RO_USER:-grafana_ro}
+      - WAZUH_GRAFANA_RO_PASSWORD=${WAZUH_GRAFANA_RO_PASSWORD:?set WAZUH_GRAFANA_RO_PASSWORD in .env (see README upgrade notes)}
       - OPENSEARCH_READONLY_PASSWORD=${OPENSEARCH_READONLY_PASSWORD:?set OPENSEARCH_READONLY_PASSWORD in .env (see README upgrade notes)}
       # Read-only InfluxDB account (created by the influxdb service below)
       - GRAFANA_INFLUX_USER=${GRAFANA_INFLUX_USER:-grafana_ro}
