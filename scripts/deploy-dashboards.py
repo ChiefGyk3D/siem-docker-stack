@@ -10,7 +10,7 @@ Or via SSH:
 Environment variables:
     GRAFANA_URL     default: http://localhost:3000
     GRAFANA_USER    default: admin
-    GRAFANA_PASS    default: changeme
+    GRAFANA_PASS    REQUIRED, no default (the script refuses a missing or placeholder value)
 
 Actions:
     1. Creates folders: SIEM, System Stats
@@ -23,17 +23,33 @@ import base64
 import json
 import os
 import pathlib
+import re
 import urllib.error
 import urllib.request
 
+# ── Secrets: no defaults ───────────────────────────────────────────────
+# One placeholder rule, kept identical in every deploy-*.py (these scripts are
+# also piped over ssh, so they cannot import a sibling module) and in
+# scripts/lib-secrets.sh; tests/python/test_required_secrets.py keeps them in step.
+_PLACEHOLDER = re.compile(r"(|change[_-]?me.*|your[_-].*|<.*|xxx.*|example.*|placeholder.*|secretpassword|mys3cr3tp4ssw0rd|kibanaserver|admin|password|.*your-password.*|.*strong-password.*)", re.I | re.S)  # placeholder-rule
+
+
+def is_placeholder(value):
+    return _PLACEHOLDER.fullmatch((value or "").strip()) is not None
+
+
+def require_secret(name, value):
+    """Return value, or exit naming the variable (never the value) if it is unusable."""
+    if is_placeholder(value):
+        raise SystemExit(f"ERROR: {name} is missing, empty, or a placeholder. "
+                         "Set a real value (see README, Required secrets).")
+    return value
+
+
 GRAFANA_URL = os.environ.get("GRAFANA_URL", "http://localhost:3000")
 GRAFANA_USER = os.environ.get("GRAFANA_USER", "admin")
-GRAFANA_PASS = os.environ.get("GRAFANA_PASS", "changeme")
-AUTH = base64.b64encode(f"{GRAFANA_USER}:{GRAFANA_PASS}".encode()).decode()
-HEADERS = {
-    "Content-Type": "application/json",
-    "Authorization": f"Basic {AUTH}",
-}
+GRAFANA_PASS = os.environ.get("GRAFANA_PASS")  # required, checked in main()
+HEADERS = {"Content-Type": "application/json"}
 
 # Map dashboard filename -> target folder title.
 # Anything not listed goes to "SIEM".
@@ -104,7 +120,15 @@ def import_dashboard(path, folder_id):
         print(f"  ✗ {title} → failed ({status}: {result.get('message', '')})")
 
 
+def _init_auth():
+    """Refuse a missing or placeholder password, then build the Basic auth header."""
+    password = require_secret("GRAFANA_PASS", GRAFANA_PASS)
+    token = base64.b64encode(f"{GRAFANA_USER}:{password}".encode()).decode()
+    HEADERS["Authorization"] = f"Basic {token}"
+
+
 def main():
+    _init_auth()
     print("=== Creating Grafana folders ===")
     siem_folder_id = ensure_folder("SIEM")
     system_folder_id = ensure_folder("System Stats")

@@ -93,16 +93,16 @@ The deployment creates 8 alert rules across 5 rule groups:
 
 ## Environment Variables
 
-All scripts read configuration from environment variables. Create a `.env` file (already in `.gitignore`) or export them in your shell.
+All scripts read configuration from environment variables. Passwords and API keys have no defaults: a script exits with an error naming the variable when one is unset, empty or a placeholder (see the README, Required secrets). Create a `.env` file (already in `.gitignore`) or export them in your shell.
 
 ### N8N Configuration
 
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `N8N_BASE` | N8N internal URL (Docker bridge IP) | `http://172.20.0.16:80` |
-| `N8N_API_KEY` | N8N public API key (Settings → API) | `eyJhbGci...` |
+| `N8N_API_KEY` | N8N public API key (Settings → API; required, no default) | `eyJhbGci...` |
 | `N8N_EMAIL` | N8N login email (for internal API) | `admin@example.com` |
-| `N8N_PASSWORD` | N8N login password | `your-password` |
+| `N8N_PASSWORD` | N8N login password (required, no default) | set from your secrets manager |
 
 ### Discord Configuration
 
@@ -117,7 +117,7 @@ All scripts read configuration from environment variables. Create a `.env` file 
 |----------|-------------|---------|
 | `GRAFANA_URL` | Grafana base URL | `http://localhost:3000` |
 | `GRAFANA_USER` | Grafana admin username | `admin` |
-| `GRAFANA_PASS` | Grafana admin password | `your-password` |
+| `GRAFANA_PASS` | Grafana admin password (required, no default) | the `GRAFANA_ADMIN_PASS` value from `.env` |
 | `ALERT_FOLDER_UID` | Grafana folder UID for alert rules | `abc123def456` |
 | `DS_WAZUH` | Wazuh datasource UID | `P75BB31...` |
 | `DS_SURICATA` | Suricata datasource UID | `fff2ee...` |
@@ -210,7 +210,7 @@ For deploying just the Grafana alert router workflow to N8N. This script uses a 
 export N8N_BASE="http://172.20.0.16:80"
 export N8N_API_KEY="your-n8n-api-key"
 export N8N_EMAIL="admin@example.com"
-export N8N_PASSWORD="your-password"
+export N8N_PASSWORD="<n8n login password>"
 export DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/ID/TOKEN"
 export DISCORD_MENTION="<@YOUR_USER_ID>"
 
@@ -225,7 +225,7 @@ For deploying just the 7 Grafana SIEM alert rules:
 ```bash
 export GRAFANA_URL="http://localhost:3000"
 export GRAFANA_USER="admin"
-export GRAFANA_PASS="your-grafana-password"
+export GRAFANA_PASS="<grafana admin password>"
 export ALERT_FOLDER_UID="your-folder-uid"
 export DS_WAZUH="your-wazuh-ds-uid"
 export DS_SURICATA="your-suricata-ds-uid"

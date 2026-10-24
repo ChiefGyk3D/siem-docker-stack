@@ -3,7 +3,8 @@
 # deploy-n8n-soar.sh — Deploy N8N SOAR workflows and Grafana alerting rules
 # =============================================================================
 # Usage:
-#   N8N_API_KEY="your-key" ./scripts/deploy-n8n-soar.sh [siem-server-ip]
+#   N8N_API_KEY=<n8n API key> GRAFANA_PASS=<grafana admin password> \
+#     ./scripts/deploy-n8n-soar.sh [siem-server-ip]
 #
 # Or set the key in your environment / .env file.
 # The script reads N8N_API_KEY from the environment — change it in one place.
@@ -19,17 +20,20 @@ N8N_PORT="80"
 N8N_BASE="http://${N8N_IP}:${N8N_PORT}"
 GRAFANA_URL="${GRAFANA_URL:-http://localhost:3000}"
 GRAFANA_USER="${GRAFANA_USER:-admin}"
-GRAFANA_PASS="${GRAFANA_PASS:-changeme}"
+GRAFANA_PASS="${GRAFANA_PASS:-}"
 SSH_USER="${SIEM_USER:-$(whoami)}"
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 N8N_DIR="${SCRIPT_DIR}/n8n"
 
-# N8N API key — set via environment variable
-if [[ -z "${N8N_API_KEY:-}" ]]; then
-  echo "ERROR: N8N_API_KEY not set."
-  echo "Usage: N8N_API_KEY='your-key-here' $0 [siem-server-ip]"
+# Secrets: no defaults. A missing, empty or placeholder value stops the script
+# before anything is sent. The messages name the variable, never its value.
+# shellcheck source=scripts/lib-secrets.sh
+source "$(dirname "$0")/lib-secrets.sh"
+require_secret N8N_API_KEY "${N8N_API_KEY:-}" || {
+  echo "Usage: N8N_API_KEY=<your n8n API key> GRAFANA_PASS=<grafana admin password> $0 [siem-server-ip]" >&2
   exit 1
-fi
+}
+require_secret GRAFANA_PASS "$GRAFANA_PASS" || exit 1
 
 # Grafana alert folder — create this in Grafana UI first, then copy the UID
 ALERT_FOLDER_UID="${ALERT_FOLDER_UID:-}"  # "SIEM Alerts"
