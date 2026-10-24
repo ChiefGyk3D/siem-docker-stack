@@ -23,11 +23,7 @@ JSON file. Source of truth is `docker/docker-compose.yml`, `docker/*/` configs,
 
 ## Open High or Critical threats
 
-- 17 Grafana holds the Wazuh indexer admin credential (the InfluxDB half is
-  fixed: Grafana now reads InfluxDB with a read-only account). Open because
-  the repo has no read-only role for the Wazuh indexer.
-
-No Critical threats are recorded. 41 threats in total: 30 Open, 11 Mitigated.
+None. No Critical threats are recorded. 41 threats in total: 29 Open, 12 Mitigated.
 
 ## Mitigated by issue #32
 
@@ -40,6 +36,9 @@ No Critical threats are recorded. 41 threats in total: 30 Open, 11 Mitigated.
   Logstash pipelines; `tests/python/test_compose_security.py` enforces it.
 - 32 Portainer: behind the `portainer` compose profile, loopback bind.
 - 14 Warm node port: binds to `BIND_ADDR` (loopback by default).
+- 17 Grafana admin credentials: InfluxDB and the Wazuh indexer use read-only
+  accounts (`scripts/11-wazuh-grafana-readonly.sh`, `docker/wazuh/security/`);
+  no datasource uses an admin account. Run the script once per deploy.
 
 Also reduced but still Open: 11, 20, 21 (exposure now opt-in), 30 (secrets
 now only in `.env`; Grafana CLI reset still uses a command-line password),
