@@ -121,3 +121,18 @@ def test_check_env_rejects_missing_and_known_defaults(tmp_path):
     assert bad.returncode == 1 and "changeme" not in bad.stderr
     assert _run_check_env(tmp_path, good.replace("Zx9-unique-3", "")).returncode == 1
     assert _run_check_env(tmp_path, "").returncode == 1
+
+
+def test_check_env_warns_loudly_when_ingest_stays_on_loopback(tmp_path):
+    """Loopback ingest is the safe default, but an upgraded stack stops hearing
+    from firewalls and agents without any error, so say so (non-fatal)."""
+    names = [ln.split("=")[0] for ln in CI_ENV.read_text(encoding="utf-8").splitlines()
+             if "=" in ln and not ln.startswith("#")]
+    names.append("OPENSEARCH_ADMIN_PASSWORD")
+    good = "".join(f"{n}=Zx9-unique-{i}\n" for i, n in enumerate(dict.fromkeys(names)))
+    for body in (good, good + "INGEST_BIND_ADDR=127.0.0.1\n"):
+        res = _run_check_env(tmp_path, body)
+        assert res.returncode == 0
+        assert "INGEST_BIND_ADDR" in res.stderr and "other hosts" in res.stderr
+    res = _run_check_env(tmp_path, good + "INGEST_BIND_ADDR=192.0.2.10\n")
+    assert res.returncode == 0 and "INGEST_BIND_ADDR" not in res.stderr

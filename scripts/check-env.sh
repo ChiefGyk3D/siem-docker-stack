@@ -55,3 +55,13 @@ if [ "$bad" -ne 0 ]; then
     exit 1
 fi
 echo "check-env: all required secrets are set and none is a known default"
+
+# Not an error: loopback ingest is the safe default. But on an upgraded stack it
+# silently stops log intake from firewalls, sensors and agents on other hosts.
+ingest="$(grep -E '^INGEST_BIND_ADDR=' "$ENV_FILE" | tail -1 | cut -d= -f2- || true)"
+ingest="${ingest%\"}"; ingest="${ingest#\"}"; ingest="${ingest%\'}"; ingest="${ingest#\'}"
+case "$ingest" in
+    "" | 127.* | localhost | ::1)
+        echo "check-env: WARNING: INGEST_BIND_ADDR is unset or loopback, so syslog, EVE, Beats, Wazuh agents and Telegraf from other hosts cannot reach this stack. Set INGEST_BIND_ADDR in $ENV_FILE to this host's interface address (see README, Network exposure)." >&2
+        ;;
+esac
