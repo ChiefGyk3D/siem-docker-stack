@@ -98,6 +98,11 @@ fi
 
 # Copy .env if it exists
 if [ -f "${REPO_DIR}/.env" ]; then
+    # Refuse to deploy with missing secrets or well-known default values
+    bash "${SCRIPT_DIR}/check-env.sh" "${REPO_DIR}/.env" || {
+        echo -e "${RED}Fix .env and re-run (see README, Upgrade notes).${NC}"
+        exit 1
+    }
     if $LOCAL_MODE; then
         cp "${REPO_DIR}/.env" "${DEPLOY_DIR}/.env"
     else
@@ -105,8 +110,9 @@ if [ -f "${REPO_DIR}/.env" ]; then
     fi
     echo -e "${GREEN}✓ .env deployed${NC}"
 else
-    echo -e "${YELLOW}⚠ No .env found — using defaults from docker-compose.yml${NC}"
-    echo "  Copy .env.example to .env, configure it, and re-run."
+    echo -e "${RED}No .env found. The stack has no default secrets and will not start.${NC}"
+    echo "  Copy .env.example to .env, set the required secrets, and re-run."
+    exit 1
 fi
 
 echo -e "${GREEN}✓ Docker configs deployed${NC}"
@@ -148,7 +154,9 @@ else
     HOST_DISPLAY="${SIEM_HOST}"
 fi
 
-echo "Services starting at http://${HOST_DISPLAY}:"
+echo "Services starting. Ports bind to loopback unless BIND_ADDR / INGEST_BIND_ADDR"
+echo "are set in .env (README, \"Network exposure\")."
+echo "Services at http://${HOST_DISPLAY}:"
 echo "  Grafana:               :3000"
 echo "  OpenSearch:             :9200 (HTTPS + auth)"
 echo "  OpenSearch Dashboards:  :5601"
@@ -156,7 +164,7 @@ echo "  Wazuh Dashboard:        :443  (HTTPS)"
 echo "  Prometheus:             :9090"
 echo "  Alertmanager:           :9093 (loopback only)"
 echo "  InfluxDB:               :8086 (auth)"
-echo "  Portainer:              :9443 (HTTPS)"
+echo "  Portainer:              opt-in: docker compose --profile portainer up -d (loopback :9443)"
 echo ""
 echo "Next steps:"
 echo "  1. Wait ~2 minutes for all services to start"

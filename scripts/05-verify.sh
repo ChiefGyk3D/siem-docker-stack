@@ -113,7 +113,7 @@ fi
 # ── Wazuh Stack ───────────────────────────────────────────────────────────────
 echo ""
 echo -e "${YELLOW}Wazuh Stack:${NC}"
-check_https "Wazuh Indexer" "https://${SIEM_HOST}:9202" "200" "admin:${WAZUH_INDEXER_PASSWORD:-SecretPassword}"
+check_https "Wazuh Indexer" "https://${SIEM_HOST}:9202" "200" "admin:${WAZUH_INDEXER_PASSWORD:?set WAZUH_INDEXER_PASSWORD (export it from .env)}"
 check_https "Wazuh Dashboard" "https://${SIEM_HOST}:443" "any"
 
 echo -e "  ${YELLOW}NOTE: Change default Wazuh passwords after deployment!${NC}"
@@ -132,7 +132,7 @@ fi
 # ── Docker Containers ────────────────────────────────────────────────────────
 echo ""
 echo -e "${YELLOW}Docker Containers:${NC}"
-EXPECTED_CONTAINERS="alertmanager cadvisor elasticsearch-exporter grafana influxdb logstash opensearch-dashboards opensearch-hot opensearch-warm portainer prometheus syslog-ng unifi-poller wazuh-dashboard wazuh-indexer wazuh-manager"
+EXPECTED_CONTAINERS="alertmanager cadvisor elasticsearch-exporter grafana influxdb logstash opensearch-dashboards opensearch-hot opensearch-warm prometheus syslog-ng unifi-poller wazuh-dashboard wazuh-indexer wazuh-manager"
 
 # Try local docker first, then SSH
 if docker ps > /dev/null 2>&1; then

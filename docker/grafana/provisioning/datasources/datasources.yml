@@ -13,13 +13,17 @@
 #   6. InfluxDB — pfSense/Telegraf/UniFi metrics
 #   7. Prometheus — Infrastructure metrics
 #
-# $WAZUH_INDEXER_PASSWORD, $OPENSEARCH_READONLY_PASSWORD, $INFLUXDB_ADMIN_USER
-# and $INFLUXDB_ADMIN_PASSWORD are interpolated by Grafana from the container
+# $WAZUH_INDEXER_PASSWORD, $OPENSEARCH_READONLY_PASSWORD, $GRAFANA_INFLUX_USER
+# and $GRAFANA_INFLUX_PASSWORD are interpolated by Grafana from the container
 # environment (set in docker-compose.yml from .env).
 #
 # Phase F1: the main OpenSearch cluster is secured — datasources use HTTPS
 # with the read-only "readonly" user; tlsSkipVerify because the cluster uses
-# self-signed certs. InfluxDB auth is enabled — admin credentials are used.
+# self-signed certs. InfluxDB auth is enabled — Grafana uses a READ-only
+# InfluxDB account ($GRAFANA_INFLUX_USER, created by the influxdb service).
+# KNOWN GAP: the Wazuh datasource still authenticates as the Wazuh indexer
+# admin; the repo defines no read-only role for that indexer (see
+# docs/threat-model, threat 17).
 
 apiVersion: 1
 
@@ -119,9 +123,9 @@ datasources:
     access: proxy
     url: http://influxdb:8086
     database: pfsense
-    user: $INFLUXDB_ADMIN_USER
+    user: $GRAFANA_INFLUX_USER
     secureJsonData:
-      password: $INFLUXDB_ADMIN_PASSWORD
+      password: $GRAFANA_INFLUX_PASSWORD
     jsonData:
       httpMode: GET
 
@@ -132,9 +136,9 @@ datasources:
     access: proxy
     url: http://influxdb:8086
     database: unpoller
-    user: $INFLUXDB_ADMIN_USER
+    user: $GRAFANA_INFLUX_USER
     secureJsonData:
-      password: $INFLUXDB_ADMIN_PASSWORD
+      password: $GRAFANA_INFLUX_PASSWORD
     jsonData:
       httpMode: GET
 

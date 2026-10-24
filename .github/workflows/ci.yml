@@ -32,7 +32,8 @@ jobs:
       # compose, promtool, amtool, logstash, Wazuh XML and rule ids, pytest.
       test-install-command: python3 -m pip install --user pytest requests pyyaml
       test-command: |
-        (cd docker && docker compose -f docker-compose.yml config --quiet)
+        # required secrets are ${VAR:?}; tests/compose.ci.env supplies throwaway values
+        (cd docker && docker compose --env-file ../tests/compose.ci.env -f docker-compose.yml config --quiet)
         stage=$(mktemp -d)
         cp -r docker/prometheus/. "$stage/"
         for f in "$stage"/targets/*.example.json; do cp "$f" "${f%.example.json}.json"; done

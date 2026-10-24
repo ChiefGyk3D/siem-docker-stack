@@ -115,7 +115,7 @@ This stack was built and tested on the following hardware. You do **not** need i
 | **Syslog-ng** | 514/udp+tcp | Centralized syslog receiver |
 | **UniFi Poller** | — | Collects UniFi switch/AP telemetry → InfluxDB |
 | **CrowdSec** | — | Optional local LAPI (profile-gated); production runs on pfSense edge |
-| **Portainer** | 9443 | Docker management UI (HTTPS, optional) |
+| **Portainer** | 9443 (loopback) | Docker management UI. Opt-in: `docker compose --profile portainer up -d` |
 
 > **Note:** N8N runs as a separate container (not in the main `docker-compose.yml`) on a macvlan network. See [docs/n8n-soar.md](docs/n8n-soar.md) for deployment.
 
@@ -197,12 +197,17 @@ python3 scripts/deploy-dashboards.py
 
 ### After Installation
 
-1. **Grafana** → `http://your-server:3000` (default: admin / changeme)
-2. **Wazuh Dashboard** → `https://your-server:443` (default: admin / SecretPassword)
-3. **OpenSearch Dashboards** → `http://your-server:5601`
-4. **Portainer** → `https://your-server:9443`
+Web UIs bind to loopback by default (see [Network exposure](#network-exposure)).
+Reach them from your workstation with an SSH tunnel, for example
+`ssh -L 3000:127.0.0.1:3000 user@siem-host`, or widen `BIND_ADDR` on purpose.
 
-> **IMPORTANT:** Change ALL default passwords immediately after first login!
+1. **Grafana** → `http://127.0.0.1:3000` (user `admin`, password `GRAFANA_ADMIN_PASS` from `.env`)
+2. **Wazuh Dashboard** → `https://127.0.0.1:443` (user `admin`, password `WAZUH_INDEXER_PASSWORD` from `.env`)
+3. **OpenSearch Dashboards** → `http://127.0.0.1:5601`
+4. **Portainer** (only if enabled) → `https://127.0.0.1:9443`
+
+> There are no default passwords: compose refuses to start until every
+> required secret in `.env` is set (see [Upgrade notes](#upgrade-notes)).
 
 ### Changing Default Passwords
 
@@ -214,14 +219,120 @@ sudo bash /opt/siem/change-passwords.sh
 ```
 
 The script handles:
-- **Wazuh Indexer** — Generates bcrypt hash, applies to security config, updates compose + Grafana datasources
-- **Wazuh API (wazuh-wui)** — Changes via REST API, updates compose + Dashboard wazuh.yml
-- **Grafana** — Resets via Grafana CLI, updates .env file
-- Automatically escapes `$` as `$$` in docker-compose.yml
+- **Wazuh Indexer (admin)** — Generates bcrypt hash, applies to security config, updates `WAZUH_INDEXER_PASSWORD` in `.env`
+- **Wazuh Dashboard (kibanaserver)** — Same for the dashboard's service account, updates `WAZUH_DASHBOARD_PASSWORD` in `.env`
+- **Wazuh API (wazuh-wui)** — Changes via REST API, updates `WAZUH_API_PASSWORD` in `.env` and the Dashboard wazuh.yml
+- **Grafana** — Resets via Grafana CLI, updates `GRAFANA_ADMIN_PASS` in `.env`
+- Never edits `docker-compose.yml`; every secret lives in `.env` (keep it mode 600)
+- Sends passwords to containers on stdin, not on `docker exec` command lines (the Grafana CLI reset is the one exception)
 - Uses `docker compose up -d` (not restart) so env var changes take effect
 - Verifies each password change worked before finishing
 
 > **TIP:** Avoid using `$` in passwords — it causes escaping issues across YAML, shell, Docker Compose, and JSON layers.
+
+---
+
+## Network exposure
+
+Docker-published ports bypass UFW, so the bind address in `.env` is the real
+access control. Everything binds to loopback (`127.0.0.1`) unless you say
+otherwise:
+
+| Variable | Default | Controls |
+|----------|---------|----------|
+| `BIND_ADDR` | `127.0.0.1` | Management and data UIs/APIs: OpenSearch 9200/9201, OpenSearch Dashboards 5601, Grafana 3000, Prometheus 9090, Wazuh API 55000, Wazuh indexer 9202, Wazuh Dashboard 443 |
+| `INGEST_BIND_ADDR` | `127.0.0.1` | Log and metric ingestion: syslog 514, Logstash 5140/udp and 5044, Wazuh agents 1514/1515, InfluxDB 8086 (pfSense Telegraf writes) |
+| `PORTAINER_BIND_ADDR` | `127.0.0.1` | Portainer 9443 (only when the `portainer` profile is on) |
+
+To expose on purpose, set the variable to one interface address, not
+`0.0.0.0` unless you must, then recreate the stack:
+
+```bash
+# .env -- accept firewall/sensor logs and agents on the LAN interface only
+INGEST_BIND_ADDR=192.0.2.10
+# .env -- reach the web UIs from the LAN (prefer an SSH tunnel or reverse proxy)
+BIND_ADDR=192.0.2.10
+```
+
+`scripts/02-bootstrap.sh` adds ufw rules only when you pass a source network
+(`SIEM_ALLOWED_CIDR=192.0.2.0/24`), and each rule names that source. Because
+published ports skip UFW, restrict who may reach a widened port with a
+`DOCKER-USER` iptables rule or by binding to a management VLAN address.
+
+### Portainer (opt-in)
+
+Portainer mounts the Docker socket read-write: control of its UI is root on
+the host. It does not start by default. To enable it:
+
+```bash
+cd /opt/siem && docker compose --profile portainer up -d portainer
+# then browse https://127.0.0.1:9443 (SSH tunnel), or set PORTAINER_BIND_ADDR
+```
+
+---
+
+## Upgrade notes
+
+This release removes every fallback secret and changes default port binding.
+Existing deployments must act before `docker compose up -d`, or compose
+stops with a message naming the missing variable.
+
+1. **New required variables.** Add these to `.env` (strong, unique values;
+   avoid `$`). `scripts/check-env.sh .env` checks for missing or well-known
+   values and `scripts/03-deploy.sh` runs it for you.
+
+   ```bash
+   # already existed in .env.example, now REQUIRED (no fallback in compose)
+   OPENSEARCH_LOGSTASH_PASSWORD=
+   OPENSEARCH_READONLY_PASSWORD=
+   OPENSEARCH_DASHBOARDS_PASSWORD=
+   GRAFANA_ADMIN_PASS=
+   INFLUXDB_ADMIN_PASSWORD=
+   WAZUH_INDEXER_PASSWORD=
+   WAZUH_API_PASSWORD=
+   UNIFI_PASS=
+   # new
+   WAZUH_DASHBOARD_PASSWORD=     # kibanaserver on the Wazuh indexer
+   GRAFANA_INFLUX_PASSWORD=      # read-only InfluxDB user for Grafana
+   UNPOLLER_INFLUX_PASSWORD=     # write-only InfluxDB user for unifi-poller
+   # optional
+   BIND_ADDR=127.0.0.1
+   INGEST_BIND_ADDR=127.0.0.1
+   ```
+
+   `OPENSEARCH_ADMIN_PASSWORD` is also checked by `check-env.sh`. If your
+   `.env` was copied from `.env.example`, replace every `changeme*`,
+   `SecretPassword` and `MyS3cr3tP4ssw0rd` value; `check-env.sh` rejects them.
+2. **Log ingestion stops until you set `INGEST_BIND_ADDR`.** Firewalls,
+   sensors and Wazuh agents on other hosts can no longer reach 514, 5140,
+   5044, 1514, 1515 or 8086 until `INGEST_BIND_ADDR` is set to the SIEM
+   host's interface address. Likewise the web UIs and APIs are loopback-only
+   until `BIND_ADDR` is set.
+3. **Wazuh dashboard service account.** The dashboard no longer uses the
+   built-in `kibanaserver` password. Put the new value in
+   `WAZUH_DASHBOARD_PASSWORD`, start the indexer, run
+   `sudo bash /opt/siem/change-passwords.sh` and enter the same value at the
+   "Wazuh Dashboard (kibanaserver)" prompt, then `docker compose up -d`. The
+   dashboard cannot reach the indexer between the compose update and that
+   step.
+4. **InfluxDB accounts.** On the next start the influxdb container creates
+   `grafana_ro` (read on pfsense, unpoller, telegraf) and `unpoller_wo` (write
+   on unpoller). Grafana and unifi-poller no longer hold the Influx admin
+   password. Names can be changed with `GRAFANA_INFLUX_USER` and
+   `UNPOLLER_INFLUX_USER`. The pfSense Telegraf writer keeps whatever account
+   you gave it; give it its own write-only user rather than the admin.
+5. **Portainer no longer starts by default.** Enable it with
+   `docker compose --profile portainer up -d portainer`. A Portainer container
+   from the old stack keeps running until you stop it (`docker stop portainer`).
+6. **`change-passwords.sh` writes to `.env`**, not into `docker-compose.yml`.
+   It now requires `/opt/siem/.env` to exist.
+7. **Scripts.** `05-verify.sh` needs `WAZUH_INDEXER_PASSWORD` in the
+   environment or `.env` and no longer expects the portainer container.
+   `02-bootstrap.sh` opens no SIEM ports in ufw unless `SIEM_ALLOWED_CIDR` is set.
+
+Still open (tracked in `docs/threat-model`): the Grafana Wazuh datasource uses
+the Wazuh indexer admin account, because the repo defines no read-only role for
+that indexer.
 
 ---
 
@@ -262,7 +373,7 @@ Or manually via the Grafana API:
 ```bash
 # Via Grafana API
 for f in dashboards/*.json; do
-    curl -X POST "http://admin:changeme@localhost:3000/api/dashboards/db" \
+    curl -X POST "http://admin:${GRAFANA_ADMIN_PASS}@localhost:3000/api/dashboards/db" \
         -H 'Content-Type: application/json' \
         -d "{\"dashboard\": $(cat "$f"), \"overwrite\": true}"
 done
@@ -338,13 +449,13 @@ DS_WAZUH="<your_wazuh_datasource_uid>" \
 ALERT_FOLDER_UID="<your_grafana_folder_uid>" \
 GRAFANA_URL="http://localhost:3000" \
 GRAFANA_USER="admin" \
-GRAFANA_PASS="changeme" \
+GRAFANA_PASS="$GRAFANA_ADMIN_PASS" \
 python3 scripts/deploy-grafana-alerts.py
 
 DS_WAZUH="<your_wazuh_datasource_uid>" \
 GRAFANA_URL="http://localhost:3000" \
 GRAFANA_USER="admin" \
-GRAFANA_PASS="changeme" \
+GRAFANA_PASS="$GRAFANA_ADMIN_PASS" \
 python3 scripts/deploy-crowdsec-dashboard.py
 ```
 
@@ -354,7 +465,7 @@ python3 scripts/deploy-crowdsec-dashboard.py
 OPENSEARCH_URL="http://localhost:9200" \
 GRAFANA_URL="http://localhost:3000" \
 GRAFANA_USER="admin" \
-GRAFANA_PASS="changeme" \
+GRAFANA_PASS="$GRAFANA_ADMIN_PASS" \
 bash scripts/08-crowdsec-smoketest.sh
 ```
 
