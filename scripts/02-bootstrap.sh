@@ -153,39 +153,49 @@ echo -e "${YELLOW}[6/7] Configuring firewall...${NC}"
 
 # WARNING: Docker-published ports BYPASS UFW — the DOCKER iptables chain is
 # evaluated before ufw's rules, so any port published in docker-compose.yml is
-# reachable regardless of these rules. Internal-only ports are bound to
-# 127.0.0.1 in docker-compose.yml instead; the ufw rules below cover the
-# intentionally exposed services.
+# reachable regardless of these rules. The real control is the bind address:
+# docker-compose.yml publishes management ports on ${BIND_ADDR} and ingestion
+# ports on ${INGEST_BIND_ADDR}, both defaulting to 127.0.0.1 (see README,
+# "Network exposure"). The ufw rules below are defense in depth for the case
+# where you widen those on purpose, and every one names a source network.
+#
+#   SIEM_ALLOWED_CIDR=192.0.2.0/24 sudo -E bash scripts/02-bootstrap.sh
 apt install -y ufw
 
 # SSH (critical — don't lock yourself out!)
 ufw allow 22/tcp comment "SSH"
 
-# SIEM Core Services
-ufw allow 9200/tcp comment "OpenSearch HTTP"
-ufw allow 5601/tcp comment "OpenSearch Dashboards"
-ufw allow 3000/tcp comment "Grafana"
-ufw allow 8086/tcp comment "InfluxDB"
-ufw allow 9090/tcp comment "Prometheus"
+if [ -z "${SIEM_ALLOWED_CIDR:-}" ]; then
+    echo -e "${YELLOW}SIEM_ALLOWED_CIDR is not set - opening NO SIEM ports in ufw.${NC}"
+    echo "  Re-run with SIEM_ALLOWED_CIDR=<your trusted network, e.g. 192.0.2.0/24>"
+    echo "  to allow log ingestion and the web UIs from that network only."
+else
+    allow_from() { # <proto> <port> <comment>
+        ufw allow from "${SIEM_ALLOWED_CIDR}" to any port "$2" proto "$1" comment "$3"
+    }
 
-# Wazuh
-ufw allow 1514/tcp comment "Wazuh agent (TCP)"
-ufw allow 1514/udp comment "Wazuh agent"
-ufw allow 1515/tcp comment "Wazuh agent enrollment"
-ufw allow 55000/tcp comment "Wazuh API"
-ufw allow 443/tcp  comment "Wazuh Dashboard"
+    # Web UIs and APIs (only reachable if BIND_ADDR is widened)
+    allow_from tcp 9200  "OpenSearch HTTP"
+    allow_from tcp 5601  "OpenSearch Dashboards"
+    allow_from tcp 3000  "Grafana"
+    allow_from tcp 9090  "Prometheus"
+    allow_from tcp 55000 "Wazuh API"
+    allow_from tcp 443   "Wazuh Dashboard"
 
-# Log Ingestion
-ufw allow 5140/udp comment "Logstash Suricata UDP"
-ufw allow 5044/tcp comment "Logstash Beats"
-ufw allow 514/udp  comment "Syslog UDP"
-ufw allow 514/tcp  comment "Syslog TCP"
+    # Log ingestion (only reachable if INGEST_BIND_ADDR is widened)
+    allow_from tcp 8086  "InfluxDB (pfSense Telegraf writes)"
+    allow_from tcp 1514  "Wazuh agent (TCP)"
+    allow_from udp 1514  "Wazuh agent"
+    allow_from tcp 1515  "Wazuh agent enrollment"
+    allow_from udp 5140  "Logstash Suricata UDP"
+    allow_from tcp 5044  "Logstash Beats"
+    allow_from udp 514   "Syslog UDP"
+    allow_from tcp 514   "Syslog TCP"
+fi
 
-# Optional: Node Exporter (uncomment if using)
-# ufw allow 9100/tcp comment "Node Exporter"
-
-# Optional: Portainer (uncomment if using)
-# ufw allow 9443/tcp comment "Portainer"
+# Portainer is opt-in (compose profile) and loopback-only by default. If you
+# expose it on purpose, allow it from one admin host only, for example:
+# ufw allow from 192.0.2.10 to any port 9443 proto tcp comment "Portainer"
 
 ufw --force enable
 ufw status numbered

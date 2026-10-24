@@ -151,10 +151,10 @@ docker exec influxdb influx -execute 'DELETE FROM /.*/ WHERE time < now() - 365d
 docker exec grafana grafana cli admin reset-admin-password newpassword
 
 # Check provisioned datasources
-curl -s -u admin:changeme 'http://localhost:3000/api/datasources' | jq '.[].name'
+curl -s -u "admin:${GRAFANA_ADMIN_PASS}" 'http://localhost:3000/api/datasources' | jq '.[].name'
 
 # Export a dashboard
-curl -s -u admin:changeme 'http://localhost:3000/api/dashboards/uid/YOUR_UID' | jq '.dashboard' > exported.json
+curl -s -u "admin:${GRAFANA_ADMIN_PASS}" 'http://localhost:3000/api/dashboards/uid/YOUR_UID' | jq '.dashboard' > exported.json
 ```
 
 ### Wazuh Maintenance
@@ -170,7 +170,7 @@ docker exec wazuh-manager /var/ossec/bin/agent_control -l | grep -c Active
 docker compose restart wazuh-manager
 
 # Check Wazuh indexer health
-curl -sk -u admin:SecretPassword 'https://localhost:9202/_cluster/health?pretty'
+curl -sk -u "admin:${WAZUH_INDEXER_PASSWORD}" 'https://localhost:9202/_cluster/health?pretty'
 ```
 
 ## Backup Strategy

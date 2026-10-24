@@ -1,0 +1,7 @@
+# Grafana's read-only Wazuh indexer user. Never put a hash here: the script
+# bcrypt-hashes WAZUH_GRAFANA_RO_PASSWORD inside the wazuh-indexer container at
+# deploy time and fills __GRAFANA_RO_HASH__ in memory only.
+__GRAFANA_RO_USER__:
+  hash: "__GRAFANA_RO_HASH__"
+  reserved: false
+  description: "Grafana read-only datasource user (WAZUH_GRAFANA_RO_PASSWORD)"

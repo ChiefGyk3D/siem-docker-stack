@@ -1,0 +1,22 @@
+# Read-only role for Grafana's Wazuh datasource. Merged into the Wazuh indexer's
+# roles.yml by scripts/11-wazuh-grafana-readonly.sh (not mounted; the Wazuh
+# indexer keeps its security config inside the container).
+# Mirrors siem_readonly in docker/opensearch/security/roles.yml, limited to the
+# Wazuh index patterns and without the cluster-wide index monitor grant.
+wazuh_grafana_readonly:
+  reserved: false
+  description: "Read-only: Grafana Wazuh datasource"
+  cluster_permissions:
+    - "cluster_monitor"
+    - "cluster_composite_ops_ro"
+  index_permissions:
+    - index_patterns:
+        - "wazuh-alerts-*"
+        - "wazuh-archives-*"
+        - "wazuh-monitoring-*"
+        - "wazuh-statistics-*"
+      allowed_actions:
+        - "read"
+        - "indices:admin/mappings/get"
+        - "indices:admin/get"
+        - "indices:monitor/*"

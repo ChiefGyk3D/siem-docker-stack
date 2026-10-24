@@ -139,7 +139,7 @@ bash scripts/06-generate-wazuh-certs.sh
 docker compose logs --tail=50 wazuh-dashboard
 
 # Check Wazuh Indexer health
-curl -sk -u admin:SecretPassword https://localhost:9202/_cluster/health
+curl -sk -u "admin:${WAZUH_INDEXER_PASSWORD}" https://localhost:9202/_cluster/health
 ```
 
 ---
@@ -154,6 +154,9 @@ docker exec wazuh-manager ss -tulnp | grep -E '1514|1515'
 
 # Check firewall
 sudo ufw status | grep -E '1514|1515'
+
+# Agents on other hosts need INGEST_BIND_ADDR set in .env (default is
+# loopback) -- see README, "Network exposure"
 
 # Check agent enrollment
 docker exec wazuh-manager /var/ossec/bin/agent_control -l
