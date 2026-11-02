@@ -108,6 +108,7 @@ This stack was built and tested on the following hardware. You do **not** need i
 | **Wazuh API** | 55000 | Wazuh RESTful API |
 | **N8N** | 80 | SOAR orchestrator — alert triage, enrichment, Discord routing |
 | **Prometheus** | 9090 | Metrics scraping & alerting |
+| **Prometheus OTLP** | 9091 (loopback) | Receiver for pushed OpenTelemetry metrics; authenticated and firewalled, see [docs/prometheus-otlp.md](docs/prometheus-otlp.md) |
 | **Alertmanager** | 9093 (loopback) | Independent alert delivery (Prometheus rules → n8n) |
 | **elasticsearch-exporter** | — | OpenSearch cluster/index metrics for Prometheus (internal :9114) |
 | **InfluxDB** | 8086 | Time-series metrics (pfSense, Telegraf, UniFi) — auth enabled |
@@ -266,6 +267,11 @@ variable. A value that is set but still a placeholder is caught by
 | `WAZUH_DASHBOARD_PASSWORD` | Wazuh dashboard service account (`kibanaserver` on the indexer) | Compose refuses to run |
 | `WAZUH_GRAFANA_RO_PASSWORD` | Read-only Wazuh indexer user for Grafana (`scripts/11-wazuh-grafana-readonly.sh` creates it) | Compose refuses to run; script 11 exits with an error |
 | `UNIFI_PASS` | The UniFi controller account unifi-poller logs in with | Compose refuses to run |
+| `PROMETHEUS_OTLP_SENDER_PASSWORD` | Basic-auth account `sender` for OTLP senders on the `prometheus-otlp` receiver | `check-env.sh` fails; the render script exits with an error |
+| `PROMETHEUS_OTLP_GRAFANA_PASSWORD` | Grafana's account `grafana` on `prometheus-otlp` | Compose refuses to run |
+| `PROMETHEUS_GRAFANA_PASSWORD` | Grafana's account `grafana` on the SIEM Prometheus (9090 now requires basic auth) | Compose refuses to run |
+| `PROMETHEUS_SELF_PASSWORD` | Account `self` on the SIEM Prometheus: its own scrape, and operator queries or reload | `check-env.sh` fails; the render script exits with an error |
+| `PROMETHEUS_OTLP_SCRAPE_PASSWORD` | Account `scrape` the main Prometheus uses to scrape `prometheus-otlp` | `check-env.sh` fails; the render script exits with an error |
 
 **Client-side secrets (environment, not the stack `.env`).** The deploy scripts
 have no fallback: unset, empty or placeholder, they exit with an error before
@@ -297,6 +303,7 @@ otherwise:
 | `BIND_ADDR` | `127.0.0.1` | Management and data UIs/APIs: OpenSearch 9200/9201, OpenSearch Dashboards 5601, Grafana 3000, Prometheus 9090, Wazuh API 55000, Wazuh indexer 9202, Wazuh Dashboard 443 |
 | `INGEST_BIND_ADDR` | `127.0.0.1` | Log and metric ingestion: syslog 514, Logstash 5140/udp and 5044, Wazuh agents 1514/1515, InfluxDB 8086 (pfSense Telegraf writes) |
 | `PORTAINER_BIND_ADDR` | `127.0.0.1` | Portainer 9443 (only when the `portainer` profile is on) |
+| `PROMETHEUS_OTLP_BIND_ADDR` | `127.0.0.1` | Prometheus OTLP receiver 9091. Authenticated (basic auth) and must be firewalled to approved senders before you widen it: [docs/prometheus-otlp.md](docs/prometheus-otlp.md) |
 
 To expose on purpose, set the variable to one interface address, not
 `0.0.0.0` unless you must, then recreate the stack:
@@ -350,6 +357,11 @@ stops with a message naming the missing variable.
    WAZUH_GRAFANA_RO_PASSWORD=    # read-only Wazuh indexer user for Grafana
    GRAFANA_INFLUX_PASSWORD=      # read-only InfluxDB user for Grafana
    UNPOLLER_INFLUX_PASSWORD=     # write-only InfluxDB user for unifi-poller
+   PROMETHEUS_OTLP_SENDER_PASSWORD=   # OTLP receiver accounts; then run scripts/render-prometheus-web-config.sh
+   PROMETHEUS_OTLP_GRAFANA_PASSWORD=
+   PROMETHEUS_OTLP_SCRAPE_PASSWORD=
+   PROMETHEUS_GRAFANA_PASSWORD=       # basic auth on the SIEM Prometheus (9090)
+   PROMETHEUS_SELF_PASSWORD=
    # optional
    BIND_ADDR=127.0.0.1
    INGEST_BIND_ADDR=127.0.0.1

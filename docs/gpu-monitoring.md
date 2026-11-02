@@ -166,10 +166,10 @@ Labels applied: `instance_name` (human-readable) and `gpu_role`
 After deploying exporters, reload Prometheus:
 
 ```bash
-curl -X POST http://localhost:9090/-/reload
+curl -X POST -u "self:$PROMETHEUS_SELF_PASSWORD" http://localhost:9090/-/reload
 ```
 
-Verify targets at `http://SIEM_HOST:9090/targets`.
+Verify targets at `http://SIEM_HOST:9090/targets` (Prometheus asks for the `self` account and `PROMETHEUS_SELF_PASSWORD`).
 
 ---
 

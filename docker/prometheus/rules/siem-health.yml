@@ -11,13 +11,20 @@
 #   - node_*          : node_exporter on file_sd host targets (only fires for
 #                       hosts you actually configured in prometheus/targets/)
 #
+# Every alert selects its metrics by scrape job (job="..."), which keeps each
+# rule on the exporter it was written for. A label is NOT proof of origin (a
+# sender can set any label), so pushed OTLP series are kept out of this
+# database altogether: they go to the separate, authenticated prometheus-otlp
+# instance (docs/prometheus-otlp.md). tests/python/test_prometheus_otlp.py fails
+# if an alert has no job matcher.
+#
 # Validate: promtool check rules docker/prometheus/rules/siem-health.yml
 
 groups:
   - name: siem-cluster-health
     rules:
       - alert: ClusterStatusRed
-        expr: elasticsearch_cluster_health_status{color="red"} == 1
+        expr: elasticsearch_cluster_health_status{job="elasticsearch-exporter", color="red"} == 1
         for: 2m
         labels:
           severity: critical
@@ -27,7 +34,7 @@ groups:
           description: "At least one primary shard is unassigned — data is unavailable and ingest may be failing. Check: curl -sk -u admin:... https://localhost:9200/_cluster/allocation/explain"
 
       - alert: ClusterStatusYellow
-        expr: elasticsearch_cluster_health_status{color="yellow"} == 1
+        expr: elasticsearch_cluster_health_status{job="elasticsearch-exporter", color="yellow"} == 1
         for: 15m
         labels:
           severity: warning
@@ -41,7 +48,7 @@ groups:
         # identical to a quiet network, so alert on "nothing indexed at all".
         # (Per-index rates exist as elasticsearch_index_stats_indexing_index_total
         # via --es.indices if you want per-source silence alerts later.)
-        expr: sum(rate(elasticsearch_indices_indexing_index_total[15m])) == 0
+        expr: sum(rate(elasticsearch_indices_indexing_index_total{job="elasticsearch-exporter"}[15m])) == 0
         for: 15m
         labels:
           severity: critical
@@ -65,7 +72,7 @@ groups:
       - alert: ContainerRestarting
         # cadvisor v0.49 exports container_start_time_seconds; a restart
         # bumps the start time, so >2 changes in 30m = restart loop.
-        expr: changes(container_start_time_seconds{name!=""}[30m]) > 2
+        expr: changes(container_start_time_seconds{job="cadvisor", name!=""}[30m]) > 2
         for: 0m
         labels:
           severity: warning
@@ -75,7 +82,7 @@ groups:
           description: "{{ $labels.name }} restarted more than twice in 30 minutes — likely a crash loop. Check: docker logs {{ $labels.name }}"
 
       - alert: PrometheusRuleEvaluationFailures
-        expr: increase(prometheus_rule_evaluation_failures_total[5m]) > 0
+        expr: increase(prometheus_rule_evaluation_failures_total{job="prometheus"}[5m]) > 0
         for: 5m
         labels:
           severity: warning
@@ -91,8 +98,8 @@ groups:
       # host itself via the 'node' job, Twingate Pis, etc.).
       - alert: FilesystemFillingUp
         expr: |
-          (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs", mountpoint!=""}
-            / node_filesystem_size_bytes) < 0.15
+          (node_filesystem_avail_bytes{job=~"node|twingate-ztna|unifi-controller|Cryptocurrency|AI|Security|Computers", fstype!~"tmpfs|overlay|squashfs|ramfs", mountpoint!=""}
+            / node_filesystem_size_bytes{job=~"node|twingate-ztna|unifi-controller|Cryptocurrency|AI|Security|Computers"}) < 0.15
         for: 30m
         labels:
           severity: warning
@@ -103,8 +110,8 @@ groups:
 
       - alert: FilesystemCritical
         expr: |
-          (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs", mountpoint!=""}
-            / node_filesystem_size_bytes) < 0.05
+          (node_filesystem_avail_bytes{job=~"node|twingate-ztna|unifi-controller|Cryptocurrency|AI|Security|Computers", fstype!~"tmpfs|overlay|squashfs|ramfs", mountpoint!=""}
+            / node_filesystem_size_bytes{job=~"node|twingate-ztna|unifi-controller|Cryptocurrency|AI|Security|Computers"}) < 0.05
         for: 10m
         labels:
           severity: critical

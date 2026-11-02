@@ -1,0 +1,8 @@
+# Basic-auth users for the SIEM Prometheus (9090): grafana (Grafana reads) and
+# self (its own scrape; also the account for operator reload and queries).
+# The real file, docker/prometheus/web.yml, is rendered by
+# scripts/render-prometheus-web-config.sh and is not committed. The values below
+# are placeholders, not hashes: render the real file with the script.
+basic_auth_users:
+  grafana: REPLACE_WITH_BCRYPT_HASH
+  self: REPLACE_WITH_BCRYPT_HASH

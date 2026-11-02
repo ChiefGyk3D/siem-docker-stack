@@ -130,7 +130,7 @@ echo ""
 echo -e "${YELLOW}Creating directory structure...${NC}"
 
 # HOT tier directories (fast, frequently accessed data)
-mkdir -p "${HOT_MOUNT}"/{opensearch,influxdb,prometheus,alertmanager,wazuh/{indexer,manager/{data,etc,logs,queue,integrations,active-response}},logstash}
+mkdir -p "${HOT_MOUNT}"/{opensearch,influxdb,prometheus,prometheus-otlp,alertmanager,wazuh/{indexer,manager/{data,etc,logs,queue,integrations,active-response}},logstash}
 
 # WARM tier directories (older data, archives, backups)
 mkdir -p "${WARM_MOUNT}"/{opensearch,grafana,archives/{syslog,suricata},backups,wazuh-archives,snapshots}
@@ -141,7 +141,7 @@ chown -R 1000:1000 "${HOT_MOUNT}/opensearch" "${WARM_MOUNT}/opensearch"
 # Grafana runs as UID 472
 chown -R 472:472 "${WARM_MOUNT}/grafana"
 # Prometheus runs as nobody (65534)
-chown -R 65534:65534 "${HOT_MOUNT}/prometheus"
+chown -R 65534:65534 "${HOT_MOUNT}/prometheus" "${HOT_MOUNT}/prometheus-otlp"
 # Wazuh indexer runs as UID 1000
 chown -R 1000:1000 "${HOT_MOUNT}/wazuh/indexer"
 
