@@ -41,6 +41,8 @@ jobs:
         # throwaway bcrypt hash made at run time (no hash literal lives in the repo)
         hash=$(docker run --rm httpd:2.4 htpasswd -nbBC 4 ci ci-only-placeholder | cut -d: -f2)
         mkdir -p "$stage/secrets" && for n in self-scrape otlp-scrape; do echo ci-only > "$stage/secrets/$n-password"; done && sed "s|REPLACE_WITH_BCRYPT_HASH|$hash|" "$stage/web.yml.example" > "$stage/web.yml"
+        mkdir -p "$stage/otlp-ca" && openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=ci-throwaway" \
+          -keyout /dev/null -out "$stage/otlp-ca/otlp-ca.crt"
         chmod -R a+rX "$stage"
         docker run --rm --entrypoint promtool -v "$stage":/etc/prometheus:ro \
           prom/prometheus:v3.10.0 check config /etc/prometheus/prometheus.yml

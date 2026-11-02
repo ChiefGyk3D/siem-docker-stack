@@ -96,6 +96,7 @@ else
         --filter='P prometheus/secrets/***' \
         --filter='P prometheus-otlp/web.yml' \
         --filter='P prometheus-otlp/tls/***' \
+        --filter='P prometheus/otlp-ca/***' \
         "${REPO_DIR}/docker/" \
         "${SIEM_USER}@${SIEM_HOST}:${DEPLOY_DIR}/"
 fi
@@ -105,7 +106,7 @@ fi
 # Docker would create a directory in its place and Prometheus would not start,
 # which silences the independent alert path, so stop here instead. The rendered
 # directories are closed (0500, owned by the container user), so check with sudo.
-run_on_server "sudo test -f ${DEPLOY_DIR}/prometheus/web.yml && sudo test -f ${DEPLOY_DIR}/prometheus-otlp/web.yml && sudo test -f ${DEPLOY_DIR}/prometheus/secrets/self-scrape-password && sudo test -f ${DEPLOY_DIR}/prometheus/secrets/otlp-scrape-password && sudo test -f ${DEPLOY_DIR}/prometheus-otlp/tls/server.key && echo 'PROM_AUTH_OK'" | grep -q PROM_AUTH_OK || {
+run_on_server "sudo test -f ${DEPLOY_DIR}/prometheus/web.yml && sudo test -f ${DEPLOY_DIR}/prometheus-otlp/web.yml && sudo test -f ${DEPLOY_DIR}/prometheus/secrets/self-scrape-password && sudo test -f ${DEPLOY_DIR}/prometheus/secrets/otlp-scrape-password && sudo test -f ${DEPLOY_DIR}/prometheus-otlp/tls/server.key && sudo test -f ${DEPLOY_DIR}/prometheus/otlp-ca/otlp-ca.crt && echo 'PROM_AUTH_OK'" | grep -q PROM_AUTH_OK || {
     echo -e "${RED}Prometheus auth files are missing in ${DEPLOY_DIR}.${NC}"
     echo "  On the server run: sudo -E bash scripts/render-prometheus-web-config.sh ${DEPLOY_DIR}"
     echo "  (needs the TLS files in prometheus-otlp/tls/; see docs/prometheus-otlp.md)"

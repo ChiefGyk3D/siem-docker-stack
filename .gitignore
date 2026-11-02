@@ -25,6 +25,7 @@ docker/prometheus/web.yml
 docker/prometheus/secrets/
 docker/prometheus-otlp/web.yml
 docker/prometheus-otlp/tls/
+docker/prometheus/otlp-ca/
 
 # OpenSearch data
 /data/

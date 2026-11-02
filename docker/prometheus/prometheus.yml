@@ -48,7 +48,7 @@ scrape_configs:
     # The receiver serves TLS; verify it against its own certificate.
     scheme: https
     tls_config:
-      ca_file: /etc/prometheus/otlp-tls/server.crt
+      ca_file: /etc/prometheus/otlp-ca/otlp-ca.crt
       server_name: prometheus-otlp
     basic_auth:
       username: scrape

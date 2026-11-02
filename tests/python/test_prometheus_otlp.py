@@ -125,7 +125,9 @@ def test_receiver_instance_is_least_privilege():
     # disk bound for pushed data on the shared hot tier
     assert any(c.startswith("--storage.tsdb.retention.size=") for c in cmd)
     # TLS in front of the credentials
-    assert bind_mount(svc, "/etc/prometheus/tls")["source"] == "./prometheus-otlp/tls"
+    # the receiver gets its certificate and key as individual files
+    assert bind_mount(svc, "/etc/prometheus/tls/server.crt")["source"] == "./prometheus-otlp/tls/server.crt"
+    assert bind_mount(svc, "/etc/prometheus/tls/server.key")["source"] == "./prometheus-otlp/tls/server.key"
 
 
 def test_receiver_config_has_window_and_no_scrape_or_rules():

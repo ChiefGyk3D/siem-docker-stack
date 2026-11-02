@@ -21,6 +21,7 @@
 #   docker/prometheus-otlp/web.yml                       hashes + TLS block
 #   docker/prometheus/secrets/self-scrape-password       "self" password
 #   docker/prometheus/secrets/otlp-scrape-password       "scrape" password
+#   docker/prometheus/otlp-ca/otlp-ca.crt               copy of the receiver certificate (no key)
 # The other passwords are never written to disk by this script.
 #
 # Safety: everything is hashed and validated first; nothing is touched if that
@@ -101,9 +102,10 @@ check_dir "$MAIN_DIR"
 check_dir "$OTLP_DIR"
 check_dir "${MAIN_DIR}/secrets"
 check_dir "${OTLP_DIR}/tls"
+check_dir "${MAIN_DIR}/otlp-ca"
 for f in "${MAIN_DIR}/web.yml" "${OTLP_DIR}/web.yml" \
     "${MAIN_DIR}/secrets/self-scrape-password" "${MAIN_DIR}/secrets/otlp-scrape-password" \
-    "${OTLP_DIR}/tls/server.crt" "${OTLP_DIR}/tls/server.key"; do
+    "${OTLP_DIR}/tls/server.crt" "${OTLP_DIR}/tls/server.key" "${MAIN_DIR}/otlp-ca/otlp-ca.crt"; do
     [ ! -L "$f" ] || die "${f} is a symlink; refusing to write through it"
 done
 [ -f "${OTLP_DIR}/tls/server.crt" ] && [ -f "${OTLP_DIR}/tls/server.key" ] ||
@@ -167,7 +169,7 @@ h_self="$(hash_for self "$self_pw")" || die "hashing failed for the self account
 
 # --- stage privately, then move into place -----------------------------------
 umask 077
-mkdir -p "${MAIN_DIR}/secrets" "${OTLP_DIR}/tls"
+mkdir -p "${MAIN_DIR}/secrets" "${OTLP_DIR}/tls" "${MAIN_DIR}/otlp-ca"
 # The stage lives in a private directory we create ourselves (0700, ours) outside
 # the target tree, so nobody who can write the tree can swap staged files.
 STAGE_ROOT="$(mktemp -d "${XDG_RUNTIME_DIR:-/run}/prom-render.XXXXXX" 2>/dev/null || mktemp -d)"
@@ -212,7 +214,7 @@ verify_owner() { # <mode> <paths...>: final owner and mode check after placement
 # Reopen the directories a previous run closed, install the new files (each
 # install replaces the destination file, never following a symlink at the leaf),
 # then close them again. The set is not atomic: if a step fails midway, re-run.
-chmod 0700 "${MAIN_DIR}/secrets" "${OTLP_DIR}/tls"
+chmod 0700 "${MAIN_DIR}/secrets" "${OTLP_DIR}/tls" "${MAIN_DIR}/otlp-ca"
 for pair in "main-web.yml ${MAIN_DIR}/web.yml" "otlp-web.yml ${OTLP_DIR}/web.yml" \
     "self-scrape-password ${MAIN_DIR}/secrets/self-scrape-password" \
     "otlp-scrape-password ${MAIN_DIR}/secrets/otlp-scrape-password"; do
@@ -220,6 +222,12 @@ for pair in "main-web.yml ${MAIN_DIR}/web.yml" "otlp-web.yml ${OTLP_DIR}/web.yml
     install -m 0400 -T "${STAGE}/${pair%% *}" "${pair#* }"
     own "${pair#* }"
 done
+# A copy of the certificate (never the key) for the clients that verify the
+# receiver, in a directory of its own so the key is mounted into the receiver only.
+check_file_target "${MAIN_DIR}/otlp-ca/otlp-ca.crt"
+install -m 0444 -T "${OTLP_DIR}/tls/server.crt" "${MAIN_DIR}/otlp-ca/otlp-ca.crt"
+own "${MAIN_DIR}/otlp-ca/otlp-ca.crt" "${MAIN_DIR}/otlp-ca"
+chmod 0555 "${MAIN_DIR}/otlp-ca"
 own "${OTLP_DIR}/tls/server.crt" "${OTLP_DIR}/tls/server.key" "${MAIN_DIR}/secrets" "${OTLP_DIR}/tls"
 chmod 0400 "${OTLP_DIR}/tls/server.key"
 chmod 0444 "${OTLP_DIR}/tls/server.crt"
@@ -228,6 +236,8 @@ verify_owner 400 "${MAIN_DIR}/web.yml" "${OTLP_DIR}/web.yml" \
     "${MAIN_DIR}/secrets/self-scrape-password" "${MAIN_DIR}/secrets/otlp-scrape-password" \
     "${OTLP_DIR}/tls/server.key"
 verify_owner 500 "${MAIN_DIR}/secrets" "${OTLP_DIR}/tls"
+verify_owner 444 "${MAIN_DIR}/otlp-ca/otlp-ca.crt"
+verify_owner 555 "${MAIN_DIR}/otlp-ca"
 
 echo "rendered 4 files under ${TARGET_BASE} (owner uid ${OWNER_UID}, mode 0400)"
 echo "Apply: docker compose up -d prometheus prometheus-otlp grafana"

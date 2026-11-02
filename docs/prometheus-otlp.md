@@ -131,8 +131,11 @@ sudo openssl req -x509 -newkey rsa:2048 -nodes -days 365 -subj "/CN=SIEM_HOST" \
   -keyout /opt/siem/prometheus-otlp/tls/server.key -out /opt/siem/prometheus-otlp/tls/server.crt
 ```
 
-Copy `server.crt` to each sender as its trust anchor. The SIEM Prometheus
-verifies the receiver against this same certificate when it scrapes it (it
+Copy `server.crt` to each sender as its trust anchor. The private key is mounted
+into the receiver alone, as an individual file; the render script publishes a
+copy of the certificate (never the key) in `prometheus/otlp-ca/`, and the SIEM
+Prometheus mounts only that directory. The SIEM Prometheus
+verifies the receiver against this certificate when it scrapes it (it
 connects as `prometheus-otlp`, which is why that name is in the certificate).
 Grafana's connection does not verify it: Grafana's provisioning takes a CA only
 as inline certificate text, which cannot be passed cleanly through `.env`, so

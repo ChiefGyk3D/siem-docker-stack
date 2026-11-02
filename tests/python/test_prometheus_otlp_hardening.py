@@ -6,6 +6,7 @@ so no secret-shaped literal sits in the source."""
 import os
 import pathlib
 import re
+import stat
 import subprocess
 
 import pytest
@@ -118,10 +119,10 @@ def test_scrape_verifies_the_receiver_certificate():
     job = [j for j in data["scrape_configs"] if j["job_name"] == "prometheus-otlp"][0]
     tls = job["tls_config"]
     assert "insecure_skip_verify" not in tls
-    assert tls["ca_file"] == "/etc/prometheus/otlp-tls/server.crt"
+    assert tls["ca_file"] == "/etc/prometheus/otlp-ca/otlp-ca.crt"
     assert tls["server_name"] == "prometheus-otlp"
-    mount = bind_mount(_services()["prometheus"], "/etc/prometheus/otlp-tls")
-    assert mount["source"] == "./prometheus-otlp/tls"
+    mount = bind_mount(_services()["prometheus"], "/etc/prometheus/otlp-ca")
+    assert mount["source"] == "./prometheus/otlp-ca"
 
 
 def test_doc_covers_san_expiry_and_the_grafana_limit():
@@ -144,3 +145,60 @@ def test_doc_reads_the_port_from_the_running_container_not_the_shell():
 
 def test_doc_does_not_overclaim_atomicity():
     assert "leaves the previous set untouched" not in _doc()
+
+
+# --- the private key reaches only the receiver ---------------------------------------
+
+KEY_DIR = "prometheus-otlp/tls"
+
+
+def key_exposed_to(services):
+    """Services other than the receiver whose relative bind mounts can see the TLS
+    key: the tls directory, the receiver directory, the stack root or the key file."""
+    exposed = []
+    for name, svc in services.items():
+        if name == "prometheus-otlp":
+            continue
+        for vol in svc.get("volumes", []):
+            src = vol["source"] if isinstance(vol, dict) else str(vol).split(":")[0]
+            if os.path.isabs(src):
+                continue  # host paths (such as cadvisor's read-only host root) are outside this check
+            norm = os.path.normpath(src)
+            if norm in (".", "prometheus-otlp") or norm.startswith(KEY_DIR):
+                exposed.append((name, src))
+    return exposed
+
+
+def test_key_guard_bites():
+    bad = {"a": {"volumes": ["./prometheus-otlp/tls:/x:ro"]},
+           "b": {"volumes": [{"type": "bind", "source": "./prometheus-otlp", "target": "/y"}]},
+           "c": {"volumes": ["./prometheus-otlp/tls/server.key:/k:ro"]},
+           "ok": {"volumes": ["./prometheus/otlp-ca:/ca:ro"]},
+           "prometheus-otlp": {"volumes": ["./prometheus-otlp/tls/server.key:/k"]}}
+    assert sorted(n for n, _ in key_exposed_to(bad)) == ["a", "b", "c"]
+
+
+def test_no_service_but_the_receiver_can_see_the_tls_key():
+    services = _services()
+    assert "prometheus-otlp" in services and len(services) > 3, "nothing collected"
+    assert key_exposed_to(services) == []
+
+
+def test_verifiers_get_only_a_certificate_directory_without_the_key():
+    main = bind_mount(_services()["prometheus"], "/etc/prometheus/otlp-ca")
+    assert main["source"] == "./prometheus/otlp-ca"
+
+
+def test_render_publishes_the_certificate_for_verifiers_without_the_key(ready):
+    assert ready(**own()).returncode == 0
+    ca = ready.main / "otlp-ca"
+    assert sorted(f.name for f in ca.iterdir()) == ["otlp-ca.crt"]
+    assert (ca / "otlp-ca.crt").read_bytes() == (ready.out / "tls" / "server.crt").read_bytes()
+    assert stat.S_IMODE((ca / "otlp-ca.crt").stat().st_mode) == 0o444
+    assert stat.S_IMODE(ca.stat().st_mode) == 0o555
+
+
+def test_deploy_protects_and_checks_the_certificate_copy():
+    text = DEPLOY.read_text(encoding="utf-8")
+    assert "prometheus/otlp-ca" in text
+    assert "sudo test -f ${DEPLOY_DIR}/prometheus/otlp-ca/otlp-ca.crt" in text

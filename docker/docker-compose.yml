@@ -324,10 +324,11 @@ services:
         read_only: true
         bind:
           create_host_path: false
-      # The receiver's certificate, used as the CA when scraping it
+      # The receiver's certificate only (a copy, in a directory with no key), used
+      # as the CA when scraping it. The private key is mounted into the receiver alone.
       - type: bind
-        source: ./prometheus-otlp/tls
-        target: /etc/prometheus/otlp-tls
+        source: ./prometheus/otlp-ca
+        target: /etc/prometheus/otlp-ca
         read_only: true
         bind:
           create_host_path: false
@@ -371,9 +372,16 @@ services:
         read_only: true
         bind:
           create_host_path: false
+      # Certificate and key as individual files: nothing else is mounted from tls/
       - type: bind
-        source: ./prometheus-otlp/tls
-        target: /etc/prometheus/tls
+        source: ./prometheus-otlp/tls/server.crt
+        target: /etc/prometheus/tls/server.crt
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./prometheus-otlp/tls/server.key
+        target: /etc/prometheus/tls/server.key
         read_only: true
         bind:
           create_host_path: false
