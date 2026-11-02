@@ -123,7 +123,8 @@ echo ""
 echo -e "${YELLOW}Services:${NC}"
 check_http "Grafana" "http://${SIEM_HOST}:3000/api/health"
 check_http "InfluxDB" "http://${SIEM_HOST}:8086/ping" "204"
-check_http "Prometheus" "http://${SIEM_HOST}:9090/-/healthy"
+# Prometheus requires basic auth; without the password an HTTP 401 means "up".
+check_http "Prometheus" "http://${SIEM_HOST}:9090/-/healthy" "401"
 # Alertmanager is bound to loopback — only checkable on the SIEM host itself.
 if [ "$SIEM_HOST" = "localhost" ] || [ "$SIEM_HOST" = "127.0.0.1" ]; then
     check_http "Alertmanager" "http://127.0.0.1:9093/-/healthy"

@@ -19,6 +19,13 @@ docker/opensearch/security/internal_users.yml
 docker/prometheus/targets/*.json
 !docker/prometheus/targets/*.example.json
 
+# Prometheus basic-auth web config and password, rendered from
+# PROMETHEUS_BASIC_AUTH_PASSWORD by scripts/render-prometheus-web-config.sh.
+# The *.example files stay tracked.
+docker/prometheus/web.yml
+docker/prometheus/secrets/*
+!docker/prometheus/secrets/*.example
+
 # OpenSearch data
 /data/
 

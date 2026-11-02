@@ -149,6 +149,10 @@ datasources:
     type: prometheus
     access: proxy
     url: http://prometheus:9090
+    basicAuth: true
+    basicAuthUser: prometheus
+    secureJsonData:
+      basicAuthPassword: $PROMETHEUS_BASIC_AUTH_PASSWORD
     jsonData:
       httpMethod: POST
       timeInterval: "15s"

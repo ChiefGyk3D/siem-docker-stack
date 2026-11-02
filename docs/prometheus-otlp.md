@@ -5,12 +5,12 @@ example from an OpenTelemetry Collector. This stack enables the receiver, sizes
 the out-of-order window for bursty senders, and keeps the port on loopback until
 you widen it on purpose.
 
-> **Warning: the OTLP receiver has no authentication.** Anything that can reach
-> the Prometheus port can write metrics into it. Prometheus has no
-> authentication on its other endpoints either (the lifecycle API is enabled).
-> Docker-published ports bypass UFW, so firewall the port with a `DOCKER-USER`
-> rule that names the approved senders **before** you widen the bind address.
-> Never expose it to an untrusted network.
+> **Warning: the receiver must be authenticated and firewalled.** Prometheus
+has no authentication of its own, so this stack turns on basic auth
+(`--web.config.file`) for the whole port and also limits who can reach it with a
+`DOCKER-USER` rule that names the approved senders. Do both before you widen the
+bind address. Docker-published ports bypass UFW, so UFW alone is not enough.
+Never expose the port to an untrusted network.
 
 ## What changes
 
@@ -18,6 +18,9 @@ you widen it on purpose.
 |-------|---------|-----|
 | `docker/docker-compose.yml` | `--web.enable-otlp-receiver` | Turns the receiver on at `POST /api/v1/otlp/v1/metrics` on the existing Prometheus port. It needs a container restart. |
 | `docker/docker-compose.yml` | `PROMETHEUS_BIND_ADDR` (falls back to `BIND_ADDR`, then `127.0.0.1`) | Lets you widen Prometheus alone, without also exposing Grafana, OpenSearch and the other management ports that `BIND_ADDR` controls. |
+| `docker/docker-compose.yml` | `--web.config.file=/etc/prometheus/web.yml` | Basic auth (user `prometheus`) on every Prometheus endpoint, the receiver included. The bcrypt hash lives in `docker/prometheus/web.yml`, rendered from `PROMETHEUS_BASIC_AUTH_PASSWORD` by `scripts/render-prometheus-web-config.sh`; neither is committed. |
+| Grafana, self-scrape | `basic_auth` on the Prometheus datasource and the `prometheus` scrape job | Both keep working once auth is on. |
+| `docker/prometheus/rules/siem-health.yml` | every alert selects its metrics by `job` | See [Alert rules](#alert-rules). |
 | `docker/prometheus/prometheus.yml` | `storage.tsdb.out_of_order_time_window: 30m` | See below. Reloads without a restart. |
 | `docker/prometheus/prometheus.yml` | `otlp.promote_resource_attributes: []` | Resource attributes stay in `target_info` instead of becoming labels on every series. `service.name` and `service.instance.id` still become `job` and `instance`. |
 
@@ -46,6 +49,24 @@ reload; do not raise it speculatively.
 - Keep high-cardinality values (session or request ids) off metric labels.
   Scrape limits do not apply to pushed data, so control cardinality at the
   sender or collector.
+
+### Alert rules
+
+Every alert rule selects its metrics by scrape job (for example
+`job="cadvisor"`), so a series with the same name pushed through the receiver
+under another job does not satisfy or suppress them. A test fails if an alert
+has no job matcher. This is a second layer: the authentication and the firewall
+are the controls that keep unapproved writers out. Give senders their own
+`service.name` (it becomes `job`); do not reuse a scrape job name.
+
+### Credentials
+
+One password, `PROMETHEUS_BASIC_AUTH_PASSWORD` in `.env`, serves senders,
+Grafana and the self-scrape. Prometheus does not separate read from write
+permission by user, so treat the sender credential as write access. Rotate by
+changing the value, re-running the render script and recreating `prometheus`
+and `grafana`. Senders send it as HTTP basic auth (for an OpenTelemetry
+Collector, the `basicauth` client extension on the `otlphttp` exporter).
 
 ## Firewall
 
@@ -87,54 +108,64 @@ source for 9090 (see [Network exposure](../README.md#network-exposure)).
 Apply in this order so the port is never open without the allow-list. Nothing
 here is applied by merging; run each step on the SIEM host on purpose.
 
-1. Add the firewall rules above, with the real sender addresses.
-2. Set `PROMETHEUS_BIND_ADDR` in `.env` to the one interface address senders
+1. Set `PROMETHEUS_BASIC_AUTH_PASSWORD` in `.env` (a strong unique value;
+   `bash scripts/check-env.sh` rejects placeholders) and run
+   `bash scripts/render-prometheus-web-config.sh /opt/siem`. Prometheus will not
+   start without the rendered files, and Grafana will not start without the
+   variable.
+2. Add the firewall rules above, with the real sender addresses.
+3. Set `PROMETHEUS_BIND_ADDR` in `.env` to the one interface address senders
    reach (not `0.0.0.0`).
-3. Pull the change and recreate Prometheus:
-   `cd /opt/siem && docker compose up -d prometheus`
-4. Confirm the flags and config took effect, then run [Verify](#verify).
+4. Pull the change and recreate Prometheus and Grafana:
+   `cd /opt/siem && docker compose up -d prometheus grafana`
+5. Confirm the flags and config took effect, then run [Verify](#verify).
 
 ## Verify
 
-Both checks must pass. Run them from the named hosts.
+All four checks must pass. `SENDER_USER` is `prometheus`; read the password from
+your shell or a secrets file, never type it into shared history.
 
-From an **approved** sender (expect `200`):
+1. From an **approved** sender, with the password (expect `200`):
 
 ```bash
 now=$(date +%s)000000000
-curl -sS -o /dev/null -w '%{http_code}\n' -X POST \
+curl -sS -o /dev/null -w '%{http_code}\n' -X POST -u "prometheus:${PROMETHEUS_BASIC_AUTH_PASSWORD}" \
   -H 'Content-Type: application/json' \
   "http://SIEM_HOST:9090/api/v1/otlp/v1/metrics" \
   -d '{"resourceMetrics":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"otlp-smoke-test"}}]},"scopeMetrics":[{"metrics":[{"name":"otlp_smoke_test","gauge":{"dataPoints":[{"timeUnixNano":"'"$now"'","asDouble":1}]}}]}]}]}'
 ```
 
-Then, on the SIEM host or any allowed reader, confirm the series arrived:
+2. From the same approved sender, **without** the password (expect `401`):
 
 ```bash
-curl -sS 'http://SIEM_HOST:9090/api/v1/query?query=otlp_smoke_test' | grep -c otlp-smoke-test
+curl -sS -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Type: application/json' \
+  -d '{}' "http://SIEM_HOST:9090/api/v1/otlp/v1/metrics"
 ```
 
-From an **unapproved** host (expect no response: the connection times out, or
-is refused, and the same series must not appear):
+3. From an **unapproved** host (expect no response: the connection times out or
+   is refused, even with the correct password):
 
 ```bash
-curl -sS --max-time 5 -o /dev/null -w '%{http_code}\n' -X POST \
+curl -sS --max-time 5 -o /dev/null -w '%{http_code}\n' -X POST -u "prometheus:${PROMETHEUS_BASIC_AUTH_PASSWORD}" \
   -H 'Content-Type: application/json' -d '{}' \
   "http://SIEM_HOST:9090/api/v1/otlp/v1/metrics"
 ```
 
-A `200`, `400` or any HTTP status from the unapproved host means the firewall
-rule is not in effect: stop and fix it before leaving the receiver on.
+Any HTTP status from the unapproved host means the firewall rule is not in
+effect: stop and fix it before leaving the receiver on.
 
-Also confirm the receiver and window on the server:
+4. On the SIEM host, confirm the series arrived and the settings took effect:
 
 ```bash
-curl -sS http://127.0.0.1:9090/api/v1/status/flags | grep -o '"web.enable-otlp-receiver":"[a-z]*"'
-curl -sS http://127.0.0.1:9090/api/v1/status/config | grep -o 'out_of_order_time_window: [0-9a-z]*'
+curl -sS -u "prometheus:${PROMETHEUS_BASIC_AUTH_PASSWORD}" 'http://127.0.0.1:9090/api/v1/query?query=otlp_smoke_test' | grep -c otlp-smoke-test
+curl -sS -u "prometheus:${PROMETHEUS_BASIC_AUTH_PASSWORD}" http://127.0.0.1:9090/api/v1/status/flags | grep -o '"web.enable-otlp-receiver":"[a-z]*"'
+curl -sS -u "prometheus:${PROMETHEUS_BASIC_AUTH_PASSWORD}" http://127.0.0.1:9090/api/v1/status/config | grep -o 'out_of_order_time_window: [0-9a-z]*'
 ```
 
-Watch `prometheus_tsdb_out_of_order_samples_total`. A rate that stays above zero
-means senders still arrive later than the window allows.
+Also confirm in Grafana that the Prometheus data source still tests green and
+that the `prometheus` target is up. Watch `prometheus_tsdb_out_of_order_samples_total`:
+a rate that stays above zero means senders still arrive later than the window
+allows.
 
 ## Rollback
 
@@ -147,7 +178,9 @@ Fastest first, each reversible on its own:
    then `sudo iptables -F PROM-OTLP-ALLOW && sudo iptables -X PROM-OTLP-ALLOW`.
 2. **Turn the receiver off:** revert this change (`git revert` the merge, or
    remove `--web.enable-otlp-receiver` from the compose command) and run
-   `docker compose up -d prometheus`.
+   `docker compose up -d prometheus grafana`. Reverting also removes basic auth,
+   the Grafana credential and the self-scrape credential together, so do it
+   with the port still on loopback.
 3. **Drop the window:** remove the `storage` block from `prometheus.yml` and
    `curl -X POST http://127.0.0.1:9090/-/reload`. Data already stored stays;
    only new out-of-order samples are rejected again.

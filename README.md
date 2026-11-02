@@ -107,7 +107,7 @@ This stack was built and tested on the following hardware. You do **not** need i
 | **Wazuh Dashboard** | 443 | EDR/SIEM dashboard (HTTPS) |
 | **Wazuh API** | 55000 | Wazuh RESTful API |
 | **N8N** | 80 | SOAR orchestrator — alert triage, enrichment, Discord routing |
-| **Prometheus** | 9090 | Metrics scraping & alerting; OTLP metrics receiver (no authentication, see [docs/prometheus-otlp.md](docs/prometheus-otlp.md)) |
+| **Prometheus** | 9090 | Metrics scraping & alerting; OTLP metrics receiver (authenticated and firewalled, see [docs/prometheus-otlp.md](docs/prometheus-otlp.md)) |
 | **Alertmanager** | 9093 (loopback) | Independent alert delivery (Prometheus rules → n8n) |
 | **elasticsearch-exporter** | — | OpenSearch cluster/index metrics for Prometheus (internal :9114) |
 | **InfluxDB** | 8086 | Time-series metrics (pfSense, Telegraf, UniFi) — auth enabled |
@@ -266,6 +266,7 @@ variable. A value that is set but still a placeholder is caught by
 | `WAZUH_DASHBOARD_PASSWORD` | Wazuh dashboard service account (`kibanaserver` on the indexer) | Compose refuses to run |
 | `WAZUH_GRAFANA_RO_PASSWORD` | Read-only Wazuh indexer user for Grafana (`scripts/11-wazuh-grafana-readonly.sh` creates it) | Compose refuses to run; script 11 exits with an error |
 | `UNIFI_PASS` | The UniFi controller account unifi-poller logs in with | Compose refuses to run |
+| `PROMETHEUS_BASIC_AUTH_PASSWORD` | Basic auth on Prometheus 9090 (user `prometheus`), including the OTLP receiver; `scripts/render-prometheus-web-config.sh` turns it into the hash and password files | Compose refuses to run; the render script exits with an error |
 
 **Client-side secrets (environment, not the stack `.env`).** The deploy scripts
 have no fallback: unset, empty or placeholder, they exit with an error before
@@ -299,9 +300,10 @@ otherwise:
 | `PORTAINER_BIND_ADDR` | `127.0.0.1` | Portainer 9443 (only when the `portainer` profile is on) |
 | `PROMETHEUS_BIND_ADDR` | `BIND_ADDR` | Prometheus 9090 only, so OTLP senders can reach it without widening the other management ports |
 
-> **Prometheus 9090 now accepts OTLP metrics and has no authentication.**
-> Before you widen `PROMETHEUS_BIND_ADDR` (or `BIND_ADDR`), firewall the port to
-> approved senders with a `DOCKER-USER` rule. Steps, verification and rollback:
+> **Prometheus 9090 now accepts OTLP metrics, so it requires basic auth and
+> must be firewalled.** Before you widen `PROMETHEUS_BIND_ADDR` (or
+> `BIND_ADDR`), run `scripts/render-prometheus-web-config.sh` and firewall the
+> port to approved senders with a `DOCKER-USER` rule. Steps, verification and rollback:
 > [docs/prometheus-otlp.md](docs/prometheus-otlp.md).
 
 To expose on purpose, set the variable to one interface address, not
@@ -356,6 +358,7 @@ stops with a message naming the missing variable.
    WAZUH_GRAFANA_RO_PASSWORD=    # read-only Wazuh indexer user for Grafana
    GRAFANA_INFLUX_PASSWORD=      # read-only InfluxDB user for Grafana
    UNPOLLER_INFLUX_PASSWORD=     # write-only InfluxDB user for unifi-poller
+   PROMETHEUS_BASIC_AUTH_PASSWORD=  # Prometheus basic auth; then run scripts/render-prometheus-web-config.sh
    # optional
    BIND_ADDR=127.0.0.1
    INGEST_BIND_ADDR=127.0.0.1

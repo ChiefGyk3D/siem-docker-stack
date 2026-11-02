@@ -221,6 +221,8 @@ services:
       # Read-only InfluxDB account (created by the influxdb service below)
       - GRAFANA_INFLUX_USER=${GRAFANA_INFLUX_USER:-grafana_ro}
       - GRAFANA_INFLUX_PASSWORD=${GRAFANA_INFLUX_PASSWORD:?set GRAFANA_INFLUX_PASSWORD in .env (see README upgrade notes)}
+      # Prometheus requires basic auth (user "prometheus")
+      - PROMETHEUS_BASIC_AUTH_PASSWORD=${PROMETHEUS_BASIC_AUTH_PASSWORD:?set PROMETHEUS_BASIC_AUTH_PASSWORD in .env (see docs/prometheus-otlp.md)}
     volumes:
       - /data/warm/grafana:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
@@ -304,10 +306,15 @@ services:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./prometheus/targets:/etc/prometheus/targets:ro
       - ./prometheus/rules:/etc/prometheus/rules:ro
+      # Basic-auth users (bcrypt hash) and the matching password for the
+      # self-scrape. Both are rendered from PROMETHEUS_BASIC_AUTH_PASSWORD by
+      # scripts/render-prometheus-web-config.sh and are not committed.
+      - ./prometheus/web.yml:/etc/prometheus/web.yml:ro
+      - ./prometheus/secrets:/etc/prometheus/secrets:ro
     # Loopback unless you widen BIND_ADDR or, for this port only,
-    # PROMETHEUS_BIND_ADDR. The OTLP receiver below has NO authentication:
-    # before widening, firewall the port to approved senders (DOCKER-USER;
-    # see docs/prometheus-otlp.md).
+    # PROMETHEUS_BIND_ADDR. The OTLP receiver must be authenticated and
+    # firewalled: before widening, add the DOCKER-USER allow-list
+    # (docs/prometheus-otlp.md).
     ports:
       - "${PROMETHEUS_BIND_ADDR:-${BIND_ADDR:-127.0.0.1}}:${PROMETHEUS_PORT:-9090}:9090"
     command:
@@ -315,7 +322,10 @@ services:
       - '--storage.tsdb.path=/prometheus'
       - '--storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-365d}'
       - '--web.enable-lifecycle'
-      # OTLP metrics push (POST /api/v1/otlp/v1/metrics). No authentication.
+      # Basic auth on every endpoint, the OTLP receiver included.
+      - '--web.config.file=/etc/prometheus/web.yml'
+      # OTLP metrics push (POST /api/v1/otlp/v1/metrics). Authenticated by the
+      # web config above; still firewall it to approved senders.
       - '--web.enable-otlp-receiver'
     networks:
       - siem-net
