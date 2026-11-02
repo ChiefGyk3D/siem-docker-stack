@@ -35,8 +35,26 @@ rule_files:
 
 scrape_configs:
   - job_name: 'prometheus'
+    # Prometheus requires basic auth (web.yml); account "self".
+    basic_auth:
+      username: self
+      password_file: /etc/prometheus/secrets/self-scrape-password
     static_configs:
       - targets: ['localhost:9090']
+
+  # The authenticated OTLP receiver instance (service prometheus-otlp). Own
+  # "scrape" account, password from the rendered secrets file.
+  - job_name: 'prometheus-otlp'
+    # The receiver serves TLS; verify it against its own certificate.
+    scheme: https
+    tls_config:
+      ca_file: /etc/prometheus/otlp-ca/otlp-ca.crt
+      server_name: prometheus-otlp
+    basic_auth:
+      username: scrape
+      password_file: /etc/prometheus/secrets/otlp-scrape-password
+    static_configs:
+      - targets: ['prometheus-otlp:9090']
 
   - job_name: 'alertmanager'
     static_configs:

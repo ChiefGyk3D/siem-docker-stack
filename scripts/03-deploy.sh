@@ -92,9 +92,26 @@ else
     rsync -avz --delete \
         --filter='P opensearch/security/internal_users.yml' \
         --filter='P opensearch/certs/*' \
+        --filter='P prometheus/web.yml' \
+        --filter='P prometheus/secrets/***' \
+        --filter='P prometheus-otlp/web.yml' \
+        --filter='P prometheus-otlp/tls/***' \
+        --filter='P prometheus/otlp-ca/***' \
         "${REPO_DIR}/docker/" \
         "${SIEM_USER}@${SIEM_HOST}:${DEPLOY_DIR}/"
 fi
+
+# Prometheus basic-auth files are rendered on the server by
+# scripts/render-prometheus-web-config.sh (never rsynced). If one is missing,
+# Docker would create a directory in its place and Prometheus would not start,
+# which silences the independent alert path, so stop here instead. The rendered
+# directories are closed (0500, owned by the container user), so check with sudo.
+run_on_server "sudo test -f ${DEPLOY_DIR}/prometheus/web.yml && sudo test -f ${DEPLOY_DIR}/prometheus-otlp/web.yml && sudo test -f ${DEPLOY_DIR}/prometheus/secrets/self-scrape-password && sudo test -f ${DEPLOY_DIR}/prometheus/secrets/otlp-scrape-password && sudo test -f ${DEPLOY_DIR}/prometheus-otlp/tls/server.key && sudo test -f ${DEPLOY_DIR}/prometheus/otlp-ca/otlp-ca.crt && echo 'PROM_AUTH_OK'" | grep -q PROM_AUTH_OK || {
+    echo -e "${RED}Prometheus auth files are missing in ${DEPLOY_DIR}.${NC}"
+    echo "  On the server run: sudo -E bash scripts/render-prometheus-web-config.sh ${DEPLOY_DIR}"
+    echo "  (needs the TLS files in prometheus-otlp/tls/; see docs/prometheus-otlp.md)"
+    exit 1
+}
 
 # Copy .env if it exists
 if [ -f "${REPO_DIR}/.env" ]; then
@@ -123,7 +140,7 @@ echo -e "${YELLOW}Fixing data directory permissions...${NC}"
 run_on_server "
     sudo chown -R 1000:1000 /data/hot/opensearch /data/warm/opensearch 2>/dev/null || true
     sudo chown -R 472:472 /data/warm/grafana 2>/dev/null || true
-    sudo chown -R 65534:65534 /data/hot/prometheus 2>/dev/null || true
+    sudo chown -R 65534:65534 /data/hot/prometheus /data/hot/prometheus-otlp 2>/dev/null || true
     sudo chown -R 1000:1000 /data/hot/wazuh/indexer 2>/dev/null || true
     # Alertmanager storage (Phase F3) + OpenSearch snapshots (Phase F4)
     sudo mkdir -p /data/hot/alertmanager /data/warm/snapshots 2>/dev/null || true
