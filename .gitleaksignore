@@ -21,3 +21,11 @@
 4cf105aec0866f4d7f455103ad7114be25403a7b:scripts/05-verify.sh:curl-auth-user:197
 # scripts/10-snapshot-setup.sh
 3f7edfd6b46027a1c42a0884be16b7d779abd8bb:scripts/10-snapshot-setup.sh:curl-auth-user:175
+# tests/python/test_prometheus_otlp.py (PR #46, commit 47ee2ec185e7a0081f523da90a4fa5988a34c5ef, since replaced)
+# Throwaway fixture passwords for the render-script test, never real credentials. The current
+# file builds them at run time; the old literals stay in history, which cannot be rewritten
+# without a force-push, so the four exact fingerprints are accepted here.
+47ee2ec185e7a0081f523da90a4fa5988a34c5ef:tests/python/test_prometheus_otlp.py:generic-api-key:175
+47ee2ec185e7a0081f523da90a4fa5988a34c5ef:tests/python/test_prometheus_otlp.py:generic-api-key:176
+47ee2ec185e7a0081f523da90a4fa5988a34c5ef:tests/python/test_prometheus_otlp.py:generic-api-key:177
+47ee2ec185e7a0081f523da90a4fa5988a34c5ef:tests/python/test_prometheus_otlp.py:generic-api-key:178

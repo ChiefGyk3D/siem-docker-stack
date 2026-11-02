@@ -2,7 +2,7 @@
 # self (its own scrape; also the account for operator reload and queries).
 # The real file, docker/prometheus/web.yml, is rendered by
 # scripts/render-prometheus-web-config.sh and is not committed. The values below
-# are fake bcrypt-shaped placeholders.
+# are placeholders, not hashes: render the real file with the script.
 basic_auth_users:
-  grafana: $2y$12$EXAMPLEEXAMPLEEXAMPLEEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEE
-  self: $2y$12$EXAMPLEEXAMPLEEXAMPLEEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEE
+  grafana: REPLACE_WITH_BCRYPT_HASH
+  self: REPLACE_WITH_BCRYPT_HASH
