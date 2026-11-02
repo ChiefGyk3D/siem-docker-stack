@@ -310,8 +310,20 @@ services:
       - ./prometheus/rules:/etc/prometheus/rules:ro
       # Basic-auth users (bcrypt) and the scrape passwords; rendered by
       # scripts/render-prometheus-web-config.sh, not committed
-      - ./prometheus/web.yml:/etc/prometheus/web.yml:ro
-      - ./prometheus/secrets:/etc/prometheus/secrets:ro
+      # Long form with create_host_path: false, so a missing rendered file is a
+      # clear start error and never a directory Docker creates in its place.
+      - type: bind
+        source: ./prometheus/web.yml
+        target: /etc/prometheus/web.yml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./prometheus/secrets
+        target: /etc/prometheus/secrets
+        read_only: true
+        bind:
+          create_host_path: false
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090"
     command:
@@ -344,13 +356,26 @@ services:
     volumes:
       - /data/hot/prometheus-otlp:/prometheus
       - ./prometheus-otlp/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./prometheus-otlp/web.yml:/etc/prometheus/web.yml:ro
+      - type: bind
+        source: ./prometheus-otlp/web.yml
+        target: /etc/prometheus/web.yml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./prometheus-otlp/tls
+        target: /etc/prometheus/tls
+        read_only: true
+        bind:
+          create_host_path: false
     ports:
       - "${PROMETHEUS_OTLP_BIND_ADDR:-127.0.0.1}:${PROMETHEUS_OTLP_PORT:-9091}:9090"
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
       - '--storage.tsdb.retention.time=${PROMETHEUS_OTLP_RETENTION:-30d}'
+      # Size bound as well as time: pushed data shares the hot tier with OpenSearch.
+      - '--storage.tsdb.retention.size=${PROMETHEUS_OTLP_RETENTION_SIZE:-5GB}'
       - '--web.config.file=/etc/prometheus/web.yml'
       - '--web.enable-otlp-receiver'
     networks:

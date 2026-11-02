@@ -162,7 +162,7 @@ datasources:
     uid: prometheus-otlp
     type: prometheus
     access: proxy
-    url: http://prometheus-otlp:9090
+    url: https://prometheus-otlp:9090
     basicAuth: true
     basicAuthUser: grafana
     secureJsonData:
@@ -170,3 +170,5 @@ datasources:
     jsonData:
       httpMethod: POST
       timeInterval: "60s"
+      # Same-host Docker network hop to a self-signed receiver certificate
+      tlsSkipVerify: true

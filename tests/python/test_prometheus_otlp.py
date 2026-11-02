@@ -5,6 +5,7 @@ loopback by default, and docs with the firewall step, verification and
 rollback using placeholder addresses only."""
 import os
 import re
+import shutil
 import stat
 import subprocess
 import textwrap
@@ -26,6 +27,7 @@ README = REPO_ROOT / "README.md"
 ENV_EXAMPLE = REPO_ROOT / ".env.example"
 DATASOURCES = (REPO_ROOT / "docker" / "grafana" / "provisioning" / "datasources"
                / "datasources.yml")
+BASH = shutil.which("bash")
 RENDER = REPO_ROOT / "scripts" / "render-prometheus-web-config.sh"
 GITIGNORE = REPO_ROOT / ".gitignore"
 
@@ -43,6 +45,15 @@ def non_placeholder_ips(text):
 
 def services_with(services, flag):
     return sorted(n for n, s in services.items() if flag in s.get("command", []))
+
+
+def bind_mount(svc, target):
+    """The long-form bind mount for `target` (short-form strings are rejected)."""
+    found = [v for v in svc["volumes"] if isinstance(v, dict) and v.get("target") == target]
+    assert len(found) == 1, f"no long-form mount for {target}"
+    assert found[0]["bind"]["create_host_path"] is False, target
+    assert found[0]["read_only"] is True, target
+    return found[0]
 
 
 def _services():
@@ -71,7 +82,8 @@ def test_main_prometheus_has_no_receiver_and_requires_auth():
     assert OTLP_FLAG not in main["command"]
     assert "--web.config.file=/etc/prometheus/web.yml" in main["command"]
     assert main["ports"] == ["${BIND_ADDR:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090"]
-    assert "./prometheus/web.yml:/etc/prometheus/web.yml:ro" in main["volumes"]
+    assert bind_mount(main, "/etc/prometheus/web.yml")["source"] == "./prometheus/web.yml"
+    assert bind_mount(main, "/etc/prometheus/secrets")["source"] == "./prometheus/secrets"
 
 
 def unauthenticated_lifecycle(services):
@@ -109,7 +121,11 @@ def test_receiver_instance_is_least_privilege():
     ports = svc["ports"]
     assert len(ports) == 1
     assert ports[0].startswith("${PROMETHEUS_OTLP_BIND_ADDR:-127.0.0.1}:"), ports[0]
-    assert "./prometheus-otlp/web.yml:/etc/prometheus/web.yml:ro" in svc["volumes"]
+    assert bind_mount(svc, "/etc/prometheus/web.yml")["source"] == "./prometheus-otlp/web.yml"
+    # disk bound for pushed data on the shared hot tier
+    assert any(c.startswith("--storage.tsdb.retention.size=") for c in cmd)
+    # TLS in front of the credentials
+    assert bind_mount(svc, "/etc/prometheus/tls")["source"] == "./prometheus-otlp/tls"
 
 
 def test_receiver_config_has_window_and_no_scrape_or_rules():
@@ -126,6 +142,7 @@ def test_main_prometheus_scrapes_receiver_with_its_own_account():
     assert job["basic_auth"]["username"] == "scrape"
     assert job["basic_auth"]["password_file"] == "/etc/prometheus/secrets/otlp-scrape-password"
     assert job["static_configs"][0]["targets"] == ["prometheus-otlp:9090"]
+    assert job["scheme"] == "https"
     assert "storage" not in data and "otlp" not in data
     own = [j for j in data["scrape_configs"] if j["job_name"] == "prometheus"][0]
     assert own["basic_auth"]["username"] == "self"
@@ -135,7 +152,7 @@ def test_main_prometheus_scrapes_receiver_with_its_own_account():
 def test_grafana_reads_the_receiver_with_its_own_account():
     sources = {d["uid"]: d for d in _yaml(DATASOURCES)["datasources"]}
     ds = sources["prometheus-otlp"]
-    assert ds["url"] == "http://prometheus-otlp:9090"
+    assert ds["url"] == "https://prometheus-otlp:9090"
     assert ds["basicAuth"] is True and ds["basicAuthUser"] == "grafana"
     assert ds["secureJsonData"]["basicAuthPassword"] == "$PROMETHEUS_OTLP_GRAFANA_PASSWORD"
     # the SIEM Prometheus authenticates too, with its own account
@@ -146,6 +163,13 @@ def test_grafana_reads_the_receiver_with_its_own_account():
     for var in ("PROMETHEUS_OTLP_GRAFANA_PASSWORD", "PROMETHEUS_GRAFANA_PASSWORD"):
         line = [e for e in env if e.startswith(var + "=")]
         assert line and ":?" in line[0], var
+
+
+def test_otlp_web_config_example_enables_tls():
+    tls = _yaml(WEB_EXAMPLE)["tls_server_config"]
+    assert tls["cert_file"] == "/etc/prometheus/tls/server.crt"
+    assert tls["key_file"] == "/etc/prometheus/tls/server.key"
+    assert tls["min_version"] == "TLS12"
 
 
 def test_web_config_examples_have_separate_accounts():
@@ -188,7 +212,7 @@ def render(tmp_path):
         #!/bin/sh
         # fake: read the password on stdin, print user:<fixed bcrypt-shaped hash>
         cat > /dev/null
-        printf '%s:$2y$12$stubstubstubstubstubstubstubstubstubstubstubstubstubstu\\n' "$3"
+        printf '%s:$2y$12$stubstubstubstubstubstubstubstubstubstubstubstubstubs\\n' "$3"
         """), encoding="utf-8")
     stub.chmod(0o755)
     base = tmp_path / "docker"
@@ -197,10 +221,11 @@ def render(tmp_path):
     def run(**extra):
         env = {"PATH": f"{stub_dir}:/usr/bin:/bin", "HOME": str(tmp_path), **PASSWORDS}
         env.update(extra)
-        return subprocess.run(["bash", str(RENDER), str(base)], env=env, text=True,
+        return subprocess.run([BASH, str(RENDER), str(base)], env=env, text=True,
                               capture_output=True, stdin=subprocess.DEVNULL, timeout=30)
     run.out = base / "prometheus-otlp"
     run.main = base / "prometheus"
+    run.stub_dir = stub_dir
     yield run
     # the script leaves the secrets directory 0500; reopen it so pytest can clean up
     secrets = run.main / "secrets"
@@ -222,11 +247,11 @@ def test_render_refuses_to_write_a_readable_secret_when_unprivileged(render):
         "nothing may be written before the privilege check"
 
 
-def test_render_modes_are_private_and_secrets_stay_off_disk(render):
-    proc = render(PROMETHEUS_FILE_UID=str(os.geteuid()))
+def test_render_modes_are_private_and_secrets_stay_off_disk(ready):
+    proc = ready(PROMETHEUS_FILE_UID=str(os.geteuid()))
     assert proc.returncode == 0, proc.stderr
-    secrets = render.main / "secrets"
-    web_main, web_otlp = render.main / "web.yml", render.out / "web.yml"
+    secrets = ready.main / "secrets"
+    web_main, web_otlp = ready.main / "web.yml", ready.out / "web.yml"
     plain = {secrets / "self-scrape-password": PASSWORDS["PROMETHEUS_SELF_PASSWORD"],
              secrets / "otlp-scrape-password": PASSWORDS["PROMETHEUS_OTLP_SCRAPE_PASSWORD"]}
     for path in (web_main, web_otlp, *plain):
@@ -250,17 +275,147 @@ def test_render_modes_are_private_and_secrets_stay_off_disk(render):
         ["grafana", "scrape", "sender"]
 
 
-def test_render_can_be_rerun(render):
-    assert render(PROMETHEUS_FILE_UID=str(os.geteuid())).returncode == 0
-    assert render(PROMETHEUS_FILE_UID=str(os.geteuid())).returncode == 0
+def test_render_can_be_rerun(ready):
+    assert ready(PROMETHEUS_FILE_UID=str(os.geteuid())).returncode == 0
+    assert ready(PROMETHEUS_FILE_UID=str(os.geteuid())).returncode == 0
 
 
-def test_render_rejects_shared_or_placeholder_passwords(render):
+def test_render_rejects_shared_or_placeholder_passwords(ready):
     own = {"PROMETHEUS_FILE_UID": str(os.geteuid())}
-    shared = render(PROMETHEUS_OTLP_GRAFANA_PASSWORD=PASSWORDS["PROMETHEUS_OTLP_SENDER_PASSWORD"], **own)
+    shared = ready(PROMETHEUS_OTLP_GRAFANA_PASSWORD=PASSWORDS["PROMETHEUS_OTLP_SENDER_PASSWORD"], **own)
     assert shared.returncode != 0
-    assert render(PROMETHEUS_SELF_PASSWORD="changeme", **own).returncode != 0
+    assert ready(PROMETHEUS_SELF_PASSWORD="changeme", **own).returncode != 0
+    assert not (ready.out / "web.yml").exists()
+
+
+def tls_files(base):
+    tls = base / "prometheus-otlp" / "tls"
+    tls.mkdir(parents=True, exist_ok=True)
+    for d in (tls.parent, tls):
+        d.chmod(0o755)  # the script refuses group-writable directories
+    (tls / "server.crt").write_text("cert", encoding="utf-8")
+    (tls / "server.key").write_text("key", encoding="utf-8")
+    return tls
+
+
+def own():
+    return {"PROMETHEUS_FILE_UID": str(os.geteuid())}
+
+
+def test_render_requires_tls_files_and_makes_them_private(render):
+    base = render.main.parent
+    missing = render(**own())
+    assert missing.returncode != 0 and "tls" in missing.stderr.lower()
     assert not (render.out / "web.yml").exists()
+    tls = tls_files(base)
+    assert render(**own()).returncode == 0
+    assert mode(tls / "server.key") == 0o400 and mode(tls) == 0o500
+    text = (render.out / "web.yml").read_text(encoding="utf-8")
+    cfg = yaml.safe_load(text)
+    assert cfg["tls_server_config"]["cert_file"] == "/etc/prometheus/tls/server.crt"
+    tls.chmod(0o700)
+
+
+@pytest.fixture()
+def ready(render):
+    tls = tls_files(render.main.parent)
+    yield render
+    for d in (tls, render.main / "secrets"):
+        if d.exists():
+            d.chmod(0o700)
+
+
+def test_render_keeps_last_good_files_when_hashing_fails(ready):
+    assert ready(**own()).returncode == 0
+    before = (ready.out / "web.yml").read_bytes() if os.access(ready.out / "web.yml", os.R_OK) else None
+    assert before is not None
+    # an htpasswd that fails must not leave empty hashes or remove the old set
+    failing = ready.stub_dir.parent / "bin-fail"
+    failing.mkdir(exist_ok=True)
+    (failing / "htpasswd").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    (failing / "htpasswd").chmod(0o755)
+    bad = ready(PATH=f"{failing}:/usr/bin:/bin", **own())
+    assert bad.returncode != 0, "must fail when hashing fails"
+    assert (ready.out / "web.yml").read_bytes() == before
+    assert (ready.main / "web.yml").exists()
+    for f in (ready.main / "web.yml", ready.out / "web.yml"):
+        assert "basic_auth_users" in f.read_text(encoding="utf-8")
+
+
+def test_render_rejects_malformed_hash_output(ready, tmp_path):
+    broken = tmp_path / "bin2"
+    broken.mkdir()
+    (broken / "htpasswd").write_text("#!/bin/sh\ncat >/dev/null\nprintf '%s:\\n' \"$3\"\n", encoding="utf-8")
+    (broken / "htpasswd").chmod(0o755)
+    proc = ready(PATH=f"{broken}:/usr/bin:/bin", **own())
+    assert proc.returncode != 0
+    assert not (ready.out / "web.yml").exists()
+
+
+def test_render_rejects_secrets_that_bcrypt_would_truncate_or_envs_would_mangle(ready):
+    long_a = "A" * 72 + "x"
+    assert ready(PROMETHEUS_SELF_PASSWORD=long_a, **own()).returncode != 0
+    assert ready(PROMETHEUS_SELF_PASSWORD="Zx9-has-$-dollar", **own()).returncode != 0
+    assert ready(PROMETHEUS_SELF_PASSWORD="A" * 72, **own()).returncode == 0
+
+
+def test_render_reads_quoted_env_values_like_check_env(ready, tmp_path):
+    env_file = ready.main.parent / ".env"
+    env_file.write_text('PROMETHEUS_SELF_PASSWORD="Zx9-quoted-self"\n', encoding="utf-8")
+    env = {k: v for k, v in PASSWORDS.items() if k != "PROMETHEUS_SELF_PASSWORD"}
+    proc = subprocess.run([BASH, str(RENDER), str(ready.main.parent)],
+                          env={"PATH": ready_path(ready), "HOME": str(tmp_path), **env, **own()},
+                          text=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert (ready.main / "secrets" / "self-scrape-password").read_text(encoding="utf-8") == "Zx9-quoted-self"
+
+
+def ready_path(render):
+    return f"{render.stub_dir}:/usr/bin:/bin"
+
+
+def test_render_ignores_the_uid_override_when_root():
+    text = RENDER.read_text(encoding="utf-8")
+    assert re.search(r'id -u\)" -eq 0 \].*\n?.*OWNER_UID=65534|OWNER_UID=65534\s*# root', text), \
+        "root must not honour PROMETHEUS_FILE_UID"
+
+
+def test_render_refuses_symlinked_directories(ready, tmp_path):
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    ready.main.mkdir(parents=True, exist_ok=True)
+    ready.main.chmod(0o755)
+    (ready.main / "secrets").symlink_to(victim)
+    proc = ready(**own())
+    assert proc.returncode != 0 and "symlink" in proc.stderr
+    assert list(victim.iterdir()) == []
+
+
+def test_render_refuses_symlinked_files(ready, tmp_path):
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep", encoding="utf-8")
+    ready.main.mkdir(parents=True, exist_ok=True)
+    ready.main.chmod(0o755)
+    (ready.main / "web.yml").symlink_to(victim)
+    proc = ready(**own())
+    assert proc.returncode != 0 and "symlink" in proc.stderr
+    assert victim.read_text(encoding="utf-8") == "keep"
+
+
+def test_render_refuses_a_world_writable_target_directory(ready):
+    ready.main.mkdir(parents=True, exist_ok=True)
+    ready.main.chmod(0o777)
+    proc = ready(**own())
+    ready.main.chmod(0o755)
+    assert proc.returncode != 0 and "writable" in proc.stderr
+
+
+def test_render_replaces_a_directory_stub_left_by_docker(ready):
+    ready.main.mkdir(parents=True, exist_ok=True)
+    ready.main.chmod(0o755)
+    (ready.main / "web.yml").mkdir()
+    assert ready(**own()).returncode == 0
+    assert (ready.main / "web.yml").is_file()
 
 
 def test_render_keeps_passwords_off_the_command_line():
@@ -339,3 +494,89 @@ def test_web_config_examples_hold_placeholders_not_hashes():
         assert not BCRYPT.search(text), path
         users = yaml.safe_load(text)["basic_auth_users"]
         assert users and set(users.values()) == {"REPLACE_WITH_BCRYPT_HASH"}, path
+
+
+# --- deploy keeps the rendered files ---------------------------------------------
+
+DEPLOY = REPO_ROOT / "scripts" / "03-deploy.sh"
+RENDERED = ("prometheus/web.yml", "prometheus/secrets/self-scrape-password",
+            "prometheus-otlp/web.yml", "prometheus-otlp/tls/server.key")
+
+
+def deploy_filters():
+    return re.findall(r"--filter='(P [^']+)'", DEPLOY.read_text(encoding="utf-8"))
+
+
+def run_rsync_delete(tmp_path, filters):
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    src.mkdir()
+    for rel in RENDERED:
+        (dst / rel).parent.mkdir(parents=True, exist_ok=True)
+        (dst / rel).write_text("kept", encoding="utf-8")
+        (dst / rel).chmod(0o400)
+    (src / "prometheus").mkdir()
+    (src / "prometheus" / "prometheus.yml").write_text("x", encoding="utf-8")
+    cmd = ["rsync", "-a", "--delete"] + [f"--filter={f}" for f in filters] + [f"{src}/", f"{dst}/"]
+    subprocess.run(cmd, check=True, capture_output=True, timeout=30)
+    return dst
+
+
+def test_deploy_guard_bites_without_the_filters(tmp_path):
+    dst = run_rsync_delete(tmp_path, [])
+    assert not (dst / "prometheus-otlp" / "web.yml").exists()
+
+
+def test_deploy_keeps_rendered_credentials_and_tls_files(tmp_path):
+    filters = deploy_filters()
+    assert filters, "no rsync filters collected from 03-deploy.sh"
+    dst = run_rsync_delete(tmp_path, filters)
+    for rel in RENDERED:
+        assert (dst / rel).read_text(encoding="utf-8") == "kept", rel
+        assert mode(dst / rel) == 0o400
+
+
+def test_deploy_preflights_the_rendered_files():
+    text = DEPLOY.read_text(encoding="utf-8")
+    for rel in ("prometheus/web.yml", "prometheus-otlp/web.yml",
+                "prometheus/secrets/self-scrape-password"):
+        assert re.search(rf"test -f [^\n]*{re.escape(rel)}", text), rel
+
+
+# --- docs say what is true ---------------------------------------------------------
+
+def _doc():
+    return DOC.read_text(encoding="utf-8")
+
+
+def test_doc_states_accounts_have_identical_web_access_and_why_no_proxy():
+    text = _doc()
+    assert "identical web access" in text
+    assert "full read and write" in text
+    assert "firewall" in text.split("identical web access", 1)[1]
+
+
+def test_doc_firewall_and_verify_commands_use_the_resolved_port():
+    text = _doc()
+    assert "OTLP_PORT=" in text
+    for block in re.findall(r"```bash\n(.*?)```", text, re.S):
+        if "iptables" in block or "SIEM_HOST" in block or "127.0.0.1" in block:
+            assert "9091" not in block.replace("PROMETHEUS_OTLP_PORT:-9091", ""), block[:80]
+
+
+def test_doc_uses_https_for_senders_and_verification():
+    text = _doc()
+    assert "http://SIEM_HOST:9091" not in text and "http://127.0.0.1:9091" not in text
+    assert "--cacert" in text and "https://" in text
+    assert "tls_server_config" in text or "server.crt" in text
+
+
+def test_doc_notes_ip_scope_dollar_alphabet_and_disk_bound():
+    text = _doc()
+    assert "IPv4" in text and "nftables" in text
+    assert "`$`" in text
+    assert "retention.size" in text or "PROMETHEUS_OTLP_RETENTION_SIZE" in text
+
+
+def test_env_example_has_disk_bound_and_tls_notes():
+    text = ENV_EXAMPLE.read_text(encoding="utf-8")
+    assert "PROMETHEUS_OTLP_RETENTION_SIZE" in text

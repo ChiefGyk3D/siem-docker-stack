@@ -51,6 +51,9 @@ jobs:
         # the OTLP receiver instance: its config (window, otlp block) and its web config
         otlp=$(mktemp -d)
         cp -r docker/prometheus-otlp/. "$otlp/"
+        mkdir -p "$otlp/tls"
+        openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=ci-throwaway" \
+          -keyout "$otlp/tls/server.key" -out "$otlp/tls/server.crt"
         sed "s|REPLACE_WITH_BCRYPT_HASH|$hash|" "$otlp/web.yml.example" > "$otlp/web.yml"
         chmod -R a+rX "$otlp"
         docker run --rm --entrypoint promtool -v "$otlp":/etc/prometheus:ro \

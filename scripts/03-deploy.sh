@@ -92,9 +92,24 @@ else
     rsync -avz --delete \
         --filter='P opensearch/security/internal_users.yml' \
         --filter='P opensearch/certs/*' \
+        --filter='P prometheus/web.yml' \
+        --filter='P prometheus/secrets/***' \
+        --filter='P prometheus-otlp/web.yml' \
+        --filter='P prometheus-otlp/tls/***' \
         "${REPO_DIR}/docker/" \
         "${SIEM_USER}@${SIEM_HOST}:${DEPLOY_DIR}/"
 fi
+
+# Prometheus basic-auth files are rendered on the server by
+# scripts/render-prometheus-web-config.sh (never rsynced). If one is missing,
+# Docker would create a directory in its place and Prometheus would not start,
+# which silences the independent alert path, so stop here instead.
+run_on_server "test -f ${DEPLOY_DIR}/prometheus/web.yml && test -f ${DEPLOY_DIR}/prometheus-otlp/web.yml && test -f ${DEPLOY_DIR}/prometheus/secrets/self-scrape-password && test -f ${DEPLOY_DIR}/prometheus/secrets/otlp-scrape-password && test -f ${DEPLOY_DIR}/prometheus-otlp/tls/server.key && echo 'PROM_AUTH_OK'" | grep -q PROM_AUTH_OK || {
+    echo -e "${RED}Prometheus auth files are missing in ${DEPLOY_DIR}.${NC}"
+    echo "  On the server run: sudo -E bash scripts/render-prometheus-web-config.sh ${DEPLOY_DIR}"
+    echo "  (needs the TLS files in prometheus-otlp/tls/; see docs/prometheus-otlp.md)"
+    exit 1
+}
 
 # Copy .env if it exists
 if [ -f "${REPO_DIR}/.env" ]; then

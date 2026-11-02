@@ -24,6 +24,7 @@ docker/prometheus/targets/*.json
 docker/prometheus/web.yml
 docker/prometheus/secrets/
 docker/prometheus-otlp/web.yml
+docker/prometheus-otlp/tls/
 
 # OpenSearch data
 /data/
