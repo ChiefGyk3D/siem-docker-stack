@@ -94,7 +94,7 @@ from anywhere that is not root-owned:
 
 ```bash
 sudo install -d -o root -g root -m 0755 /usr/local/libexec/siem
-sudo install -o root -g root -m 0755 scripts/render-prometheus-web-config.sh scripts/lib-secrets.sh /usr/local/libexec/siem/
+sudo install -o root -g root -m 0755 scripts/render-prometheus-web-config.sh scripts/prometheus-otlp-firewall.sh scripts/lib-secrets.sh /usr/local/libexec/siem/
 sudo /usr/local/libexec/siem/render-prometheus-web-config.sh /opt/siem
 ```
 
@@ -172,13 +172,16 @@ reach the instance over the Docker network, which published-port rules do not
 affect. Use placeholders here; fill in the real sender addresses at apply time.
 The documentation range `192.0.2.0/24` is used below.
 
-`scripts/prometheus-otlp-firewall.sh` installs the allow-list in `DOCKER-USER`:
+`prometheus-otlp-firewall.sh` installs the allow-list in `DOCKER-USER`. Run the
+root-owned copy installed with the render script (above); as root it refuses to run
+from anywhere that is not root-owned, uses a fixed PATH and ignores any
+`IPTABLES` or `DOCKER` override:
 
 ```bash
 # Run on the SIEM host, after the receiver is up on loopback (apply order below).
 # First argument: the one interface address the receiver will be published on
 # (PROMETHEUS_OTLP_BIND_ADDR), never 0.0.0.0. Then the approved senders.
-sudo bash scripts/prometheus-otlp-firewall.sh apply 192.0.2.1 192.0.2.10 192.0.2.11
+sudo /usr/local/libexec/siem/prometheus-otlp-firewall.sh apply 192.0.2.1 192.0.2.10 192.0.2.11
 sudo iptables -S DOCKER-USER
 ```
 
@@ -189,7 +192,16 @@ wildcard address and malformed senders. It builds a new chain (`PROM-OTLP-A` or
 `PROM-OTLP-B`, alternating), puts it in front, only then removes the old jump and
 chain, and checks the rule is in place, so a re-run never leaves a moment
 without rules. The rule names the original destination address and port and
-matches only DNAT'd connections, so container-to-container traffic is left alone.
+matches only DNAT'd connections in the original direction (client to receiver),
+so container-to-container traffic is left alone and the receiver's own replies
+to approved senders are not matched, and cannot be dropped, by the chain. Senders
+with a prefix length of 0 (which would allow everyone) are refused, and if the
+current rules cannot be read the script stops without changing anything.
+
+I could not exercise the netfilter behavior itself in this change (it needs the
+real host). It is checked when you apply it: the [Verify](#verify) step requires
+an approved sender to succeed (replies must get through) and an unapproved host
+to be refused.
 
 Scope: this is an IPv4, iptables (DOCKER-USER) rule. It assumes the receiver
 is bound to a single IPv4 address, as the apply order requires. A Docker
@@ -217,7 +229,7 @@ here is applied by merging; run each step on the SIEM host on purpose.
    SIEM Prometheus so they pick up the new data source and scrape job:
    `cd /opt/siem && docker compose up -d prometheus-otlp prometheus grafana`
 4. Install the allow-list for the address you are about to use, with the real
-   sender addresses: `sudo bash scripts/prometheus-otlp-firewall.sh apply <bind-address> <sender>...`.
+   sender addresses: `sudo /usr/local/libexec/siem/prometheus-otlp-firewall.sh apply <bind-address> <sender>...`.
    It reads the port from the running container, so it follows
    `PROMETHEUS_OTLP_PORT` in `.env`. Do this **before** the address is
    reachable, so the port is never open without the allow-list.
@@ -288,7 +300,7 @@ Fastest first, each reversible on its own:
    in `.env` and run `docker compose up -d prometheus-otlp`. Remote senders can
    no longer connect. To remove the firewall rules afterward (they are found
    from the live rules, so nothing needs to be remembered):
-   `sudo bash scripts/prometheus-otlp-firewall.sh remove`.
+   `sudo /usr/local/libexec/siem/prometheus-otlp-firewall.sh remove`.
 2. **Stop the receiver:** `docker compose stop prometheus-otlp` (or
    `docker compose rm -sf prometheus-otlp`). The SIEM Prometheus, its rules and
    its data are not affected. The `prometheus-otlp` scrape target will show

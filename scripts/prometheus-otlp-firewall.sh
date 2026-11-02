@@ -26,15 +26,29 @@
 
 set -euo pipefail
 
-IPT="${IPTABLES:-iptables}"
-DOCKER_BIN="${DOCKER:-docker}"
 CHAIN_A=PROM-OTLP-A
 CHAIN_B=PROM-OTLP-B
 
 die() { echo "prometheus-otlp-firewall: $*" >&2; exit 1; }
 
-if [ "$EUID" -ne 0 ] && [ "${PROM_FW_NO_SUDO:-}" != 1 ]; then
-    die "run as root (sudo)"
+if [ "$(id -u)" -eq 0 ]; then
+    # As root: fixed PATH, fixed program names (no IPTABLES/DOCKER overrides), and
+    # only code nobody else can edit. Run the root-owned copy (docs).
+    if [ "$EUID" -eq 0 ]; then
+        PATH=/usr/sbin:/usr/bin:/sbin:/bin
+        export PATH
+    fi
+    IPT=iptables
+    DOCKER_BIN=docker
+    SELF="${BASH_SOURCE[0]}"
+    for f in "$(dirname "$SELF")" "$SELF"; do
+        [ "$(stat -c '%u' "$f")" -eq 0 ] && [ $((8#$(stat -c '%a' "$f") & 8#022)) -eq 0 ] ||
+            die "${f} is not root-owned (or is group or world writable); run the root-owned copy of the script (docs/prometheus-otlp.md)"
+    done
+else
+    [ "${PROM_FW_NO_SUDO:-}" = 1 ] || die "run as root (sudo)"
+    IPT="${IPTABLES:-iptables}"
+    DOCKER_BIN="${DOCKER:-docker}"
 fi
 
 OCTET='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
@@ -55,17 +69,24 @@ discover_port() { # prints the single published IPv4 port of the receiver
     printf '%s' "$port"
 }
 
-live_chain() { # the chain the live jump points at, if any
-    { "$IPT" -S DOCKER-USER || true; } | grep -o -- '-j PROM-OTLP-[AB]' | head -1 | sed 's/^-j //' || true
+# The live rule list is read once, and a failed read stops the script before
+# anything is changed (never treat "could not read" as "nothing there").
+RULES=""
+read_rules() {
+    RULES="$("$IPT" -S DOCKER-USER)" || die "could not read the DOCKER-USER rules; nothing was changed"
 }
 
-remove_jumps_to() { # <chain>: delete every DOCKER-USER rule that jumps to it
+live_chain() { # the chain the live jump points at, if any (uses RULES)
+    printf '%s\n' "$RULES" | grep -o -- '-j PROM-OTLP-[AB]' | head -1 | sed 's/^-j //' || true
+}
+
+remove_jumps_to() { # <chain>: delete every DOCKER-USER rule that jumps to it (uses RULES)
     local chain="$1" line spec
     while IFS= read -r line; do
         spec="${line#-A DOCKER-USER }"
         # shellcheck disable=SC2086  # the saved rule is a word list on purpose
         "$IPT" -D DOCKER-USER $spec
-    done < <({ "$IPT" -S DOCKER-USER || true; } | grep -- "-j ${chain}\$" || true)
+    done < <(printf '%s\n' "$RULES" | grep -- "-j ${chain}\$" || true)
 }
 
 drop_chain() { # <chain>
@@ -84,10 +105,13 @@ case "$cmd" in
         [ "$#" -ge 1 ] || die "give at least one approved sender"
         for s in "$@"; do
             [[ "$s" =~ $IPV4 || "$s" =~ $CIDR ]] || die "sender '${s}' is not an IPv4 address or CIDR"
-            [ "$s" != "0.0.0.0" ] && [ "$s" != "0.0.0.0/0" ] || die "sender '${s}' would allow everyone"
+            [ "$s" != "0.0.0.0" ] || die "sender '${s}' would allow everyone"
+            # Any /0 matches every address, whatever the base address says.
+            [[ "$s" != */0 ]] || die "sender '${s}' has prefix length 0 and would allow everyone"
         done
         port="$(discover_port)"
 
+        read_rules
         current="$(live_chain)"
         if [ "$current" = "$CHAIN_A" ]; then new="$CHAIN_B"; else new="$CHAIN_A"; fi
         # The new chain is not referenced by any live rule, so flushing a leftover is safe.
@@ -96,17 +120,21 @@ case "$cmd" in
             "$IPT" -A "$new" -s "$s" -j RETURN
         done
         "$IPT" -A "$new" -j DROP
-        "$IPT" -I DOCKER-USER -p tcp -m conntrack --ctstate DNAT \
+        # Only the original direction (client to receiver) goes through the allow-list.
+        # Reply packets of an approved connection travel the other way and must not
+        # be matched, or the DROP would cut the receiver's own answers.
+        "$IPT" -I DOCKER-USER -p tcp -m conntrack --ctstate DNAT --ctdir ORIGINAL \
             --ctorigdst "$bind" --ctorigdstport "$port" -j "$new"
         if [ -n "$current" ]; then
             remove_jumps_to "$current"
             drop_chain "$current"
         fi
-        "$IPT" -C DOCKER-USER -p tcp -m conntrack --ctstate DNAT \
+        "$IPT" -C DOCKER-USER -p tcp -m conntrack --ctstate DNAT --ctdir ORIGINAL \
             --ctorigdst "$bind" --ctorigdstport "$port" -j "$new" || die "the rule is not in place after applying"
         echo "guarding ${bind}:${port}; allowed: $*"
         ;;
     remove)
+        read_rules
         for chain in "$CHAIN_A" "$CHAIN_B"; do
             remove_jumps_to "$chain"
         done

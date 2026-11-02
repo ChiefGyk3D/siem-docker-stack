@@ -144,6 +144,8 @@ def fw(tmp_path):
             f.write(" ".join(args) + "\\n")
         state = open(os.environ["IPT_STATE"]).read()
         if args[:2] == ["-S", "DOCKER-USER"]:
+            if os.environ.get("IPT_FAIL_S") == "1":
+                sys.exit(1)
             sys.stdout.write(state)
         if args and args[0] == "-N":
             if ("-N " + args[1]) in state.split("\\n"):
@@ -156,17 +158,19 @@ def fw(tmp_path):
         sys.stdout.write(os.environ.get("DOCKER_PORT_OUT", ""))
         """))
 
-    def run(*args, docker_out="127.0.0.1:9091\n", state=""):
+    def run(*args, docker_out="127.0.0.1:9091\n", state="", **extra_env):
         state_path = tmp_path / "ipt.state"
         state_path.write_text(state, encoding="utf-8")
         log.write_text("", encoding="utf-8")
         env = {"PATH": f"{stubs}:/usr/bin:/bin", "IPT_LOG": str(log), "IPT_STATE": str(state_path),
                "IPTABLES": str(stubs / "iptables"), "DOCKER": str(stubs / "docker"),
-               "DOCKER_PORT_OUT": docker_out, "PROM_FW_NO_SUDO": "1"}
+               "DOCKER_PORT_OUT": docker_out, "PROM_FW_NO_SUDO": "1", **extra_env}
         proc = subprocess.run([BASH, str(FIREWALL), *args], env=env, text=True,
                               capture_output=True, stdin=subprocess.DEVNULL, timeout=30)
         proc.calls = [line for line in log.read_text(encoding="utf-8").splitlines() if line]
         return proc
+    run.stubs = stubs
+    run.log = log
     return run
 
 
@@ -243,3 +247,88 @@ def test_doc_uses_the_firewall_script_and_orders_rule_before_address():
 def test_doc_runs_the_renderer_from_a_root_owned_copy():
     text = _doc()
     assert "/usr/local/libexec" in text and "root-owned" in text
+
+
+# --- firewall script: root trust, reply traffic, broad senders, failed reads -------
+
+def test_firewall_rule_matches_only_the_original_direction(fw):
+    proc = fw(*GOOD)
+    assert proc.returncode == 0, proc.stderr
+    jump = next(c for c in proc.calls if c.startswith("-I DOCKER-USER"))
+    assert "--ctstate DNAT" in jump and "--ctdir ORIGINAL" in jump
+    check = next(c for c in proc.calls if c.startswith("-C DOCKER-USER"))
+    assert "--ctdir ORIGINAL" in check, "the verification must test the same rule"
+
+
+def test_doc_says_netfilter_behavior_is_checked_at_apply_time():
+    text = _doc()
+    assert "original direction" in text or "original-direction" in text
+    assert "verify step" in text.lower() or "[Verify](#verify)" in text
+
+
+@pytest.mark.parametrize("sender", ["10.0.0.0/0", "192.0.2.10/0", "0.0.0.0/0"])
+def test_firewall_refuses_prefix_zero_senders(fw, sender):
+    proc = fw("apply", "192.0.2.1", sender)
+    assert proc.returncode != 0 and not any(c.startswith(("-N", "-I")) for c in proc.calls)
+
+
+def test_a_failed_rule_listing_changes_nothing(fw):
+    proc = fw(*GOOD, IPT_FAIL_S="1")
+    assert proc.returncode != 0
+    assert not any(c.startswith(("-N", "-F", "-X", "-I", "-D", "-A")) for c in proc.calls)
+    removal = fw("remove", IPT_FAIL_S="1")
+    assert removal.returncode != 0
+    assert not any(c.startswith(("-F", "-X", "-D")) for c in removal.calls)
+
+
+@pytest.fixture()
+def fw_root(fw, tmp_path):
+    """The firewall script as a simulated root (stub id and stat), env overrides set."""
+    stubs = tmp_path / "fw-root-stubs"
+    stubs.mkdir()
+    write_stub(stubs, "id", "#!/bin/sh\necho 0\n")
+
+    def run(owner, mode="755", *args):
+        write_stub(stubs, "stat", textwrap.dedent(f"""\
+            #!/bin/sh
+            case "$2" in
+              %u) echo {owner} ;;
+              %a) echo {mode} ;;
+              *) exec /usr/bin/stat "$@" ;;
+            esac
+            """))
+        env = {"PATH": f"{stubs}:{fw.stubs}:/usr/bin:/bin", "IPT_LOG": str(fw.log),
+               "IPT_STATE": str(tmp_path / "ipt.state"),
+               "IPTABLES": str(fw.stubs / "iptables"), "DOCKER": str(fw.stubs / "docker")}
+        fw.log.write_text("", encoding="utf-8")
+        proc = subprocess.run([BASH, str(FIREWALL), *(args or GOOD)], env=env, text=True,
+                              capture_output=True, stdin=subprocess.DEVNULL, timeout=30)
+        proc.calls = [x for x in fw.log.read_text(encoding="utf-8").splitlines() if x]
+        return proc
+    return run
+
+
+def test_firewall_root_refuses_a_script_that_is_not_root_owned(fw_root):
+    proc = fw_root(1234)
+    assert proc.returncode != 0 and "root-owned" in proc.stderr
+
+
+def test_firewall_root_refuses_a_group_writable_script(fw_root):
+    proc = fw_root(0, "775")
+    assert proc.returncode != 0 and "root-owned" in proc.stderr
+
+
+def test_firewall_root_ignores_the_iptables_and_docker_overrides(fw_root):
+    proc = fw_root(0)  # trusted script: it must still not call the override programs
+    assert "run as root" not in proc.stderr and "root-owned" not in proc.stderr
+    assert proc.calls == [], "the override stubs must not be used as root"
+
+
+def test_firewall_resets_path_for_real_root():
+    text = FIREWALL.read_text(encoding="utf-8")
+    assert "PATH=/usr/sbin:/usr/bin:/sbin:/bin" in text
+
+
+def test_doc_tells_the_maintainer_to_run_a_root_owned_firewall_copy():
+    text = _doc()
+    assert "/usr/local/libexec/siem/prometheus-otlp-firewall.sh" in text
