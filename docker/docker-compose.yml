@@ -221,8 +221,8 @@ services:
       # Read-only InfluxDB account (created by the influxdb service below)
       - GRAFANA_INFLUX_USER=${GRAFANA_INFLUX_USER:-grafana_ro}
       - GRAFANA_INFLUX_PASSWORD=${GRAFANA_INFLUX_PASSWORD:?set GRAFANA_INFLUX_PASSWORD in .env (see README upgrade notes)}
-      # Prometheus requires basic auth (user "prometheus")
-      - PROMETHEUS_BASIC_AUTH_PASSWORD=${PROMETHEUS_BASIC_AUTH_PASSWORD:?set PROMETHEUS_BASIC_AUTH_PASSWORD in .env (see docs/prometheus-otlp.md)}
+      # Grafana's own read account on prometheus-otlp (docs/prometheus-otlp.md)
+      - PROMETHEUS_OTLP_GRAFANA_PASSWORD=${PROMETHEUS_OTLP_GRAFANA_PASSWORD:?set PROMETHEUS_OTLP_GRAFANA_PASSWORD in .env (see docs/prometheus-otlp.md)}
     volumes:
       - /data/warm/grafana:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
@@ -306,26 +306,45 @@ services:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./prometheus/targets:/etc/prometheus/targets:ro
       - ./prometheus/rules:/etc/prometheus/rules:ro
-      # Basic-auth users (bcrypt hash) and the matching password for the
-      # self-scrape. Both are rendered from PROMETHEUS_BASIC_AUTH_PASSWORD by
-      # scripts/render-prometheus-web-config.sh and are not committed.
-      - ./prometheus/web.yml:/etc/prometheus/web.yml:ro
-      - ./prometheus/secrets:/etc/prometheus/secrets:ro
-    # Loopback unless you widen BIND_ADDR or, for this port only,
-    # PROMETHEUS_BIND_ADDR. The OTLP receiver must be authenticated and
-    # firewalled: before widening, add the DOCKER-USER allow-list
-    # (docs/prometheus-otlp.md).
+      # Scrape password for the prometheus-otlp job (rendered, not committed)
+      - ./prometheus-otlp/secrets:/etc/prometheus/secrets:ro
     ports:
-      - "${PROMETHEUS_BIND_ADDR:-${BIND_ADDR:-127.0.0.1}}:${PROMETHEUS_PORT:-9090}:9090"
+      - "${BIND_ADDR:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090"
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
       - '--storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-365d}'
       - '--web.enable-lifecycle'
-      # Basic auth on every endpoint, the OTLP receiver included.
+    networks:
+      - siem-net
+    user: "65534"
+
+# =============================================================================
+# PROMETHEUS-OTLP — Authenticated OTLP metrics receiver (separate instance)
+# =============================================================================
+# Pushed OTLP metrics land in their OWN Prometheus, never in the one above, so
+# a pushed series cannot satisfy or suppress the SIEM alert rules, and OTLP
+# senders have no reach into the main instance or its lifecycle API. This
+# instance has no rules, no scrape jobs and no --web.enable-lifecycle.
+# Basic auth (separate sender, Grafana and scrape users) comes from web.yml,
+# rendered by scripts/render-prometheus-web-config.sh. Firewall the published
+# port to approved senders (docs/prometheus-otlp.md).
+
+  prometheus-otlp:
+    image: prom/prometheus:${PROMETHEUS_VERSION:-latest}
+    container_name: prometheus-otlp
+    restart: unless-stopped
+    volumes:
+      - /data/hot/prometheus-otlp:/prometheus
+      - ./prometheus-otlp/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus-otlp/web.yml:/etc/prometheus/web.yml:ro
+    ports:
+      - "${PROMETHEUS_OTLP_BIND_ADDR:-127.0.0.1}:${PROMETHEUS_OTLP_PORT:-9091}:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=${PROMETHEUS_OTLP_RETENTION:-30d}'
       - '--web.config.file=/etc/prometheus/web.yml'
-      # OTLP metrics push (POST /api/v1/otlp/v1/metrics). Authenticated by the
-      # web config above; still firewall it to approved senders.
       - '--web.enable-otlp-receiver'
     networks:
       - siem-net

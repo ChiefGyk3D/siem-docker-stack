@@ -17,11 +17,7 @@ DASHBOARDS_YML = REPO_ROOT / "docker" / "wazuh" / "opensearch_dashboards.yml"
 
 SECRET_NAME = re.compile(r"(PASSWORD|PASS|SECRET|TOKEN)(_|$)")
 REF = re.compile(r"\$\{([A-Z0-9_]+)(:?[-?])?([^}]*)\}")
-SAFE_BIND = re.compile(
-    r"^(127\.0\.0\.1"
-    r"|\$\{(BIND_ADDR|INGEST_BIND_ADDR|PORTAINER_BIND_ADDR):-127\.0\.0\.1\}"
-    # Prometheus OTLP: its own override, falling back to BIND_ADDR, then loopback
-    r"|\$\{PROMETHEUS_BIND_ADDR:-\$\{BIND_ADDR:-127\.0\.0\.1\}\}):")
+SAFE_BIND = re.compile(r"^(127\.0\.0\.1|\$\{(BIND_ADDR|INGEST_BIND_ADDR|PORTAINER_BIND_ADDR|PROMETHEUS_OTLP_BIND_ADDR):-127\.0\.0\.1\}):")
 
 
 def secret_fallbacks(text):

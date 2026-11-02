@@ -33,32 +33,19 @@ alerting:
 rule_files:
   - /etc/prometheus/rules/*.yml
 
-# OTLP metrics ingestion (--web.enable-otlp-receiver in docker-compose.yml).
-# See docs/prometheus-otlp.md before exposing the port: the receiver must be
-# authenticated (web.yml) and firewalled to approved senders.
-#
-# 30m: batching collectors can deliver samples out of order. A sample is
-# accepted if its timestamp is within 30 minutes of the newest sample in the
-# database; older ones are rejected. Raise it (cost: more WAL and memory) if a
-# sender must backfill after a longer outage.
-storage:
-  tsdb:
-    out_of_order_time_window: 30m
-
-# Resource attributes stay in target_info instead of becoming labels on every
-# series (keeps cardinality down). service.name and service.instance.id still
-# map to the job and instance labels.
-otlp:
-  promote_resource_attributes: []
-
 scrape_configs:
   - job_name: 'prometheus'
-    # Prometheus requires basic auth (web.yml); same password as Grafana uses.
-    basic_auth:
-      username: prometheus
-      password_file: /etc/prometheus/secrets/basic-auth-password
     static_configs:
       - targets: ['localhost:9090']
+
+  # The authenticated OTLP receiver instance (service prometheus-otlp). Own
+  # "scrape" account, password from the rendered secrets file.
+  - job_name: 'prometheus-otlp'
+    basic_auth:
+      username: scrape
+      password_file: /etc/prometheus/secrets/otlp-scrape-password
+    static_configs:
+      - targets: ['prometheus-otlp:9090']
 
   - job_name: 'alertmanager'
     static_configs:

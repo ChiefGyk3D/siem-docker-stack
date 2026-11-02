@@ -1,0 +1,10 @@
+# Basic-auth users for the OTLP receiver instance, one per role so each can be
+# rotated or revoked on its own: sender (OTLP senders), grafana (reads),
+# scrape (the SIEM Prometheus scraping this instance's /metrics).
+# The real file, docker/prometheus-otlp/web.yml, is rendered by
+# scripts/render-prometheus-web-config.sh and is not committed. The values below
+# are fake bcrypt-shaped placeholders.
+basic_auth_users:
+  sender: $2y$12$EXAMPLEEXAMPLEEXAMPLEEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEE
+  grafana: $2y$12$EXAMPLEEXAMPLEEXAMPLEEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEE
+  scrape: $2y$12$EXAMPLEEXAMPLEEXAMPLEEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEE

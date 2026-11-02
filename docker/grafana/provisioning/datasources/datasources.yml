@@ -149,10 +149,20 @@ datasources:
     type: prometheus
     access: proxy
     url: http://prometheus:9090
-    basicAuth: true
-    basicAuthUser: prometheus
-    secureJsonData:
-      basicAuthPassword: $PROMETHEUS_BASIC_AUTH_PASSWORD
     jsonData:
       httpMethod: POST
       timeInterval: "15s"
+
+  # --- Prometheus OTLP (pushed metrics; separate instance, own account) ---
+  - name: Prometheus OTLP
+    uid: prometheus-otlp
+    type: prometheus
+    access: proxy
+    url: http://prometheus-otlp:9090
+    basicAuth: true
+    basicAuthUser: grafana
+    secureJsonData:
+      basicAuthPassword: $PROMETHEUS_OTLP_GRAFANA_PASSWORD
+    jsonData:
+      httpMethod: POST
+      timeInterval: "60s"

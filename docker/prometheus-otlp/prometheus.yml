@@ -1,0 +1,26 @@
+# =============================================================================
+# Prometheus OTLP receiver instance (service prometheus-otlp)
+# =============================================================================
+# Receives pushed OpenTelemetry metrics (--web.enable-otlp-receiver in
+# docker-compose.yml). Deliberately separate from the SIEM Prometheus: no
+# scrape jobs, no alert rules, no lifecycle API. Pushed series stay here and
+# cannot mix with the series the SIEM alerts evaluate. See
+# docs/prometheus-otlp.md. The receiver must be authenticated (web.yml) and
+# firewalled to approved senders.
+
+global:
+  evaluation_interval: 60s
+
+# 30m: batching collectors can deliver samples out of order. A sample is
+# accepted if its timestamp is within 30 minutes of the newest sample in the
+# database; older ones are rejected. Raise it (cost: more WAL and memory) if a
+# sender must backfill after a longer outage.
+storage:
+  tsdb:
+    out_of_order_time_window: 30m
+
+# Resource attributes stay in target_info instead of becoming labels on every
+# series (keeps cardinality down). service.name and service.instance.id still
+# map to the job and instance labels.
+otlp:
+  promote_resource_attributes: []

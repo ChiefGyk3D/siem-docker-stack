@@ -1,6 +1,0 @@
-# Prometheus web config (basic auth for every endpoint, OTLP receiver included).
-# The real file, docker/prometheus/web.yml, is rendered by
-# scripts/render-prometheus-web-config.sh from PROMETHEUS_BASIC_AUTH_PASSWORD
-# and is not committed. The value below is a fake bcrypt-shaped placeholder.
-basic_auth_users:
-  prometheus: $2y$12$EXAMPLEEXAMPLEEXAMPLEEEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLEE
