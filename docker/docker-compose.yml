@@ -221,6 +221,10 @@ services:
       # Read-only InfluxDB account (created by the influxdb service below)
       - GRAFANA_INFLUX_USER=${GRAFANA_INFLUX_USER:-grafana_ro}
       - GRAFANA_INFLUX_PASSWORD=${GRAFANA_INFLUX_PASSWORD:?set GRAFANA_INFLUX_PASSWORD in .env (see README upgrade notes)}
+      # Grafana's own read accounts, one per Prometheus instance (docs/prometheus-otlp.md)
+      # Grafana's own read account on the SIEM Prometheus
+      - PROMETHEUS_GRAFANA_PASSWORD=${PROMETHEUS_GRAFANA_PASSWORD:?set PROMETHEUS_GRAFANA_PASSWORD in .env (see docs/prometheus-otlp.md)}
+      - PROMETHEUS_OTLP_GRAFANA_PASSWORD=${PROMETHEUS_OTLP_GRAFANA_PASSWORD:?set PROMETHEUS_OTLP_GRAFANA_PASSWORD in .env (see docs/prometheus-otlp.md)}
     volumes:
       - /data/warm/grafana:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
@@ -304,6 +308,22 @@ services:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./prometheus/targets:/etc/prometheus/targets:ro
       - ./prometheus/rules:/etc/prometheus/rules:ro
+      # Basic-auth users (bcrypt) and the scrape passwords; rendered by
+      # scripts/render-prometheus-web-config.sh, not committed
+      # Long form with create_host_path: false, so a missing rendered file is a
+      # clear start error and never a directory Docker creates in its place.
+      - type: bind
+        source: ./prometheus/web.yml
+        target: /etc/prometheus/web.yml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./prometheus/secrets
+        target: /etc/prometheus/secrets
+        read_only: true
+        bind:
+          create_host_path: false
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090"
     command:
@@ -311,6 +331,53 @@ services:
       - '--storage.tsdb.path=/prometheus'
       - '--storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-365d}'
       - '--web.enable-lifecycle'
+      # Basic auth (accounts grafana and self): lifecycle is on, so this port
+      # must never be reachable unauthenticated.
+      - '--web.config.file=/etc/prometheus/web.yml'
+    networks:
+      - siem-net
+    user: "65534"
+
+# =============================================================================
+# PROMETHEUS-OTLP — Authenticated OTLP metrics receiver (separate instance)
+# =============================================================================
+# Pushed OTLP metrics land in their OWN Prometheus, never in the one above, so
+# a pushed series cannot satisfy or suppress the SIEM alert rules, and OTLP
+# senders have no reach into the main instance or its lifecycle API. This
+# instance has no rules, no scrape jobs and no --web.enable-lifecycle.
+# Basic auth (separate sender, Grafana and scrape users) comes from web.yml,
+# rendered by scripts/render-prometheus-web-config.sh. Firewall the published
+# port to approved senders (docs/prometheus-otlp.md).
+
+  prometheus-otlp:
+    image: prom/prometheus:${PROMETHEUS_VERSION:-latest}
+    container_name: prometheus-otlp
+    restart: unless-stopped
+    volumes:
+      - /data/hot/prometheus-otlp:/prometheus
+      - ./prometheus-otlp/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - type: bind
+        source: ./prometheus-otlp/web.yml
+        target: /etc/prometheus/web.yml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./prometheus-otlp/tls
+        target: /etc/prometheus/tls
+        read_only: true
+        bind:
+          create_host_path: false
+    ports:
+      - "${PROMETHEUS_OTLP_BIND_ADDR:-127.0.0.1}:${PROMETHEUS_OTLP_PORT:-9091}:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=${PROMETHEUS_OTLP_RETENTION:-30d}'
+      # Size bound as well as time: pushed data shares the hot tier with OpenSearch.
+      - '--storage.tsdb.retention.size=${PROMETHEUS_OTLP_RETENTION_SIZE:-5GB}'
+      - '--web.config.file=/etc/prometheus/web.yml'
+      - '--web.enable-otlp-receiver'
     networks:
       - siem-net
     user: "65534"
