@@ -29,7 +29,8 @@
 # or world write). Files end up owned by the container user (uid 65534), mode
 # 0400, secrets and tls directories 0500, so no other user can read them. That
 # needs root, so the script refuses to run otherwise. Run it on the deployed
-# copy (/opt/siem) as: sudo -E bash <this script> /opt/siem
+# copy (/opt/siem), from a root-owned copy of this script:
+# sudo /usr/local/libexec/siem/render-prometheus-web-config.sh /opt/siem
 #
 # Each password goes to htpasswd on stdin, never on a command line. Needs
 # htpasswd (apt install apache2-utils); no container image ever sees a password.
@@ -40,10 +41,21 @@
 # running as the deploy account itself could still race the final placement, so
 # keep the deployed tree out of reach of other software running as that account.
 #
+# Re-running is safe (rotation, recovery): it accepts the ownership and modes its
+# own earlier run left, and still refuses symlinks and any other owner.
+#
 # After rendering: docker compose up -d prometheus prometheus-otlp grafana
 # =============================================================================
 
 set -euo pipefail
+
+# Real root runs with a fixed PATH, so nothing is resolved from the caller's PATH.
+if [ "$EUID" -eq 0 ]; then
+    PATH=/usr/sbin:/usr/bin:/sbin:/bin
+    export PATH
+fi
+
+die() { echo "render-prometheus-web-config: $*" >&2; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -59,31 +71,42 @@ else
     OWNER_UID="${PROMETHEUS_FILE_UID:-65534}"
 fi
 
+# As root, run and source only code that no one else can edit: this script, the
+# library it sources and their directory must be root-owned and not writable by
+# group or others. Use a root-owned copy (docs/prometheus-otlp.md).
+if [ "$(id -u)" -eq 0 ]; then
+    for f in "$SCRIPT_DIR" "${SCRIPT_DIR}/lib-secrets.sh" "${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"; do
+        [ "$(stat -c '%u' "$f")" -eq 0 ] && [ $((8#$(stat -c '%a' "$f") & 8#022)) -eq 0 ] ||
+            die "${f} is not root-owned (or is group or world writable); run a root-owned copy of the script and lib-secrets.sh (docs/prometheus-otlp.md)"
+    done
+fi
+
 # shellcheck source=scripts/lib-secrets.sh
 . "${SCRIPT_DIR}/lib-secrets.sh"
 
-die() { echo "render-prometheus-web-config: $*" >&2; exit 1; }
-
 if [ "$(id -u)" -ne 0 ] && [ "$(id -u)" -ne "$OWNER_UID" ]; then
-    die "run as root (sudo -E) so the files can be owned by uid ${OWNER_UID} with mode 0400; refusing to write a readable secret"
+    die "run as root (sudo) so the files can be owned by uid ${OWNER_UID} with mode 0400; refusing to write a readable secret"
 fi
 
 # --- path safety: real directories only, not writable by group or others ------
-trusted_owner() { # <path>: root or the sudo-invoking account (or ourselves when unprivileged)
+trusted_owner() { # <path> [managed]: root or the sudo-invoking account (or ourselves
+    # when unprivileged). A managed directory is one this script closes itself, so
+    # it may also be owned by the container user from a previous run.
     local u
     u="$(stat -c '%u' "$1")"
+    [ "${2:-}" != managed ] || [ "$u" -ne "$OWNER_UID" ] || return 0
     if [ "$(id -u)" -eq 0 ]; then
         [ "$u" -eq 0 ] || { [ -n "${SUDO_UID:-}" ] && [ "$u" -eq "$SUDO_UID" ]; }
     else
         [ "$u" -eq "$(id -u)" ]
     fi
 }
-check_dir() { # <dir>
+check_dir() { # <dir> [managed]
     local d="$1" m
     [ ! -L "$d" ] || die "${d} is a symlink; refusing to write through it"
     if [ -e "$d" ]; then
         [ -d "$d" ] || die "${d} exists and is not a directory"
-        trusted_owner "$d" || die "${d} is owned by uid $(stat -c '%u' "$d"), which is not trusted; refusing"
+        trusted_owner "$d" "${2:-}" || die "${d} is owned by uid $(stat -c '%u' "$d"), which is not trusted; refusing"
         m="$(stat -c '%a' "$d")"
         [ $((8#${m} & 8#022)) -eq 0 ] || die "${d} is group or world writable (mode ${m}); refusing"
     fi
@@ -100,9 +123,9 @@ check_file_target() { # <path>: not a symlink; an empty directory stub from Dock
 trusted_owner "$TARGET_BASE" || die "${TARGET_BASE} is owned by uid $(stat -c '%u' "$TARGET_BASE"), which is not trusted; refusing"
 check_dir "$MAIN_DIR"
 check_dir "$OTLP_DIR"
-check_dir "${MAIN_DIR}/secrets"
-check_dir "${OTLP_DIR}/tls"
-check_dir "${MAIN_DIR}/otlp-ca"
+check_dir "${MAIN_DIR}/secrets" managed
+check_dir "${OTLP_DIR}/tls" managed
+check_dir "${MAIN_DIR}/otlp-ca" managed
 for f in "${MAIN_DIR}/web.yml" "${OTLP_DIR}/web.yml" \
     "${MAIN_DIR}/secrets/self-scrape-password" "${MAIN_DIR}/secrets/otlp-scrape-password" \
     "${OTLP_DIR}/tls/server.crt" "${OTLP_DIR}/tls/server.key" "${MAIN_DIR}/otlp-ca/otlp-ca.crt"; do
@@ -171,8 +194,17 @@ h_self="$(hash_for self "$self_pw")" || die "hashing failed for the self account
 umask 077
 mkdir -p "${MAIN_DIR}/secrets" "${OTLP_DIR}/tls" "${MAIN_DIR}/otlp-ca"
 # The stage lives in a private directory we create ourselves (0700, ours) outside
-# the target tree, so nobody who can write the tree can swap staged files.
-STAGE_ROOT="$(mktemp -d "${XDG_RUNTIME_DIR:-/run}/prom-render.XXXXXX" 2>/dev/null || mktemp -d)"
+# the target tree, in /run (root-owned). The caller's runtime and temp directory
+# variables are ignored on purpose, and there is no fallback.
+# Only a genuinely unprivileged run (the tests) may choose another base.
+if [ "$EUID" -ne 0 ] && [ -n "${PROMETHEUS_STAGE_BASE:-}" ]; then
+    STAGE_BASE="$PROMETHEUS_STAGE_BASE"
+else
+    STAGE_BASE=/run
+fi
+STAGE_ROOT="$(TMPDIR=/nonexistent mktemp -d "${STAGE_BASE}/prom-render.XXXXXX")" || die "cannot create a private stage directory in ${STAGE_BASE}"
+[ "$(stat -c '%u' "$STAGE_ROOT")" -eq "$(id -u)" ] && [ "$(stat -c '%a' "$STAGE_ROOT")" = 700 ] ||
+    die "the stage directory ${STAGE_ROOT} is not private to this user"
 STAGE="${STAGE_ROOT}"
 trap 'rm -rf "$STAGE_ROOT"' EXIT
 HDR="# Rendered by scripts/render-prometheus-web-config.sh - do not commit."

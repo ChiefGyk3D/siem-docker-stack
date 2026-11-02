@@ -222,9 +222,12 @@ def render(tmp_path):
     stub.chmod(0o755)
     base = tmp_path / "docker"
     base.mkdir()
+    stage_base = tmp_path / "render-stage"
+    stage_base.mkdir()
 
     def run(at=None, **extra):
-        env = {"PATH": f"{stub_dir}:/usr/bin:/bin", "HOME": str(tmp_path), **PASSWORDS}
+        env = {"PATH": f"{stub_dir}:/usr/bin:/bin", "HOME": str(tmp_path), **PASSWORDS,
+               "PROMETHEUS_STAGE_BASE": str(stage_base)}
         env.update(extra)
         return subprocess.run([BASH, str(RENDER), str(at or base)], env=env, text=True,
                               capture_output=True, stdin=subprocess.DEVNULL, timeout=30)
@@ -369,7 +372,8 @@ def test_render_reads_quoted_env_values_like_check_env(ready, tmp_path):
     env_file.write_text(f'PROMETHEUS_SELF_PASSWORD="{QUOTED_VALUE}"\n', encoding="utf-8")
     env = {k: v for k, v in PASSWORDS.items() if k != "PROMETHEUS_SELF_PASSWORD"}
     proc = subprocess.run([BASH, str(RENDER), str(ready.main.parent)],
-                          env={"PATH": ready_path(ready), "HOME": str(tmp_path), **env, **own()},
+                          env={"PATH": ready_path(ready), "HOME": str(tmp_path), **env, **own(),
+                              "PROMETHEUS_STAGE_BASE": str(tmp_path / "render-stage")},
                           text=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=30)
     assert proc.returncode == 0, proc.stderr
     assert (ready.main / "secrets" / "self-scrape-password").read_text(encoding="utf-8") == QUOTED_VALUE

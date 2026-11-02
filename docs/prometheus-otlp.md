@@ -88,11 +88,22 @@ Set `PROMETHEUS_OTLP_SENDER_PASSWORD`, `PROMETHEUS_OTLP_GRAFANA_PASSWORD`,
 `PROMETHEUS_SELF_PASSWORD` in `.env` (five different strong values of at most 72 bytes, because bcrypt ignores the
 rest; avoid `$`, which Grafana and compose expand, so use letters, digits and
 simple punctuation; `bash scripts/check-env.sh` rejects placeholders). Create the receiver's TLS certificate first (next section), then run,
-as root, **on the deployed copy**:
+as root, **from a root-owned copy of the script**. Code in a directory the deploy
+account can write must not run as root, so the script refuses to run as root
+from anywhere that is not root-owned:
 
 ```bash
-sudo -E bash scripts/render-prometheus-web-config.sh /opt/siem
+sudo install -d -o root -g root -m 0755 /usr/local/libexec/siem
+sudo install -o root -g root -m 0755 scripts/render-prometheus-web-config.sh scripts/lib-secrets.sh /usr/local/libexec/siem/
+sudo /usr/local/libexec/siem/render-prometheus-web-config.sh /opt/siem
 ```
+
+The script reads the passwords from `/opt/siem/.env` itself, so nothing needs to
+be passed through `sudo`. Repeat the `install` lines after you update the
+repository. Re-running is safe, and is how you rotate a password or recover from a
+failed run: it accepts the ownership and modes its own earlier run left (the
+closed directories owned by the container user) and still refuses symlinks and
+any other owner.
 
 The script hashes everything first (nothing is touched if hashing fails), stages
 the files in a private root-owned directory outside the tree, then installs them
@@ -161,29 +172,24 @@ reach the instance over the Docker network, which published-port rules do not
 affect. Use placeholders here; fill in the real sender addresses at apply time.
 The documentation range `192.0.2.0/24` is used below.
 
-```bash
-# Run on the SIEM host, after the receiver container is up (apply order below).
-# Take the address and port from what Docker actually published, not from the
-# shell or a default, so the rule always guards the real port.
-OTLP_PUB=$(sudo docker port prometheus-otlp 9090/tcp | head -1)
-OTLP_ADDR=${OTLP_PUB%:*}
-OTLP_PORT=${OTLP_PUB##*:}
-echo "guarding $OTLP_ADDR:$OTLP_PORT"
-# Replace the example addresses. Matching DNAT'd connections leaves
-# container-to-container traffic alone. Safe to re-run.
-sudo iptables -N PROM-OTLP-ALLOW 2>/dev/null || sudo iptables -F PROM-OTLP-ALLOW
-sudo iptables -A PROM-OTLP-ALLOW -s 192.0.2.10 -j RETURN    # approved sender 1
-sudo iptables -A PROM-OTLP-ALLOW -s 192.0.2.11 -j RETURN    # approved sender 2
-sudo iptables -A PROM-OTLP-ALLOW -j DROP
-sudo iptables -C DOCKER-USER -p tcp -m conntrack --ctstate DNAT \
-    --ctorigdst "$OTLP_ADDR" --ctorigdstport "$OTLP_PORT" -j PROM-OTLP-ALLOW 2>/dev/null ||
-  sudo iptables -I DOCKER-USER -p tcp -m conntrack --ctstate DNAT \
-    --ctorigdst "$OTLP_ADDR" --ctorigdstport "$OTLP_PORT" -j PROM-OTLP-ALLOW
+`scripts/prometheus-otlp-firewall.sh` installs the allow-list in `DOCKER-USER`:
 
-# Check
+```bash
+# Run on the SIEM host, after the receiver is up on loopback (apply order below).
+# First argument: the one interface address the receiver will be published on
+# (PROMETHEUS_OTLP_BIND_ADDR), never 0.0.0.0. Then the approved senders.
+sudo bash scripts/prometheus-otlp-firewall.sh apply 192.0.2.1 192.0.2.10 192.0.2.11
 sudo iptables -S DOCKER-USER
-sudo iptables -S PROM-OTLP-ALLOW
 ```
+
+It reads the published port from the running container (`docker port
+prometheus-otlp`, exactly one IPv4 line), so it follows `PROMETHEUS_OTLP_PORT` in
+`.env`, and it refuses an empty, multi-line, IPv6-only or malformed answer, a
+wildcard address and malformed senders. It builds a new chain (`PROM-OTLP-A` or
+`PROM-OTLP-B`, alternating), puts it in front, only then removes the old jump and
+chain, and checks the rule is in place, so a re-run never leaves a moment
+without rules. The rule names the original destination address and port and
+matches only DNAT'd connections, so container-to-container traffic is left alone.
 
 Scope: this is an IPv4, iptables (DOCKER-USER) rule. It assumes the receiver
 is bound to a single IPv4 address, as the apply order requires. A Docker
@@ -210,12 +216,14 @@ here is applied by merging; run each step on the SIEM host on purpose.
 3. Start the receiver on loopback (the default bind), and restart Grafana and the
    SIEM Prometheus so they pick up the new data source and scrape job:
    `cd /opt/siem && docker compose up -d prometheus-otlp prometheus grafana`
-4. Add the firewall rules above, with the real sender addresses. They read the
-   port from the running container, so they follow `PROMETHEUS_OTLP_PORT` in `.env`.
-5. Set `PROMETHEUS_OTLP_BIND_ADDR` in `.env` to the one interface address
-   senders reach (not `0.0.0.0`), recreate the receiver
-   (`docker compose up -d prometheus-otlp`) and re-run the firewall snippet so the
-   rule names the new address.
+4. Install the allow-list for the address you are about to use, with the real
+   sender addresses: `sudo bash scripts/prometheus-otlp-firewall.sh apply <bind-address> <sender>...`.
+   It reads the port from the running container, so it follows
+   `PROMETHEUS_OTLP_PORT` in `.env`. Do this **before** the address is
+   reachable, so the port is never open without the allow-list.
+5. Set `PROMETHEUS_OTLP_BIND_ADDR` in `.env` to that same address (one interface
+   address, not `0.0.0.0`) and recreate the receiver
+   (`docker compose up -d prometheus-otlp`). The rule already names this address.
 6. Run [Verify](#verify).
 
 ## Verify
@@ -258,7 +266,7 @@ effect: stop and fix it before leaving the receiver on.
    use the reload endpoint, and that the settings took effect:
 
 ```bash
-OTLP_PUB=$(sudo docker port prometheus-otlp 9090/tcp | head -1)
+OTLP_PUB=$(sudo docker port prometheus-otlp 9090/tcp | grep -E '^[0-9.]+:[0-9]+$')   # exactly one IPv4 line
 OTLP_ADDR=${OTLP_PUB%:*}; OTLP_PORT=${OTLP_PUB##*:}
 curl -sS -u "sender:${PROMETHEUS_OTLP_SENDER_PASSWORD}" --cacert /opt/siem/prometheus-otlp/tls/server.crt --resolve SIEM_HOST:${OTLP_PORT}:${OTLP_ADDR} "https://SIEM_HOST:${OTLP_PORT}/api/v1/query?query=otlp_smoke_test" | grep -c otlp-smoke-test
 curl -sS -o /dev/null -w '%{http_code}\n' -X POST -u "sender:${PROMETHEUS_OTLP_SENDER_PASSWORD}" --cacert /opt/siem/prometheus-otlp/tls/server.crt --resolve SIEM_HOST:${OTLP_PORT}:${OTLP_ADDR} https://SIEM_HOST:${OTLP_PORT}/-/reload   # expect 403 or 404, not 200
@@ -278,11 +286,9 @@ Fastest first, each reversible on its own:
 
 1. **Close the door:** set `PROMETHEUS_OTLP_BIND_ADDR=127.0.0.1` (or remove it)
    in `.env` and run `docker compose up -d prometheus-otlp`. Remote senders can
-   no longer connect. To remove the firewall rules afterward:
-   `sudo iptables -D DOCKER-USER -p tcp -m conntrack --ctstate DNAT --ctorigdst "$OTLP_ADDR" --ctorigdstport "$OTLP_PORT" -j PROM-OTLP-ALLOW`,
-   then `sudo iptables -F PROM-OTLP-ALLOW && sudo iptables -X PROM-OTLP-ALLOW`.
-   (Read `OTLP_ADDR` and `OTLP_PORT` with the snippet in the Firewall section
-   first, before recreating the container; the rule names them.)
+   no longer connect. To remove the firewall rules afterward (they are found
+   from the live rules, so nothing needs to be remembered):
+   `sudo bash scripts/prometheus-otlp-firewall.sh remove`.
 2. **Stop the receiver:** `docker compose stop prometheus-otlp` (or
    `docker compose rm -sf prometheus-otlp`). The SIEM Prometheus, its rules and
    its data are not affected. The `prometheus-otlp` scrape target will show

@@ -107,7 +107,7 @@ groups:
           description: "The prometheus-otlp TSDB is close to its size bound. Check series growth (prometheus_tsdb_head_series) and the approved senders, and the free space on /data/hot."
 
       - alert: OtlpReceiverDown
-        expr: up{job="prometheus-otlp"} == 0
+        expr: up{job="prometheus-otlp"} == 0 or absent(up{job="prometheus-otlp"})
         for: 5m
         labels:
           severity: warning

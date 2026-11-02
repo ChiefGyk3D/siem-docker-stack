@@ -12,7 +12,7 @@ import subprocess
 import pytest
 
 from test_prometheus_otlp import (  # noqa: F401  (fixtures are used by name)
-    BASH, DEPLOY, MAIN_PROM_YML, RENDER, RULES, _doc, _services, _yaml,
+    BASH, DEPLOY, MAIN_PROM_YML, REPO_ROOT, RENDER, RULES, _doc, _services, _yaml,
     bind_mount, own, ready, render,
 )
 
@@ -139,7 +139,9 @@ def test_doc_reads_the_port_from_the_running_container_not_the_shell():
     assert "docker port prometheus-otlp" in text
     for block in re.findall(r"```bash\n(.*?)```", text, re.S):
         assert "OTLP_PORT=${PROMETHEUS_OTLP_PORT" not in block, block[:60]
-    assert "--ctorigdst" in text and "iptables -C" in text
+    assert "prometheus-otlp-firewall.sh" in text
+    fw = (REPO_ROOT / "scripts" / "prometheus-otlp-firewall.sh").read_text(encoding="utf-8")
+    assert "--ctorigdst" in fw and '"$IPT" -C' in fw
     assert ":127.0.0.1" not in text.split("## Verify", 1)[1].split("## Rollback", 1)[0]
 
 
