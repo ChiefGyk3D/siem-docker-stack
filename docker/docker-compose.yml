@@ -221,7 +221,9 @@ services:
       # Read-only InfluxDB account (created by the influxdb service below)
       - GRAFANA_INFLUX_USER=${GRAFANA_INFLUX_USER:-grafana_ro}
       - GRAFANA_INFLUX_PASSWORD=${GRAFANA_INFLUX_PASSWORD:?set GRAFANA_INFLUX_PASSWORD in .env (see README upgrade notes)}
-      # Grafana's own read account on prometheus-otlp (docs/prometheus-otlp.md)
+      # Grafana's own read accounts, one per Prometheus instance (docs/prometheus-otlp.md)
+      # Grafana's own read account on the SIEM Prometheus
+      - PROMETHEUS_GRAFANA_PASSWORD=${PROMETHEUS_GRAFANA_PASSWORD:?set PROMETHEUS_GRAFANA_PASSWORD in .env (see docs/prometheus-otlp.md)}
       - PROMETHEUS_OTLP_GRAFANA_PASSWORD=${PROMETHEUS_OTLP_GRAFANA_PASSWORD:?set PROMETHEUS_OTLP_GRAFANA_PASSWORD in .env (see docs/prometheus-otlp.md)}
     volumes:
       - /data/warm/grafana:/var/lib/grafana
@@ -306,8 +308,10 @@ services:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./prometheus/targets:/etc/prometheus/targets:ro
       - ./prometheus/rules:/etc/prometheus/rules:ro
-      # Scrape password for the prometheus-otlp job (rendered, not committed)
-      - ./prometheus-otlp/secrets:/etc/prometheus/secrets:ro
+      # Basic-auth users (bcrypt) and the scrape passwords; rendered by
+      # scripts/render-prometheus-web-config.sh, not committed
+      - ./prometheus/web.yml:/etc/prometheus/web.yml:ro
+      - ./prometheus/secrets:/etc/prometheus/secrets:ro
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090"
     command:
@@ -315,6 +319,9 @@ services:
       - '--storage.tsdb.path=/prometheus'
       - '--storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-365d}'
       - '--web.enable-lifecycle'
+      # Basic auth (accounts grafana and self): lifecycle is on, so this port
+      # must never be reachable unauthenticated.
+      - '--web.config.file=/etc/prometheus/web.yml'
     networks:
       - siem-net
     user: "65534"

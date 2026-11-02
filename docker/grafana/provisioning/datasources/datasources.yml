@@ -149,6 +149,10 @@ datasources:
     type: prometheus
     access: proxy
     url: http://prometheus:9090
+    basicAuth: true
+    basicAuthUser: grafana
+    secureJsonData:
+      basicAuthPassword: $PROMETHEUS_GRAFANA_PASSWORD
     jsonData:
       httpMethod: POST
       timeInterval: "15s"

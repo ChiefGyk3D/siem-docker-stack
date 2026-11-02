@@ -19,11 +19,11 @@ docker/opensearch/security/internal_users.yml
 docker/prometheus/targets/*.json
 !docker/prometheus/targets/*.example.json
 
-# Prometheus OTLP receiver basic-auth web config and scrape password, rendered
-# by scripts/render-prometheus-web-config.sh. The *.example files stay tracked.
+# Prometheus basic-auth web configs and scrape passwords, rendered by
+# scripts/render-prometheus-web-config.sh. The *.example files stay tracked.
+docker/prometheus/web.yml
+docker/prometheus/secrets/
 docker/prometheus-otlp/web.yml
-docker/prometheus-otlp/secrets/*
-!docker/prometheus-otlp/secrets/*.example
 
 # OpenSearch data
 /data/

@@ -269,6 +269,8 @@ variable. A value that is set but still a placeholder is caught by
 | `UNIFI_PASS` | The UniFi controller account unifi-poller logs in with | Compose refuses to run |
 | `PROMETHEUS_OTLP_SENDER_PASSWORD` | Basic-auth account `sender` for OTLP senders on the `prometheus-otlp` receiver | `check-env.sh` fails; the render script exits with an error |
 | `PROMETHEUS_OTLP_GRAFANA_PASSWORD` | Grafana's account `grafana` on `prometheus-otlp` | Compose refuses to run |
+| `PROMETHEUS_GRAFANA_PASSWORD` | Grafana's account `grafana` on the SIEM Prometheus (9090 now requires basic auth) | Compose refuses to run |
+| `PROMETHEUS_SELF_PASSWORD` | Account `self` on the SIEM Prometheus: its own scrape, and operator queries or reload | `check-env.sh` fails; the render script exits with an error |
 | `PROMETHEUS_OTLP_SCRAPE_PASSWORD` | Account `scrape` the main Prometheus uses to scrape `prometheus-otlp` | `check-env.sh` fails; the render script exits with an error |
 
 **Client-side secrets (environment, not the stack `.env`).** The deploy scripts
@@ -358,6 +360,8 @@ stops with a message naming the missing variable.
    PROMETHEUS_OTLP_SENDER_PASSWORD=   # OTLP receiver accounts; then run scripts/render-prometheus-web-config.sh
    PROMETHEUS_OTLP_GRAFANA_PASSWORD=
    PROMETHEUS_OTLP_SCRAPE_PASSWORD=
+   PROMETHEUS_GRAFANA_PASSWORD=       # basic auth on the SIEM Prometheus (9090)
+   PROMETHEUS_SELF_PASSWORD=
    # optional
    BIND_ADDR=127.0.0.1
    INGEST_BIND_ADDR=127.0.0.1

@@ -38,12 +38,14 @@ jobs:
         cp -r docker/prometheus/. "$stage/"
         for f in "$stage"/targets/*.example.json; do cp "$f" "${f%.example.json}.json"; done
         # promtool runs as nobody in the container; mktemp dirs are 0700
-        mkdir -p "$stage/secrets" && cp docker/prometheus-otlp/secrets/otlp-scrape-password.example "$stage/secrets/otlp-scrape-password"
+        mkdir -p "$stage/secrets" && for n in self-scrape otlp-scrape; do echo ci-only > "$stage/secrets/$n-password"; done && cp "$stage/web.yml.example" "$stage/web.yml"
         chmod -R a+rX "$stage"
         docker run --rm --entrypoint promtool -v "$stage":/etc/prometheus:ro \
           prom/prometheus:v3.10.0 check config /etc/prometheus/prometheus.yml
         docker run --rm --entrypoint /bin/sh -v "$stage":/etc/prometheus:ro \
           prom/prometheus:v3.10.0 -c 'promtool check rules /etc/prometheus/rules/*.yml'
+        docker run --rm --entrypoint promtool -v "$stage":/etc/prometheus:ro \
+          prom/prometheus:v3.10.0 check web-config /etc/prometheus/web.yml
         # the OTLP receiver instance: its config (window, otlp block) and its web config
         otlp=$(mktemp -d)
         cp -r docker/prometheus-otlp/. "$otlp/"

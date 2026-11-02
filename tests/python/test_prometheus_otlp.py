@@ -19,6 +19,8 @@ MAIN_PROM_YML = REPO_ROOT / "docker" / "prometheus" / "prometheus.yml"
 OTLP_DIR = REPO_ROOT / "docker" / "prometheus-otlp"
 OTLP_YML = OTLP_DIR / "prometheus.yml"
 WEB_EXAMPLE = OTLP_DIR / "web.yml.example"
+MAIN_WEB_EXAMPLE = REPO_ROOT / "docker" / "prometheus" / "web.yml.example"
+RULES = sorted((REPO_ROOT / "docker" / "prometheus" / "rules").glob("*.yml"))
 DOC = REPO_ROOT / "docs" / "prometheus-otlp.md"
 README = REPO_ROOT / "README.md"
 ENV_EXAMPLE = REPO_ROOT / ".env.example"
@@ -64,11 +66,37 @@ def test_only_the_dedicated_instance_has_the_receiver():
     assert services_with(_services(), OTLP_FLAG) == ["prometheus-otlp"]
 
 
-def test_main_prometheus_unchanged_by_the_receiver():
+def test_main_prometheus_has_no_receiver_and_requires_auth():
     main = _services()["prometheus"]
     assert OTLP_FLAG not in main["command"]
-    assert not any("web.config.file" in c for c in main["command"])
+    assert "--web.config.file=/etc/prometheus/web.yml" in main["command"]
     assert main["ports"] == ["${BIND_ADDR:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090"]
+    assert "./prometheus/web.yml:/etc/prometheus/web.yml:ro" in main["volumes"]
+
+
+def unauthenticated_lifecycle(services):
+    """Services that expose the lifecycle or admin API without a web config."""
+    return sorted(
+        n for n, s in services.items()
+        if any(c.startswith(("--web.enable-lifecycle", "--web.enable-admin-api"))
+               for c in s.get("command", []))
+        and not any(c.startswith("--web.config.file=") for c in s["command"]))
+
+
+def test_lifecycle_guard_bites():
+    bad = {"p": {"command": ["--web.enable-lifecycle"]}}
+    good = {"p": {"command": ["--web.enable-lifecycle", "--web.config.file=/w.yml"]}}
+    assert unauthenticated_lifecycle(bad) == ["p"]
+    assert unauthenticated_lifecycle(good) == []
+    assert unauthenticated_lifecycle(
+        {"p": {"command": ["--web.enable-admin-api"]}}) == ["p"]
+
+
+def test_no_service_has_lifecycle_without_authentication():
+    services = _services()
+    assert any("--web.enable-lifecycle" in s.get("command", []) for s in services.values()), \
+        "nothing collected: expected the SIEM Prometheus to enable lifecycle"
+    assert unauthenticated_lifecycle(services) == []
 
 
 def test_receiver_instance_is_least_privilege():
@@ -99,6 +127,9 @@ def test_main_prometheus_scrapes_receiver_with_its_own_account():
     assert job["basic_auth"]["password_file"] == "/etc/prometheus/secrets/otlp-scrape-password"
     assert job["static_configs"][0]["targets"] == ["prometheus-otlp:9090"]
     assert "storage" not in data and "otlp" not in data
+    own = [j for j in data["scrape_configs"] if j["job_name"] == "prometheus"][0]
+    assert own["basic_auth"]["username"] == "self"
+    assert own["basic_auth"]["password_file"] == "/etc/prometheus/secrets/self-scrape-password"
 
 
 def test_grafana_reads_the_receiver_with_its_own_account():
@@ -107,33 +138,45 @@ def test_grafana_reads_the_receiver_with_its_own_account():
     assert ds["url"] == "http://prometheus-otlp:9090"
     assert ds["basicAuth"] is True and ds["basicAuthUser"] == "grafana"
     assert ds["secureJsonData"]["basicAuthPassword"] == "$PROMETHEUS_OTLP_GRAFANA_PASSWORD"
-    # the SIEM Prometheus datasource is untouched
-    assert "basicAuth" not in sources["prometheus"]
+    # the SIEM Prometheus authenticates too, with its own account
+    siem = sources["prometheus"]
+    assert siem["basicAuth"] is True and siem["basicAuthUser"] == "grafana"
+    assert siem["secureJsonData"]["basicAuthPassword"] == "$PROMETHEUS_GRAFANA_PASSWORD"
     env = _services()["grafana"]["environment"]
-    line = [e for e in env if e.startswith("PROMETHEUS_OTLP_GRAFANA_PASSWORD=")]
-    assert line and ":?" in line[0]
+    for var in ("PROMETHEUS_OTLP_GRAFANA_PASSWORD", "PROMETHEUS_GRAFANA_PASSWORD"):
+        line = [e for e in env if e.startswith(var + "=")]
+        assert line and ":?" in line[0], var
 
 
-def test_web_config_example_has_three_separate_accounts():
+def test_web_config_examples_have_separate_accounts():
     assert sorted(_yaml(WEB_EXAMPLE)["basic_auth_users"]) == ["grafana", "scrape", "sender"]
+    assert sorted(_yaml(MAIN_WEB_EXAMPLE)["basic_auth_users"]) == ["grafana", "self"]
 
 
 def test_rendered_files_are_ignored_by_git():
     ignore = GITIGNORE.read_text(encoding="utf-8")
-    assert "docker/prometheus-otlp/web.yml" in ignore
-    assert "docker/prometheus-otlp/secrets/*" in ignore
+    for path in ("docker/prometheus-otlp/web.yml", "docker/prometheus/web.yml",
+                 "docker/prometheus/secrets/"):
+        assert path in ignore
 
 
 def test_env_example_lists_the_accounts_and_loopback_default():
     text = ENV_EXAMPLE.read_text(encoding="utf-8")
     for name in ("PROMETHEUS_OTLP_SENDER_PASSWORD", "PROMETHEUS_OTLP_GRAFANA_PASSWORD",
-                 "PROMETHEUS_OTLP_SCRAPE_PASSWORD", "PROMETHEUS_OTLP_BIND_ADDR"):
+                 "PROMETHEUS_OTLP_SCRAPE_PASSWORD", "PROMETHEUS_GRAFANA_PASSWORD",
+                 "PROMETHEUS_SELF_PASSWORD", "PROMETHEUS_OTLP_BIND_ADDR"):
         assert name in text
 
 
 # --- render script: private modes, separate secrets ----------------------------
 
-SENDER, GRAFANA, SCRAPE = "Zx9-unique-sender", "Zx9-unique-grafana", "Zx9-unique-scrape"
+PASSWORDS = {
+    "PROMETHEUS_OTLP_SENDER_PASSWORD": "Zx9-unique-sender",
+    "PROMETHEUS_OTLP_GRAFANA_PASSWORD": "Zx9-unique-otlp-grafana",
+    "PROMETHEUS_OTLP_SCRAPE_PASSWORD": "Zx9-unique-otlp-scrape",
+    "PROMETHEUS_GRAFANA_PASSWORD": "Zx9-unique-grafana",
+    "PROMETHEUS_SELF_PASSWORD": "Zx9-unique-self",
+}
 
 
 @pytest.fixture()
@@ -153,17 +196,15 @@ def render(tmp_path):
     base.mkdir()
 
     def run(**extra):
-        env = {"PATH": f"{stub_dir}:/usr/bin:/bin", "HOME": str(tmp_path),
-               "PROMETHEUS_OTLP_SENDER_PASSWORD": SENDER,
-               "PROMETHEUS_OTLP_GRAFANA_PASSWORD": GRAFANA,
-               "PROMETHEUS_OTLP_SCRAPE_PASSWORD": SCRAPE}
+        env = {"PATH": f"{stub_dir}:/usr/bin:/bin", "HOME": str(tmp_path), **PASSWORDS}
         env.update(extra)
         return subprocess.run(["bash", str(RENDER), str(base)], env=env, text=True,
                               capture_output=True, stdin=subprocess.DEVNULL, timeout=30)
     run.out = base / "prometheus-otlp"
+    run.main = base / "prometheus"
     yield run
     # the script leaves the secrets directory 0500; reopen it so pytest can clean up
-    secrets = run.out / "secrets"
+    secrets = run.main / "secrets"
     if secrets.exists():
         secrets.chmod(0o700)
 
@@ -178,26 +219,35 @@ def test_render_refuses_to_write_a_readable_secret_when_unprivileged(render):
     proc = render()  # default owner uid is 65534, which is not us
     assert proc.returncode != 0
     assert "refusing" in proc.stderr
-    assert not render.out.exists(), "nothing may be written before the privilege check"
+    assert not render.out.exists() and not render.main.exists(), \
+        "nothing may be written before the privilege check"
 
 
 def test_render_modes_are_private_and_secrets_stay_off_disk(render):
     proc = render(PROMETHEUS_FILE_UID=str(os.geteuid()))
     assert proc.returncode == 0, proc.stderr
-    web, pw, secrets = (render.out / "web.yml",
-                        render.out / "secrets" / "otlp-scrape-password",
-                        render.out / "secrets")
-    assert mode(web) == 0o400 and mode(pw) == 0o400
-    assert mode(secrets) == 0o500
-    for path in (web, pw, secrets):
+    secrets = render.main / "secrets"
+    web_main, web_otlp = render.main / "web.yml", render.out / "web.yml"
+    plain = {secrets / "self-scrape-password": PASSWORDS["PROMETHEUS_SELF_PASSWORD"],
+             secrets / "otlp-scrape-password": PASSWORDS["PROMETHEUS_OTLP_SCRAPE_PASSWORD"]}
+    for path in (web_main, web_otlp, *plain):
+        assert mode(path) == 0o400, path
         assert path.stat().st_uid == os.geteuid()
-    # the scrape password must be plain (Prometheus sends it); the sender and
-    # Grafana passwords are never written, and web.yml holds hashes only
-    assert pw.read_text(encoding="utf-8") == SCRAPE
-    on_disk = web.read_text(encoding="utf-8") + pw.read_text(encoding="utf-8")
-    assert SENDER not in on_disk and GRAFANA not in on_disk
-    assert SCRAPE not in web.read_text(encoding="utf-8")
-    assert sorted(yaml.safe_load(web.read_text(encoding="utf-8"))["basic_auth_users"]) == \
+    assert mode(secrets) == 0o500 and secrets.stat().st_uid == os.geteuid()
+    for path, value in plain.items():
+        assert path.read_text(encoding="utf-8") == value
+    # only the two scrape passwords are written in plain text; the rest never
+    # reach disk, and the web configs hold hashes only
+    written = "".join(p.read_text(encoding="utf-8") for p in (web_main, web_otlp, *plain))
+    for name in ("PROMETHEUS_OTLP_SENDER_PASSWORD", "PROMETHEUS_OTLP_GRAFANA_PASSWORD",
+                 "PROMETHEUS_GRAFANA_PASSWORD"):
+        assert PASSWORDS[name] not in written, name
+    for path in (web_main, web_otlp):
+        text = path.read_text(encoding="utf-8")
+        assert not any(v in text for v in PASSWORDS.values())
+    assert sorted(yaml.safe_load(web_main.read_text(encoding="utf-8"))["basic_auth_users"]) == \
+        ["grafana", "self"]
+    assert sorted(yaml.safe_load(web_otlp.read_text(encoding="utf-8"))["basic_auth_users"]) == \
         ["grafana", "scrape", "sender"]
 
 
@@ -208,8 +258,9 @@ def test_render_can_be_rerun(render):
 
 def test_render_rejects_shared_or_placeholder_passwords(render):
     own = {"PROMETHEUS_FILE_UID": str(os.geteuid())}
-    assert render(PROMETHEUS_OTLP_GRAFANA_PASSWORD=SENDER, **own).returncode != 0
-    assert render(PROMETHEUS_OTLP_SCRAPE_PASSWORD="changeme", **own).returncode != 0
+    shared = render(PROMETHEUS_OTLP_GRAFANA_PASSWORD=PASSWORDS["PROMETHEUS_OTLP_SENDER_PASSWORD"], **own)
+    assert shared.returncode != 0
+    assert render(PROMETHEUS_SELF_PASSWORD="changeme", **own).returncode != 0
     assert not (render.out / "web.yml").exists()
 
 
@@ -238,3 +289,35 @@ def test_readme_links_doc_and_names_the_bind_variable():
     text = README.read_text(encoding="utf-8")
     assert "docs/prometheus-otlp.md" in text
     assert "PROMETHEUS_OTLP_BIND_ADDR" in text
+
+
+# --- alert rules are scoped to their scrape job -----------------------------------
+
+JOB_MATCHER = re.compile(r"\bjob\s*(=~|=)\s*\"")
+
+
+def unscoped_alerts(rule_files):
+    bad = []
+    for path in rule_files:
+        for group in yaml.safe_load(path.read_text(encoding="utf-8"))["groups"]:
+            for rule in group["rules"]:
+                if "alert" in rule and not JOB_MATCHER.search(rule["expr"]):
+                    bad.append(rule["alert"])
+    return bad
+
+
+def test_scope_guard_bites(tmp_path):
+    f = tmp_path / "r.yml"
+    f.write_text("groups:\n- name: g\n  rules:\n  - alert: A\n    expr: foo > 1\n"
+                 "  - alert: B\n    expr: foo{job=\"x\"} > 1\n", encoding="utf-8")
+    assert unscoped_alerts([f]) == ["A"]
+
+
+def test_every_alert_rule_selects_a_scrape_job():
+    assert RULES, "no rule files collected"
+    assert unscoped_alerts(RULES) == []
+
+
+def test_rule_comment_does_not_claim_a_label_proves_origin():
+    text = "\n".join(p.read_text(encoding="utf-8") for p in RULES)
+    assert "NOT proof of origin" in text

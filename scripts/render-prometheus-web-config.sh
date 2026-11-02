@@ -2,17 +2,21 @@
 # =============================================================================
 # render-prometheus-web-config.sh - Render the OTLP receiver's basic-auth files
 # =============================================================================
-# Reads three passwords from the environment or .env (one per account, so each
-# can be rotated or revoked alone):
-#   PROMETHEUS_OTLP_SENDER_PASSWORD   user "sender"  (OTLP senders)
-#   PROMETHEUS_OTLP_GRAFANA_PASSWORD  user "grafana" (Grafana reads)
-#   PROMETHEUS_OTLP_SCRAPE_PASSWORD   user "scrape"  (SIEM Prometheus scrape)
+# Reads five passwords from the environment or .env, one per account, so each
+# can be rotated or revoked alone:
+#   SIEM Prometheus (9090):  PROMETHEUS_GRAFANA_PASSWORD   user "grafana"
+#                            PROMETHEUS_SELF_PASSWORD      user "self"
+#   OTLP receiver (9091):    PROMETHEUS_OTLP_SENDER_PASSWORD   user "sender"
+#                            PROMETHEUS_OTLP_GRAFANA_PASSWORD  user "grafana"
+#                            PROMETHEUS_OTLP_SCRAPE_PASSWORD   user "scrape"
 #
-# Writes (git-ignored), only bcrypt hashes except for the one file Prometheus
-# needs in plain text to authenticate its own scrape:
-#   docker/prometheus-otlp/web.yml                       bcrypt hashes
-#   docker/prometheus-otlp/secrets/otlp-scrape-password  scrape password
-# The sender and Grafana passwords are never written to disk by this script.
+# Writes (git-ignored): bcrypt hashes, plus the two passwords Prometheus must
+# hold in plain text to authenticate its own scrapes:
+#   docker/prometheus/web.yml                            hashes (grafana, self)
+#   docker/prometheus-otlp/web.yml                       hashes (sender, grafana, scrape)
+#   docker/prometheus/secrets/self-scrape-password       "self" password
+#   docker/prometheus/secrets/otlp-scrape-password       "scrape" password
+# The other passwords are never written to disk by this script.
 #
 # Permissions: the files are owned by the container user (uid 65534), mode 0400,
 # and the secrets directory is 0500, so no other user can read them. That needs
@@ -34,7 +38,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TARGET_BASE="${1:-${REPO_DIR}/docker}"
-OUT_DIR="${TARGET_BASE}/prometheus-otlp"
+MAIN_DIR="${TARGET_BASE}/prometheus"
+OTLP_DIR="${TARGET_BASE}/prometheus-otlp"
 # The uid the Prometheus container runs as. Overridable only so the test can
 # run unprivileged as its own uid; the mode rules do not change.
 OWNER_UID="${PROMETHEUS_FILE_UID:-65534}"
@@ -79,31 +84,46 @@ hash_for() { # <user> <password>; prints the bcrypt hash only
 }
 
 sender_pw="$(read_secret PROMETHEUS_OTLP_SENDER_PASSWORD)"
-grafana_pw="$(read_secret PROMETHEUS_OTLP_GRAFANA_PASSWORD)"
-scrape_pw="$(read_secret PROMETHEUS_OTLP_SCRAPE_PASSWORD)"
-if [ "$sender_pw" = "$grafana_pw" ] || [ "$sender_pw" = "$scrape_pw" ] || [ "$grafana_pw" = "$scrape_pw" ]; then
-    echo "render-prometheus-web-config: the three passwords must differ (separate accounts)" >&2
+otlp_grafana_pw="$(read_secret PROMETHEUS_OTLP_GRAFANA_PASSWORD)"
+otlp_scrape_pw="$(read_secret PROMETHEUS_OTLP_SCRAPE_PASSWORD)"
+grafana_pw="$(read_secret PROMETHEUS_GRAFANA_PASSWORD)"
+self_pw="$(read_secret PROMETHEUS_SELF_PASSWORD)"
+all_pw=("$sender_pw" "$otlp_grafana_pw" "$otlp_scrape_pw" "$grafana_pw" "$self_pw")
+if [ "$(printf '%s\n' "${all_pw[@]}" | sort -u | wc -l)" -ne "${#all_pw[@]}" ]; then
+    echo "render-prometheus-web-config: the five passwords must all differ (separate accounts)" >&2
     exit 1
 fi
 
 umask 077
-mkdir -p "${OUT_DIR}/secrets"
+mkdir -p "${MAIN_DIR}/secrets" "${OTLP_DIR}"
 # A previous run leaves the directory 0500 and the files 0400; reopen to rewrite.
-chmod 0700 "${OUT_DIR}/secrets"
-rm -f "${OUT_DIR}/web.yml" "${OUT_DIR}/secrets/otlp-scrape-password"
+chmod 0700 "${MAIN_DIR}/secrets"
+rm -f "${MAIN_DIR}/web.yml" "${OTLP_DIR}/web.yml" \
+    "${MAIN_DIR}/secrets/self-scrape-password" "${MAIN_DIR}/secrets/otlp-scrape-password"
+
+HDR="# Rendered by scripts/render-prometheus-web-config.sh - do not commit."
 {
-    echo "# Rendered by scripts/render-prometheus-web-config.sh - do not commit."
+    echo "$HDR"
+    echo "basic_auth_users:"
+    printf '  grafana: %s\n' "$(hash_for grafana "$grafana_pw")"
+    printf '  self: %s\n' "$(hash_for self "$self_pw")"
+} > "${MAIN_DIR}/web.yml"
+{
+    echo "$HDR"
     echo "basic_auth_users:"
     printf '  sender: %s\n' "$(hash_for sender "$sender_pw")"
-    printf '  grafana: %s\n' "$(hash_for grafana "$grafana_pw")"
-    printf '  scrape: %s\n' "$(hash_for scrape "$scrape_pw")"
-} > "${OUT_DIR}/web.yml"
-printf '%s' "$scrape_pw" > "${OUT_DIR}/secrets/otlp-scrape-password"
+    printf '  grafana: %s\n' "$(hash_for grafana "$otlp_grafana_pw")"
+    printf '  scrape: %s\n' "$(hash_for scrape "$otlp_scrape_pw")"
+} > "${OTLP_DIR}/web.yml"
+printf '%s' "$self_pw" > "${MAIN_DIR}/secrets/self-scrape-password"
+printf '%s' "$otlp_scrape_pw" > "${MAIN_DIR}/secrets/otlp-scrape-password"
 
-chown "${OWNER_UID}:${OWNER_UID}" "${OUT_DIR}/secrets" "${OUT_DIR}/web.yml" "${OUT_DIR}/secrets/otlp-scrape-password" 2>/dev/null \
+files=("${MAIN_DIR}/web.yml" "${OTLP_DIR}/web.yml"
+    "${MAIN_DIR}/secrets/self-scrape-password" "${MAIN_DIR}/secrets/otlp-scrape-password")
+chown "${OWNER_UID}:${OWNER_UID}" "${MAIN_DIR}/secrets" "${files[@]}" 2>/dev/null \
     || [ "$(id -u)" -eq "$OWNER_UID" ]
-chmod 0400 "${OUT_DIR}/web.yml" "${OUT_DIR}/secrets/otlp-scrape-password"
-chmod 0500 "${OUT_DIR}/secrets"
+chmod 0400 "${files[@]}"
+chmod 0500 "${MAIN_DIR}/secrets"
 
-echo "rendered ${OUT_DIR}/web.yml and ${OUT_DIR}/secrets/otlp-scrape-password (owner uid ${OWNER_UID}, mode 0400)"
+echo "rendered ${#files[@]} files under ${TARGET_BASE} (owner uid ${OWNER_UID}, mode 0400)"
 echo "Apply: docker compose up -d prometheus prometheus-otlp grafana"

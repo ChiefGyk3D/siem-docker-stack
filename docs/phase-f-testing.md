@@ -174,8 +174,8 @@ docker logs logstash --tail 20   # no auth/TLS errors
 # Exporter metrics visible:
 docker exec prometheus wget -qO- http://elasticsearch-exporter:9114/metrics | grep -m3 elasticsearch_cluster_health
 # Prometheus sees its targets and rules:
-curl -s localhost:9090/api/v1/targets | jq '.data.activeTargets[] | {job: .labels.job, health: .health}'
-curl -s localhost:9090/api/v1/rules | jq '.data.groups[].name'
+curl -s -u "self:$PROMETHEUS_SELF_PASSWORD" localhost:9090/api/v1/targets | jq '.data.activeTargets[] | {job: .labels.job, health: .health}'
+curl -s -u "self:$PROMETHEUS_SELF_PASSWORD" localhost:9090/api/v1/rules | jq '.data.groups[].name'
 # Alertmanager healthy (loopback only):
 curl -s http://127.0.0.1:9093/-/healthy
 ```

@@ -35,6 +35,10 @@ rule_files:
 
 scrape_configs:
   - job_name: 'prometheus'
+    # Prometheus requires basic auth (web.yml); account "self".
+    basic_auth:
+      username: self
+      password_file: /etc/prometheus/secrets/self-scrape-password
     static_configs:
       - targets: ['localhost:9090']
 

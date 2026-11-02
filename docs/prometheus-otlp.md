@@ -21,7 +21,8 @@ until you widen it on purpose.
 | No `--web.enable-lifecycle` and no admin API on the instance | A sender credential cannot reload or stop anything. Config changes take a container restart. |
 | Three accounts: `sender`, `grafana`, `scrape` | Each is rotated or revoked on its own. Prometheus has no per-user permissions, so the separation limits blast radius and lets you cut one off; it is not an authorization system. |
 | No scrape jobs and no rules on the instance | It only stores and serves what was pushed. |
-| The SIEM Prometheus (9090) is unchanged | Same port, same lifecycle behavior as before; it only gains a scrape job for the receiver's own health. |
+| The SIEM Prometheus (9090) now requires basic auth too (accounts `grafana` and `self`) | It keeps `--web.enable-lifecycle` (used for config reload), so it must never answer unauthenticated. Grafana, its own scrape and operator reloads use their own accounts. A test fails if any service enables lifecycle or the admin API without a web config. |
+| Alert rules select metrics by `job` | Hygiene only: a label does not prove where a series came from, because a sender can set any label. Pushed series are kept out of the rules' database altogether, which is what actually protects the alerts. |
 
 Files: `docker/prometheus-otlp/prometheus.yml` (window and OTLP translation),
 the `prometheus-otlp` service in `docker/docker-compose.yml`, the Grafana data
@@ -59,20 +60,25 @@ instance; do not raise it speculatively.
 
 ### Credentials and file permissions
 
-Set `PROMETHEUS_OTLP_SENDER_PASSWORD`, `PROMETHEUS_OTLP_GRAFANA_PASSWORD` and
-`PROMETHEUS_OTLP_SCRAPE_PASSWORD` in `.env` (three different strong values;
+Set `PROMETHEUS_OTLP_SENDER_PASSWORD`, `PROMETHEUS_OTLP_GRAFANA_PASSWORD`,
+`PROMETHEUS_OTLP_SCRAPE_PASSWORD`, `PROMETHEUS_GRAFANA_PASSWORD` and
+`PROMETHEUS_SELF_PASSWORD` in `.env` (five different strong values;
 `bash scripts/check-env.sh` rejects placeholders). Then run, as root:
 
 ```bash
 sudo -E bash scripts/render-prometheus-web-config.sh /opt/siem
 ```
 
-The script writes bcrypt hashes to `docker/prometheus-otlp/web.yml` and the
-scrape password (the one value Prometheus must hold in plain text, to
-authenticate its own scrape) to `docker/prometheus-otlp/secrets/`. Files are
+The script writes bcrypt hashes to `docker/prometheus/web.yml` and
+`docker/prometheus-otlp/web.yml`, and the two scrape passwords (the only values
+Prometheus must hold in plain text, to authenticate its own scrapes) to
+`docker/prometheus/secrets/`. Files are
 owned by the container user (65534), mode 0400, directory 0500, so no other
 user can read them. It refuses to run unprivileged rather than leave a readable
 secret. The sender and Grafana passwords are never written by the script.
+The SIEM Prometheus now asks for a password too: use
+`curl -u "self:$PROMETHEUS_SELF_PASSWORD" ...` for API queries and for
+`POST /-/reload`.
 
 Rotate an account by changing its value in `.env`, re-running the script and
 restarting the affected containers.
@@ -112,7 +118,7 @@ Defense in depth: also limit the source network at the edge firewall (see
 Apply in this order so the port is never open without the allow-list. Nothing
 here is applied by merging; run each step on the SIEM host on purpose.
 
-1. Set the three passwords in `.env` and run the render script (above).
+1. Set the five passwords in `.env` and run the render script (above).
 2. Create the data directory: `sudo mkdir -p /data/hot/prometheus-otlp && sudo chown 65534:65534 /data/hot/prometheus-otlp`
    (`scripts/01-disk-setup.sh` does this on a new host).
 3. Add the firewall rules above, with the real sender addresses.
@@ -166,8 +172,10 @@ curl -sS -o /dev/null -w '%{http_code}\n' -X POST -u "sender:${PROMETHEUS_OTLP_S
 curl -sS -u "scrape:${PROMETHEUS_OTLP_SCRAPE_PASSWORD}" http://127.0.0.1:9091/api/v1/status/config | grep -o 'out_of_order_time_window: [0-9a-z]*'
 ```
 
-Also confirm the `prometheus-otlp` target is up on the SIEM Prometheus and that
-the "Prometheus OTLP" data source tests green in Grafana. Watch
+Also confirm the `prometheus` and `prometheus-otlp` targets are up on the SIEM
+Prometheus and that both Prometheus data sources test green in Grafana. The SIEM
+Prometheus without a password must answer 401:
+`curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9090/-/healthy`. Watch
 `prometheus_tsdb_out_of_order_samples_total` on the receiver: a rate that stays
 above zero means senders still arrive later than the window allows.
 
