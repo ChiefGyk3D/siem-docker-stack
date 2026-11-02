@@ -304,13 +304,19 @@ services:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./prometheus/targets:/etc/prometheus/targets:ro
       - ./prometheus/rules:/etc/prometheus/rules:ro
+    # Loopback unless you widen BIND_ADDR or, for this port only,
+    # PROMETHEUS_BIND_ADDR. The OTLP receiver below has NO authentication:
+    # before widening, firewall the port to approved senders (DOCKER-USER;
+    # see docs/prometheus-otlp.md).
     ports:
-      - "${BIND_ADDR:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090"
+      - "${PROMETHEUS_BIND_ADDR:-${BIND_ADDR:-127.0.0.1}}:${PROMETHEUS_PORT:-9090}:9090"
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
       - '--storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-365d}'
       - '--web.enable-lifecycle'
+      # OTLP metrics push (POST /api/v1/otlp/v1/metrics). No authentication.
+      - '--web.enable-otlp-receiver'
     networks:
       - siem-net
     user: "65534"

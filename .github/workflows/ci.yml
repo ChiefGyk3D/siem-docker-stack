@@ -40,9 +40,9 @@ jobs:
         # promtool runs as nobody in the container; mktemp dirs are 0700
         chmod -R a+rX "$stage"
         docker run --rm --entrypoint promtool -v "$stage":/etc/prometheus:ro \
-          prom/prometheus:v2.53.0 check config /etc/prometheus/prometheus.yml
+          prom/prometheus:v3.10.0 check config /etc/prometheus/prometheus.yml
         docker run --rm --entrypoint /bin/sh -v "$stage":/etc/prometheus:ro \
-          prom/prometheus:v2.53.0 -c 'promtool check rules /etc/prometheus/rules/*.yml'
+          prom/prometheus:v3.10.0 -c 'promtool check rules /etc/prometheus/rules/*.yml'
         docker run --rm --entrypoint amtool \
           -v "$PWD/docker/alertmanager/alertmanager.yml":/tmp/am.yml:ro \
           prom/alertmanager:v0.27.0 check-config /tmp/am.yml

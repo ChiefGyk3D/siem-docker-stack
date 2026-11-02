@@ -107,7 +107,7 @@ This stack was built and tested on the following hardware. You do **not** need i
 | **Wazuh Dashboard** | 443 | EDR/SIEM dashboard (HTTPS) |
 | **Wazuh API** | 55000 | Wazuh RESTful API |
 | **N8N** | 80 | SOAR orchestrator — alert triage, enrichment, Discord routing |
-| **Prometheus** | 9090 | Metrics scraping & alerting |
+| **Prometheus** | 9090 | Metrics scraping & alerting; OTLP metrics receiver (no authentication, see [docs/prometheus-otlp.md](docs/prometheus-otlp.md)) |
 | **Alertmanager** | 9093 (loopback) | Independent alert delivery (Prometheus rules → n8n) |
 | **elasticsearch-exporter** | — | OpenSearch cluster/index metrics for Prometheus (internal :9114) |
 | **InfluxDB** | 8086 | Time-series metrics (pfSense, Telegraf, UniFi) — auth enabled |
@@ -297,6 +297,12 @@ otherwise:
 | `BIND_ADDR` | `127.0.0.1` | Management and data UIs/APIs: OpenSearch 9200/9201, OpenSearch Dashboards 5601, Grafana 3000, Prometheus 9090, Wazuh API 55000, Wazuh indexer 9202, Wazuh Dashboard 443 |
 | `INGEST_BIND_ADDR` | `127.0.0.1` | Log and metric ingestion: syslog 514, Logstash 5140/udp and 5044, Wazuh agents 1514/1515, InfluxDB 8086 (pfSense Telegraf writes) |
 | `PORTAINER_BIND_ADDR` | `127.0.0.1` | Portainer 9443 (only when the `portainer` profile is on) |
+| `PROMETHEUS_BIND_ADDR` | `BIND_ADDR` | Prometheus 9090 only, so OTLP senders can reach it without widening the other management ports |
+
+> **Prometheus 9090 now accepts OTLP metrics and has no authentication.**
+> Before you widen `PROMETHEUS_BIND_ADDR` (or `BIND_ADDR`), firewall the port to
+> approved senders with a `DOCKER-USER` rule. Steps, verification and rollback:
+> [docs/prometheus-otlp.md](docs/prometheus-otlp.md).
 
 To expose on purpose, set the variable to one interface address, not
 `0.0.0.0` unless you must, then recreate the stack:
