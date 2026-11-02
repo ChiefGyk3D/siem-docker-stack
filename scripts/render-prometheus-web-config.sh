@@ -23,16 +23,21 @@
 #   docker/prometheus/secrets/otlp-scrape-password       "scrape" password
 # The other passwords are never written to disk by this script.
 #
-# Safety: everything is hashed and validated first; files are staged in a
-# private directory and moved into place, so a failure leaves the previous set
-# untouched. Target directories must be real directories (no symlinks, no group
+# Safety: everything is hashed and validated first; nothing is touched if that
+# fails. Files are then staged in a private directory and installed one by one. Target directories must be real directories (no symlinks, no group
 # or world write). Files end up owned by the container user (uid 65534), mode
 # 0400, secrets and tls directories 0500, so no other user can read them. That
 # needs root, so the script refuses to run otherwise. Run it on the deployed
 # copy (/opt/siem) as: sudo -E bash <this script> /opt/siem
 #
 # Each password goes to htpasswd on stdin, never on a command line. Needs
-# htpasswd (apt install apache2-utils) or docker (uses the httpd image).
+# htpasswd (apt install apache2-utils); no container image ever sees a password.
+#
+# Trust: target directories must be owned by root or by the account that ran
+# sudo (that account can become root anyway), never by anyone else. Staging
+# happens in a private root-owned directory outside the target tree. A process
+# running as the deploy account itself could still race the final placement, so
+# keep the deployed tree out of reach of other software running as that account.
 #
 # After rendering: docker compose up -d prometheus prometheus-otlp grafana
 # =============================================================================
@@ -63,11 +68,21 @@ if [ "$(id -u)" -ne 0 ] && [ "$(id -u)" -ne "$OWNER_UID" ]; then
 fi
 
 # --- path safety: real directories only, not writable by group or others ------
+trusted_owner() { # <path>: root or the sudo-invoking account (or ourselves when unprivileged)
+    local u
+    u="$(stat -c '%u' "$1")"
+    if [ "$(id -u)" -eq 0 ]; then
+        [ "$u" -eq 0 ] || { [ -n "${SUDO_UID:-}" ] && [ "$u" -eq "$SUDO_UID" ]; }
+    else
+        [ "$u" -eq "$(id -u)" ]
+    fi
+}
 check_dir() { # <dir>
     local d="$1" m
     [ ! -L "$d" ] || die "${d} is a symlink; refusing to write through it"
     if [ -e "$d" ]; then
         [ -d "$d" ] || die "${d} exists and is not a directory"
+        trusted_owner "$d" || die "${d} is owned by uid $(stat -c '%u' "$d"), which is not trusted; refusing"
         m="$(stat -c '%a' "$d")"
         [ $((8#${m} & 8#022)) -eq 0 ] || die "${d} is group or world writable (mode ${m}); refusing"
     fi
@@ -81,6 +96,7 @@ check_file_target() { # <path>: not a symlink; an empty directory stub from Dock
 }
 [ ! -L "$TARGET_BASE" ] || die "${TARGET_BASE} is a symlink; refusing"
 [ -d "$TARGET_BASE" ] || die "${TARGET_BASE} is not a directory"
+trusted_owner "$TARGET_BASE" || die "${TARGET_BASE} is owned by uid $(stat -c '%u' "$TARGET_BASE"), which is not trusted; refusing"
 check_dir "$MAIN_DIR"
 check_dir "$OTLP_DIR"
 check_dir "${MAIN_DIR}/secrets"
@@ -110,6 +126,11 @@ read_secret() { # <NAME>; same quote handling as check-env.sh
         die "set ${name} to a strong unique value in .env"
     fi
     case "$value" in *'$'*) die "${name} must not contain a dollar sign (Grafana and compose expand it)" ;; esac
+    # A strict subset that .env parsers agree on: no whitespace (CR included),
+    # backslash, quote or backtick inside the value.
+    case "$value" in
+        *[[:space:]]* | *'\'* | *'"'* | *"'"* | *'`'*) die "${name} must not contain whitespace, backslashes, quotes or backticks" ;;
+    esac
     [ "$(printf '%s' "$value" | LC_ALL=C wc -c)" -le 72 ] || die "${name} is longer than 72 bytes (bcrypt ignores the rest)"
     printf '%s' "$value"
 }
@@ -118,10 +139,8 @@ hash_for() { # <user> <password>; prints the bcrypt hash only, fails on any erro
     local out
     if command -v htpasswd >/dev/null 2>&1; then
         out="$(printf '%s' "$2" | htpasswd -niBC 12 "$1")" || return 1
-    elif command -v docker >/dev/null 2>&1; then
-        out="$(printf '%s' "$2" | docker run --rm -i httpd:2.4 htpasswd -niBC 12 "$1")" || return 1
     else
-        echo "render-prometheus-web-config: need htpasswd (apt install apache2-utils) or docker" >&2
+        echo "render-prometheus-web-config: need htpasswd (apt install apache2-utils)" >&2
         return 1
     fi
     out="${out#"$1":}"
@@ -149,8 +168,11 @@ h_self="$(hash_for self "$self_pw")" || die "hashing failed for the self account
 # --- stage privately, then move into place -----------------------------------
 umask 077
 mkdir -p "${MAIN_DIR}/secrets" "${OTLP_DIR}/tls"
-STAGE="$(mktemp -d "${MAIN_DIR}/.render.XXXXXX")"
-trap 'rm -rf "$STAGE"' EXIT
+# The stage lives in a private directory we create ourselves (0700, ours) outside
+# the target tree, so nobody who can write the tree can swap staged files.
+STAGE_ROOT="$(mktemp -d "${XDG_RUNTIME_DIR:-/run}/prom-render.XXXXXX" 2>/dev/null || mktemp -d)"
+STAGE="${STAGE_ROOT}"
+trap 'rm -rf "$STAGE_ROOT"' EXIT
 HDR="# Rendered by scripts/render-prometheus-web-config.sh - do not commit."
 {
     echo "$HDR"
@@ -172,26 +194,40 @@ HDR="# Rendered by scripts/render-prometheus-web-config.sh - do not commit."
 printf '%s' "$self_pw" > "${STAGE}/self-scrape-password"
 printf '%s' "$otlp_scrape_pw" > "${STAGE}/otlp-scrape-password"
 
-own() { # <paths...>: owner uid, no symlink following
-    chown -h "${OWNER_UID}:${OWNER_UID}" "$@" 2>/dev/null || [ "$(id -u)" -eq "$OWNER_UID" ]
+own() { # <paths...>: owner uid, no symlink following; a failure stops the script
+    if ! chown -h "${OWNER_UID}:${OWNER_UID}" "$@" 2>/dev/null; then
+        [ "$(id -u)" -eq "$OWNER_UID" ] || die "could not change the owner of $* to uid ${OWNER_UID}"
+    fi
 }
-for f in main-web.yml otlp-web.yml self-scrape-password otlp-scrape-password; do
-    own "${STAGE}/${f}" && chmod 0400 "${STAGE}/${f}"
-done
+verify_owner() { # <mode> <paths...>: final owner and mode check after placement
+    local want="$1" f
+    shift
+    for f in "$@"; do
+        [ ! -L "$f" ] || die "${f} became a symlink; refusing"
+        [ "$(stat -c '%u' "$f")" -eq "$OWNER_UID" ] || die "${f} is not owned by uid ${OWNER_UID}"
+        [ "$(stat -c '%a' "$f")" = "$want" ] || die "${f} does not have mode ${want}"
+    done
+}
 
-# Reopen the directories a previous run closed, move the new files in
-# (rename replaces atomically), then close them again.
+# Reopen the directories a previous run closed, install the new files (each
+# install replaces the destination file, never following a symlink at the leaf),
+# then close them again. The set is not atomic: if a step fails midway, re-run.
 chmod 0700 "${MAIN_DIR}/secrets" "${OTLP_DIR}/tls"
 for pair in "main-web.yml ${MAIN_DIR}/web.yml" "otlp-web.yml ${OTLP_DIR}/web.yml" \
     "self-scrape-password ${MAIN_DIR}/secrets/self-scrape-password" \
     "otlp-scrape-password ${MAIN_DIR}/secrets/otlp-scrape-password"; do
     check_file_target "${pair#* }"
-    mv -T "${STAGE}/${pair%% *}" "${pair#* }"
+    install -m 0400 -T "${STAGE}/${pair%% *}" "${pair#* }"
+    own "${pair#* }"
 done
 own "${OTLP_DIR}/tls/server.crt" "${OTLP_DIR}/tls/server.key" "${MAIN_DIR}/secrets" "${OTLP_DIR}/tls"
 chmod 0400 "${OTLP_DIR}/tls/server.key"
 chmod 0444 "${OTLP_DIR}/tls/server.crt"
 chmod 0500 "${MAIN_DIR}/secrets" "${OTLP_DIR}/tls"
+verify_owner 400 "${MAIN_DIR}/web.yml" "${OTLP_DIR}/web.yml" \
+    "${MAIN_DIR}/secrets/self-scrape-password" "${MAIN_DIR}/secrets/otlp-scrape-password" \
+    "${OTLP_DIR}/tls/server.key"
+verify_owner 500 "${MAIN_DIR}/secrets" "${OTLP_DIR}/tls"
 
 echo "rendered 4 files under ${TARGET_BASE} (owner uid ${OWNER_UID}, mode 0400)"
 echo "Apply: docker compose up -d prometheus prometheus-otlp grafana"

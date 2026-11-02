@@ -91,6 +91,31 @@ groups:
           summary: "Prometheus rule evaluation failures"
           description: "Prometheus failed to evaluate alerting/recording rules in the last 5 minutes — 'monitoring the monitoring' is degraded. Check the Prometheus UI → Status → Rules."
 
+  - name: siem-otlp-receiver
+    rules:
+      # The receiver's disk and memory are bounded by retention.size and the
+      # container memory limit, but those trim on a schedule and are not hard
+      # quotas (docs/prometheus-otlp.md). Warn well before the 5GB default.
+      - alert: OtlpReceiverStorageHigh
+        expr: prometheus_tsdb_storage_blocks_bytes{job="prometheus-otlp"} > 4e9
+        for: 15m
+        labels:
+          severity: warning
+          source: siem-health
+        annotations:
+          summary: "OTLP receiver storage is above 4 GB"
+          description: "The prometheus-otlp TSDB is close to its size bound. Check series growth (prometheus_tsdb_head_series) and the approved senders, and the free space on /data/hot."
+
+      - alert: OtlpReceiverDown
+        expr: up{job="prometheus-otlp"} == 0
+        for: 5m
+        labels:
+          severity: warning
+          source: siem-health
+        annotations:
+          summary: "OTLP receiver is not scraped"
+          description: "The SIEM Prometheus cannot scrape prometheus-otlp. Check the container, its certificate (expiry) and the scrape password."
+
   - name: siem-host-disk
     rules:
       # NOTE: node_exporter is not a default service in this stack — these

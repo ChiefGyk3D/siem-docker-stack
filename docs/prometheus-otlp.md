@@ -21,7 +21,7 @@ until you widen it on purpose.
 | No `--web.enable-lifecycle` and no admin API on the instance | A sender credential cannot reload or stop anything. Config changes take a container restart. |
 | Three accounts: `sender`, `grafana`, `scrape` | Each is rotated or revoked on its own. Prometheus has no per-user permissions: see [Account privileges](#account-privileges). |
 | TLS on the receiver (`tls_server_config`, TLS 1.2 or later) | Basic-auth credentials would otherwise cross the network in clear text, and the allow-list does not stop capture on the path. |
-| A disk bound (`--storage.tsdb.retention.size`, 5GB by default) as well as 30 days | Pushed data shares the hot tier with OpenSearch and Wazuh; scrape limits do not apply to pushed data, so a misbehaving sender must not be able to fill the disk. |
+| Bounds: 30 days, `--storage.tsdb.retention.size` (5GB by default), a container memory limit (2g), a storage alert | Pushed data shares the hot tier with OpenSearch and Wazuh, and scrape limits do not apply to pushed data. The size setting is not a hard cap: Prometheus trims old blocks on its own schedule, and the write-ahead log, the in-memory head and compaction scratch are not counted. The memory limit and the `OtlpReceiverStorageHigh` alert (4 GB) limit and warn; for a real guarantee give `/data/hot/prometheus-otlp` its own filesystem or a filesystem project quota. |
 | No scrape jobs and no rules on the instance | It only stores and serves what was pushed. |
 | The SIEM Prometheus (9090) now requires basic auth too (accounts `grafana` and `self`) | It keeps `--web.enable-lifecycle` (used for config reload), so it must never answer unauthenticated. A test fails if any service enables lifecycle or the admin API without a web config. |
 | Alert rules select metrics by `job` | Hygiene only: a label does not prove where a series came from, because a sender can set any label. Pushed series are kept out of the rules' database altogether, which is what actually protects the alerts. |
@@ -94,9 +94,13 @@ as root, **on the deployed copy**:
 sudo -E bash scripts/render-prometheus-web-config.sh /opt/siem
 ```
 
-The script hashes everything first and stages the files privately, so a failure
-leaves the previous set untouched. It refuses symlinked or group- or
-world-writable target directories, and it refuses to run unprivileged. Do not
+The script hashes everything first (nothing is touched if hashing fails), stages
+the files in a private root-owned directory outside the tree, then installs them
+one by one; if a later step fails, re-run it (the set is not atomic). It refuses
+symlinks, group- or world-writable directories and directories owned by anyone
+other than root or the account that ran `sudo`, and it refuses to run
+unprivileged. It needs a local `htpasswd` (`apt install apache2-utils`); no
+container image ever sees a password. Do not
 render in the workstation checkout: `scripts/03-deploy.sh` protects the rendered
 files on the server from `rsync --delete` and stops if they are missing.
 
@@ -123,33 +127,55 @@ container only. For a self-signed pair (replace the names; keep the key private)
 ```bash
 sudo mkdir -p /opt/siem/prometheus-otlp/tls
 sudo openssl req -x509 -newkey rsa:2048 -nodes -days 365 -subj "/CN=SIEM_HOST" \
-  -addext "subjectAltName=DNS:SIEM_HOST,IP:192.0.2.1" \
+  -addext "subjectAltName=DNS:SIEM_HOST,DNS:prometheus-otlp,IP:192.0.2.1" \
   -keyout /opt/siem/prometheus-otlp/tls/server.key -out /opt/siem/prometheus-otlp/tls/server.crt
 ```
 
-Copy `server.crt` to each sender as its trust anchor. Grafana and the SIEM
-Prometheus reach the receiver over the Docker network on the same host and do
-not verify this certificate.
+Copy `server.crt` to each sender as its trust anchor. The SIEM Prometheus
+verifies the receiver against this same certificate when it scrapes it (it
+connects as `prometheus-otlp`, which is why that name is in the certificate).
+Grafana's connection does not verify it: Grafana's provisioning takes a CA only
+as inline certificate text, which cannot be passed cleanly through `.env`, so
+that hop (Grafana to the receiver, on the Docker network of the one host)
+does not verify the certificate. Treat that as a known limit: it leaves the
+Grafana read account exposed to a hostile container on the same network.
+
+The certificate expires (365 days above) and an expired one breaks every sender
+and the SIEM scrape. The `OtlpReceiverDown` alert fires when the scrape fails;
+also check the date now and then:
+
+```bash
+sudo openssl x509 -in /opt/siem/prometheus-otlp/tls/server.crt -noout -enddate
+```
+
+To rotate, replace both files, re-run the render script, restart
+`prometheus-otlp` and copy the new certificate to the senders.
 
 ## Firewall
 
-Only the OTLP senders need to reach the receiver port (9091 unless you set
-`PROMETHEUS_OTLP_PORT`). Grafana and the SIEM Prometheus
+Only the OTLP senders need to reach the receiver port. Grafana and the SIEM Prometheus
 reach the instance over the Docker network, which published-port rules do not
 affect. Use placeholders here; fill in the real sender addresses at apply time.
 The documentation range `192.0.2.0/24` is used below.
 
 ```bash
-# Run on the SIEM host. Replace the example addresses. OTLP_PORT must be the
-# published port, so it follows PROMETHEUS_OTLP_PORT from .env. Matching DNAT'd
-# connections leaves container-to-container traffic alone.
-OTLP_PORT=${PROMETHEUS_OTLP_PORT:-9091}
-sudo iptables -N PROM-OTLP-ALLOW
+# Run on the SIEM host, after the receiver container is up (apply order below).
+# Take the address and port from what Docker actually published, not from the
+# shell or a default, so the rule always guards the real port.
+OTLP_PUB=$(sudo docker port prometheus-otlp 9090/tcp | head -1)
+OTLP_ADDR=${OTLP_PUB%:*}
+OTLP_PORT=${OTLP_PUB##*:}
+echo "guarding $OTLP_ADDR:$OTLP_PORT"
+# Replace the example addresses. Matching DNAT'd connections leaves
+# container-to-container traffic alone. Safe to re-run.
+sudo iptables -N PROM-OTLP-ALLOW 2>/dev/null || sudo iptables -F PROM-OTLP-ALLOW
 sudo iptables -A PROM-OTLP-ALLOW -s 192.0.2.10 -j RETURN    # approved sender 1
 sudo iptables -A PROM-OTLP-ALLOW -s 192.0.2.11 -j RETURN    # approved sender 2
 sudo iptables -A PROM-OTLP-ALLOW -j DROP
-sudo iptables -I DOCKER-USER -p tcp \
-    -m conntrack --ctstate DNAT --ctorigdstport "$OTLP_PORT" -j PROM-OTLP-ALLOW
+sudo iptables -C DOCKER-USER -p tcp -m conntrack --ctstate DNAT \
+    --ctorigdst "$OTLP_ADDR" --ctorigdstport "$OTLP_PORT" -j PROM-OTLP-ALLOW 2>/dev/null ||
+  sudo iptables -I DOCKER-USER -p tcp -m conntrack --ctstate DNAT \
+    --ctorigdst "$OTLP_ADDR" --ctorigdstport "$OTLP_PORT" -j PROM-OTLP-ALLOW
 
 # Check
 sudo iptables -S DOCKER-USER
@@ -176,14 +202,17 @@ here is applied by merging; run each step on the SIEM host on purpose.
 
 1. Create the TLS certificate and set the five passwords in `.env`, then run the
    render script on the server (above).
-2. Provide the TLS files and the data directory: `sudo mkdir -p /data/hot/prometheus-otlp && sudo chown 65534:65534 /data/hot/prometheus-otlp`
+2. Create the data directory: `sudo mkdir -p /data/hot/prometheus-otlp && sudo chown 65534:65534 /data/hot/prometheus-otlp`
    (`scripts/01-disk-setup.sh` does this on a new host).
-3. Add the firewall rules above, with the real sender addresses.
-4. Set `PROMETHEUS_OTLP_BIND_ADDR` in `.env` to the one interface address
-   senders reach (not `0.0.0.0`).
-5. Pull the change and start the receiver; restart Grafana and the SIEM
-   Prometheus so they pick up the new data source and scrape job:
+3. Start the receiver on loopback (the default bind), and restart Grafana and the
+   SIEM Prometheus so they pick up the new data source and scrape job:
    `cd /opt/siem && docker compose up -d prometheus-otlp prometheus grafana`
+4. Add the firewall rules above, with the real sender addresses. They read the
+   port from the running container, so they follow `PROMETHEUS_OTLP_PORT` in `.env`.
+5. Set `PROMETHEUS_OTLP_BIND_ADDR` in `.env` to the one interface address
+   senders reach (not `0.0.0.0`), recreate the receiver
+   (`docker compose up -d prometheus-otlp`) and re-run the firewall snippet so the
+   rule names the new address.
 6. Run [Verify](#verify).
 
 ## Verify
@@ -194,7 +223,8 @@ never type them into shared history.
 1. From an **approved** sender, with the sender password (expect `200`):
 
 ```bash
-OTLP_PORT=${PROMETHEUS_OTLP_PORT:-9091}
+# From the sender: use the receiver's address and port as configured there.
+: "${OTLP_PORT:?set OTLP_PORT to the receiver's published port (docker port prometheus-otlp, on the SIEM host)}"
 now=$(date +%s)000000000
 curl -sS -o /dev/null -w '%{http_code}\n' -X POST -u "sender:${PROMETHEUS_OTLP_SENDER_PASSWORD}" \
   -H 'Content-Type: application/json' \
@@ -225,10 +255,11 @@ effect: stop and fix it before leaving the receiver on.
    use the reload endpoint, and that the settings took effect:
 
 ```bash
-OTLP_PORT=${PROMETHEUS_OTLP_PORT:-9091}
-curl -sS -u "sender:${PROMETHEUS_OTLP_SENDER_PASSWORD}" --cacert /opt/siem/prometheus-otlp/tls/server.crt --resolve SIEM_HOST:${OTLP_PORT}:127.0.0.1 "https://SIEM_HOST:${OTLP_PORT}/api/v1/query?query=otlp_smoke_test" | grep -c otlp-smoke-test
-curl -sS -o /dev/null -w '%{http_code}\n' -X POST -u "sender:${PROMETHEUS_OTLP_SENDER_PASSWORD}" --cacert /opt/siem/prometheus-otlp/tls/server.crt --resolve SIEM_HOST:${OTLP_PORT}:127.0.0.1 https://SIEM_HOST:${OTLP_PORT}/-/reload   # expect 403 or 404, not 200
-curl -sS -u "scrape:${PROMETHEUS_OTLP_SCRAPE_PASSWORD}" --cacert /opt/siem/prometheus-otlp/tls/server.crt --resolve SIEM_HOST:${OTLP_PORT}:127.0.0.1 https://SIEM_HOST:${OTLP_PORT}/api/v1/status/config | grep -o 'out_of_order_time_window: [0-9a-z]*'
+OTLP_PUB=$(sudo docker port prometheus-otlp 9090/tcp | head -1)
+OTLP_ADDR=${OTLP_PUB%:*}; OTLP_PORT=${OTLP_PUB##*:}
+curl -sS -u "sender:${PROMETHEUS_OTLP_SENDER_PASSWORD}" --cacert /opt/siem/prometheus-otlp/tls/server.crt --resolve SIEM_HOST:${OTLP_PORT}:${OTLP_ADDR} "https://SIEM_HOST:${OTLP_PORT}/api/v1/query?query=otlp_smoke_test" | grep -c otlp-smoke-test
+curl -sS -o /dev/null -w '%{http_code}\n' -X POST -u "sender:${PROMETHEUS_OTLP_SENDER_PASSWORD}" --cacert /opt/siem/prometheus-otlp/tls/server.crt --resolve SIEM_HOST:${OTLP_PORT}:${OTLP_ADDR} https://SIEM_HOST:${OTLP_PORT}/-/reload   # expect 403 or 404, not 200
+curl -sS -u "scrape:${PROMETHEUS_OTLP_SCRAPE_PASSWORD}" --cacert /opt/siem/prometheus-otlp/tls/server.crt --resolve SIEM_HOST:${OTLP_PORT}:${OTLP_ADDR} https://SIEM_HOST:${OTLP_PORT}/api/v1/status/config | grep -o 'out_of_order_time_window: [0-9a-z]*'
 ```
 
 Also confirm the `prometheus` and `prometheus-otlp` targets are up on the SIEM
@@ -242,15 +273,18 @@ above zero means senders still arrive later than the window allows.
 
 Fastest first, each reversible on its own:
 
-1. **Close the door:** (`OTLP_PORT` is `${PROMETHEUS_OTLP_PORT:-9091}`) set `PROMETHEUS_OTLP_BIND_ADDR=127.0.0.1` (or remove it)
+1. **Close the door:** set `PROMETHEUS_OTLP_BIND_ADDR=127.0.0.1` (or remove it)
    in `.env` and run `docker compose up -d prometheus-otlp`. Remote senders can
    no longer connect. To remove the firewall rules afterward:
-   `sudo iptables -D DOCKER-USER -p tcp -m conntrack --ctstate DNAT --ctorigdstport "$OTLP_PORT" -j PROM-OTLP-ALLOW`,
+   `sudo iptables -D DOCKER-USER -p tcp -m conntrack --ctstate DNAT --ctorigdst "$OTLP_ADDR" --ctorigdstport "$OTLP_PORT" -j PROM-OTLP-ALLOW`,
    then `sudo iptables -F PROM-OTLP-ALLOW && sudo iptables -X PROM-OTLP-ALLOW`.
+   (Read `OTLP_ADDR` and `OTLP_PORT` with the snippet in the Firewall section
+   first, before recreating the container; the rule names them.)
 2. **Stop the receiver:** `docker compose stop prometheus-otlp` (or
    `docker compose rm -sf prometheus-otlp`). The SIEM Prometheus, its rules and
    its data are not affected. The `prometheus-otlp` scrape target will show
-   down; that job is not part of any alert.
+   down and the `OtlpReceiverDown` alert will fire; remove that alert and the
+   scrape job too if you are not bringing the receiver back.
 3. **Remove the change entirely:** `git revert` the merge and run
    `docker compose up -d`. Remove `/data/hot/prometheus-otlp` and the rendered
    files in `docker/prometheus-otlp/` if you want the pushed data and secrets

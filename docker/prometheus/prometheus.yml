@@ -45,11 +45,11 @@ scrape_configs:
   # The authenticated OTLP receiver instance (service prometheus-otlp). Own
   # "scrape" account, password from the rendered secrets file.
   - job_name: 'prometheus-otlp'
-    # The receiver serves TLS. This hop stays on the Docker network of one host,
-    # so the certificate is not verified here; senders do verify it.
+    # The receiver serves TLS; verify it against its own certificate.
     scheme: https
     tls_config:
-      insecure_skip_verify: true
+      ca_file: /etc/prometheus/otlp-tls/server.crt
+      server_name: prometheus-otlp
     basic_auth:
       username: scrape
       password_file: /etc/prometheus/secrets/otlp-scrape-password

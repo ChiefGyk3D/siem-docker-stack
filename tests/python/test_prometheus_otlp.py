@@ -221,10 +221,10 @@ def render(tmp_path):
     base = tmp_path / "docker"
     base.mkdir()
 
-    def run(**extra):
+    def run(at=None, **extra):
         env = {"PATH": f"{stub_dir}:/usr/bin:/bin", "HOME": str(tmp_path), **PASSWORDS}
         env.update(extra)
-        return subprocess.run([BASH, str(RENDER), str(base)], env=env, text=True,
+        return subprocess.run([BASH, str(RENDER), str(at or base)], env=env, text=True,
                               capture_output=True, stdin=subprocess.DEVNULL, timeout=30)
     run.out = base / "prometheus-otlp"
     run.main = base / "prometheus"

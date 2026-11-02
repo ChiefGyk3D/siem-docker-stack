@@ -324,6 +324,13 @@ services:
         read_only: true
         bind:
           create_host_path: false
+      # The receiver's certificate, used as the CA when scraping it
+      - type: bind
+        source: ./prometheus-otlp/tls
+        target: /etc/prometheus/otlp-tls
+        read_only: true
+        bind:
+          create_host_path: false
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090"
     command:
@@ -353,6 +360,8 @@ services:
     image: prom/prometheus:${PROMETHEUS_VERSION:-latest}
     container_name: prometheus-otlp
     restart: unless-stopped
+    # Memory bound for a high-cardinality push; retention.size alone is not one
+    mem_limit: ${PROMETHEUS_OTLP_MEM_LIMIT:-2g}
     volumes:
       - /data/hot/prometheus-otlp:/prometheus
       - ./prometheus-otlp/prometheus.yml:/etc/prometheus/prometheus.yml:ro
