@@ -161,7 +161,11 @@ def render(tmp_path):
         return subprocess.run(["bash", str(RENDER), str(base)], env=env, text=True,
                               capture_output=True, stdin=subprocess.DEVNULL, timeout=30)
     run.out = base / "prometheus-otlp"
-    return run
+    yield run
+    # the script leaves the secrets directory 0500; reopen it so pytest can clean up
+    secrets = run.out / "secrets"
+    if secrets.exists():
+        secrets.chmod(0o700)
 
 
 def mode(path):
