@@ -27,6 +27,7 @@ jobs:
       codeql-languages: actions   # no Python here; CodeQL fails on a language with no source
       pip-audit-requirements: ""
       scorecard: true
+      gitleaks-scope: all-refs   # .gitleaksignore holds commit-bound fingerprints; a PR tree scan cannot match them, so keep the full-history scan
       egress-policy: block
       doppler-project: ci
       doppler-config: ci
