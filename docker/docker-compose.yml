@@ -225,6 +225,10 @@ services:
       # Grafana's own read account on the SIEM Prometheus
       - PROMETHEUS_GRAFANA_PASSWORD=${PROMETHEUS_GRAFANA_PASSWORD:?set PROMETHEUS_GRAFANA_PASSWORD in .env (see docs/prometheus-otlp.md)}
       - PROMETHEUS_OTLP_GRAFANA_PASSWORD=${PROMETHEUS_OTLP_GRAFANA_PASSWORD:?set PROMETHEUS_OTLP_GRAFANA_PASSWORD in .env (see docs/prometheus-otlp.md)}
+      # Webhook secret for the n8n alert router contact point
+      # (provisioning/alerting/contact-points.yml). Passed through by name,
+      # no default; empty means n8n rejects the call (fail closed).
+      - GRAFANA_WEBHOOK_SECRET
     volumes:
       - /data/warm/grafana:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning:ro

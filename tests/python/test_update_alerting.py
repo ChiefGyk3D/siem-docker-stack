@@ -32,6 +32,43 @@ def _nodes():
     return {n["name"]: n for n in _workflow()["nodes"]}
 
 
+def _build_node():
+    nodes = [n for n in _workflow()["nodes"] if n["type"] == "n8n-nodes-base.code"
+             and "$env.PUSHOVER_APP_TOKEN" in n["parameters"].get("jsCode", "")]
+    assert len(nodes) == 1, "expected exactly one Pushover payload Code node"
+    return nodes[0]
+
+
+def _run_build(body, env=None, origin=None):
+    """Run the Code node under node with a fake $input/$env. Returns the payload."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    js = _build_node()["parameters"]["jsCode"]
+    if origin is not None:
+        js, n = re.subn(r"(?m)^const ALLOWED_DASHBOARD_ORIGIN = '[^']*';",
+                        "const ALLOWED_DASHBOARD_ORIGIN = " + json.dumps(origin) + ";", js)
+        assert n == 1
+    harness = (
+        "const f=new Function('$input','$env'," + json.dumps(js) + ");\n"
+        "const b=" + json.dumps(body) + ";\n"
+        "const e=Object.assign({PUSHOVER_APP_TOKEN:'t',PUSHOVER_USER_KEY:'u'},"
+        + json.dumps(env or {}) + ");\n"
+        "const r=f({first:()=>({json:{body:b}})},e);\n"
+        "console.log(JSON.stringify(r[0].json.pushover));"
+    )
+    r = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout)
+
+
+def _alert(status, labels, **extra):
+    a = {"labels": dict({"alertname": "A"}, **labels), "annotations": {"summary": "s"},
+         "fingerprint": "fp1"}
+    a.update(extra)
+    return {"status": status, "alerts": [a]}
+
+
 def _send_node():
     sends = [n for n in _workflow()["nodes"] if "messages.json" in json.dumps(n["parameters"])]
     assert len(sends) == 1, "expected exactly one Pushover send node"
@@ -53,11 +90,12 @@ def test_router_has_pushover_http_node_gated_by_env():
     nodes = _nodes()
     send = _send_node()
     assert send["type"] == "n8n-nodes-base.httpRequest"
-    body = json.dumps(send["parameters"])
+    assert "$json.pushover" in send["parameters"]["jsonBody"]
+    body = _build_node()["parameters"]["jsCode"]
     for var in PUSHOVER_VARS[1:]:
         assert f"$env.{var}" in body, var
     assert "300" in body and "10800" in body, "retry/expire defaults missing"
-    gate = [n for n in nodes.values() if n["type"] == "n8n-nodes-base.if"
+    gate =[n for n in nodes.values() if n["type"] == "n8n-nodes-base.if"
             and "$env.PUSHOVER_ENABLED" in json.dumps(n["parameters"])]
     assert len(gate) == 1
     assert all(n["type"].startswith("n8n-nodes-base.") for n in nodes.values()), \
@@ -74,39 +112,96 @@ def test_router_http_nodes_only_reachable_through_gate():
     direct = {c["node"] for o in outs for c in o}
     http = {n["name"] for n in wf["nodes"] if n["type"] == "n8n-nodes-base.httpRequest"}
     assert http and not (direct & http)
+    # the payload builder sits behind the gate, never directly behind the switch
+    assert _build_node()["name"] not in direct
 
 
 def test_pushover_mapping_logic_matches_spec():
-    node = shutil.which("node")
-    if not node:
-        pytest.skip("node not installed")
-    expr = _send_node()["parameters"]["jsonBody"]
-    assert expr.startswith("={{") and expr.rstrip().endswith("}}")
-    js = expr[3:].rstrip()[:-2]
-    harness = (
-        "const run=(body,env)=>{const $json={body};const $env=env;return JSON.parse(" + js + ");};\n"
-        "const mk=(status,labels)=>({status,alerts:[{labels:Object.assign({alertname:'A'},labels),"
-        "annotations:{summary:'s'},fingerprint:'fp1'}]});\n"
-        "const e={PUSHOVER_APP_TOKEN:'t',PUSHOVER_USER_KEY:'u'};\n"
-        "const out={crit:run(mk('firing',{severity:'critical'}),e),"
-        "sec:run(mk('firing',{severity:'warning',update_security:'true'}),e),"
-        "warn:run(mk('firing',{severity:'warning'}),e),"
-        "res:run(mk('resolved',{severity:'critical'}),e),"
-        "clamp:run(mk('firing',{severity:'critical'}),"
-        "Object.assign({PUSHOVER_EXPIRE:'99999',PUSHOVER_RETRY:'5'},e))};\n"
-        "console.log(JSON.stringify(out));"
-    )
-    r = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
-    assert r.returncode == 0, r.stderr
-    out = json.loads(r.stdout)
-    assert out["crit"]["priority"] == 2 and out["crit"]["retry"] == 300
-    assert out["crit"]["expire"] == 10800
-    assert out["sec"]["priority"] == 2
-    assert out["warn"]["priority"] == 1
-    assert "retry" not in out["warn"] and "expire" not in out["warn"]
-    assert out["res"]["priority"] == 0 and "retry" not in out["res"]
-    assert out["clamp"]["expire"] == 10800 and out["clamp"]["retry"] == 30
-    assert len(out["crit"]["title"]) <= 250 and len(out["crit"]["message"]) <= 1024
+    e = {}
+    crit = _run_build(_alert("firing", {"severity": "critical"}), e)
+    sec = _run_build(_alert("firing", {"severity": "warning", "update_security": "true"}), e)
+    warn = _run_build(_alert("firing", {"severity": "warning"}), e)
+    res = _run_build(_alert("resolved", {"severity": "critical"}), e)
+    clamp = _run_build(_alert("firing", {"severity": "critical"}),
+                       {"PUSHOVER_EXPIRE": "99999", "PUSHOVER_RETRY": "5"})
+    assert crit["priority"] == 2 and crit["retry"] == 300 and crit["expire"] == 10800
+    assert sec["priority"] == 2
+    assert warn["priority"] == 1 and "retry" not in warn and "expire" not in warn
+    assert res["priority"] == 0 and "retry" not in res
+    assert clamp["expire"] == 10800 and clamp["retry"] == 30
+    assert len(crit["title"]) <= 250 and len(crit["message"]) <= 1024
+
+
+# --- webhook authentication and URL allowlist (round 2) ----------------------
+
+def test_webhook_requires_header_auth_with_credential_reference():
+    wf = _workflow()
+    hooks = [n for n in wf["nodes"] if n["type"] == "n8n-nodes-base.webhook"]
+    assert len(hooks) == 1, "the router must have exactly one entry point"
+    hook = hooks[0]
+    assert hook["parameters"]["authentication"] == "headerAuth"
+    cred = hook["credentials"]["httpHeaderAuth"]
+    assert set(cred) == {"id", "name"} and cred["name"] == "grafana-webhook-auth"
+    # the entry point leads only to the switch, which fronts Discord and Pushover
+    assert [c["node"] for o in wf["connections"][hook["name"]]["main"] for c in o] == ["Alert Status"]
+    # no secret-looking literal anywhere in the credential reference
+    assert not re.search(r"[A-Za-z0-9+/_-]{32,}", json.dumps(hook["credentials"]))
+
+
+def test_unauthenticated_webhook_detected_by_guard():
+    """Negative case: the guard's check fails on a node without auth."""
+    hook = dict(_nodes()["Grafana Webhook"])
+    hook["parameters"] = {k: v for k, v in hook["parameters"].items() if k != "authentication"}
+    assert hook["parameters"].get("authentication") != "headerAuth"
+
+
+def test_contact_point_sends_secret_from_environment_only():
+    path = ALERTING / "contact-points.yml"
+    settings = yaml.safe_load(path.read_text(encoding="utf-8"))["contactPoints"][0]["receivers"][0]["settings"]
+    assert settings["authorization_scheme"] == "Bearer"
+    assert settings["authorization_credentials"] == "$GRAFANA_WEBHOOK_SECRET"
+    text = path.read_text(encoding="utf-8")
+    assert not re.search(r"[A-Za-z0-9+/_-]{32,}", text), "literal secret-looking value"
+
+
+def test_webhook_secret_is_declared_without_a_value():
+    assert re.search(r"^# GRAFANA_WEBHOOK_SECRET=\s*$", ENV_EXAMPLE.read_text(encoding="utf-8"), re.M)
+    compose = yaml.safe_load((REPO_ROOT / "docker" / "docker-compose.yml").read_text(encoding="utf-8"))
+    assert "GRAFANA_WEBHOOK_SECRET" in compose["services"]["grafana"]["environment"], \
+        "passed through by name, with no default"
+
+
+ORIGIN = "https://grafana.example.com"
+
+
+def test_dashboard_origin_constant_defaults_empty():
+    js = _build_node()["parameters"]["jsCode"]
+    assert re.search(r"(?m)^const ALLOWED_DASHBOARD_ORIGIN = '';", js)
+    assert js.count("ALLOWED_DASHBOARD_ORIGIN") >= 2
+    assert "ALLOWED_DASHBOARD_ORIGIN" in DOC.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("url,origin,kept", [
+    (ORIGIN + "/d/abc?orgId=1", ORIGIN, True),
+    (ORIGIN + "/d/abc", "", False),                       # default: always dropped
+    ("http://grafana.example.com/d/abc", ORIGIN, False),
+    ("javascript:alert(1)", ORIGIN, False),
+    ("https://evil.example.net/d/abc", ORIGIN, False),
+    ("https://grafana.example.com.evil.example.net/", ORIGIN, False),
+    ("https://grafana.example.com@evil.example.net/", ORIGIN, False),
+    ("https://user:pw@grafana.example.com/d/abc", ORIGIN, False),
+    (ORIGIN + "/d/" + "a" * 600, ORIGIN, False),          # over-long
+    ("not a url", ORIGIN, False),
+])
+def test_dashboard_url_allowlist(url, origin, kept):
+    if shutil.which("node"):
+        out = _run_build(_alert("firing", {"severity": "warning"}, dashboardURL=url), {}, origin=origin)
+        assert (out.get("url") == url) is kept
+        assert kept or "url" not in out
+    else:
+        js = _build_node()["parameters"]["jsCode"]
+        for needle in ("https:", "p.origin", "length", "username"):
+            assert needle in js
 
 
 def test_env_example_documents_pushover_names_without_secret_values():
@@ -283,3 +378,6 @@ def test_docs_exist_and_cover_env_vars():
         assert var in text, var
     assert "—" not in text, "em dash in docs"
     assert "doppler" in text.lower()
+    for needle in ("grafana-webhook-auth", "GRAFANA_WEBHOOK_SECRET", "ALLOWED_DASHBOARD_ORIGIN",
+                   "authenticated Grafana caller"):
+        assert needle in text, needle

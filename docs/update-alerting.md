@@ -96,6 +96,47 @@ organization, so the file ships as `.example` and Grafana ignores it. Merge its
 policies), or copy it to `update-notification-policy.yml` if you have no
 tree yet. Repeat intervals: 4h for warning, 1h for critical.
 
+## Webhook authentication
+
+The router's `Grafana Webhook` node uses n8n Header Auth, so a call without
+the right secret is rejected before the Discord and Pushover branches run.
+Without this, anyone who can reach the webhook could post alerts, page the
+phone at emergency priority and call the cancel endpoint.
+
+1. Generate a long random value and store it in Doppler, project
+   `siem-docker-stack`, config `dev`, as `GRAFANA_WEBHOOK_SECRET`. Do not
+   write it into the repo or `.env`.
+2. In n8n, create a credential of type **Header Auth** named
+   `grafana-webhook-auth`. Header name `Authorization`, header value
+   `Bearer <the same secret>`. Select it on the `Grafana Webhook` node after
+   you import the workflow (the JSON carries only the credential name).
+3. Run Grafana with the variable in its environment, for example
+   `doppler run -- docker compose up -d`. The compose file passes
+   `GRAFANA_WEBHOOK_SECRET` through by name, with no default.
+   `contact-points.yml` sends it as `authorization_credentials` with
+   `authorization_scheme: Bearer`, written as `$GRAFANA_WEBHOOK_SECRET`,
+   which Grafana provisioning replaces from the environment (Grafana
+   documentation, "Use configuration files to provision alerting
+   resources", read 2026-11-17). If the variable is unset, Grafana sends an
+   empty value and n8n rejects the call.
+4. Rotate by changing the Doppler value and the n8n credential together.
+
+### Dashboard link allowlist
+
+The `Build Pushover Payload` Code node forwards a dashboard link to the phone
+only when it is an https URL, has no embedded user name or password, is at
+most 512 characters, and its origin equals the constant
+`ALLOWED_DASHBOARD_ORIGIN` at the top of that node. The default is an empty
+string, which drops every link. To enable links, edit the node and set it to
+your Grafana origin, for example `https://grafana.example.com`.
+
+### Residual risk
+
+The cancel call (`cancel_by_tag`) is only reachable by an
+authenticated Grafana caller, because the webhook rejects everything else. A caller who holds the
+secret could still cancel repeats for an alert fingerprint. This repo does
+not keep a store of previously paged fingerprints.
+
 ## Pushover (phone push)
 
 Off by default. n8n reads these variables with expressions:

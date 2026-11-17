@@ -13,4 +13,10 @@ contactPoints:
         settings:
           url: http://n8n/webhook/grafana-alerts
           httpMethod: POST
+          # Sent as "Authorization: Bearer <value>". Grafana interpolates
+          # $VARIABLE from its container environment (see
+          # docs/update-alerting.md). The n8n Header Auth credential
+          # grafana-webhook-auth must hold the same value. Never put the value here.
+          authorization_scheme: Bearer
+          authorization_credentials: $GRAFANA_WEBHOOK_SECRET
         disableResolveMessage: false

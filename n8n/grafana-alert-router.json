@@ -11,7 +11,8 @@
       "parameters": {
         "httpMethod": "POST",
         "path": "grafana-alerts",
-        "options": {}
+        "options": {},
+        "authentication": "headerAuth"
       },
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2.1,
@@ -21,7 +22,13 @@
       ],
       "id": "grafana-webhook",
       "name": "Grafana Webhook",
-      "webhookId": "grafana-alerts"
+      "webhookId": "grafana-alerts",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "grafana-webhook-auth"
+        }
+      }
     },
     {
       "parameters": {
@@ -328,7 +335,7 @@
         "url": "https://api.pushover.net/1/messages.json",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ (() => { const b = $json.body || {}; const al = b.alerts || [{}]; const a = al[0]; const l = a.labels || {}; const an = a.annotations || {}; const resolved = b.status === 'resolved'; const urgent = l.severity === 'critical' || l.update_security === 'true'; const prio = resolved ? 0 : (urgent ? 2 : (l.severity === 'warning' ? 1 : 0)); const title = ((resolved ? 'RESOLVED: ' : '') + (l.alertname || 'Grafana alert')).slice(0, 250); const msg = ((an.summary || ('Alert condition ' + (resolved ? 'cleared' : 'is true'))) + (an.description ? '\\n' + an.description : '') + (al.length > 1 ? '\\n(+' + (al.length - 1) + ' more alerts)' : '')).slice(0, 1024); const o = { token: $env.PUSHOVER_APP_TOKEN, user: $env.PUSHOVER_USER_KEY, title: title, message: msg, priority: prio }; if (prio === 2) { o.retry = Math.max(30, parseInt($env.PUSHOVER_RETRY || '300', 10) || 300); o.expire = Math.min(10800, parseInt($env.PUSHOVER_EXPIRE || '10800', 10) || 10800); if (a.fingerprint) { o.tags = a.fingerprint; } } if (a.dashboardURL) { o.url = String(a.dashboardURL).slice(0, 512); } return JSON.stringify(o); })() }}",
+        "jsonBody": "={{ JSON.stringify($json.pushover) }}",
         "options": {
           "timeout": 10000
         }
@@ -395,6 +402,19 @@
       "id": "pushover-cancel",
       "name": "Pushover Cancel Repeats",
       "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const ALLOWED_DASHBOARD_ORIGIN = '';\n// Only an https URL on exactly this origin is forwarded to the phone. The\n// empty default drops every URL. Set it to your Grafana origin, for example\n// 'https://grafana.example.com'.\n\nfunction safeDashboardUrl(u) {\n  if (!ALLOWED_DASHBOARD_ORIGIN || typeof u !== 'string' || u.length > 512) { return ''; }\n  let p;\n  try { p = new URL(u); } catch (e) { return ''; }\n  if (p.protocol !== 'https:' || p.username || p.password) { return ''; }\n  if (p.origin !== ALLOWED_DASHBOARD_ORIGIN) { return ''; }\n  return u;\n}\n\nconst b = $input.first().json.body || {};\nconst al = b.alerts || [{}];\nconst a = al[0];\nconst l = a.labels || {};\nconst an = a.annotations || {};\nconst resolved = b.status === 'resolved';\nconst urgent = l.severity === 'critical' || l.update_security === 'true';\nconst prio = resolved ? 0 : (urgent ? 2 : (l.severity === 'warning' ? 1 : 0));\nconst title = ((resolved ? 'RESOLVED: ' : '') + (l.alertname || 'Grafana alert')).slice(0, 250);\nconst msg = ((an.summary || ('Alert condition ' + (resolved ? 'cleared' : 'is true')))\n  + (an.description ? '\\n' + an.description : '')\n  + (al.length > 1 ? '\\n(+' + (al.length - 1) + ' more alerts)' : '')).slice(0, 1024);\nconst o = { token: $env.PUSHOVER_APP_TOKEN, user: $env.PUSHOVER_USER_KEY, title: title, message: msg, priority: prio };\nif (prio === 2) {\n  o.retry = Math.max(30, parseInt($env.PUSHOVER_RETRY || '300', 10) || 300);\n  o.expire = Math.min(10800, parseInt($env.PUSHOVER_EXPIRE || '10800', 10) || 10800);\n  if (a.fingerprint) { o.tags = a.fingerprint; }\n}\nconst url = safeDashboardUrl(a.dashboardURL);\nif (url) { o.url = url; }\nreturn [{ json: { pushover: o } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        750,
+        480
+      ],
+      "id": "pushover-build",
+      "name": "Build Pushover Payload"
     }
   ],
   "connections": {
@@ -442,7 +462,7 @@
       "main": [
         [
           {
-            "node": "Pushover Notify",
+            "node": "Build Pushover Payload",
             "type": "main",
             "index": 0
           },
@@ -465,6 +485,17 @@
           }
         ],
         []
+      ]
+    },
+    "Build Pushover Payload": {
+      "main": [
+        [
+          {
+            "node": "Pushover Notify",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     }
   },
