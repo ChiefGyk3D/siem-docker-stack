@@ -288,6 +288,113 @@
           "name": "Discord Webhook Alerts"
         }
       }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "pushover-enabled",
+              "leftValue": "={{ String($env.PUSHOVER_ENABLED || '').toLowerCase() === 'true' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        600,
+        600
+      ],
+      "id": "pushover-enabled",
+      "name": "Pushover Enabled?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.pushover.net/1/messages.json",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ (() => { const b = $json.body || {}; const al = b.alerts || [{}]; const a = al[0]; const l = a.labels || {}; const an = a.annotations || {}; const resolved = b.status === 'resolved'; const urgent = l.severity === 'critical' || l.update_security === 'true'; const prio = resolved ? 0 : (urgent ? 2 : (l.severity === 'warning' ? 1 : 0)); const title = ((resolved ? 'RESOLVED: ' : '') + (l.alertname || 'Grafana alert')).slice(0, 250); const msg = ((an.summary || ('Alert condition ' + (resolved ? 'cleared' : 'is true'))) + (an.description ? '\\n' + an.description : '') + (al.length > 1 ? '\\n(+' + (al.length - 1) + ' more alerts)' : '')).slice(0, 1024); const o = { token: $env.PUSHOVER_APP_TOKEN, user: $env.PUSHOVER_USER_KEY, title: title, message: msg, priority: prio }; if (prio === 2) { o.retry = Math.max(30, parseInt($env.PUSHOVER_RETRY || '300', 10) || 300); o.expire = Math.min(10800, parseInt($env.PUSHOVER_EXPIRE || '10800', 10) || 10800); if (a.fingerprint) { o.tags = a.fingerprint; } } if (a.dashboardURL) { o.url = String(a.dashboardURL).slice(0, 512); } return JSON.stringify(o); })() }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        900,
+        560
+      ],
+      "id": "pushover-notify",
+      "name": "Pushover Notify",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "pushover-is-resolved",
+              "leftValue": "={{ $json.body.status }}",
+              "rightValue": "resolved",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        900,
+        700
+      ],
+      "id": "pushover-is-resolved",
+      "name": "Pushover Resolved?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ 'https://api.pushover.net/1/receipts/cancel_by_tag/' + encodeURIComponent((($json.body.alerts || [{}])[0].fingerprint) || 'none') + '.json' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ token: $env.PUSHOVER_APP_TOKEN }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1200,
+        700
+      ],
+      "id": "pushover-cancel",
+      "name": "Pushover Cancel Repeats",
+      "onError": "continueRegularOutput"
     }
   ],
   "connections": {
@@ -309,11 +416,50 @@
             "node": "Discord — Firing",
             "type": "main",
             "index": 0
+          },
+          {
+            "node": "Pushover Enabled?",
+            "type": "main",
+            "index": 0
           }
         ],
         [
           {
             "node": "Discord — Resolved",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Pushover Enabled?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Pushover Enabled?": {
+      "main": [
+        [
+          {
+            "node": "Pushover Notify",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Pushover Resolved?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Pushover Resolved?": {
+      "main": [
+        [
+          {
+            "node": "Pushover Cancel Repeats",
             "type": "main",
             "index": 0
           }

@@ -1,0 +1,16 @@
+# Contact point for the n8n Grafana Alert Router (issue #53).
+# n8n fans each alert out to Discord (always) and Pushover (when
+# PUSHOVER_ENABLED=true in n8n). The URL holds no secret. Adjust the host name
+# if n8n is not reachable as `n8n` from the Grafana container.
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: n8n-grafana-router
+    receivers:
+      - uid: n8n-grafana-router
+        type: webhook
+        settings:
+          url: http://n8n/webhook/grafana-alerts
+          httpMethod: POST
+        disableResolveMessage: false
