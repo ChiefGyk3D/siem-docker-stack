@@ -141,8 +141,11 @@ phone.
 
 Two checks apply. Compose refuses to start Grafana when the value is unset or
 empty. `scripts/check-env.sh` (run it before `docker compose up`) also rejects
-whitespace-only, placeholder and short values. Neither can check what you typed
-into n8n: an n8n credential whose value is just `Bearer`
+whitespace-only, placeholder and short values. It measures the value the way
+Compose reads it from `.env`: an unquoted value ends at whitespace followed by
+`#` (so `x # long comment` is the one character `x`), matching quotes are
+removed, and a duplicate assignment, unmatched quote, backslash or unquoted
+`$` is rejected. Neither check can see what you typed into n8n: an n8n credential whose value is just `Bearer`
 would accept an empty-secret call, so follow step 2 exactly and run the
 checklist below.
 
@@ -244,6 +247,16 @@ Limit the exposure:
     `location /webhook/grafana-alerts { allow 192.0.2.10; deny all; proxy_pass http://n8n:5678; }`
     (192.0.2.10 is a documentation address; use your Grafana host's address).
 - Rotate the secret if anyone who held it leaves or a copy may have leaked.
+
+### Request normalization
+
+The `Normalize Alert` node rebuilds the first alert into a new body before
+the switch. Scalar fields (labels, annotations, `valueString`, timestamps,
+links, fingerprint) are coerced to length-capped strings, objects and arrays
+in scalar positions become empty strings, and a timestamp that does not parse
+is dropped. The Discord and Pushover expressions read only those rebuilt
+fields, and a test scans every expression to keep it that way. A body that
+cannot be rebuilt (bad status, no alerts) goes to the malformed notices.
 
 ## Known limitations
 

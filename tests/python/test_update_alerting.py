@@ -73,7 +73,7 @@ def _run_build(body, origin=None, enabled=None):
         "const r=f({first:()=>({json:{body:b}})});\n"
         "console.log(JSON.stringify(r[0].json));"
     )
-    r = subprocess.run([_node_bin(), "-e", harness], capture_output=True, text=True, timeout=30)
+    r = subprocess.run([_node_bin(), "-"], input=harness, capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, r.stderr
     return json.loads(r.stdout)
 
@@ -228,7 +228,7 @@ def test_pure_js_sha256_matches_node_crypto():
                "for (const s of ['', 'abc', 'a|b', 'x'.repeat(55), 'x'.repeat(56), 'x'.repeat(64), 'x'.repeat(200)])"
                "{ if (sha256hex(s) !== crypto.createHash('sha256').update(s).digest('hex')) bad.push(s.length); }"
                "console.log(JSON.stringify(bad));")
-    r = subprocess.run([_node_bin(), "-e", harness], capture_output=True, text=True, timeout=30)
+    r = subprocess.run([_node_bin(), "-"], input=harness, capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, r.stderr
     assert json.loads(r.stdout) == []
 
@@ -585,7 +585,7 @@ def _js_eval(code, item):
     harness = ("const $json=" + json.dumps(item) + ";"
                "const f=new Function('$json'," + json.dumps("return (" + code + ");") + ");"
                "const v=f($json);console.log(JSON.stringify({v:v===undefined?null:v}));")
-    r = subprocess.run([_node_bin(), "-e", harness], capture_output=True, text=True, timeout=30)
+    r = subprocess.run([_node_bin(), "-"], input=harness, capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, "expression errored (the node would fail in n8n): " + r.stderr[-300:]
     return json.loads(r.stdout)["v"]
 
@@ -599,8 +599,52 @@ def _run_code_node(node, item):
     harness = ("const f=new Function('$input'," + json.dumps(node["parameters"]["jsCode"]) + ");"
                "const r=f({first:()=>({json:" + json.dumps(item) + "})});"
                "console.log(JSON.stringify(r.map(x=>x.json)));")
-    r = subprocess.run([_node_bin(), "-e", harness], capture_output=True, text=True, timeout=30)
+    r = subprocess.run([_node_bin(), "-"], input=harness, capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, "Code node threw: " + r.stderr[-300:]
+    return json.loads(r.stdout)
+
+
+def _templates(text):
+    """Yield the JS inside each {{ ... }} of an n8n expression string (balanced braces)."""
+    i = 0
+    while True:
+        i = text.find("{{", i)
+        if i < 0:
+            return
+        j, depth = i + 2, 0
+        while j < len(text):
+            if text[j] == "{":
+                depth += 1
+            elif text[j] == "}":
+                if depth == 0 and text.startswith("}}", j):
+                    break
+                depth -= 1
+            j += 1
+        assert j < len(text), "unbalanced expression"
+        yield text[i + 2:j].strip()
+        i = j + 2
+
+
+def _expressions(value):
+    if isinstance(value, dict):
+        for v in value.values():
+            yield from _expressions(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from _expressions(v)
+    elif isinstance(value, str) and value.startswith("="):
+        yield from _templates(value[1:])
+
+
+def _eval_many(codes, item):
+    """Evaluate many expressions in one node process; each result is {v} or {error}."""
+    harness = ("const $json=" + json.dumps(item) + ";const out=[];"
+               "for (const c of " + json.dumps(codes) + ") { try {"
+               " const f=new Function('$json','return ('+c+');'); const v=f($json);"
+               " out.push({v:v===undefined?null:v}); } catch(e) { out.push({error:String(e)}); } }"
+               "console.log(JSON.stringify(out));")
+    r = subprocess.run([_node_bin(), "-"], input=harness, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr[-300:]
     return json.loads(r.stdout)
 
 
@@ -620,6 +664,10 @@ def _simulate(webhook_item):
         reached.append(name)
         t = node["type"]
         if t in ("n8n-nodes-base.discord", "n8n-nodes-base.httpRequest"):
+            # evaluate every expression of the node: a throw here is a lost notification
+            codes = list(_expressions(node["parameters"]))
+            for code, res in zip(codes, _eval_many(codes, items[0])):
+                assert "error" not in res, f"{name}: expression failed: {res['error']} in {code[:80]}"
             notified.add(name)
             continue
         outs = [[] for _ in wf["connections"].get(name, {"main": []})["main"]]
@@ -793,3 +841,169 @@ def test_known_healthy_and_update_outputs_still_work(tmp_path):
 def test_unexpected_pkg_output_fails_closed(tmp_path, pkg):
     r, _ = _run(tmp_path, "Your system is up to date", pkg)
     _assert_failure(r)
+
+
+# --- round 5: type-safe normalization, .env parsing, negated pfSense text ------
+
+HOSTILE = [7, {"a": {"b": 1}}, [1, 2], None, True, "x" * 100000, {"toString": "x"}]
+LABEL_KEYS = ["alertname", "severity", "instance", "agent", "job", "srcip", "update_security"]
+ANNOTATION_KEYS = ["summary", "description", "trigger_logic", "trigger_query", "threshold", "window"]
+ALERT_SCALARS = ["valueString", "startsAt", "endsAt", "dashboardURL", "panelURL", "generatorURL", "fingerprint"]
+
+
+def _hostile_body(status, value):
+    alert = {"labels": {k: value for k in LABEL_KEYS},
+             "annotations": {k: value for k in ANNOTATION_KEYS}}
+    alert.update({k: value for k in ALERT_SCALARS})
+    return {"status": status, "alerts": [alert]}
+
+
+def _normalize_node():
+    return _nodes()["Normalize Alert"]
+
+
+def _discord_texts():
+    return [c for n in _workflow()["nodes"] if n["type"] == "n8n-nodes-base.discord"
+            for c in _expressions(n["parameters"])]
+
+
+@pytest.mark.parametrize("status", ["firing", "resolved"])
+@pytest.mark.parametrize("value", HOSTILE, ids=["number", "object", "array", "null", "bool", "long", "tostring"])
+def test_hostile_field_types_reach_notifications_without_throwing(status, value):
+    reached, notified = _simulate({"headers": {}, "body": _hostile_body(status, value)})
+    expected = DISCORD_FIRING if status == "firing" else DISCORD_RESOLVED
+    assert expected in notified, "alert was not routed to its Discord node"
+    assert _build_node()["name"] in reached
+
+
+def test_normalize_builds_a_fresh_typed_body():
+    out = _run_code_node(_normalize_node(), {"headers": {"x": 1}, "body": _hostile_body("firing", 7),
+                                             "extra": {"a": 1}})[0]
+    assert set(out) == {"body"}, "only the rebuilt body may pass"
+    a = out["body"]["alerts"][0]
+    assert all(isinstance(a[k], str) for k in ALERT_SCALARS)
+    assert all(isinstance(v, str) for v in a["labels"].values())
+    assert all(isinstance(v, str) for v in a["annotations"].values())
+    big = _run_code_node(_normalize_node(), {"body": _hostile_body("firing", "x" * 100000)})[0]
+    assert len(json.dumps(big)) < 20000, "lengths must be capped"
+    bad_ts = _run_code_node(_normalize_node(), {"body": {"status": "firing", "alerts": [
+        {"labels": {}, "startsAt": "not-a-timestamp", "endsAt": "2026-01-01T00:00:00Z"}]}})[0]
+    assert bad_ts["body"]["alerts"][0]["startsAt"] == ""
+    assert bad_ts["body"]["alerts"][0]["endsAt"] == "2026-01-01T00:00:00Z"
+
+
+def test_normalize_covers_every_field_the_expressions_reference():
+    blob = "\n".join(_discord_texts())
+    pairs = set(re.findall(r"\)\[0\]\.(\w+)(?:\?\.(\w+))?", blob))
+    assert pairs, "no field references found"
+    assert not (set(re.findall(r"\$json\.(\w+)", blob)) - {"body"}), "expressions read outside $json.body"
+    item = {"body": {"status": "firing", "alerts": [{
+        "labels": {k: "v-" + k for k in LABEL_KEYS + ["extra_label"]},
+        "annotations": {k: "v-" + k for k in ANNOTATION_KEYS},
+        **{k: "v-" + k for k in ALERT_SCALARS}}]}}
+    item["body"]["alerts"][0]["startsAt"] = item["body"]["alerts"][0]["endsAt"] = "2026-01-01T00:00:00Z"
+    a = _run_code_node(_normalize_node(), item)[0]["body"]["alerts"][0]
+    for top, sub in sorted(pairs):
+        if sub:
+            assert a[top][sub] == "v-" + sub, f"{top}.{sub} is read by an expression but not normalized"
+        elif top == "labels":
+            assert a["labels"].get("extra_label") == "v-extra_label"
+        else:
+            assert top in a, f"{top} is read by an expression but not normalized"
+
+
+# check-env.sh: parse the value the way Compose does
+
+def _check_env_lines(tmp_path, *lines):
+    env = tmp_path / ".env"
+    env.write_text(_env_body(None) + "".join(line + "\n" for line in lines), encoding="utf-8")
+    return subprocess.run(["bash", str(CHECK_ENV), str(env)], capture_output=True,
+                          text=True, timeout=60, check=False)
+
+
+COMMENT_REPRO = "GRAFANA_WEBHOOK_SECRET=x # this-comment-makes-the-raw-line-long-enough"
+
+
+@pytest.mark.parametrize("lines", [
+    [COMMENT_REPRO],
+    ["GRAFANA_WEBHOOK_SECRET=x\t# this-comment-makes-the-raw-line-long-enough"],
+    ['GRAFANA_WEBHOOK_SECRET="x" # this-comment-makes-the-raw-line-long-enough'],
+    ["GRAFANA_WEBHOOK_SECRET='x' # this-comment-makes-the-raw-line-long-enough"],
+    ["GRAFANA_WEBHOOK_SECRET= # " + "c" * 40],
+    ['GRAFANA_WEBHOOK_SECRET="' + "a" * 20 + '\\n' + "b" * 20 + '"'],   # newline escape
+    ['GRAFANA_WEBHOOK_SECRET="' + "a" * 40],                                 # unmatched quote
+    ["GRAFANA_WEBHOOK_SECRET='" + "a" * 40],
+    ["GRAFANA_WEBHOOK_SECRET=" + "a" * 20 + "$HOME" + "b" * 20],             # Compose would interpolate
+    ["GRAFANA_WEBHOOK_SECRET=" + "a" * 40, "GRAFANA_WEBHOOK_SECRET=x"],      # duplicate, last is short
+    ["GRAFANA_WEBHOOK_SECRET=x", "GRAFANA_WEBHOOK_SECRET=" + "a" * 40],      # duplicate, last is good
+])
+def test_check_env_parses_like_compose_and_rejects(tmp_path, lines):
+    r = _check_env_lines(tmp_path, *lines)
+    assert r.returncode == 1, r.stderr
+    assert "GRAFANA_WEBHOOK_SECRET" in r.stderr
+    assert "this-comment" not in r.stderr and "aaaa" not in r.stderr, "value must not be printed"
+
+
+@pytest.mark.parametrize("line", [
+    "GRAFANA_WEBHOOK_SECRET=" + "a" * 40,
+    "GRAFANA_WEBHOOK_SECRET=" + "a" * 40 + "   # a comment",
+    'GRAFANA_WEBHOOK_SECRET="' + "a" * 40 + '"',
+    'GRAFANA_WEBHOOK_SECRET="' + "a" * 40 + '"  # a comment',
+    "GRAFANA_WEBHOOK_SECRET='" + "a" * 40 + "'",
+    "GRAFANA_WEBHOOK_SECRET='" + "a" * 40 + "' # a comment",
+    "GRAFANA_WEBHOOK_SECRET=" + VALID_SECRET,
+    "GRAFANA_WEBHOOK_SECRET=" + "ab+/" * 11 + "==",
+])
+def test_check_env_accepts_valid_compose_forms(tmp_path, line):
+    r = _check_env_lines(tmp_path, line)
+    assert r.returncode == 0, r.stderr
+
+
+def _real_compose():
+    try:
+        r = subprocess.run(["docker", "compose", "version"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0 and "Docker Compose" in r.stdout
+
+
+def test_compose_resolves_the_comment_fixture_to_the_short_value(tmp_path):
+    if not _real_compose():
+        pytest.skip("docker compose is not available here (the docker command is a podman emulation or missing)")
+    (tmp_path / "c.yml").write_text("services:\n  a:\n    image: x\n    environment:\n"
+                                    "      V: ${GRAFANA_WEBHOOK_SECRET}\n", encoding="utf-8")
+    (tmp_path / ".env").write_text(COMMENT_REPRO + "\n", encoding="utf-8")
+    r = subprocess.run(["docker", "compose", "-f", str(tmp_path / "c.yml"), "--env-file",
+                        str(tmp_path / ".env"), "config", "--format", "json"],
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["services"]["a"]["environment"]["V"] == "x"
+
+
+# pfSense: negated or stale "up to date" text is not healthy
+
+@pytest.mark.parametrize("text", [
+    "Your system is no longer up to date",
+    "Your system is not up to date",
+    "Your system is not currently up to date",
+    "Your system isn't up to date",
+    "Your system is out of date",
+    "Your system is outdated",
+    "Your system is up to date (cache is stale)",
+    "Your system is up to date\nVersion 99.9 is available",
+    "System status: up to date",            # not a known complete line
+    "your system is up to date, probably",
+])
+def test_negated_or_unknown_healthy_text_fails_closed(tmp_path, text):
+    r, _ = _run(tmp_path, text, "")
+    _assert_failure(r)
+
+
+@pytest.mark.parametrize("text", [
+    "Your system is up to date",
+    "your system is up to date.",
+    "  Your system is up to date  \n\n",
+])
+def test_exact_healthy_lines_are_accepted(tmp_path, text):
+    r, _ = _run(tmp_path, text, "")
+    assert r.returncode == 0 and "pfsense_update_check_success value=1i" in r.stdout

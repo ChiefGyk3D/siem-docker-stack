@@ -53,15 +53,40 @@ case "$lc" in
         *"timed out"* | *timeout* | *unavailable* | *unreachable* | *"not found"* | *denied*)
         fail "pfSense-upgrade output mentions a problem" ;;
 esac
-case "$lc" in
-    *"up to date"* | *"no updates"*) ;;
-    *available* | *"new version"*) core=1 ;;
-    *) fail "unrecognized pfSense-upgrade output" ;;
+# Negations and staleness phrases are never healthy, whatever else the text says.
+case " $lc " in
+    *" not "* | *"no longer"* | *"n't"* | *"out of date"* | *outdated* | *stale*)
+        fail "pfSense-upgrade output is negated or stale" ;;
 esac
 
-case "$lc" in
-    *security*) security=true ;;
-esac
+# Every non-blank line must be a complete, known form (lowercased, trailing
+# punctuation removed): "your system is up to date" is healthy; "version X is
+# available" and "a new version ... is available" mean an update is pending.
+# A mix of the two, or any other line, is an unknown result.
+healthy=0
+pending_core=0
+while IFS= read -r l; do
+    l="${l#"${l%%[![:space:]]*}"}"
+    l="${l%"${l##*[![:space:]]}"}"
+    l="${l%[.!]}"
+    [ -n "$l" ] || continue
+    case "$l" in
+        "your system is up to date") healthy=1 ;;
+        "version "*" is available"* | "a new version "*" is available"* | "new version available"*)
+            pending_core=1
+            case "$l" in *security*) security=true ;; esac ;;
+        *) fail "unrecognized pfSense-upgrade output" ;;
+    esac
+done <<EOF
+$lc
+EOF
+if [ "$healthy" -eq 1 ] && [ "$pending_core" -eq 1 ]; then
+    fail "pfSense-upgrade output mixes healthy and update text"
+fi
+if [ "$healthy" -eq 0 ] && [ "$pending_core" -eq 0 ]; then
+    fail "empty pfSense-upgrade output"
+fi
+core=$pending_core
 
 # One package name per line; no word splitting or globbing.
 while IFS= read -r name; do
