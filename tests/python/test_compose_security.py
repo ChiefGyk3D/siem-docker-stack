@@ -112,11 +112,18 @@ def _run_check_env(tmp_path, body):
                           capture_output=True, text=True, check=False)
 
 
+def _ci_value(name, i):
+    """A value check-env accepts; the webhook secret has a 32 character minimum."""
+    if name == "GRAFANA_WEBHOOK_SECRET":
+        return "Zx9-unique-webhook-secret-value-" + str(i)
+    return f"Zx9-unique-{i}"
+
+
 def test_check_env_rejects_missing_and_known_defaults(tmp_path):
     names = [ln.split("=")[0] for ln in CI_ENV.read_text(encoding="utf-8").splitlines()
              if "=" in ln and not ln.startswith("#")]
     names.append("OPENSEARCH_ADMIN_PASSWORD")
-    good = "".join(f"{n}=Zx9-unique-{i}\n" for i, n in enumerate(names))
+    good = "".join(f"{n}={_ci_value(n, i)}\n" for i, n in enumerate(names))
     assert _run_check_env(tmp_path, good).returncode == 0
     bad = _run_check_env(tmp_path, good.replace("Zx9-unique-0", "changeme"))
     assert bad.returncode == 1 and "changeme" not in bad.stderr
@@ -130,7 +137,7 @@ def test_check_env_warns_loudly_when_ingest_stays_on_loopback(tmp_path):
     names = [ln.split("=")[0] for ln in CI_ENV.read_text(encoding="utf-8").splitlines()
              if "=" in ln and not ln.startswith("#")]
     names.append("OPENSEARCH_ADMIN_PASSWORD")
-    good = "".join(f"{n}=Zx9-unique-{i}\n" for i, n in enumerate(dict.fromkeys(names)))
+    good = "".join(f"{n}={_ci_value(n, i)}\n" for i, n in enumerate(dict.fromkeys(names)))
     for body in (good, good + "INGEST_BIND_ADDR=127.0.0.1\n"):
         res = _run_check_env(tmp_path, body)
         assert res.returncode == 0

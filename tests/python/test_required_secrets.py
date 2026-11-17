@@ -130,6 +130,9 @@ def _check_env_rejects(tmp_path, value):
     lines = "".join(f"{n}=Zx9-unique-{i}\n" for i, n in enumerate(REQUIRED_SECRETS))
     lines = lines.replace("OPENSEARCH_ADMIN_PASSWORD=Zx9-unique-0",
                           f"OPENSEARCH_ADMIN_PASSWORD={value}")
+    # check-env.sh also requires the webhook secret (32 character minimum); give it a
+    # valid one so this test still isolates the placeholder rule for the other secrets.
+    lines += "GRAFANA_WEBHOOK_SECRET=Zx9-unique-webhook-secret-value-0123456789\n"
     env = tmp_path / ".env"
     env.write_text(lines, encoding="utf-8")
     proc = _run(["bash", str(SCRIPTS / "check-env.sh"), str(env)])

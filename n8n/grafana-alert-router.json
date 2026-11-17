@@ -432,6 +432,49 @@
           "name": "pushover-api"
         }
       }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Runs directly behind the webhook. A body the router cannot route safely is\n// replaced by {status: 'malformed'}, which the Alert Status switch sends to the\n// malformed-alert notifications. A valid body passes through unchanged. This\n// node never throws, so an authenticated call cannot end in silence.\nconst isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);\nlet item;\ntry {\n  item = $input.first().json;\n} catch (e) {\n  item = {};\n}\nlet ok = false;\ntry {\n  const b = isObj(item) ? item.body : undefined;\n  ok = isObj(b)\n    && (b.status === 'firing' || b.status === 'resolved')\n    && Array.isArray(b.alerts) && b.alerts.length >= 1 && isObj(b.alerts[0])\n    && (b.alerts[0].labels === undefined || isObj(b.alerts[0].labels))\n    && (b.alerts[0].annotations === undefined || isObj(b.alerts[0].annotations));\n} catch (e) {\n  ok = false;\n}\nif (ok) { return [{ json: item }]; }\nreturn [{ json: { body: { status: 'malformed', alerts: [] } } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        150,
+        300
+      ],
+      "id": "normalize-alert",
+      "name": "Normalize Alert"
+    },
+    {
+      "parameters": {
+        "authentication": "webhook",
+        "operation": "sendLegacy",
+        "content": "",
+        "embeds": {
+          "values": [
+            {
+              "title": "MALFORMED ALERT RECEIVED",
+              "description": "The alert router received a webhook call it could not parse. Check the sender and the n8n execution log.",
+              "color": 15158332
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        600,
+        0
+      ],
+      "id": "discord---malformed",
+      "name": "Discord — Malformed",
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Discord Webhook Alerts"
+        }
+      }
     }
   ],
   "connections": {
@@ -439,7 +482,7 @@
       "main": [
         [
           {
-            "node": "Alert Status",
+            "node": "Normalize Alert",
             "type": "main",
             "index": 0
           }
@@ -472,7 +515,18 @@
             "index": 0
           }
         ],
-        []
+        [
+          {
+            "node": "Discord — Malformed",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Build Pushover Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     },
     "Build Pushover Payload": {
@@ -513,6 +567,17 @@
           }
         ],
         []
+      ]
+    },
+    "Normalize Alert": {
+      "main": [
+        [
+          {
+            "node": "Alert Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
       ]
     }
   },

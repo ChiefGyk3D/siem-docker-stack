@@ -47,6 +47,25 @@ for var in "${REQUIRED[@]}"; do
     fi
 done
 
+# The Grafana to n8n webhook secret (docs/update-alerting.md) also needs a
+# minimum length: reject empty, whitespace-only, placeholder and short values.
+# Whitespace does not count toward the length. The value is never printed.
+var=GRAFANA_WEBHOOK_SECRET
+line="$(grep -E "^${var}=" "$ENV_FILE" | tail -1 || true)"
+value="${line#*=}"
+value="${value%\"}"; value="${value#\"}"; value="${value%\'}"; value="${value#\'}"
+trimmed="$(printf '%s' "$value" | tr -d '[:space:]')"
+if [ -z "$line" ] || [ -z "$trimmed" ]; then
+    echo "check-env: ${var} is missing, empty or only whitespace" >&2
+    bad=1
+elif is_placeholder "$trimmed"; then
+    echo "check-env: ${var} still has a placeholder or known default value" >&2
+    bad=1
+elif [ "${#trimmed}" -lt 32 ]; then
+    echo "check-env: ${var} must be at least 32 characters (generate it with: openssl rand -base64 32)" >&2
+    bad=1
+fi
+
 if [ "$bad" -ne 0 ]; then
     echo "check-env: set strong unique values in $ENV_FILE (see README, Required secrets)" >&2
     exit 1

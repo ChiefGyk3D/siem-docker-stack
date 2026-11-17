@@ -43,14 +43,24 @@ kernel=0
 package=0
 security=false
 
-# Core: pfSense-upgrade reports a newer base version.
-case "$check_out" in
-    *[Uu]p\ to\ date* | *[Nn]o\ updates* | '') ;;
-    *[Aa]vailable* | *[Nn]ew\ version* | *[Uu]pgrade\ *) core=1 ;;
+# Classify the pfSense-upgrade text. Only two shapes are understood: the
+# healthy "up to date" text and an "update available" text. Anything else, an
+# empty result, or any text that also mentions an error or warning is an
+# unknown result and fails closed (it must never look healthy).
+lc=$(printf '%s' "$check_out" | tr '[:upper:]' '[:lower:]')
+case "$lc" in
+    *error* | *fail* | *unable* | *cannot* | *"can't"* | *"could not"* | *warning* | \
+        *"timed out"* | *timeout* | *unavailable* | *unreachable* | *"not found"* | *denied*)
+        fail "pfSense-upgrade output mentions a problem" ;;
+esac
+case "$lc" in
+    *"up to date"* | *"no updates"*) ;;
+    *available* | *"new version"*) core=1 ;;
+    *) fail "unrecognized pfSense-upgrade output" ;;
 esac
 
-case "$check_out" in
-    *[Ss]ecurity* | *SECURITY*) security=true ;;
+case "$lc" in
+    *security*) security=true ;;
 esac
 
 # One package name per line; no word splitting or globbing.
@@ -58,6 +68,10 @@ while IFS= read -r name; do
     [ -n "$name" ] || continue
     case "$name" in
         *[!A-Za-z0-9._+-]*) fail "unexpected characters in package name" ;;
+        *-[0-9]*) ;;
+        *) fail "unexpected package name shape" ;;
+    esac
+    case "$name" in
         pfSense-kernel-*) kernel=1 ;;
         pfSense-[0-9]* | pfSense-base-* | pfSense-rc-*) core=1 ;;
         *) package=1 ;;

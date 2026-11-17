@@ -40,8 +40,9 @@ def _nodes():
 
 
 def _build_node():
-    nodes = [n for n in _workflow()["nodes"] if n["type"] == "n8n-nodes-base.code"]
-    assert len(nodes) == 1, "expected exactly one Code node (the Pushover payload builder)"
+    nodes = [n for n in _workflow()["nodes"] if n["type"] == "n8n-nodes-base.code"
+             and "ALLOWED_ALERTNAMES" in n["parameters"]["jsCode"]]
+    assert len(nodes) == 1, "expected exactly one Pushover payload builder Code node"
     return nodes[0]
 
 
@@ -305,7 +306,7 @@ def test_dashboard_url_returns_normalized_href():
     assert out["pushover"]["url"] == "https://grafana.example.com/d/a%20b"
 
 
-def test_allowed_alertnames_equal_provisioned_update_alert_titles():
+def test_public_alert_names_equal_provisioned_rule_titles():
     js = _build_node()["parameters"]["jsCode"]
     m = re.search(r"const ALLOWED_ALERTNAMES = \[(.*?)\];", js, re.S)
     assert m
@@ -575,3 +576,220 @@ def test_docs_exist_and_cover_required_topics():
     assert "PUSHOVER_APP_TOKEN" not in text and "PUSHOVER_USER_KEY" not in text
     assert "N8N_BLOCK_ENV_ACCESS_IN_NODE" not in text
     assert "n8n rejects the call" not in text
+
+
+# --- round 4: end-to-end routing, secret validation, unknown pfSense output ----
+
+def _js_eval(code, item):
+    """Run JS with `$json` bound to item; return its JSON value."""
+    harness = ("const $json=" + json.dumps(item) + ";"
+               "const f=new Function('$json'," + json.dumps("return (" + code + ");") + ");"
+               "const v=f($json);console.log(JSON.stringify({v:v===undefined?null:v}));")
+    r = subprocess.run([_node_bin(), "-e", harness], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, "expression errored (the node would fail in n8n): " + r.stderr[-300:]
+    return json.loads(r.stdout)["v"]
+
+
+def _expr(value):
+    assert value.startswith("={{") and value.rstrip().endswith("}}"), value
+    return value[3:].rstrip()[:-2]
+
+
+def _run_code_node(node, item):
+    harness = ("const f=new Function('$input'," + json.dumps(node["parameters"]["jsCode"]) + ");"
+               "const r=f({first:()=>({json:" + json.dumps(item) + "})});"
+               "console.log(JSON.stringify(r.map(x=>x.json)));")
+    r = subprocess.run([_node_bin(), "-e", harness], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, "Code node threw: " + r.stderr[-300:]
+    return json.loads(r.stdout)
+
+
+def _simulate(webhook_item):
+    """Walk the real graph from the webhook. Returns (nodes reached, notification nodes)."""
+    wf = _workflow()
+    nodes = {n["name"]: n for n in wf["nodes"]}
+    hook = next(n["name"] for n in wf["nodes"] if n["type"] == "n8n-nodes-base.webhook")
+    reached, notified = [], set()
+    todo = [(hook, [webhook_item])]
+    steps = 0
+    while todo:
+        steps += 1
+        assert steps < 100, "routing loop"
+        name, items = todo.pop(0)
+        node = nodes[name]
+        reached.append(name)
+        t = node["type"]
+        if t in ("n8n-nodes-base.discord", "n8n-nodes-base.httpRequest"):
+            notified.add(name)
+            continue
+        outs = [[] for _ in wf["connections"].get(name, {"main": []})["main"]]
+        if t == "n8n-nodes-base.webhook":
+            outs[0] = items
+        elif t == "n8n-nodes-base.code":
+            outs[0] = _run_code_node(node, items[0])
+        elif t == "n8n-nodes-base.switch":
+            rules = node["parameters"]["rules"]["values"]
+            hit = len(rules)  # fallback output
+            for i, rule in enumerate(rules):
+                cond = rule["conditions"]["conditions"][0]
+                if _js_eval(_expr(cond["leftValue"]), items[0]) == cond["rightValue"]:
+                    hit = i
+                    break
+            outs = [[] for _ in range(max(len(outs), hit + 1))]
+            outs[hit] = items
+        elif t == "n8n-nodes-base.if":
+            cond = node["parameters"]["conditions"]["conditions"][0]
+            ok = _js_eval(_expr(cond["leftValue"]), items[0]) is True
+            outs = [[], []]
+            outs[0 if ok else 1] = items
+        else:
+            raise AssertionError("node type not modeled: " + t)
+        conn = wf["connections"].get(name, {"main": []})["main"]
+        for idx, produced in enumerate(outs):
+            if produced and idx < len(conn):
+                for c in conn[idx]:
+                    todo.append((c["node"], produced))
+    return reached, notified
+
+
+def test_alert_status_switch_has_every_output_connected():
+    wf = _workflow()
+    switch = next(n for n in wf["nodes"] if n["type"] == "n8n-nodes-base.switch")
+    n_out = len(switch["parameters"]["rules"]["values"]) + 1  # plus the fallback output
+    main = wf["connections"][switch["name"]]["main"]
+    assert len(main) == n_out
+    assert all(main[i] for i in range(n_out)), "a switch output is not connected"
+
+
+VALID_ALERT = {"labels": {"alertname": GOOD_NAME, "severity": "warning"},
+               "annotations": {"summary": "s"}, "fingerprint": GOOD_FP}
+ROUTING_CASES = {
+    "firing": ({"status": "firing", "alerts": [VALID_ALERT]}, DISCORD_FIRING),
+    "resolved": ({"status": "resolved", "alerts": [VALID_ALERT]}, DISCORD_RESOLVED),
+    "status absent": ({"alerts": [VALID_ALERT]}, "Discord — Malformed"),
+    "status weird": ({"status": "weird", "alerts": [{}]}, "Discord — Malformed"),
+    "status number": ({"status": 5, "alerts": [{}]}, "Discord — Malformed"),
+    "status array": ({"status": ["firing"], "alerts": [{}]}, "Discord — Malformed"),
+    "alerts not array": ({"status": "firing", "alerts": "x"}, "Discord — Malformed"),
+    "alerts empty": ({"status": "firing", "alerts": []}, "Discord — Malformed"),
+    "first alert null": ({"status": "firing", "alerts": [None]}, "Discord — Malformed"),
+    "body is a string": ("just text", "Discord — Malformed"),
+    "body is null": (None, "Discord — Malformed"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(ROUTING_CASES))
+def test_every_authenticated_body_ends_in_a_notification(case):
+    body, expected = ROUTING_CASES[case]
+    reached, notified = _simulate({"headers": {}, "body": body})
+    assert notified, "silent drop"
+    assert expected in notified
+    assert _build_node()["name"] in reached, "Pushover builder not reached"
+    if case not in ("firing", "resolved"):
+        assert DISCORD_FIRING not in notified and DISCORD_RESOLVED not in notified
+
+
+def test_missing_body_entirely_still_notifies():
+    reached, notified = _simulate({"headers": {}})
+    assert "Discord — Malformed" in notified
+
+
+def test_malformed_discord_message_is_static():
+    node = _nodes()["Discord — Malformed"]
+    assert node["type"] == "n8n-nodes-base.discord"
+    assert "{{" not in json.dumps(node["parameters"]), "no caller data in the malformed message"
+    assert node["credentials"]["discordWebhookApi"]["name"] == "Discord Webhook Alerts"
+
+
+# check-env.sh: the webhook secret
+
+CHECK_ENV = REPO_ROOT / "scripts" / "check-env.sh"
+VALID_SECRET = "Zx9-" + "k3Lm" * 10  # 44 characters, not a placeholder
+
+
+def _env_body(secret_line):
+    ci = (REPO_ROOT / "tests" / "compose.ci.env").read_text(encoding="utf-8").splitlines()
+    names = [ln.split("=")[0] for ln in ci if "=" in ln and not ln.startswith("#")]
+    names.append("OPENSEARCH_ADMIN_PASSWORD")
+    lines = [f"{n}=Zx9-unique-{i}" for i, n in enumerate(dict.fromkeys(names))
+             if n != "GRAFANA_WEBHOOK_SECRET"]
+    if secret_line is not None:
+        lines.append(secret_line)
+    return "\n".join(lines) + "\n"
+
+
+def _check_env(tmp_path, secret_line):
+    env = tmp_path / ".env"
+    env.write_text(_env_body(secret_line), encoding="utf-8")
+    return subprocess.run(["bash", str(CHECK_ENV), str(env)], capture_output=True,
+                          text=True, timeout=60, check=False)
+
+
+@pytest.mark.parametrize("line", [
+    None,                                              # unset
+    "GRAFANA_WEBHOOK_SECRET=",                         # empty
+    "GRAFANA_WEBHOOK_SECRET=   ",                      # whitespace only
+    'GRAFANA_WEBHOOK_SECRET="   "',
+    "GRAFANA_WEBHOOK_SECRET=changeme",                 # placeholder
+    "GRAFANA_WEBHOOK_SECRET=changeme-" + "x" * 40,     # placeholder prefix, long
+    "GRAFANA_WEBHOOK_SECRET=x",                        # one character
+    "GRAFANA_WEBHOOK_SECRET=" + "a" * 31,              # one short of the minimum
+    "GRAFANA_WEBHOOK_SECRET=" + " " * 20 + "ab" * 8,   # padding does not count
+])
+def test_check_env_rejects_bad_webhook_secrets(tmp_path, line):
+    r = _check_env(tmp_path, line)
+    assert r.returncode == 1, r.stderr
+    assert "GRAFANA_WEBHOOK_SECRET" in r.stderr
+    assert "changeme" not in r.stderr and "aaaa" not in r.stderr, "value must not be printed"
+
+
+def test_check_env_accepts_a_valid_webhook_secret(tmp_path):
+    for line in ("GRAFANA_WEBHOOK_SECRET=" + VALID_SECRET,
+                 'GRAFANA_WEBHOOK_SECRET="' + VALID_SECRET + '"',
+                 "GRAFANA_WEBHOOK_SECRET=" + "a" * 32):
+        r = _check_env(tmp_path, line)
+        assert r.returncode == 0, r.stderr
+
+
+def test_docs_claim_only_what_is_enforced():
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    row = next(ln for ln in readme.splitlines() if "`GRAFANA_WEBHOOK_SECRET`" in ln)
+    assert "32 characters" in row and "check-env.sh" in row
+    assert "32 random bytes" not in DOC.read_text(encoding="utf-8")
+    text = DOC.read_text(encoding="utf-8")
+    for needle in ("accepted residual risk", "does not prove which Grafana", "allow", "unique to this contact point"):
+        assert needle in text, needle
+
+
+# pfSense: unknown output must not look healthy
+
+@pytest.mark.parametrize("text", [
+    "unable to contact update server; status unavailable",
+    "Impossible de contacter le serveur de mises a jour",           # localized
+    "something unexpected happened",
+    "WARNING: repository metadata is stale",                        # warning, exit 0
+    "Your system is up to date\nERROR: could not verify signature",  # mixed
+    "Version 99.9 is available\nWarning: low disk space",            # update plus warning
+    "",                                                             # empty output
+    "   \n",
+])
+def test_unknown_upgrade_output_fails_closed(tmp_path, text):
+    r, _ = _run(tmp_path, text, "")
+    _assert_failure(r)
+
+
+def test_known_healthy_and_update_outputs_still_work(tmp_path):
+    r, _ = _run(tmp_path, "Your system is up to date", "")
+    assert r.returncode == 0 and "pfsense_update_check_success value=1i" in r.stdout
+    r, _ = _run(tmp_path, "Version 99.9 is available", "")
+    assert _metrics(r.stdout)[("core", "false")] == 1
+
+
+@pytest.mark.parametrize("pkg", [
+    "Updating repository catalogue",           # chatter, spaces
+    "nopackageversion",                       # no name-version shape
+    "pfSense-pkg-Foo-1.0\nrepository error",  # mixed
+])
+def test_unexpected_pkg_output_fails_closed(tmp_path, pkg):
+    r, _ = _run(tmp_path, "Your system is up to date", pkg)
+    _assert_failure(r)

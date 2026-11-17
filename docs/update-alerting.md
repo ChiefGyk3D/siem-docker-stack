@@ -113,8 +113,11 @@ the right secret is rejected before the Discord and Pushover branches run.
 Without this, anyone who can reach the webhook could post alerts and page the
 phone.
 
-1. Generate the secret: `openssl rand -base64 32` (at least 32 random bytes;
-   do not use a shorter or human-chosen value). Store it in Doppler, project
+1. Generate the secret: `openssl rand -base64 32` (44 characters).
+   `scripts/check-env.sh` rejects a value that is empty, only whitespace, a
+   placeholder or under 32 characters; do not use a human-chosen value. The
+   secret must be unique to this contact point and never reused for any
+   other webhook, credential or service. Store it in Doppler, project
    `siem-docker-stack`, config `dev`, as `GRAFANA_WEBHOOK_SECRET`. Never write
    it into the repo or `.env`.
 2. In n8n, create a credential of type **Header Auth** named
@@ -136,8 +139,10 @@ phone.
    2026-11-17).
 5. Rotate by changing the Doppler value and the n8n credential together.
 
-The compose check stops Grafana from starting with an empty secret. It cannot
-check what you typed into n8n: an n8n credential whose value is just `Bearer`
+Two checks apply. Compose refuses to start Grafana when the value is unset or
+empty. `scripts/check-env.sh` (run it before `docker compose up`) also rejects
+whitespace-only, placeholder and short values. Neither can check what you typed
+into n8n: an n8n credential whose value is just `Bearer`
 would accept an empty-secret call, so follow step 2 exactly and run the
 checklist below.
 
@@ -214,13 +219,31 @@ update is still pending, Grafana re-alerts at the policy repeat interval (4h
 warning, 1h critical) and a new emergency message starts. The alert itself
 ends only when the update is applied.
 
-### Residual risk
+### Residual risk (accepted)
 
-The cancel call and the emergency page are only reachable by an
-authenticated Grafana caller, because the webhook rejects everything else.
-Anyone who holds the webhook secret can still page for the allowlisted alert
-names, and can cancel repeats for a tag they can compute. This repo does not
-keep a store of previously paged fingerprints.
+This is an accepted residual risk, and the owner's call, not something the
+workflow fixes. The webhook secret is a shared secret. Anyone who holds it,
+and can reach the webhook, can send an alert with any allowlisted title, pick
+emergency priority, and cancel the repeats for a tag they can compute from a
+title and fingerprint. The allowlist (`ALLOWED_ALERTNAMES`) only limits
+which names get emergency priority; it does not prove which Grafana rule
+sent the call, and it is not provenance. The cancel call and the emergency
+page are only reachable by an authenticated Grafana caller (one that
+presents the secret), because the webhook rejects everything else. This repo
+does not keep a store of previously paged fingerprints.
+
+Limit the exposure:
+
+- The secret must be unique to this contact point and never reused for other
+  webhooks.
+- Make the n8n webhook reachable only from the Grafana host. Examples:
+  - Docker: put n8n and Grafana on a Docker network of their own, and do not
+    publish the n8n port to the host (no `ports:` entry for the webhook).
+  - Reverse proxy: allow only the Grafana address and deny the rest, for
+    example in nginx:
+    `location /webhook/grafana-alerts { allow 192.0.2.10; deny all; proxy_pass http://n8n:5678; }`
+    (192.0.2.10 is a documentation address; use your Grafana host's address).
+- Rotate the secret if anyone who held it leaves or a copy may have leaked.
 
 ## Known limitations
 
