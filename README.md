@@ -272,6 +272,7 @@ variable. A value that is set but still a placeholder is caught by
 | `PROMETHEUS_GRAFANA_PASSWORD` | Grafana's account `grafana` on the SIEM Prometheus (9090 now requires basic auth) | Compose refuses to run |
 | `PROMETHEUS_SELF_PASSWORD` | Account `self` on the SIEM Prometheus: its own scrape, and operator queries or reload | `check-env.sh` fails; the render script exits with an error |
 | `PROMETHEUS_OTLP_SCRAPE_PASSWORD` | Account `scrape` the main Prometheus uses to scrape `prometheus-otlp` | `check-env.sh` fails; the render script exits with an error |
+| `GRAFANA_WEBHOOK_SECRET` | Shared secret Grafana sends to the n8n alert router webhook (at least 32 random bytes; see `docs/update-alerting.md`) | Compose refuses to run |
 
 **Client-side secrets (environment, not the stack `.env`).** The deploy scripts
 have no fallback: unset, empty or placeholder, they exit with an error before

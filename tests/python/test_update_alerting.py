@@ -1,5 +1,10 @@
-"""Guards for update alerting (issue #53): the n8n router's Pushover nodes,
-the Grafana alert provisioning files, and the pfSense update metric script."""
+"""Guards for update alerting (issue #53): the n8n router (webhook auth, Pushover
+nodes, payload builder), the Grafana alert provisioning files, and the pfSense
+update metric script.
+
+Node is REQUIRED: the Code node logic is executed for real, never string-matched.
+"""
+import hashlib
 import json
 import re
 import shutil
@@ -17,11 +22,13 @@ SCRIPT = REPO_ROOT / "scripts" / "pfsense-update-metric.sh"
 ENV_EXAMPLE = REPO_ROOT / ".env.example"
 DOC = REPO_ROOT / "docs" / "update-alerting.md"
 POLICY = ALERTING / "update-notification-policy.yml.example"
+COMPOSE = REPO_ROOT / "docker" / "docker-compose.yml"
 
-PUSHOVER_VARS = ["PUSHOVER_ENABLED", "PUSHOVER_APP_TOKEN", "PUSHOVER_USER_KEY",
-                 "PUSHOVER_RETRY", "PUSHOVER_EXPIRE"]
 DISCORD_FIRING = "Discord — Firing"
 DISCORD_RESOLVED = "Discord — Resolved"
+ORIGIN = "https://grafana.example.com"
+GOOD_NAME = "UniFi update pending over 24h"
+GOOD_FP = "abcdef0123456789"
 
 
 def _workflow():
@@ -33,49 +40,51 @@ def _nodes():
 
 
 def _build_node():
-    nodes = [n for n in _workflow()["nodes"] if n["type"] == "n8n-nodes-base.code"
-             and "$env.PUSHOVER_APP_TOKEN" in n["parameters"].get("jsCode", "")]
-    assert len(nodes) == 1, "expected exactly one Pushover payload Code node"
+    nodes = [n for n in _workflow()["nodes"] if n["type"] == "n8n-nodes-base.code"]
+    assert len(nodes) == 1, "expected exactly one Code node (the Pushover payload builder)"
     return nodes[0]
 
 
-def _run_build(body, env=None, origin=None):
-    """Run the Code node under node with a fake $input/$env. Returns the payload."""
+def _http_nodes():
+    return [n for n in _workflow()["nodes"] if n["type"] == "n8n-nodes-base.httpRequest"]
+
+
+def _node_bin():
     node = shutil.which("node")
-    if not node:
-        pytest.skip("node not installed")
+    assert node, "node is required for these tests (it must not be skipped or faked)"
+    return node
+
+
+def _run_build(body, origin=None, enabled=None):
+    """Run the real Code node source under node; return its first output item."""
     js = _build_node()["parameters"]["jsCode"]
     if origin is not None:
         js, n = re.subn(r"(?m)^const ALLOWED_DASHBOARD_ORIGIN = '[^']*';",
                         "const ALLOWED_DASHBOARD_ORIGIN = " + json.dumps(origin) + ";", js)
         assert n == 1
+    if enabled is not None:
+        js, n = re.subn(r"(?m)^const PUSHOVER_ENABLED = (true|false);",
+                        f"const PUSHOVER_ENABLED = {'true' if enabled else 'false'};", js)
+        assert n == 1
     harness = (
-        "const f=new Function('$input','$env'," + json.dumps(js) + ");\n"
+        "const f=new Function('$input'," + json.dumps(js) + ");\n"
         "const b=" + json.dumps(body) + ";\n"
-        "const e=Object.assign({PUSHOVER_APP_TOKEN:'t',PUSHOVER_USER_KEY:'u'},"
-        + json.dumps(env or {}) + ");\n"
-        "const r=f({first:()=>({json:{body:b}})},e);\n"
-        "console.log(JSON.stringify(r[0].json.pushover));"
+        "const r=f({first:()=>({json:{body:b}})});\n"
+        "console.log(JSON.stringify(r[0].json));"
     )
-    r = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    r = subprocess.run([_node_bin(), "-e", harness], capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, r.stderr
     return json.loads(r.stdout)
 
 
-def _alert(status, labels, **extra):
-    a = {"labels": dict({"alertname": "A"}, **labels), "annotations": {"summary": "s"},
-         "fingerprint": "fp1"}
+def _alert(status, labels=None, name=GOOD_NAME, fp=GOOD_FP, **extra):
+    a = {"labels": dict({"alertname": name}, **(labels or {})),
+         "annotations": {"summary": "s"}, "fingerprint": fp}
     a.update(extra)
     return {"status": status, "alerts": [a]}
 
 
-def _send_node():
-    sends = [n for n in _workflow()["nodes"] if "messages.json" in json.dumps(n["parameters"])]
-    assert len(sends) == 1, "expected exactly one Pushover send node"
-    return sends[0]
-
-
-# --- n8n router ------------------------------------------------------------
+# --- n8n router: structure -------------------------------------------------
 
 def test_router_discord_nodes_still_present_and_connected():
     nodes = _nodes()
@@ -86,103 +95,188 @@ def test_router_discord_nodes_still_present_and_connected():
     assert any(c["node"] == DISCORD_RESOLVED for c in outs[1])
 
 
-def test_router_has_pushover_http_node_gated_by_env():
-    nodes = _nodes()
-    send = _send_node()
-    assert send["type"] == "n8n-nodes-base.httpRequest"
-    assert "$json.pushover" in send["parameters"]["jsonBody"]
-    body = _build_node()["parameters"]["jsCode"]
-    for var in PUSHOVER_VARS[1:]:
-        assert f"$env.{var}" in body, var
-    assert "300" in body and "10800" in body, "retry/expire defaults missing"
-    gate =[n for n in nodes.values() if n["type"] == "n8n-nodes-base.if"
-            and "$env.PUSHOVER_ENABLED" in json.dumps(n["parameters"])]
-    assert len(gate) == 1
-    assert all(n["type"].startswith("n8n-nodes-base.") for n in nodes.values()), \
-        "community package node added"
+def _edges(wf):
+    edges = {}
+    for src, conn in wf["connections"].items():
+        for branch in conn["main"]:
+            for c in branch:
+                edges.setdefault(src, set()).add(c["node"])
+    return edges
 
 
-def test_router_http_nodes_only_reachable_through_gate():
+def _reachable(start, edges, blocked=()):
+    seen, todo = set(), [start]
+    while todo:
+        n = todo.pop()
+        if n in seen or n in blocked:
+            continue
+        seen.add(n)
+        todo.extend(edges.get(n, ()))
+    return seen
+
+
+def test_every_node_is_reachable_only_through_the_authenticated_webhook():
     wf = _workflow()
-    gate = next(n["name"] for n in wf["nodes"] if "$env.PUSHOVER_ENABLED" in json.dumps(n["parameters"]))
-    outs = wf["connections"]["Alert Status"]["main"]
-    assert any(c["node"] == gate for c in outs[0])
-    assert any(c["node"] == gate for c in outs[1])
-    assert wf["connections"][gate]["main"][0], "gate true branch not wired"
-    direct = {c["node"] for o in outs for c in o}
-    http = {n["name"] for n in wf["nodes"] if n["type"] == "n8n-nodes-base.httpRequest"}
-    assert http and not (direct & http)
-    # the payload builder sits behind the gate, never directly behind the switch
-    assert _build_node()["name"] not in direct
+    names = {n["name"] for n in wf["nodes"]}
+    hooks = [n["name"] for n in wf["nodes"] if n["type"] == "n8n-nodes-base.webhook"]
+    assert len(hooks) == 1
+    edges = _edges(wf)
+    has_incoming = {t for ts in edges.values() for t in ts}
+    assert names - has_incoming == {hooks[0]}, "a node other than the webhook is an entry point"
+    assert _reachable(hooks[0], edges) == names, "unreachable node in the graph"
+    # nothing at all is reachable if the webhook is cut
+    assert _reachable(hooks[0], edges, blocked={hooks[0]}) == set()
+    # the Pushover HTTP nodes need the enable gate and the payload builder
+    http = {n["name"] for n in _http_nodes()}
+    assert http
+    assert not (http & _reachable(hooks[0], edges, blocked={"Pushover Enabled?"}))
+    assert not (http & _reachable(hooks[0], edges, blocked={_build_node()["name"]}))
 
 
-def test_pushover_mapping_logic_matches_spec():
-    e = {}
-    crit = _run_build(_alert("firing", {"severity": "critical"}), e)
-    sec = _run_build(_alert("firing", {"severity": "warning", "update_security": "true"}), e)
-    warn = _run_build(_alert("firing", {"severity": "warning"}), e)
-    res = _run_build(_alert("resolved", {"severity": "critical"}), e)
-    clamp = _run_build(_alert("firing", {"severity": "critical"}),
-                       {"PUSHOVER_EXPIRE": "99999", "PUSHOVER_RETRY": "5"})
+def test_webhook_requires_header_auth_with_credential_reference():
+    hook = next(n for n in _workflow()["nodes"] if n["type"] == "n8n-nodes-base.webhook")
+    assert hook["parameters"]["authentication"] == "headerAuth"
+    cred = hook["credentials"]["httpHeaderAuth"]
+    assert set(cred) == {"id", "name"} and cred["name"] == "grafana-webhook-auth"
+    assert not re.search(r"[A-Za-z0-9+/_-]{32,}", json.dumps(hook["credentials"]))
+
+
+def test_pushover_secrets_come_from_a_credential_not_env_or_node_output():
+    text = ROUTER.read_text(encoding="utf-8")
+    assert "$env" not in text, "no env access anywhere in the workflow"
+    assert "PUSHOVER_APP_TOKEN" not in text and "PUSHOVER_USER_KEY" not in text
+    code = _build_node()["parameters"]["jsCode"]
+    assert not re.search(r"\btoken\b|\buser\b", code), "Code node must not handle the Pushover secrets"
+    http = _http_nodes()
+    assert len(http) == 2
+    for n in http:
+        assert "api.pushover.net" in n["parameters"]["url"]
+        assert n["parameters"]["authentication"] == "genericCredentialType"
+        assert n["parameters"]["genericAuthType"] == "httpCustomAuth"
+        cred = n["credentials"]["httpCustomAuth"]
+        assert set(cred) == {"id", "name"} and cred["name"] == "pushover-api"
+        assert not re.search(r"[A-Za-z0-9+/_-]{32,}", json.dumps(n["credentials"]))
+
+
+def test_workflow_does_not_persist_successful_executions():
+    s = _workflow()["settings"]
+    assert s["saveDataSuccessExecution"] == "none"
+    assert s["saveManualExecutions"] is False
+    assert s["saveExecutionProgress"] is False
+
+
+def test_cancel_only_for_namespaced_tags():
+    nodes = _nodes()
+    cond = json.dumps(nodes["Pushover Cancel?"]["parameters"])
+    assert "upd-" in cond
+    assert "cancel_by_tag" in nodes["Pushover Cancel Repeats"]["parameters"]["url"]
+    wf = _workflow()
+    assert _edges(wf)["Pushover Cancel?"] == {"Pushover Cancel Repeats"}
+
+
+# --- n8n router: Code node behavior (real execution) ------------------------
+
+def test_default_is_disabled():
+    out = _run_build(_alert("firing", {"severity": "warning"}))
+    assert out["enabled"] is False
+    assert _run_build(_alert("firing", {"severity": "warning"}), enabled=True)["enabled"] is True
+
+
+def test_priority_mapping():
+    crit = _run_build(_alert("firing", {"severity": "critical"}))["pushover"]
+    sec = _run_build(_alert("firing", {"severity": "warning", "update_security": "true"}))["pushover"]
+    warn = _run_build(_alert("firing", {"severity": "warning"}))["pushover"]
+    res = _run_build(_alert("resolved", {"severity": "critical"}))["pushover"]
     assert crit["priority"] == 2 and crit["retry"] == 300 and crit["expire"] == 10800
     assert sec["priority"] == 2
     assert warn["priority"] == 1 and "retry" not in warn and "expire" not in warn
     assert res["priority"] == 0 and "retry" not in res
-    assert clamp["expire"] == 10800 and clamp["retry"] == 30
     assert len(crit["title"]) <= 250 and len(crit["message"]) <= 1024
+    for k in ("token", "user"):
+        assert k not in crit
 
 
-# --- webhook authentication and URL allowlist (round 2) ----------------------
-
-def test_webhook_requires_header_auth_with_credential_reference():
-    wf = _workflow()
-    hooks = [n for n in wf["nodes"] if n["type"] == "n8n-nodes-base.webhook"]
-    assert len(hooks) == 1, "the router must have exactly one entry point"
-    hook = hooks[0]
-    assert hook["parameters"]["authentication"] == "headerAuth"
-    cred = hook["credentials"]["httpHeaderAuth"]
-    assert set(cred) == {"id", "name"} and cred["name"] == "grafana-webhook-auth"
-    # the entry point leads only to the switch, which fronts Discord and Pushover
-    assert [c["node"] for o in wf["connections"][hook["name"]]["main"] for c in o] == ["Alert Status"]
-    # no secret-looking literal anywhere in the credential reference
-    assert not re.search(r"[A-Za-z0-9+/_-]{32,}", json.dumps(hook["credentials"]))
+def test_unknown_alertname_cannot_get_emergency_priority_or_cancel():
+    fake = _run_build(_alert("firing", {"severity": "critical", "update_security": "true"},
+                             name="fake", fp="victim1"))
+    assert fake["pushover"]["priority"] == 1
+    assert "tags" not in fake["pushover"] and "retry" not in fake["pushover"]
+    res = _run_build(_alert("resolved", {}, name="fake", fp="abcd"))
+    assert res["cancelTag"] == ""
 
 
-def test_unauthenticated_webhook_detected_by_guard():
-    """Negative case: the guard's check fails on a node without auth."""
-    hook = dict(_nodes()["Grafana Webhook"])
-    hook["parameters"] = {k: v for k, v in hook["parameters"].items() if k != "authentication"}
-    assert hook["parameters"].get("authentication") != "headerAuth"
+def test_tags_are_namespaced_hashes_and_cancel_matches():
+    expected = "upd-" + hashlib.sha256(f"{GOOD_NAME}|{GOOD_FP}".encode()).hexdigest()[:32]
+    fire = _run_build(_alert("firing", {"severity": "critical"}))
+    assert fire["pushover"]["tags"] == expected
+    res = _run_build(_alert("resolved", {"severity": "critical"}))
+    assert res["cancelTag"] == expected
+    assert fire["cancelTag"] == ""
+    # an invalid fingerprint yields no tag and no cancel
+    bad = _run_build(_alert("firing", {"severity": "critical"}, fp="../../x"))
+    assert "tags" not in bad["pushover"]
+    assert _run_build(_alert("resolved", {}, fp="../../x"))["cancelTag"] == ""
 
 
-def test_contact_point_sends_secret_from_environment_only():
-    path = ALERTING / "contact-points.yml"
-    settings = yaml.safe_load(path.read_text(encoding="utf-8"))["contactPoints"][0]["receivers"][0]["settings"]
-    assert settings["authorization_scheme"] == "Bearer"
-    assert settings["authorization_credentials"] == "$GRAFANA_WEBHOOK_SECRET"
-    text = path.read_text(encoding="utf-8")
-    assert not re.search(r"[A-Za-z0-9+/_-]{32,}", text), "literal secret-looking value"
+def test_pure_js_sha256_matches_node_crypto():
+    js = _build_node()["parameters"]["jsCode"]
+    m = re.search(r"function sha256hex\(.*?\n\}\n", js, re.S)
+    assert m, "sha256hex helper missing"
+    helper = m.group(0)
+    harness = (helper + "\nconst crypto=require('crypto');const bad=[];"
+               "for (const s of ['', 'abc', 'a|b', 'x'.repeat(55), 'x'.repeat(56), 'x'.repeat(64), 'x'.repeat(200)])"
+               "{ if (sha256hex(s) !== crypto.createHash('sha256').update(s).digest('hex')) bad.push(s.length); }"
+               "console.log(JSON.stringify(bad));")
+    r = subprocess.run([_node_bin(), "-e", harness], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout) == []
 
 
-def test_webhook_secret_is_declared_without_a_value():
-    assert re.search(r"^# GRAFANA_WEBHOOK_SECRET=\s*$", ENV_EXAMPLE.read_text(encoding="utf-8"), re.M)
-    compose = yaml.safe_load((REPO_ROOT / "docker" / "docker-compose.yml").read_text(encoding="utf-8"))
-    assert "GRAFANA_WEBHOOK_SECRET" in compose["services"]["grafana"]["environment"], \
-        "passed through by name, with no default"
+def test_code_node_does_not_need_node_builtins():
+    code = _build_node()["parameters"]["jsCode"]
+    assert "require(" not in code
 
 
-ORIGIN = "https://grafana.example.com"
+@pytest.mark.parametrize("body", [
+    {"status": "firing", "alerts": "nope"},
+    {"status": "firing", "alerts": {"0": {}}},
+    {"status": "firing", "alerts": [None]},
+    {"status": "firing", "alerts": []},
+    {"status": "firing", "alerts": [{"labels": "x"}]},
+    {"status": "firing", "alerts": [{"labels": [], "annotations": 5}]},
+    {"status": "firing", "alerts": [{"labels": {"alertname": {"toString": "x"}}}]},
+    {"status": "weird", "alerts": [{}]},
+    {"status": ["firing"], "alerts": [{}]},
+    "just a string",
+    None,
+    {"status": "firing", "alerts": [{"labels": {"alertname": 5, "severity": {"a": 1}},
+                                      "annotations": {"summary": {"x": 1}, "description": 7},
+                                      "fingerprint": {"a": 1}, "dashboardURL": 12}]},
+])
+def test_malformed_bodies_never_throw_and_never_page_at_emergency(body):
+    out = _run_build(body, enabled=True)
+    assert out["enabled"] is True
+    assert out["pushover"]["priority"] in (0, 1)
+    assert out["cancelTag"] == ""
+    assert isinstance(out["pushover"]["title"], str) and isinstance(out["pushover"]["message"], str)
+
+
+def test_malformed_structure_yields_generic_priority_one_alert():
+    out = _run_build({"status": "firing", "alerts": "nope"})
+    assert out["pushover"]["priority"] == 1
+    assert "malformed" in out["pushover"]["message"].lower()
 
 
 def test_dashboard_origin_constant_defaults_empty():
     js = _build_node()["parameters"]["jsCode"]
     assert re.search(r"(?m)^const ALLOWED_DASHBOARD_ORIGIN = '';", js)
-    assert js.count("ALLOWED_DASHBOARD_ORIGIN") >= 2
+    assert re.search(r"(?m)^const PUSHOVER_ENABLED = false;", js)
     assert "ALLOWED_DASHBOARD_ORIGIN" in DOC.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("url,origin,kept", [
     (ORIGIN + "/d/abc?orgId=1", ORIGIN, True),
+    (ORIGIN + "/d/abc", ORIGIN + "/", True),              # configured origin is canonicalized
     (ORIGIN + "/d/abc", "", False),                       # default: always dropped
     ("http://grafana.example.com/d/abc", ORIGIN, False),
     ("javascript:alert(1)", ORIGIN, False),
@@ -190,26 +284,64 @@ def test_dashboard_origin_constant_defaults_empty():
     ("https://grafana.example.com.evil.example.net/", ORIGIN, False),
     ("https://grafana.example.com@evil.example.net/", ORIGIN, False),
     ("https://user:pw@grafana.example.com/d/abc", ORIGIN, False),
+    ("https://grafana.example.com\\@evil.example.net/d/a", ORIGIN, False),
+    ("https://grafana.example.com/d/a\nb", ORIGIN, False),
+    ("https://grafana.example.com/d/a\x00b", ORIGIN, False),
     (ORIGIN + "/d/" + "a" * 600, ORIGIN, False),          # over-long
     ("not a url", ORIGIN, False),
 ])
 def test_dashboard_url_allowlist(url, origin, kept):
-    if shutil.which("node"):
-        out = _run_build(_alert("firing", {"severity": "warning"}, dashboardURL=url), {}, origin=origin)
-        assert (out.get("url") == url) is kept
-        assert kept or "url" not in out
+    out = _run_build(_alert("firing", {"severity": "warning"}, dashboardURL=url), origin=origin)
+    sent = out["pushover"].get("url")
+    if kept:
+        assert sent == ORIGIN + (url[len(ORIGIN):])
     else:
-        js = _build_node()["parameters"]["jsCode"]
-        for needle in ("https:", "p.origin", "length", "username"):
-            assert needle in js
+        assert sent is None
 
 
-def test_env_example_documents_pushover_names_without_secret_values():
+def test_dashboard_url_returns_normalized_href():
+    out = _run_build(_alert("firing", {"severity": "warning"},
+                            dashboardURL="HTTPS://GRAFANA.example.com:443/d/a b"), origin=ORIGIN)
+    assert out["pushover"]["url"] == "https://grafana.example.com/d/a%20b"
+
+
+def test_allowed_alertnames_equal_provisioned_update_alert_titles():
+    js = _build_node()["parameters"]["jsCode"]
+    m = re.search(r"const ALLOWED_ALERTNAMES = \[(.*?)\];", js, re.S)
+    assert m
+    listed = re.findall(r"'([^']*)'", m.group(1))
+    provisioned = {r["title"] for _, _, r in _rules() if r["labels"].get("update_alert") == "true"}
+    assert len(listed) == len(set(listed))
+    assert set(listed) == provisioned and len(provisioned) >= 6
+
+
+# --- webhook secret handling -------------------------------------------------
+
+def test_contact_point_sends_secret_from_environment_only():
+    path = ALERTING / "contact-points.yml"
+    settings = yaml.safe_load(path.read_text(encoding="utf-8"))["contactPoints"][0]["receivers"][0]["settings"]
+    assert settings["authorization_scheme"] == "Bearer"
+    assert settings["authorization_credentials"] == "$GRAFANA_WEBHOOK_SECRET"
+    assert not re.search(r"[A-Za-z0-9+/_-]{32,}", path.read_text(encoding="utf-8"))
+    assert settings["url"].endswith("/webhook/grafana-alerts")
+
+
+def test_webhook_secret_is_required_non_empty_in_compose():
+    assert re.search(r"^# GRAFANA_WEBHOOK_SECRET=\s*$", ENV_EXAMPLE.read_text(encoding="utf-8"), re.M)
+    compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
+    env = compose["services"]["grafana"]["environment"]
+    entry = [e for e in env if e.startswith("GRAFANA_WEBHOOK_SECRET")]
+    assert len(entry) == 1
+    assert entry[0].startswith("GRAFANA_WEBHOOK_SECRET=${GRAFANA_WEBHOOK_SECRET:?"), \
+        "must fail closed on an unset or empty value"
+    assert ":-" not in entry[0]
+    ci_env = (REPO_ROOT / "tests" / "compose.ci.env").read_text(encoding="utf-8")
+    assert re.search(r"^GRAFANA_WEBHOOK_SECRET=\S+", ci_env, re.M)
+
+
+def test_env_example_has_no_pushover_secret_names():
     text = ENV_EXAMPLE.read_text(encoding="utf-8")
-    for var in PUSHOVER_VARS:
-        assert re.search(rf"^# {var}=", text, re.M), f"{var} missing"
-    for var in ("PUSHOVER_APP_TOKEN", "PUSHOVER_USER_KEY"):
-        assert re.search(rf"^# {var}=\s*$", text, re.M), f"{var} must have no value"
+    assert "PUSHOVER_APP_TOKEN" not in text and "PUSHOVER_USER_KEY" not in text
 
 
 # --- Grafana provisioning --------------------------------------------------
@@ -228,17 +360,22 @@ def _rules():
 
 def test_rule_schema():
     rules = _rules()
-    assert len(rules) >= 5
+    assert len(rules) >= 6
     uids = [r["uid"] for _, _, r in rules]
     assert len(uids) == len(set(uids))
     for fname, _group, rule in rules:
         assert rule["uid"] and rule["title"], fname
         refs = {d["refId"] for d in rule["data"]}
         assert rule["condition"] in refs, rule["title"]
-        assert rule["noDataState"] == "OK", rule["title"]
         assert rule["labels"]["severity"] in {"warning", "critical"}, rule["title"]
         assert rule["labels"]["update_alert"] == "true", rule["title"]
         assert rule["for"], rule["title"]
+        if rule["uid"].startswith("update-unifi"):
+            assert rule["noDataState"] == "OK", rule["title"]
+        else:
+            # pfSense detector: missing data or a failed query must not look healthy
+            assert rule["noDataState"] == "Alerting", rule["title"]
+            assert rule["execErrState"] == "Alerting", rule["title"]
 
 
 def test_unifi_rules_escalate_24h_then_7d():
@@ -253,14 +390,26 @@ def test_unifi_rules_escalate_24h_then_7d():
 
 def test_pfsense_rules_ship_paused_and_use_metric():
     pf = [r for _, _, r in _rules() if r["uid"].startswith("update-pfsense")]
-    assert len(pf) >= 3
+    assert len(pf) >= 4
     for r in pf:
         assert r["isPaused"] is True, r["uid"]
-        assert "pfsense_update_pending" in json.dumps(r["data"])
+        assert "pfsense_update" in json.dumps(r["data"])
     assert any(r["labels"].get("update_security") == "true"
                and r["labels"]["severity"] == "critical" for r in pf)
     text = "\n".join(p.read_text(encoding="utf-8") for p in RULE_FILES)
     assert "Telegraf" in text, "comment explaining when pfSense rules are enabled"
+
+
+def test_pfsense_collector_health_rule():
+    by = {r["uid"]: r for _, _, r in _rules()}
+    r = by["update-pfsense-check-failing"]
+    assert r["title"] == "pfSense update check failing or stale"
+    assert "pfsense_update_check_success" in json.dumps(r["data"])
+    assert "36h" in json.dumps(r["data"]) or 129600 in [d["relativeTimeRange"]["from"] for d in r["data"]
+                                                         if "relativeTimeRange" in d]
+    assert r["isPaused"] is True and r["noDataState"] == "Alerting"
+    cond = json.dumps([d["model"] for d in r["data"] if d["refId"] == "C"])
+    assert '"lt"' in cond
 
 
 def test_rules_have_no_manual_dismiss_logic():
@@ -282,18 +431,33 @@ def test_contact_point_is_webhook_to_router():
     data = yaml.safe_load((ALERTING / "contact-points.yml").read_text(encoding="utf-8"))
     cp = data["contactPoints"][0]["receivers"][0]
     assert cp["type"] == "webhook"
-    assert cp["settings"]["url"].endswith("/webhook/grafana-alerts")
 
 
 # --- pfSense metric script -------------------------------------------------
 
-def _fake_bin(tmp_path, upgrade_out, pkg_out, upgrade_rc=0):
+FAKE_UP = """#!/bin/sh
+echo "pfSense-upgrade $*" >> "$REC"
+if [ "$*" != "-c" ]; then echo "unexpected args: $*" >&2; exit 99; fi
+cat <<'EOT'
+{out}
+EOT
+exit {rc}
+"""
+FAKE_PKG = """#!/bin/sh
+echo "pkg-static $*" >> "$REC"
+if [ "$*" != "version -qRl <" ]; then echo "unexpected args: $*" >&2; exit 99; fi
+cat <<'EOT'
+{out}
+EOT
+exit {rc}
+"""
+
+
+def _fake_bin(tmp_path, upgrade_out, pkg_out, upgrade_rc=0, pkg_rc=0):
     d = tmp_path / "bin"
-    d.mkdir()
-    (d / "pfSense-upgrade").write_text(
-        f"#!/bin/sh\ncat <<'EOT'\n{upgrade_out}\nEOT\nexit {upgrade_rc}\n", encoding="utf-8")
-    (d / "pkg-static").write_text(
-        f"#!/bin/sh\ncat <<'EOT'\n{pkg_out}\nEOT\n", encoding="utf-8")
+    d.mkdir(exist_ok=True)
+    (d / "pfSense-upgrade").write_text(FAKE_UP.format(out=upgrade_out, rc=upgrade_rc), encoding="utf-8")
+    (d / "pkg-static").write_text(FAKE_PKG.format(out=pkg_out, rc=pkg_rc), encoding="utf-8")
     for f in d.iterdir():
         f.chmod(0o755)
     return d
@@ -301,14 +465,20 @@ def _fake_bin(tmp_path, upgrade_out, pkg_out, upgrade_rc=0):
 
 def _run(tmp_path, upgrade_out, pkg_out, **kw):
     d = _fake_bin(tmp_path, upgrade_out, pkg_out, **kw)
-    env = {"PATH": f"{d}:/usr/bin:/bin"}
-    return subprocess.run(["/bin/sh", str(SCRIPT)], capture_output=True, text=True,
-                          env=env, timeout=30, check=False)
+    rec = tmp_path / "calls.txt"
+    env = {"PATH": f"{d}:/usr/bin:/bin", "REC": str(rec)}
+    r = subprocess.run(["/bin/sh", str(SCRIPT)], capture_output=True, text=True,
+                       env=env, timeout=30, check=False, cwd=str(tmp_path))
+    calls = rec.read_text(encoding="utf-8").splitlines() if rec.exists() else []
+    return r, calls
 
 
 def _metrics(out):
     res = {}
     for line in out.strip().splitlines():
+        if line == "pfsense_update_check_success value=1i":
+            res["ok"] = 1
+            continue
         m = re.match(r"pfsense_update_pending,kind=(\w+),security=(\w+) value=(\d)i$", line)
         assert m, line
         res[(m.group(1), m.group(2))] = int(m.group(3))
@@ -322,7 +492,8 @@ def test_script_syntax_and_shellcheck():
         assert subprocess.run([sc, "-s", "sh", str(SCRIPT)], timeout=60).returncode == 0
 
 
-def test_script_is_read_only():
+def test_script_is_read_only_by_denylist():
+    # A denylist is a weak guard; the exact-argv tests below are the real check.
     text = SCRIPT.read_text(encoding="utf-8")
     code = "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
     for bad in ("pkg-static upgrade", "pkg-static install", "pfSense-upgrade -y",
@@ -331,53 +502,76 @@ def test_script_is_read_only():
     assert text.startswith("#!/bin/sh")
 
 
-def test_up_to_date(tmp_path):
-    r = _run(tmp_path, "Your system is up to date", "")
+def test_up_to_date_and_exact_argv(tmp_path):
+    r, calls = _run(tmp_path, "Your system is up to date", "")
     assert r.returncode == 0
     m = _metrics(r.stdout)
+    assert m.pop("ok") == 1
     assert len(m) == 6 and sum(m.values()) == 0
+    assert calls == ["pfSense-upgrade -c", "pkg-static version -qRl <"]
 
 
 def test_core_update_pending(tmp_path):
-    r = _run(tmp_path, "Version 99.9 is available\n", "pfSense-99.9\n")
+    r, _ = _run(tmp_path, "Version 99.9 is available\n", "pfSense-99.9\n")
     m = _metrics(r.stdout)
     assert m[("core", "false")] == 1 and m[("core", "true")] == 0
     assert m[("kernel", "false")] == 0 and m[("package", "false")] == 0
 
 
 def test_kernel_and_package_pending(tmp_path):
-    r = _run(tmp_path, "Your system is up to date",
-             "pfSense-kernel-pfSense-99.9\npfSense-pkg-Telegraf-1.2\n")
+    r, _ = _run(tmp_path, "Your system is up to date",
+                "pfSense-kernel-pfSense-99.9\npfSense-pkg-Telegraf-1.2\n")
     m = _metrics(r.stdout)
     assert m[("kernel", "false")] == 1 and m[("package", "false")] == 1
     assert m[("core", "false")] == 0
 
 
 def test_security_flag(tmp_path):
-    r = _run(tmp_path, "Version 99.9 is available (security update)\n", "pfSense-99.9\n")
+    r, _ = _run(tmp_path, "Version 99.9 is available (security update)\n", "pfSense-99.9\n")
     m = _metrics(r.stdout)
     assert m[("core", "true")] == 1 and m[("core", "false")] == 0
 
 
-def test_check_failure_emits_nothing_and_exits_zero(tmp_path):
-    r = _run(tmp_path, "unable to reach update server", "", upgrade_rc=1)
-    assert r.returncode == 0
-    assert r.stdout.strip() == ""
+def _assert_failure(r):
+    assert r.returncode != 0
+    assert r.stdout.strip() == "pfsense_update_check_success value=0i"
+    assert "pfsense_update_pending" not in r.stdout
 
 
-def test_missing_tools_exit_zero_no_output(tmp_path):
+def test_upgrade_check_failure_is_a_failure_not_healthy(tmp_path):
+    r, _ = _run(tmp_path, "unable to reach update server", "", upgrade_rc=1)
+    _assert_failure(r)
+
+
+def test_pkg_static_failure_is_a_failure_not_healthy(tmp_path):
+    r, _ = _run(tmp_path, "Your system is up to date", "", pkg_rc=1)
+    _assert_failure(r)
+
+
+def test_missing_tools_is_a_failure(tmp_path):
     (tmp_path / "empty").mkdir()
     r = subprocess.run(["/bin/sh", str(SCRIPT)], capture_output=True, text=True, timeout=30,
                        env={"PATH": str(tmp_path / "empty")}, check=False)
-    assert r.returncode == 0 and r.stdout.strip() == ""
+    _assert_failure(r)
 
 
-def test_docs_exist_and_cover_env_vars():
+def test_glob_and_odd_names_are_not_expanded_and_fail_closed(tmp_path):
+    (tmp_path / "pfSense-99.9").write_text("x", encoding="utf-8")
+    r, _ = _run(tmp_path, "Your system is up to date", "*\n")
+    _assert_failure(r)
+    r, _ = _run(tmp_path, "Your system is up to date", "pkg;touch x\n")
+    _assert_failure(r)
+    assert not (tmp_path / "x").exists()
+
+
+def test_docs_exist_and_cover_required_topics():
     text = DOC.read_text(encoding="utf-8")
-    for var in PUSHOVER_VARS + ["N8N_BLOCK_ENV_ACCESS_IN_NODE"]:
-        assert var in text, var
-    assert "—" not in text, "em dash in docs"
-    assert "doppler" in text.lower()
-    for needle in ("grafana-webhook-auth", "GRAFANA_WEBHOOK_SECRET", "ALLOWED_DASHBOARD_ORIGIN",
-                   "authenticated Grafana caller"):
+    for needle in ("grafana-webhook-auth", "pushover-api", "GRAFANA_WEBHOOK_SECRET",
+                   "ALLOWED_DASHBOARD_ORIGIN", "ALLOWED_ALERTNAMES", "authenticated Grafana caller",
+                   "openssl rand -base64 32", "Known limitations", "pre-deploy checklist",
+                   "PUSHOVER_ENABLED", "Doppler"):
         assert needle in text, needle
+    assert "—" not in text, "em dash in docs"
+    assert "PUSHOVER_APP_TOKEN" not in text and "PUSHOVER_USER_KEY" not in text
+    assert "N8N_BLOCK_ENV_ACCESS_IN_NODE" not in text
+    assert "n8n rejects the call" not in text

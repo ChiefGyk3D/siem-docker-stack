@@ -15,6 +15,7 @@ UniFi poller -> InfluxDB (unpoller) --\
 pfSense Telegraf exec -> InfluxDB ----/        |
  (pfsense_update_pending)                      v
                                   contact point n8n-grafana-router
+                                    (webhook, header auth)
                                                |
                                   n8n "Grafana SOAR - Alert Router"
                                        |                 |
@@ -29,22 +30,26 @@ you turn it on.
 | File | Purpose |
 |------|---------|
 | `docker/grafana/provisioning/alerting/update-alert-rules-unifi.yml` | UniFi rules: warning after 24h pending, critical after 7 days |
-| `docker/grafana/provisioning/alerting/update-alert-rules-pfsense.yml` | pfSense rules, shipped paused (see below) |
+| `docker/grafana/provisioning/alerting/update-alert-rules-pfsense.yml` | pfSense rules and a collector health rule, shipped paused |
 | `docker/grafana/provisioning/alerting/contact-points.yml` | Webhook contact point pointing at the n8n router |
 | `docker/grafana/provisioning/alerting/update-notification-policy.yml.example` | Repeat intervals: 4h warning, 1h critical |
-| `n8n/grafana-alert-router.json` | Router with the added Pushover nodes |
+| `n8n/grafana-alert-router.json` | Router with header auth and the added Pushover nodes |
 | `scripts/pfsense-update-metric.sh` | Read-only metric source for the firewall (not deployed) |
-| `tests/python/test_update_alerting.py` | Tests for all of the above |
+| `tests/python/test_update_alerting.py` | Tests for all of the above (Node is required) |
 
 ### Rules
 
-- `noDataState: OK` on every rule: missing data never pages.
 - Every rule carries `severity` (warning or critical), `update_alert=true` and
   `alert_group=updates`. The pfSense security rule also carries
   `update_security=true`.
+- UniFi rules use `noDataState: OK`: missing poller data never pages.
+- pfSense rules are security detectors, so `noDataState` and `execErrState`
+  are `Alerting`: a silent or broken check raises an alert instead of hiding.
+  A separate rule, "pfSense update check failing or stale", fires when
+  `pfsense_update_check_success` is 0 or no result has arrived for 36 hours.
 - A rule clears only when its query stops returning a pending update (the
   UniFi `upgradable` flag goes false, or `pfsense_update_pending` returns to
-  0). There is no manual dismiss or silence logic in the rules.
+  0). There is no manual override in the rules.
 - The 24h and 7 day thresholds use the rule `for` duration, so a device that
   is updated and later has a new update starts a fresh clock.
 
@@ -66,13 +71,19 @@ pending Network application update does not raise an alert.
 ### pfSense data (not deployed)
 
 The pfSense rules ship paused. Enable them (set `isPaused: false`) once the
-Telegraf input below is deployed and the metric is arriving.
+Telegraf input below is deployed and the metrics are arriving.
 
 Metric `pfsense_update_pending`: gauge, `value` 0 or 1, tags `kind`
-(`core`, `kernel`, `package`) and `security` (`true`, `false`). The script
-prints all six series every run, so a series never goes stale while an update
-is pending. The `security` tag is a best-effort match on the word "security"
-in the `pfSense-upgrade -c` text.
+(`core`, `kernel`, `package`) and `security` (`true`, `false`). Metric
+`pfsense_update_check_success`: 1 when both checks ran, 0 when one failed.
+On success the script prints all six update series plus the health metric. On
+any failure (a missing or failing `pfSense-upgrade -c` or
+`pkg-static version -qRl '<'`, or an unexpected package name) it prints only
+`pfsense_update_check_success value=0i` and exits non-zero, never zero-valued
+update metrics. Telegraf may drop the output of a command that exits
+non-zero; that is why the health rule also alerts on missing data. The
+`security` tag is a best-effort match on the word "security" in the
+`pfSense-upgrade -c` text.
 
 Telegraf exec input for the firewall:
 
@@ -85,8 +96,7 @@ Telegraf exec input for the firewall:
 ```
 
 Copy `scripts/pfsense-update-metric.sh` to that path by hand when you are
-ready. The script only runs `pfSense-upgrade -c` and `pkg-static version`, and
-always exits 0. If a check fails it prints nothing.
+ready. The script runs only those two read-only commands.
 
 ### Notification policy
 
@@ -100,91 +110,148 @@ tree yet. Repeat intervals: 4h for warning, 1h for critical.
 
 The router's `Grafana Webhook` node uses n8n Header Auth, so a call without
 the right secret is rejected before the Discord and Pushover branches run.
-Without this, anyone who can reach the webhook could post alerts, page the
-phone at emergency priority and call the cancel endpoint.
+Without this, anyone who can reach the webhook could post alerts and page the
+phone.
 
-1. Generate a long random value and store it in Doppler, project
-   `siem-docker-stack`, config `dev`, as `GRAFANA_WEBHOOK_SECRET`. Do not
-   write it into the repo or `.env`.
+1. Generate the secret: `openssl rand -base64 32` (at least 32 random bytes;
+   do not use a shorter or human-chosen value). Store it in Doppler, project
+   `siem-docker-stack`, config `dev`, as `GRAFANA_WEBHOOK_SECRET`. Never write
+   it into the repo or `.env`.
 2. In n8n, create a credential of type **Header Auth** named
    `grafana-webhook-auth`. Header name `Authorization`, header value
-   `Bearer <the same secret>`. Select it on the `Grafana Webhook` node after
-   you import the workflow (the JSON carries only the credential name).
-3. Run Grafana with the variable in its environment, for example
-   `doppler run -- docker compose up -d`. The compose file passes
-   `GRAFANA_WEBHOOK_SECRET` through by name, with no default.
+   `Bearer <the same secret>`. The value must be a non-empty secret after
+   `Bearer `. Select the credential on the `Grafana Webhook` node after you
+   import the workflow (the JSON carries only the credential name).
+3. Defense in depth: change the webhook node path from `grafana-alerts` to
+   `grafana-alerts-<opaque>`, where `<opaque>` comes from `openssl rand -hex
+   16`, and use the same URL in `contact-points.yml`. Keep that value out of
+   public places.
+4. Run Grafana with the variable in its environment, for example
+   `doppler run -- docker compose up -d`. The compose file requires a
+   non-empty `GRAFANA_WEBHOOK_SECRET` and refuses to start without it.
    `contact-points.yml` sends it as `authorization_credentials` with
-   `authorization_scheme: Bearer`, written as `$GRAFANA_WEBHOOK_SECRET`,
-   which Grafana provisioning replaces from the environment (Grafana
-   documentation, "Use configuration files to provision alerting
-   resources", read 2026-11-17). If the variable is unset, Grafana sends an
-   empty value and n8n rejects the call.
-4. Rotate by changing the Doppler value and the n8n credential together.
+   `authorization_scheme: Bearer`, written as `$GRAFANA_WEBHOOK_SECRET`, which
+   Grafana provisioning replaces from the environment (Grafana documentation,
+   "Use configuration files to provision alerting resources", read
+   2026-11-17).
+5. Rotate by changing the Doppler value and the n8n credential together.
 
-### Dashboard link allowlist
-
-The `Build Pushover Payload` Code node forwards a dashboard link to the phone
-only when it is an https URL, has no embedded user name or password, is at
-most 512 characters, and its origin equals the constant
-`ALLOWED_DASHBOARD_ORIGIN` at the top of that node. The default is an empty
-string, which drops every link. To enable links, edit the node and set it to
-your Grafana origin, for example `https://grafana.example.com`.
-
-### Residual risk
-
-The cancel call (`cancel_by_tag`) is only reachable by an
-authenticated Grafana caller, because the webhook rejects everything else. A caller who holds the
-secret could still cancel repeats for an alert fingerprint. This repo does
-not keep a store of previously paged fingerprints.
+The compose check stops Grafana from starting with an empty secret. It cannot
+check what you typed into n8n: an n8n credential whose value is just `Bearer`
+would accept an empty-secret call, so follow step 2 exactly and run the
+checklist below.
 
 ## Pushover (phone push)
 
-Off by default. n8n reads these variables with expressions:
+Off by default. All Pushover behavior is set by constants at the top of the
+`Build Pushover Payload` Code node, so no environment access is needed in n8n
+at all (reading environment values from n8n expressions needs a setting that
+widens what workflow authors can read, so this repo avoids it):
 
-| Variable | Default | Meaning |
+| Constant | Default | Meaning |
 |----------|---------|---------|
-| `PUSHOVER_ENABLED` | off | Set to `true` to send to Pushover |
-| `PUSHOVER_APP_TOKEN` | none | Pushover application token (secret) |
-| `PUSHOVER_USER_KEY` | none | Pushover user or group key (secret) |
+| `PUSHOVER_ENABLED` | `false` | Set to `true` to send to Pushover |
 | `PUSHOVER_RETRY` | 300 | Seconds between repeats for priority 2 (minimum 30) |
 | `PUSHOVER_EXPIRE` | 10800 | Seconds before repeats stop (maximum 10800) |
+| `ALLOWED_DASHBOARD_ORIGIN` | empty | Only an https link on exactly this origin is forwarded; empty drops every link |
+| `ALLOWED_ALERTNAMES` | the provisioned update alert titles | Only these names can page at emergency priority or cancel repeats |
+
+Keep `ALLOWED_ALERTNAMES` equal to the rule titles in
+`update-alert-rules-*.yml`; a test enforces this.
 
 Priority mapping:
 
 | Alert | Pushover priority |
 |-------|-------------------|
-| severity `critical`, or label `update_security=true` | 2 (emergency, repeats until acknowledged) |
-| severity `warning` | 1 (high, bypasses quiet hours) |
+| allowlisted name, severity `critical` or `update_security=true` | 2 (emergency, repeats until acknowledged) |
+| any other critical or `update_security=true`, or severity `warning` | 1 (high, bypasses quiet hours) |
 | resolved | 0 (normal, no repeat) |
+| malformed body | 1, generic "malformed alert" message |
 
 Messages are cut to the Pushover limits (title 250, message 1024 characters).
+
+### Pushover credential
+
+The Pushover application token and user key never appear in the Code node,
+its output, or the workflow JSON. Both HTTP Request nodes use an n8n
+**Custom Auth** credential named `pushover-api` whose JSON supplies them as
+body fields:
+
+```
+{ "body": { "token": "<application token>", "user": "<user key>" } }
+```
+
+Doppler (project `siem-docker-stack`, config `dev`) is the source of truth.
+You copy the two values from Doppler into the n8n credential by hand; the
+JSON here carries only the credential name and a placeholder id. To rotate,
+change the Doppler values, then paste the new ones into the n8n credential.
+
+The workflow settings do not save successful executions, manual executions or
+execution progress, so alert content is not kept in n8n history. Failed
+executions are still stored, and they carry only alert text, not the
+Pushover credential.
 
 ### Enable it
 
 1. Create a Pushover application and note its token and your user key.
-2. Store the three secret values in Doppler, project `siem-docker-stack`,
-   config `dev`. Never put values in this repo or in `.env`.
-3. Run n8n with those variables in its environment, for example
-   `doppler run -- docker compose up -d`. n8n is not defined in this repo's
-   `docker/docker-compose.yml`, so add the variables to wherever your n8n
-   container is defined. Pass the secrets through by name only, without a
-   `:-` default.
-4. n8n blocks `$env` in expressions by default in current releases. Set
-   `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` on the n8n container, or the gate
-   node cannot read `PUSHOVER_ENABLED`.
-5. Set `PUSHOVER_ENABLED=true`. Import the updated
-   `n8n/grafana-alert-router.json` into n8n and activate it.
+2. Store them in Doppler (project `siem-docker-stack`, config `dev`).
+3. Create the `pushover-api` Custom Auth credential in n8n as above.
+4. Import `n8n/grafana-alert-router.json`, select the `grafana-webhook-auth`
+   and `pushover-api` credentials on the nodes, set `PUSHOVER_ENABLED` to
+   `true` (and `ALLOWED_DASHBOARD_ORIGIN` if you want links), and activate it.
 
-### How acknowledging stops the nag
+### Tags and cancelling repeats
 
-A priority 2 message repeats every `PUSHOVER_RETRY` seconds until you
-acknowledge it in the Pushover app or `PUSHOVER_EXPIRE` passes. Acknowledging
-stops that one message only. While the update is still pending, Grafana
-re-alerts at the policy repeat interval (4h warning, 1h critical) and a new
-emergency message starts. The alert itself ends only when the update is
-applied. On resolve, the router sends a normal priority message and asks
-Pushover to cancel any repeats still running for that alert (matched by the
-alert fingerprint tag).
+An emergency message carries a tag: `upd-` plus the first 32 hex characters
+of SHA-256 over `alertname|fingerprint`, computed in pure JavaScript (n8n's
+Code sandbox does not allow built-in modules by default). When the alert
+resolves, the router sends a normal message and asks Pushover to cancel
+repeats for that tag. The cancel call runs only for tags with the `upd-`
+prefix and only for names in `ALLOWED_ALERTNAMES`.
+
+Acknowledging in the Pushover app stops that one message only. While the
+update is still pending, Grafana re-alerts at the policy repeat interval (4h
+warning, 1h critical) and a new emergency message starts. The alert itself
+ends only when the update is applied.
+
+### Residual risk
+
+The cancel call and the emergency page are only reachable by an
+authenticated Grafana caller, because the webhook rejects everything else.
+Anyone who holds the webhook secret can still page for the allowlisted alert
+names, and can cancel repeats for a tag they can compute. This repo does not
+keep a store of previously paged fingerprints.
+
+## Known limitations
+
+- The existing Discord embeds in the router forward alert text and links
+  without length or Markdown limits; that pre-existing behavior is left for a
+  separate hardening change.
+- The Custom Auth body merge, the `URL` global in the n8n Code node and
+  Telegraf's handling of a non-zero exit are expected behavior, not checked
+  against a live system.
+
+## Manual pre-deploy checklist
+
+No unit test can prove these. Do them against a live n8n and Grafana before
+you rely on the alerts.
+
+1. n8n rejects, with 401 or 403 and no downstream node running (check the
+   execution list and Discord), a POST to the webhook with: no
+   `Authorization` header; an empty one; `Bearer` with no secret; the wrong
+   scheme (`Basic <secret>`); a different-case scheme; the wrong secret; and
+   two `Authorization` headers.
+2. n8n accepts a POST with the exact `Bearer <secret>` and one test message
+   reaches Discord.
+3. In Grafana, the contact point test sends the secret: confirm that n8n
+   accepts it, which proves `$GRAFANA_WEBHOOK_SECRET` was substituted.
+4. With `PUSHOVER_ENABLED` still `false`, confirm no Pushover call is made.
+   Then enable it and confirm a priority 1 test message arrives, with the
+   token and user key added by the `pushover-api` credential.
+5. Confirm an emergency test (a provisioned alert name, critical) repeats and
+   stops after acknowledging, and that a resolved message cancels repeats.
+6. Confirm no successful execution is listed in n8n after these tests.
+7. Check the unpoller field names with the `SHOW FIELD KEYS` command above.
 
 ## Tests
 
@@ -192,5 +259,7 @@ alert fingerprint tag).
 python3 -m pytest tests/python/test_update_alerting.py -q
 ```
 
-The script test uses fake `pfSense-upgrade` and `pkg-static` programs, so it
-never touches a firewall.
+The tests need Node on the path (the Code node source is executed for
+real). The script tests use fake `pfSense-upgrade` and `pkg-static` programs
+that record their arguments and reject any other argument, so they never
+touch a firewall.
