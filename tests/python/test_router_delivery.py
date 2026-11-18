@@ -43,11 +43,14 @@ def test_webhook_answers_through_a_response_node_not_at_once():
     assert hook["parameters"]["responseMode"] == "responseNode"
     assert hook["parameters"]["authentication"] == "headerAuth"
     responds = [n for n in _workflow()["nodes"] if n["type"] == "n8n-nodes-base.respondToWebhook"]
-    assert len(responds) == 1
-    params = responds[0]["parameters"]
-    assert params["respondWith"] == "json"
-    assert not list(_expressions(params)), "the response body is static: it never echoes the alert"
-    assert json.loads(params["responseBody"])["status"] == "delivered"
+    assert sorted(n["name"] for n in responds) == ["Respond Error", "Respond OK"]
+    by_code = {n["parameters"]["options"]["responseCode"]: n["parameters"] for n in responds}
+    assert set(by_code) == {200, 502}
+    for params in by_code.values():
+        assert params["respondWith"] == "json"
+        assert not list(_expressions(params)), "the response body is static: it never echoes the alert"
+    assert json.loads(by_code[200]["responseBody"])["status"] == "delivered"
+    assert json.loads(by_code[502]["responseBody"])["status"] == "delivery failed"
 
 
 def test_every_channel_step_runs_before_the_response():
@@ -92,14 +95,15 @@ def test_every_earlier_case_still_ends_in_a_200_response(case):
 @pytest.mark.parametrize("status,node", [("firing", DISCORD_FIRING), ("resolved", DISCORD_RESOLVED)])
 def test_a_failed_discord_step_fails_the_run_and_the_phone_still_gets_it(status, node):
     res = _run_graph(_item(status), pushover_enabled=True, fail={node})
-    assert res["response"] == "error", "the webhook must answer with an error so Grafana retries"
+    assert res["run"] == "error", "the run must end in error so the error workflow fires"
+    assert res["response"] == "502", "the webhook must answer with an error status so Grafana retries"
     assert node in res["error"] and "Discord delivery failed" in res["error"]
     assert "Pushover Notify" in res["notified"], "a Discord failure must not silence the phone"
 
 
 def test_a_failed_malformed_notice_also_fails_the_run():
     res = _run_graph({"headers": {}, "body": {"status": "weird"}}, fail={MALFORMED})
-    assert res["response"] == "error" and MALFORMED in res["error"]
+    assert res["run"] == "error" and res["response"] == "502" and MALFORMED in res["error"]
 
 
 def test_the_failure_message_carries_no_alert_content():
@@ -147,7 +151,7 @@ def test_without_the_phone_label_nothing_pushes_and_discord_failure_still_fails(
     ok = _run_graph(_item("firing", phone=False), pushover_enabled=True)
     assert ok["response"] == "200" and "Pushover Notify" not in ok["notified"]
     bad = _run_graph(_item("firing", phone=False), pushover_enabled=True, fail={DISCORD_FIRING})
-    assert bad["response"] == "error"
+    assert bad["run"] == "error" and bad["response"] == "502"
 
 
 def test_the_fail_run_node_is_the_only_way_to_an_error_and_names_no_payload():
@@ -326,7 +330,7 @@ def test_fail_run_message_names_the_node_and_a_trimmed_error_only():
 @pytest.mark.parametrize("status,node", [("firing", DISCORD_FIRING), ("resolved", DISCORD_RESOLVED)])
 def test_the_modeled_discord_failure_shape_is_the_verified_one(status, node):
     res = _run_graph(_item(status), pushover_enabled=True, fail={node})
-    assert res["response"] == "error" and node in res["error"]
+    assert res["run"] == "error" and res["response"] == "502" and node in res["error"]
     assert "Pushover Notify" in res["notified"], "the phone still gets the alert"
 
 
@@ -345,3 +349,55 @@ def test_the_payload_builder_ignores_a_discord_item_that_only_has_an_error_key()
            "prev": DISCORD_FIRING}
     out = _run_code_node(_build_node(), {"error": "Forbidden"}, ctx)[0]
     assert out["pushover"]["title"].startswith(GOOD_NAME) and out["pushover"]["priority"] == 1
+
+
+# --- the explicit 502 (verified live: Stop and Error alone answers 200 with an empty body) ------
+
+def test_respond_error_answers_502_before_fail_run():
+    wf = _workflow()
+    nodes = {n["name"]: n for n in wf["nodes"]}
+    ok, err = nodes["Respond OK"], nodes["Respond Error"]
+    assert err["type"] == ok["type"] == "n8n-nodes-base.respondToWebhook"
+    assert err["typeVersion"] == ok["typeVersion"]
+    p = err["parameters"]
+    assert p["respondWith"] == "json" and json.loads(p["responseBody"]) == {"status": "delivery failed"}
+    assert p["options"]["responseCode"] == 502
+    assert not list(_expressions(p)), "static: never echoes the alert"
+    main = wf["connections"]["Discord Failed?"]["main"]
+    assert [c["node"] for c in main[0]] == ["Respond Error"]
+    assert [c["node"] for c in wf["connections"]["Respond Error"]["main"][0]] == ["Fail Run"]
+
+
+@pytest.mark.parametrize("status,node", [("firing", DISCORD_FIRING), ("resolved", DISCORD_RESOLVED)])
+def test_discord_failure_answers_502_ends_in_error_and_the_phone_chain_ran(status, node):
+    res = _run_graph(_item(status), pushover_enabled=True, fail={node})
+    assert res["response"] == "502" and json.loads(res["body"]) == {"status": "delivery failed"}
+    assert res["run"] == "error", "the run still ends in error so the error workflow fires"
+    assert "Respond Error" in res["reached"] and "Fail Run" in res["reached"]
+    assert res["reached"].index("Respond Error") < res["reached"].index("Fail Run")
+    assert "Pushover Notify" in res["notified"]
+
+
+def test_fail_run_message_still_resolves_after_the_respond_node():
+    res = _run_graph(_item("firing"), pushover_enabled=True, fail={DISCORD_FIRING})
+    assert res["error"].startswith("Discord delivery failed: " + DISCORD_FIRING)
+    assert "boom" in res["error"] and MARKER not in res["error"]
+
+
+def test_success_answers_200_delivered_and_a_pushover_failure_still_does():
+    ok = _run_graph(_item("firing"), pushover_enabled=True)
+    assert ok["response"] == "200" and json.loads(ok["body"]) == {"status": "delivered"} and ok["run"] == "success"
+    phone = _run_graph(_item("firing"), pushover_enabled=True, fail={"Pushover Notify"})
+    assert phone["response"] == "200" and phone["run"] == "success"
+    assert "Respond Error" not in phone["reached"]
+
+
+def test_the_model_reproduces_the_verified_live_defect_without_respond_error():
+    """Without Respond Error, a run that stops with an error answers 200 with an empty body."""
+    wf = _workflow()
+    for name in ("Respond Error",):
+        wf["nodes"] = [n for n in wf["nodes"] if n["name"] != name]
+    wf["connections"]["Discord Failed?"]["main"][0] = [{"node": "Fail Run", "type": "main", "index": 0}]
+    wf["connections"].pop("Respond Error", None)
+    res = _run_graph(_item("firing"), pushover_enabled=True, fail={DISCORD_FIRING}, wf=wf)
+    assert res["run"] == "error" and res["response"] == "200" and res["body"] == ""

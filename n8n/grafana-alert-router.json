@@ -582,7 +582,7 @@
       "type": "n8n-nodes-base.stopAndError",
       "typeVersion": 1,
       "position": [
-        1950,
+        2200,
         520
       ],
       "id": "fail-run",
@@ -604,6 +604,23 @@
       ],
       "id": "respond-ok",
       "name": "Respond OK"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"status\": \"delivery failed\"}",
+        "options": {
+          "responseCode": 502
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1950,
+        520
+      ],
+      "id": "respond-error",
+      "name": "Respond Error"
     }
   ],
   "connections": {
@@ -796,7 +813,7 @@
       "main": [
         [
           {
-            "node": "Fail Run",
+            "node": "Respond Error",
             "type": "main",
             "index": 0
           }
@@ -804,6 +821,17 @@
         [
           {
             "node": "Respond OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond Error": {
+      "main": [
+        [
+          {
+            "node": "Fail Run",
             "type": "main",
             "index": 0
           }
