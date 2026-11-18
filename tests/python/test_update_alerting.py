@@ -51,7 +51,9 @@ def _build_node():
 
 
 def _http_nodes():
-    return [n for n in _workflow()["nodes"] if n["type"] == "n8n-nodes-base.httpRequest"]
+    """The Pushover HTTP nodes (the heartbeat ping node is covered by test_heartbeat.py)."""
+    return [n for n in _workflow()["nodes"] if n["type"] == "n8n-nodes-base.httpRequest"
+            and "api.pushover.net" in str(n["parameters"].get("url", ""))]
 
 
 def _node_bin():
@@ -148,7 +150,9 @@ def test_webhook_requires_header_auth_with_credential_reference():
 
 def test_pushover_secrets_come_from_a_credential_not_env_or_node_output():
     text = ROUTER.read_text(encoding="utf-8")
-    assert "$env" not in text, "no env access anywhere in the workflow"
+    # the only env access is the heartbeat sink setting, read in its own Code node (test_heartbeat.py)
+    assert set(re.findall(r"\$env\.(\w+)", text)) <= {"HEARTBEAT_PING_URL", "HEARTBEAT_KIND"}
+    assert "$env" not in _build_node()["parameters"]["jsCode"], "the Pushover builder reads no env"
     assert "PUSHOVER_APP_TOKEN" not in text and "PUSHOVER_USER_KEY" not in text
     code = _build_node()["parameters"]["jsCode"]
     assert not re.search(r"\btoken\b|\buser\b", code), "Code node must not handle the Pushover secrets"
@@ -666,9 +670,15 @@ def test_env_example_names_the_homelab_doppler_location():
 # --- round 4: end-to-end routing, secret validation, unknown pfSense output ----
 
 def _ctx_js(ctx):
-    """JS preamble binding $ (node references) and $prevNode from a context dict."""
+    """JS preamble binding $ (node references), $prevNode and $env from a context dict.
+
+    ctx["env"]: a dict of environment variables, or the string "blocked" to model n8n
+    refusing env access (reading any key then throws)."""
     ctx = ctx or {}
-    return ("const __o=" + json.dumps(ctx.get("outputs", {})) + ";"
+    env = ctx.get("env", {})
+    env_js = ("new Proxy({}, {get() { throw new Error('access to env vars denied'); }})"
+              if env == "blocked" else json.dumps(env))
+    return ("const $env=" + env_js + ";" +"const __o=" + json.dumps(ctx.get("outputs", {})) + ";"
             "const $=(n)=>({first:()=>({json:(__o[n]||[{}])[0]}),all:()=>(__o[n]||[]).map(j=>({json:j})),"
             "isExecuted:Object.prototype.hasOwnProperty.call(__o,n)});"
             "const $prevNode={name:" + json.dumps(ctx.get("prev", "")) + "};")
@@ -690,9 +700,9 @@ def _expr(value):
 
 
 def _run_code_node(node, item, ctx=None):
-    harness = (_ctx_js(ctx) + "const f=new Function('$input','$','$prevNode',"
+    harness = (_ctx_js(ctx) + "const f=new Function('$input','$','$prevNode','$env',"
                + json.dumps(node["parameters"]["jsCode"]) + ");"
-               "const r=f({first:()=>({json:" + json.dumps(item) + "})},$,$prevNode);"
+               "const r=f({first:()=>({json:" + json.dumps(item) + "})},$,$prevNode,$env);"
                "console.log(JSON.stringify(r.map(x=>x.json)));")
     r = subprocess.run([_node_bin(), "-"], input=harness, capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, "Code node threw: " + r.stderr[-300:]
@@ -743,7 +753,7 @@ def _eval_many(codes, item, ctx=None):
     return json.loads(r.stdout)
 
 
-def _run_graph(webhook_item, pushover_enabled=False, fail=(), wf=None):
+def _run_graph(webhook_item, pushover_enabled=False, fail=(), wf=None, env=None):
     """Walk the real graph from the webhook, the way n8n runs it (first match for a
     switch, continue-on-error outputs, a failed node without one stops the run).
 
@@ -752,6 +762,8 @@ def _run_graph(webhook_item, pushover_enabled=False, fail=(), wf=None):
     response (the HTTP status the webhook answered, as a string), body (what it sent),
     run ("success" or "error": how the run ended, which is what the error workflow
     sees) and error (the Stop and Error message, or the failing node's name).
+    env: the environment variables the Code nodes see ($env), or "blocked".
+    requests: one {node, url} per HTTP node that ran, with its URL expression evaluated.
 
     Verified live: the FIRST Respond to Webhook node reached decides the answer. A run
     that stops with an error before any Respond node ran answers 200 with an EMPTY
@@ -760,7 +772,7 @@ def _run_graph(webhook_item, pushover_enabled=False, fail=(), wf=None):
     nodes = {n["name"]: n for n in wf["nodes"]}
     hook = next(n["name"] for n in wf["nodes"] if n["type"] == "n8n-nodes-base.webhook")
     res = {"reached": [], "notified": set(), "failed": set(), "response": None, "body": None,
-           "run": "success", "error": ""}
+           "run": "success", "error": "", "requests": []}
 
     def stop(message):
         res["run"], res["error"] = "error", message
@@ -778,7 +790,7 @@ def _run_graph(webhook_item, pushover_enabled=False, fail=(), wf=None):
         node = nodes[name]
         res["reached"].append(name)
         t = node["type"]
-        ctx = {"outputs": outputs, "prev": prev}
+        ctx = {"outputs": outputs, "prev": prev, "env": {} if env is None else env}
         conn = wf["connections"].get(name, {"main": []})["main"]
         outs = [[] for _ in range(max(len(conn), 1))]
         if t in ("n8n-nodes-base.discord", "n8n-nodes-base.httpRequest"):
@@ -787,6 +799,11 @@ def _run_graph(webhook_item, pushover_enabled=False, fail=(), wf=None):
             for code, r in zip(codes, _eval_many(codes, items[0], ctx)):
                 assert "error" not in r, f"{name}: expression failed: {r['error']} in {code[:80]}"
             res["notified"].add(name)
+            if t == "n8n-nodes-base.httpRequest":
+                url = str(node["parameters"].get("url", ""))
+                if url.startswith("={{") and len(codes) == 1:
+                    url = _eval_many(codes, items[0], ctx)[0]["v"]
+                res["requests"].append({"node": name, "url": url})
             if name in fail and t == "n8n-nodes-base.discord":
                 # Verified live: the Discord node reports a failure as ONE item with an
                 # `error` key (a string) on its NORMAL output. Its error output stays empty.

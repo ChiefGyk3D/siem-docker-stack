@@ -34,6 +34,7 @@ you turn it on.
 | `docker/grafana/provisioning/alerting/contact-points.yml` | Webhook contact point pointing at the n8n router |
 | `docker/grafana/provisioning/alerting/update-notification-policy.yml.example` | Repeat intervals: 4h warning, 1h critical |
 | `n8n/grafana-alert-router.json` | Router with header auth and the added Pushover nodes |
+| `docs/heartbeat.md` | The alert path heartbeat (dead-man's switch), its own rule, policy route and settings |
 | `scripts/pfsense-update-metric.sh` | Read-only metric source for the firewall (not deployed) |
 | `tests/python/test_update_alerting.py` | Tests for all of the above (Node is required) |
 
@@ -50,7 +51,8 @@ you turn it on.
   poller wrote no point to `usw` for 15 minutes (`for: 5m`, no data and
   errors both alert). It is the watchdog for the data the UniFi rules read.
   A heartbeat that proves the whole path (rule, router and delivery) end to
-  end is not part of this change and comes later.
+  end is not part of this change; it ships separately, see
+  [docs/heartbeat.md](heartbeat.md).
 - pfSense rules are security detectors, so `noDataState` and `execErrState`
   are `Alerting`: a silent or broken check raises an alert instead of hiding.
   A separate rule, "pfSense update check failing or stale", fires when

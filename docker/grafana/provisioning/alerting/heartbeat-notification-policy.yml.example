@@ -1,0 +1,30 @@
+# Notification policy route for the alert path heartbeat (issue #80). SHIPPED AS AN EXAMPLE.
+#
+# Grafana provisions the notification policy as ONE tree for the whole
+# organization: loading this file replaces whatever policy tree exists today.
+# That is why it ends in .example and Grafana ignores it. To use it, merge the
+# `heartbeat` route below into your existing tree (keep your other routes; put
+# it before routes that would match everything, since Grafana stops at the first
+# match unless `continue: true`). The update-alert tree in
+# update-notification-policy.yml.example already has the same root receiver.
+#
+# Timing: the rule evaluates every 1m. group_wait 0s sends the first
+# notification at once, group_interval 1m is how often Grafana looks at the
+# group again, and repeat_interval 5m is the heartbeat: the alert is sent again
+# every 5 minutes while it keeps firing. Grafana can only repeat at a
+# group_interval tick, so the real gap is 5 to 6 minutes. Set the observer's
+# period to 5 minutes and its grace time to 10 minutes (docs/heartbeat.md).
+apiVersion: 1
+
+policies:
+  - orgId: 1
+    receiver: n8n-grafana-router
+    group_by: ["alertname", "grafana_folder"]
+    routes:
+      - receiver: n8n-grafana-router
+        object_matchers:
+          - ["heartbeat", "=", "true"]
+        group_by: ["alertname"]
+        group_wait: 0s
+        group_interval: 1m
+        repeat_interval: 5m
