@@ -72,9 +72,9 @@ def _run_build(body, origin=None, enabled=None):
                         f"const PUSHOVER_ENABLED = {'true' if enabled else 'false'};", js)
         assert n == 1
     harness = (
-        "const f=new Function('$input'," + json.dumps(js) + ");\n"
+        "const f=new Function('$input','$'," + json.dumps(js) + ");\n"
         "const b=" + json.dumps(body) + ";\n"
-        "const r=f({first:()=>({json:{body:b}})});\n"
+        "const r=f({first:()=>({json:{body:b}})},(n)=>({first:()=>({json:{body:b}}),isExecuted:true}));\n"
         "console.log(JSON.stringify(r[0].json));"
     )
     r = subprocess.run([_node_bin(), "-"], input=harness, capture_output=True, text=True, timeout=30)
@@ -185,7 +185,7 @@ def test_cancel_only_for_namespaced_tags():
     assert "upd-" in cond
     assert "cancel_by_tag" in nodes["Pushover Cancel Repeats"]["parameters"]["url"]
     wf = _workflow()
-    assert _edges(wf)["Pushover Cancel?"] == {"Pushover Cancel Repeats"}
+    assert _edges(wf)["Pushover Cancel?"] == {"Pushover Cancel Repeats", "Pushover Notify"}
 
 
 # --- n8n router: Code node behavior (real execution) ------------------------
@@ -665,11 +665,20 @@ def test_env_example_names_the_homelab_doppler_location():
 
 # --- round 4: end-to-end routing, secret validation, unknown pfSense output ----
 
-def _js_eval(code, item):
+def _ctx_js(ctx):
+    """JS preamble binding $ (node references) and $prevNode from a context dict."""
+    ctx = ctx or {}
+    return ("const __o=" + json.dumps(ctx.get("outputs", {})) + ";"
+            "const $=(n)=>({first:()=>({json:(__o[n]||[{}])[0]}),all:()=>(__o[n]||[]).map(j=>({json:j})),"
+            "isExecuted:Object.prototype.hasOwnProperty.call(__o,n)});"
+            "const $prevNode={name:" + json.dumps(ctx.get("prev", "")) + "};")
+
+
+def _js_eval(code, item, ctx=None):
     """Run JS with `$json` bound to item; return its JSON value."""
-    harness = ("const $json=" + json.dumps(item) + ";"
-               "const f=new Function('$json'," + json.dumps("return (" + code + ");") + ");"
-               "const v=f($json);console.log(JSON.stringify({v:v===undefined?null:v}));")
+    harness = (_ctx_js(ctx) + "const $json=" + json.dumps(item) + ";"
+               "const f=new Function('$json','$','$prevNode'," + json.dumps("return (" + code + ");") + ");"
+               "const v=f($json,$,$prevNode);console.log(JSON.stringify({v:v===undefined?null:v}));")
     r = subprocess.run([_node_bin(), "-"], input=harness, capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, "expression errored (the node would fail in n8n): " + r.stderr[-300:]
     return json.loads(r.stdout)["v"]
@@ -680,9 +689,10 @@ def _expr(value):
     return value[3:].rstrip()[:-2]
 
 
-def _run_code_node(node, item):
-    harness = ("const f=new Function('$input'," + json.dumps(node["parameters"]["jsCode"]) + ");"
-               "const r=f({first:()=>({json:" + json.dumps(item) + "})});"
+def _run_code_node(node, item, ctx=None):
+    harness = (_ctx_js(ctx) + "const f=new Function('$input','$','$prevNode',"
+               + json.dumps(node["parameters"]["jsCode"]) + ");"
+               "const r=f({first:()=>({json:" + json.dumps(item) + "})},$,$prevNode);"
                "console.log(JSON.stringify(r.map(x=>x.json)));")
     r = subprocess.run([_node_bin(), "-"], input=harness, capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, "Code node threw: " + r.stderr[-300:]
@@ -721,11 +731,11 @@ def _expressions(value):
         yield from _templates(value[1:])
 
 
-def _eval_many(codes, item):
+def _eval_many(codes, item, ctx=None):
     """Evaluate many expressions in one node process; each result is {v} or {error}."""
-    harness = ("const $json=" + json.dumps(item) + ";const out=[];"
+    harness = (_ctx_js(ctx) + "const $json=" + json.dumps(item) + ";const out=[];"
                "for (const c of " + json.dumps(codes) + ") { try {"
-               " const f=new Function('$json','return ('+c+');'); const v=f($json);"
+               " const f=new Function('$json','$','$prevNode','return ('+c+');'); const v=f($json,$,$prevNode);"
                " out.push({v:v===undefined?null:v}); } catch(e) { out.push({error:String(e)}); } }"
                "console.log(JSON.stringify(out));")
     r = subprocess.run([_node_bin(), "-"], input=harness, capture_output=True, text=True, timeout=60)
@@ -733,62 +743,101 @@ def _eval_many(codes, item):
     return json.loads(r.stdout)
 
 
-def _simulate(webhook_item, pushover_enabled=False):
-    """Walk the real graph from the webhook. Returns (nodes reached, notification nodes).
+def _run_graph(webhook_item, pushover_enabled=False, fail=(), wf=None):
+    """Walk the real graph from the webhook, the way n8n runs it (first match for a
+    switch, continue-on-error outputs, a failed node without one stops the run).
 
-    pushover_enabled flips the PUSHOVER_ENABLED constant in the payload builder."""
-    wf = _workflow()
+    fail: names of Discord or HTTP nodes that should fail when they run.
+    Returns a dict: reached, notified (every Discord or HTTP node that ran), failed,
+    response ("200" when a Respond to Webhook node ran, "error" when the run failed)
+    and error (the Stop and Error message, or the failing node's name)."""
+    wf = wf or _workflow()
     nodes = {n["name"]: n for n in wf["nodes"]}
     hook = next(n["name"] for n in wf["nodes"] if n["type"] == "n8n-nodes-base.webhook")
-    reached, notified = [], set()
-    todo = [(hook, [webhook_item])]
+    res = {"reached": [], "notified": set(), "failed": set(), "response": None, "error": ""}
+    outputs = {}
+    todo = [(hook, [webhook_item], "")]
     steps = 0
     while todo:
         steps += 1
-        assert steps < 100, "routing loop"
-        name, items = todo.pop(0)
+        assert steps < 200, "routing loop"
+        name, items, prev = todo.pop(0)
         node = nodes[name]
-        reached.append(name)
+        res["reached"].append(name)
         t = node["type"]
+        ctx = {"outputs": outputs, "prev": prev}
+        conn = wf["connections"].get(name, {"main": []})["main"]
+        outs = [[] for _ in range(max(len(conn), 1))]
         if t in ("n8n-nodes-base.discord", "n8n-nodes-base.httpRequest"):
             # evaluate every expression of the node: a throw here is a lost notification
             codes = list(_expressions(node["parameters"]))
-            for code, res in zip(codes, _eval_many(codes, items[0])):
-                assert "error" not in res, f"{name}: expression failed: {res['error']} in {code[:80]}"
-            notified.add(name)
-            continue
-        outs = [[] for _ in wf["connections"].get(name, {"main": []})["main"]]
-        if t == "n8n-nodes-base.webhook":
+            for code, r in zip(codes, _eval_many(codes, items[0], ctx)):
+                assert "error" not in r, f"{name}: expression failed: {r['error']} in {code[:80]}"
+            res["notified"].add(name)
+            if name in fail:
+                res["failed"].add(name)
+                mode = node.get("onError")
+                err = [{"error": {"message": "boom"}}]
+                if mode == "continueErrorOutput":
+                    outs = [[], err]
+                elif mode == "continueRegularOutput":
+                    outs[0] = err
+                else:
+                    res["response"], res["error"] = "error", name
+                    return res
+            else:
+                outs[0] = [{"ok": True}]
+        elif t == "n8n-nodes-base.webhook":
             outs[0] = items
         elif t == "n8n-nodes-base.code":
             if pushover_enabled and "ALLOWED_ALERTNAMES" in node["parameters"]["jsCode"]:
                 node = json.loads(json.dumps(node))
                 node["parameters"]["jsCode"] = node["parameters"]["jsCode"].replace(
                     "const PUSHOVER_ENABLED = false;", "const PUSHOVER_ENABLED = true;")
-            outs[0] = _run_code_node(node, items[0])
+            outs[0] = _run_code_node(node, items[0], ctx)
         elif t == "n8n-nodes-base.switch":
             rules = node["parameters"]["rules"]["values"]
             hit = len(rules)  # fallback output
             for i, rule in enumerate(rules):
                 cond = rule["conditions"]["conditions"][0]
-                if _js_eval(_expr(cond["leftValue"]), items[0]) == cond["rightValue"]:
+                if _js_eval(_expr(cond["leftValue"]), items[0], ctx) == cond["rightValue"]:
                     hit = i
                     break
-            outs = [[] for _ in range(max(len(outs), hit + 1))]
+            outs = [[] for _ in range(max(len(conn), hit + 1))]
             outs[hit] = items
         elif t == "n8n-nodes-base.if":
             cond = node["parameters"]["conditions"]["conditions"][0]
-            ok = _js_eval(_expr(cond["leftValue"]), items[0]) is True
+            ok = _js_eval(_expr(cond["leftValue"]), items[0], ctx) is True
             outs = [[], []]
             outs[0 if ok else 1] = items
+        elif t == "n8n-nodes-base.stopAndError":
+            msg = node["parameters"].get("errorMessage", "")
+            codes = list(_expressions({"m": msg}))
+            if codes:
+                msg = str(_eval_many(codes, items[0], ctx)[0].get("v"))
+            res["response"], res["error"] = "error", msg
+            return res
+        elif t == "n8n-nodes-base.respondToWebhook":
+            codes = list(_expressions(node["parameters"]))
+            for code, r in zip(codes, _eval_many(codes, items[0], ctx)):
+                assert "error" not in r, f"{name}: expression failed: {r['error']}"
+            res["response"] = str(node["parameters"].get("options", {}).get("responseCode", 200))
+            outs[0] = items
         else:
             raise AssertionError("node type not modeled: " + t)
-        conn = wf["connections"].get(name, {"main": []})["main"]
+        if any(outs):
+            outputs[name] = outs[0] if outs[0] else next(o for o in outs if o)
         for idx, produced in enumerate(outs):
             if produced and idx < len(conn):
                 for c in conn[idx]:
-                    todo.append((c["node"], produced))
-    return reached, notified
+                    todo.append((c["node"], produced, name))
+    return res
+
+
+def _simulate(webhook_item, pushover_enabled=False):
+    res = _run_graph(webhook_item, pushover_enabled)
+    assert res["response"] == "200", f"a healthy run must answer 200, got {res['response']} ({res['error']})"
+    return res["reached"], res["notified"]
 
 
 def test_alert_status_switch_has_every_output_connected():
@@ -954,7 +1003,9 @@ def _normalize_node():
 
 
 def _discord_texts():
+    # the phone-failure notices read the error output, not the alert, so they are not part of this scan
     return [c for n in _workflow()["nodes"] if n["type"] == "n8n-nodes-base.discord"
+            and "Phone Failed" not in n["name"]
             for c in _expressions(n["parameters"])]
 
 
