@@ -252,15 +252,26 @@ caller (Grafana) gets its answer only after the channel steps finish, and a
 failed run answers with an error status, which Grafana logs and retries.
 
 How the channel steps are wired (n8n node settings used: `onError:
-continueErrorOutput` on the Discord and Pushover steps, `continueRegularOutput`
-on the notice nodes, a `Stop and Error` node, and an `If` node):
+continueRegularOutput` on the Discord steps and the notice nodes, `onError:
+continueErrorOutput` on the Pushover steps, a `Stop and Error` node, and an
+`If` node):
 
-- Each Discord step (firing, resolved, malformed notice) has an error output.
-  A failure there is marked (`Mark Discord Failed`, keeping only the node name
-  and a trimmed error message), the Pushover steps still run (a Discord outage
-  must not silence the phone), and at the end `Fail Run` (a `Stop and Error`
-  node) fails the run. That makes the webhook answer with an error and fires
-  the error workflow.
+- Verified live: the Discord node (`n8n-nodes-base.discord` v2, webhook
+  authentication, `sendLegacy`) does not use an error output. With its
+  credentials removed it ended the run as a success and emitted ONE item on its
+  NORMAL output whose json had a single key `error` (a string). So a Discord
+  failure is detected from that item, not from an error output. For each of the
+  three Discord steps (firing, resolved, malformed notice) the check is: the
+  first output item has a non-empty `error` (a string, or an object with a
+  `message`). The check is guarded, so a node that did not run counts as not
+  failed.
+- The Pushover steps still run after a Discord step either way (a Discord
+  outage must not silence the phone). Then `Discord Failed?` looks at all three
+  Discord nodes. If any failed, `Fail Run` (a `Stop and Error` node) fails the
+  run with a message of the node name and the trimmed error text only (120
+  characters, any `Bearer` value removed, never the alert), so the webhook
+  answers with an error and the error workflow fires. Otherwise `Respond OK`
+  answers 200.
 - A failed Pushover step (send or cancel) never blocks Discord and never fails
   the run. Its error output goes to a short Discord notice: "phone delivery
   failed: Pushover Notify <short error>". The notice has no payload and no
@@ -288,13 +299,14 @@ request headers and so the webhook credential. The traces of a failure are the
 n8n container log and the handler's notice.
 
 Unverified against a live n8n (the graph tests model these, they are not n8n):
-the webhook's `responseNode` mode answering with an error status when the run
-fails before the response node; the `continueErrorOutput` setting on the
-Discord and HTTP Request nodes, and what the error item holds (the notices read
-`$json.error.message`); `$prevNode.name` and `$('Node').isExecuted` in the
-expressions; that the error workflow fires for a run stopped by `Stop and
-Error` in a webhook-triggered, production run; and the `lastNodeExecuted`,
-`error.message` and `id` fields the handler reads.
+the status code the webhook returns to Grafana when `Stop and Error` ends the
+run (expected to be an error status, not 200); that the error workflow fires
+for a run stopped by `Stop and Error` in a webhook-triggered production run;
+the `lastNodeExecuted`, `error.message` and `id` fields the handler reads; the
+`continueErrorOutput` setting on the Pushover HTTP Request nodes and what their
+error item holds (the notices read `$json.error.message`); and `isExecuted` on
+a node reference in the expressions. The Discord failure shape above is the
+one thing in this section that was verified live.
 
 ### Enable it
 
