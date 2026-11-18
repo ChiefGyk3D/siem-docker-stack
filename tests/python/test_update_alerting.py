@@ -9,6 +9,7 @@ import json
 import re
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
 import yaml
@@ -395,7 +396,7 @@ def test_unifi_rules_escalate_24h_then_7d():
     assert warn["for"] == "0s" and warn["labels"]["severity"] == "warning"
     assert crit["for"] == "0s" and crit["labels"]["severity"] == "critical"
     assert not warn.get("isPaused") and not crit.get("isPaused")
-    assert "upgradable" in json.dumps(warn["data"])
+    assert "upgradeable" in json.dumps(warn["data"])
     assert any(d["datasourceUid"] == "influxdb-unifi" for d in warn["data"])
 
 
@@ -414,7 +415,7 @@ def test_unifi_warning_is_bounded_by_the_critical_rule_with_no_overlap_or_gap():
     pw, pc = _data(warn, "P"), _data(crit, "P")
     assert pw["model"]["query"] == pc["model"]["query"]
     assert pw["relativeTimeRange"] == pc["relativeTimeRange"] == {"from": 604800, "to": 0}
-    assert "GROUP BY time(1h)" in pw["model"]["query"] and '"upgradable" = true' in pw["model"]["query"]
+    assert "GROUP BY time(1h)" in pw["model"]["query"] and '"upgradeable" = true' in pw["model"]["query"]
     full = 604800 // 3600  # buckets in a week that is pending the whole time
     expr_w = _data(warn, "C")["model"]["expression"]
     expr_c = _data(crit, "C")["model"]["expression"]
@@ -1078,3 +1079,26 @@ def test_negated_or_unknown_healthy_text_fails_closed(tmp_path, text):
 def test_exact_healthy_lines_are_accepted(tmp_path, text):
     r, _ = _run(tmp_path, text, "")
     assert r.returncode == 0 and "pfsense_update_check_success value=1i" in r.stdout
+
+
+# --- the poller field name, verified against a live unpoller database ----------
+
+WRONG_FIELD = "upgrad" + "able"   # the misspelling; kept split so this file never contains it
+RIGHT_FIELD = "upgrade" + "able"
+
+
+def test_unifi_rules_query_the_real_poller_field_name():
+    unifi = ALERTING / "update-alert-rules-unifi.yml"
+    for path in (unifi, DOC, Path(__file__)):
+        assert WRONG_FIELD not in path.read_text(encoding="utf-8"), path.name
+    rules = [r for _, _, r in _rules() if r["uid"].startswith("update-unifi")]
+    assert len(rules) == 2
+    for rule in rules:
+        for ref in ("A", "P"):
+            query = _data(rule, ref)["model"]["query"]
+            assert f'"{RIGHT_FIELD}"' in query, (rule["uid"], ref)
+            assert WRONG_FIELD not in query
+            m = re.search(r"FROM /\^\(([^)]*)\)\$/", query)
+            assert m, query
+            assert {"uap", "usw"} <= set(m.group(1).split("|")), "uap and usw must stay in the measurement regex"
+    assert "verified on 2026-11-18" in " ".join(unifi.read_text(encoding="utf-8").split()).lower()
