@@ -29,7 +29,7 @@ you turn it on.
 
 | File | Purpose |
 |------|---------|
-| `docker/grafana/provisioning/alerting/update-alert-rules-unifi.yml` | UniFi rules: warning after 24h pending, critical after 7 days |
+| `docker/grafana/provisioning/alerting/update-alert-rules-unifi.yml` | UniFi rules: warning from 24h to 7 days pending, critical after 7 days |
 | `docker/grafana/provisioning/alerting/update-alert-rules-pfsense.yml` | pfSense rules and a collector health rule, shipped paused |
 | `docker/grafana/provisioning/alerting/contact-points.yml` | Webhook contact point pointing at the n8n router |
 | `docker/grafana/provisioning/alerting/update-notification-policy.yml.example` | Repeat intervals: 4h warning, 1h critical |
@@ -50,8 +50,17 @@ you turn it on.
 - A rule clears only when its query stops returning a pending update (the
   UniFi `upgradable` flag goes false, or `pfsense_update_pending` returns to
   0). There is no manual override in the rules.
-- The 24h and 7 day thresholds use the rule `for` duration, so a device that
-  is updated and later has a new update starts a fresh clock.
+- The 24h thresholds use the rule `for` duration, so a device that is
+  updated and later has a new update starts a fresh clock.
+- UniFi escalation is exclusive: the warning covers pending for more than 24h
+  and not more than 7 days, and the critical covers more than 7 days, so the
+  warning stops when the critical starts (Grafana-managed alerting has no
+  inhibit rule). Both rules count the hourly buckets in the last 7 days that
+  held a pending point; the warning needs fewer than 168 and the critical
+  needs 168 or more, and the same number is in both rules, so they cannot
+  overlap and cannot leave a gap. A device that stops reporting for an hour
+  falls back to the warning until a full week is pending again. pfSense rules
+  keep the separate `for` durations.
 
 ### UniFi data
 

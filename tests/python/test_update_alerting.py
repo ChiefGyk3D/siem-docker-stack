@@ -383,10 +383,45 @@ def test_unifi_rules_escalate_24h_then_7d():
     by = {r["uid"]: r for _, _, r in _rules()}
     warn, crit = by["update-unifi-pending-24h"], by["update-unifi-pending-7d"]
     assert warn["for"] == "24h" and warn["labels"]["severity"] == "warning"
-    assert crit["for"] == "168h" and crit["labels"]["severity"] == "critical"
+    # the 7 day boundary is a query condition shared with the warning, not a longer `for`
+    assert crit["for"] == "0s" and crit["labels"]["severity"] == "critical"
     assert not warn.get("isPaused") and not crit.get("isPaused")
     assert "upgradable" in json.dumps(warn["data"])
     assert any(d["datasourceUid"] == "influxdb-unifi" for d in warn["data"])
+
+
+def _unifi_pair():
+    by = {r["uid"]: r for _, _, r in _rules()}
+    return by["update-unifi-pending-24h"], by["update-unifi-pending-7d"]
+
+
+def _data(rule, ref):
+    return next(d for d in rule["data"] if d["refId"] == ref)
+
+
+def test_unifi_warning_is_bounded_by_the_critical_rule_with_no_overlap_or_gap():
+    warn, crit = _unifi_pair()
+    # both rules measure the same thing: hourly buckets that held a pending point in the last 7 days
+    pw, pc = _data(warn, "P"), _data(crit, "P")
+    assert pw["model"]["query"] == pc["model"]["query"]
+    assert pw["relativeTimeRange"] == pc["relativeTimeRange"] == {"from": 604800, "to": 0}
+    assert "GROUP BY time(1h)" in pw["model"]["query"] and '"upgradable" = true' in pw["model"]["query"]
+    full = 604800 // 3600  # buckets in a week that is pending the whole time
+    expr_w = _data(warn, "C")["model"]["expression"]
+    expr_c = _data(crit, "C")["model"]["expression"]
+    mw = re.fullmatch(r"\$B > 0 && \$Pc < (\d+)", expr_w)
+    mc = re.fullmatch(r"\$B > 0 && \$Pc >= (\d+)", expr_c)
+    assert mw and mc, (expr_w, expr_c)
+    assert int(mw.group(1)) == int(mc.group(1)) == full, "upper bound of warning must equal lower bound of critical"
+    # evaluate both conditions for every bucket count: exactly one fires while an update is pending
+    for pc_count in range(0, full + 40):
+        w = pc_count < int(mw.group(1))
+        c = pc_count >= int(mc.group(1))
+        assert w != c, f"overlap or gap at {pc_count} buckets"
+    for rule in (warn, crit):
+        assert _data(rule, "Pc")["model"]["reducer"] == "count"
+        assert rule["condition"] == "C"
+        assert rule["noDataState"] == "OK" and rule["execErrState"] == "OK"
 
 
 def test_pfsense_rules_ship_paused_and_use_metric():

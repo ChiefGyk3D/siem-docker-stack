@@ -7,10 +7,17 @@
 # this repo. Verify with: SHOW FIELD KEYS ON unpoller FROM usw
 #
 # Behavior: an alert instance exists per device while `upgradable` is true.
-# It escalates from warning (pending more than 24h) to critical (pending
-# more than 7 days). It clears only when the device stops reporting
-# `upgradable = true`, that is, when the update is applied. There is no
-# manual override. Missing data (noDataState OK) never pages.
+# The warning covers pending for more than 24h and NOT more than 7 days; the
+# critical covers more than 7 days. Grafana-managed alerting has no inhibit
+# rule, so the two are made exclusive in the queries: query P counts the hourly
+# buckets in the last 7 days that held a pending point (168 means pending the
+# whole week). Warning needs fewer than 168, critical needs 168 or more, the
+# same number in both rules, so there is no overlap and no gap at the boundary.
+# Critical has `for: 0s` because the week of history already is its clock; the
+# warning's `for: 24h` still delays it by a day. A device that stops reporting
+# for an hour drops back to the warning. The rules clear only when the device
+# stops reporting `upgradable = true`, that is, when the update is applied.
+# There is no manual override. Missing data (noDataState OK) never pages.
 # Repeat intervals come from the notification policy
 # (update-notification-policy.yml.example).
 apiVersion: 1
@@ -35,14 +42,28 @@ groups:
               resultFormat: time_series
               query: >-
                 SELECT count("upgradable") FROM /^(uap|usw|ugw|udm|uxg)$/ WHERE "upgradable" = true AND time > now() - 5m GROUP BY "name"
+          - refId: P
+            relativeTimeRange: {from: 604800, to: 0}
+            datasourceUid: influxdb-unifi
+            model:
+              refId: P
+              datasource: {type: influxdb, uid: influxdb-unifi}
+              rawQuery: true
+              resultFormat: time_series
+              query: >-
+                SELECT count("upgradable") FROM /^(uap|usw|ugw|udm|uxg)$/ WHERE "upgradable" = true AND time > now() - 7d GROUP BY time(1h), "name"
           - refId: B
             datasourceUid: __expr__
             relativeTimeRange: {from: 0, to: 0}
             model: {refId: B, type: reduce, expression: A, reducer: last, settings: {mode: dropNN}}
+          - refId: Pc
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: Pc, type: reduce, expression: P, reducer: count, settings: {mode: dropNN}}
           - refId: C
             datasourceUid: __expr__
             relativeTimeRange: {from: 0, to: 0}
-            model: {refId: C, type: threshold, expression: B, conditions: [{evaluator: {type: gt, params: [0]}}]}
+            model: {refId: C, type: math, expression: "$B > 0 && $Pc < 168"}
         noDataState: OK
         execErrState: OK
         for: 24h
@@ -70,17 +91,31 @@ groups:
               resultFormat: time_series
               query: >-
                 SELECT count("upgradable") FROM /^(uap|usw|ugw|udm|uxg)$/ WHERE "upgradable" = true AND time > now() - 5m GROUP BY "name"
+          - refId: P
+            relativeTimeRange: {from: 604800, to: 0}
+            datasourceUid: influxdb-unifi
+            model:
+              refId: P
+              datasource: {type: influxdb, uid: influxdb-unifi}
+              rawQuery: true
+              resultFormat: time_series
+              query: >-
+                SELECT count("upgradable") FROM /^(uap|usw|ugw|udm|uxg)$/ WHERE "upgradable" = true AND time > now() - 7d GROUP BY time(1h), "name"
           - refId: B
             datasourceUid: __expr__
             relativeTimeRange: {from: 0, to: 0}
             model: {refId: B, type: reduce, expression: A, reducer: last, settings: {mode: dropNN}}
+          - refId: Pc
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: Pc, type: reduce, expression: P, reducer: count, settings: {mode: dropNN}}
           - refId: C
             datasourceUid: __expr__
             relativeTimeRange: {from: 0, to: 0}
-            model: {refId: C, type: threshold, expression: B, conditions: [{evaluator: {type: gt, params: [0]}}]}
+            model: {refId: C, type: math, expression: "$B > 0 && $Pc >= 168"}
         noDataState: OK
         execErrState: OK
-        for: 168h
+        for: 0s
         isPaused: false
         annotations:
           summary: "UniFi device {{ $labels.name }} has had an update pending for over 7 days"
