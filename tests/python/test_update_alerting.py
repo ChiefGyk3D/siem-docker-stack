@@ -749,12 +749,25 @@ def _run_graph(webhook_item, pushover_enabled=False, fail=(), wf=None):
 
     fail: names of Discord or HTTP nodes that should fail when they run.
     Returns a dict: reached, notified (every Discord or HTTP node that ran), failed,
-    response ("200" when a Respond to Webhook node ran, "error" when the run failed)
-    and error (the Stop and Error message, or the failing node's name)."""
+    response (the HTTP status the webhook answered, as a string), body (what it sent),
+    run ("success" or "error": how the run ended, which is what the error workflow
+    sees) and error (the Stop and Error message, or the failing node's name).
+
+    Verified live: the FIRST Respond to Webhook node reached decides the answer. A run
+    that stops with an error before any Respond node ran answers 200 with an EMPTY
+    body, so Grafana would treat it as delivered."""
     wf = wf or _workflow()
     nodes = {n["name"]: n for n in wf["nodes"]}
     hook = next(n["name"] for n in wf["nodes"] if n["type"] == "n8n-nodes-base.webhook")
-    res = {"reached": [], "notified": set(), "failed": set(), "response": None, "error": ""}
+    res = {"reached": [], "notified": set(), "failed": set(), "response": None, "body": None,
+           "run": "success", "error": ""}
+
+    def stop(message):
+        res["run"], res["error"] = "error", message
+        if res["response"] is None:
+            res["response"], res["body"] = "200", ""   # verified live: 200 with an empty body
+        return res
+
     outputs = {}
     todo = [(hook, [webhook_item], "")]
     steps = 0
@@ -788,8 +801,7 @@ def _run_graph(webhook_item, pushover_enabled=False, fail=(), wf=None):
                 elif mode == "continueRegularOutput":
                     outs[0] = err
                 else:
-                    res["response"], res["error"] = "error", name
-                    return res
+                    return stop(name)
             else:
                 outs[0] = [{"ok": True}]
         elif t == "n8n-nodes-base.webhook":
@@ -820,13 +832,14 @@ def _run_graph(webhook_item, pushover_enabled=False, fail=(), wf=None):
             codes = list(_expressions({"m": msg}))
             if codes:
                 msg = str(_eval_many(codes, items[0], ctx)[0].get("v"))
-            res["response"], res["error"] = "error", msg
-            return res
+            return stop(msg)
         elif t == "n8n-nodes-base.respondToWebhook":
             codes = list(_expressions(node["parameters"]))
             for code, r in zip(codes, _eval_many(codes, items[0], ctx)):
                 assert "error" not in r, f"{name}: expression failed: {r['error']}"
-            res["response"] = str(node["parameters"].get("options", {}).get("responseCode", 200))
+            if res["response"] is None:  # the first Respond node reached answers
+                res["response"] = str(node["parameters"].get("options", {}).get("responseCode", 200))
+                res["body"] = node["parameters"].get("responseBody", "")
             outs[0] = items
         else:
             raise AssertionError("node type not modeled: " + t)
@@ -841,7 +854,8 @@ def _run_graph(webhook_item, pushover_enabled=False, fail=(), wf=None):
 
 def _simulate(webhook_item, pushover_enabled=False):
     res = _run_graph(webhook_item, pushover_enabled)
-    assert res["response"] == "200", f"a healthy run must answer 200, got {res['response']} ({res['error']})"
+    assert res["run"] == "success" and res["response"] == "200", \
+        f"a healthy run must answer 200, got {res['response']} ({res['error']})"
     return res["reached"], res["notified"]
 
 

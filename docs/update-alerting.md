@@ -267,11 +267,19 @@ continueErrorOutput` on the Pushover steps, a `Stop and Error` node, and an
   failed.
 - The Pushover steps still run after a Discord step either way (a Discord
   outage must not silence the phone). Then `Discord Failed?` looks at all three
-  Discord nodes. If any failed, `Fail Run` (a `Stop and Error` node) fails the
-  run with a message of the node name and the trimmed error text only (120
-  characters, any `Bearer` value removed, never the alert), so the webhook
-  answers with an error and the error workflow fires. Otherwise `Respond OK`
-  answers 200.
+  Discord nodes. If any failed, `Respond Error` answers first (a Respond to
+  Webhook node, HTTP 502, static body `{"status": "delivery failed"}`), and then
+  `Fail Run` (a `Stop and Error` node) fails the run with a message of the node
+  name and the trimmed error text only (120 characters, any `Bearer` value
+  removed, never the alert), so the error workflow fires. Otherwise `Respond OK`
+  answers 200 with `{"status": "delivered"}`.
+- Why `Respond Error` exists. Verified live: with `responseNode` mode, a run
+  that stops with an error before any Respond to Webhook node ran answers HTTP
+  200 with an empty body, so `Stop and Error` alone would make Grafana treat a
+  failed delivery as delivered. The first Respond node reached decides the
+  answer, so `Respond Error` runs before `Fail Run`, and the run still ends in
+  error. `Fail Run` reads the Discord nodes by reference, not from the item
+  that passes through the Respond node.
 - A failed Pushover step (send or cancel) never blocks Discord and never fails
   the run. Its error output goes to a short Discord notice: "phone delivery
   failed: Pushover Notify <short error>". The notice has no payload and no
@@ -299,14 +307,15 @@ request headers and so the webhook credential. The traces of a failure are the
 n8n container log and the handler's notice.
 
 Unverified against a live n8n (the graph tests model these, they are not n8n):
-the status code the webhook returns to Grafana when `Stop and Error` ends the
-run (expected to be an error status, not 200); that the error workflow fires
-for a run stopped by `Stop and Error` in a webhook-triggered production run;
+the 502 itself (that `Respond Error` is the answer Grafana receives, and that
+the run still ends in error after it); that the error workflow fires for a run
+stopped by `Stop and Error` in a webhook-triggered production run;
 the `lastNodeExecuted`, `error.message` and `id` fields the handler reads; the
 `continueErrorOutput` setting on the Pushover HTTP Request nodes and what their
 error item holds (the notices read `$json.error.message`); and `isExecuted` on
-a node reference in the expressions. The Discord failure shape above is the
-one thing in this section that was verified live.
+a node reference in the expressions. Verified live: the Discord failure shape
+(an item with an `error` key on the normal output), the run ending in `error`
+at `Fail Run`, and that `Stop and Error` alone answers 200 with an empty body.
 
 ### Enable it
 
