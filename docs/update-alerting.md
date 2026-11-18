@@ -48,7 +48,7 @@ you turn it on.
   A separate rule, "pfSense update check failing or stale", fires when
   `pfsense_update_check_success` is 0 or no result has arrived for 36 hours.
 - A rule clears only when its query stops returning a pending update (the
-  UniFi `upgradable` flag goes false, or `pfsense_update_pending` returns to
+  UniFi `upgradeable` flag goes false, or `pfsense_update_pending` returns to
   0). There is no manual override in the rules.
 - UniFi escalation is exclusive and has no `for` clock (both rules use
   `for: 0s`), because a `for` clock restarts whenever the data has a gap and
@@ -65,9 +65,11 @@ you turn it on.
 
 The UniFi poller (unpoller) writes InfluxDB database `unpoller`, one
 measurement per device type (`uap`, `usw`, `ugw`, `udm`, `uxg`), with a
-boolean field `upgradable` and the device `name` as a tag. This schema is
-taken from the unpoller documentation and has not been checked against a live
-database. Check it before relying on the rules:
+boolean field `upgradeable` (spelled with an "e") and the device `name` as a
+tag. This was verified on 2026-11-18 against a live unpoller database: the
+measurements `uap` and `usw` exist with that field and tag, and devices are
+written about every 30 seconds. Other device types (`ugw`, `udm`, `uxg`) are
+in the rules for stacks that have them. Re-check it on your stack:
 
 ```
 docker exec influxdb influx -execute 'SHOW FIELD KEYS ON unpoller FROM usw'
@@ -285,6 +287,30 @@ cannot be rebuilt (bad status, no alerts) goes to the malformed notices.
 - The Custom Auth body merge, the `URL` global in the n8n Code node and
   Telegraf's handling of a non-zero exit are expected behavior, not checked
   against a live system.
+
+## Deploying to a stack that already exists
+
+What a deploy onto a running stack needed (placeholders, no real values):
+
+- **Datasource ids.** The rules refer to the datasource ids `influxdb-pfsense`
+  and `influxdb-unifi`. An older stack may not have given its InfluxDB
+  datasources those fixed ids. Do not change the ids of existing datasources:
+  dashboards that reference them would break. Add two extra datasources with
+  the ids the rules expect, same databases (`pfsense` and `unpoller`), a
+  distinct name such as `InfluxDB-UniFi-alerts`, in their own provisioning
+  file next to the existing one.
+- **Contact point URL.** In `contact-points.yml`, use the private webhook path
+  of the authenticated n8n router (the opaque path from the webhook
+  authentication section), for example `http://<n8n-host>/webhook/<private-path>`,
+  not the short default.
+- **n8n import.** The workflow JSON needs an `id`, and, to keep the short
+  webhook URL, a `webhookId` on the webhook node. With no `webhookId`, n8n
+  serves the webhook under `/webhook/<workflowId>/<node name>/<path>`.
+- **Publishing through the CLI** needs an n8n restart before the webhook is
+  registered.
+- **macvlan.** A container on a macvlan network is not reachable from its own
+  host. Test the webhook through the Docker bridge address of the container
+  instead (placeholder: `http://<bridge-address>/webhook/<private-path>`).
 
 ## Manual pre-deploy checklist
 

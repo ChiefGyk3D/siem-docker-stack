@@ -2,11 +2,15 @@
 #
 # Data: the UniFi poller (unpoller) writes one InfluxDB measurement per device
 # type (uap, usw, ugw, udm, uxg) into database `unpoller`, with a boolean
-# field `upgradable` and the device `name` as a tag. That schema comes from
-# the unpoller documentation; it is not checked against a live database in
-# this repo. Verify with: SHOW FIELD KEYS ON unpoller FROM usw
+# field `upgradeable` (spelled with an "e") and the device `name` as a tag.
+# Verified on 2026-11-18 against a live unpoller database: measurements uap and
+# usw (plus clients, subsystems and others), the boolean field `upgradeable`
+# on usw and uap, the `name` tag, and a write interval of about 30 seconds per
+# device, so the hourly bucket logic has data. The regex also lists ugw, udm
+# and uxg for stacks that have those devices. Re-check with:
+# SHOW FIELD KEYS ON unpoller FROM usw
 #
-# Behavior: an alert instance exists per device while `upgradable` is true.
+# Behavior: an alert instance exists per device while `upgradeable` is true.
 # The warning covers pending for about 24h up to about 7 days; the critical
 # covers about 7 days and more. Grafana-managed alerting has no inhibit rule,
 # so the two are made exclusive in the queries, and both clocks are in the
@@ -18,7 +22,7 @@
 # (not 168) is a tolerance of about 8 hours of missing data per week, so a short
 # poller or controller outage does not drop a critical back to a warning. Both
 # rules also need the pending-now check (B > 0). The rules clear only when the
-# device stops reporting `upgradable = true`, that is, when the update is
+# device stops reporting `upgradeable = true`, that is, when the update is
 # applied. There is no manual override. Missing data (noDataState OK) never
 # pages.
 # Repeat intervals come from the notification policy
@@ -44,7 +48,7 @@ groups:
               rawQuery: true
               resultFormat: time_series
               query: >-
-                SELECT count("upgradable") FROM /^(uap|usw|ugw|udm|uxg)$/ WHERE "upgradable" = true AND time > now() - 5m GROUP BY "name"
+                SELECT count("upgradeable") FROM /^(uap|usw|ugw|udm|uxg)$/ WHERE "upgradeable" = true AND time > now() - 5m GROUP BY "name"
           - refId: P
             relativeTimeRange: {from: 604800, to: 0}
             datasourceUid: influxdb-unifi
@@ -54,7 +58,7 @@ groups:
               rawQuery: true
               resultFormat: time_series
               query: >-
-                SELECT count("upgradable") FROM /^(uap|usw|ugw|udm|uxg)$/ WHERE "upgradable" = true AND time > now() - 7d GROUP BY time(1h), "name"
+                SELECT count("upgradeable") FROM /^(uap|usw|ugw|udm|uxg)$/ WHERE "upgradeable" = true AND time > now() - 7d GROUP BY time(1h), "name"
           - refId: B
             datasourceUid: __expr__
             relativeTimeRange: {from: 0, to: 0}
@@ -93,7 +97,7 @@ groups:
               rawQuery: true
               resultFormat: time_series
               query: >-
-                SELECT count("upgradable") FROM /^(uap|usw|ugw|udm|uxg)$/ WHERE "upgradable" = true AND time > now() - 5m GROUP BY "name"
+                SELECT count("upgradeable") FROM /^(uap|usw|ugw|udm|uxg)$/ WHERE "upgradeable" = true AND time > now() - 5m GROUP BY "name"
           - refId: P
             relativeTimeRange: {from: 604800, to: 0}
             datasourceUid: influxdb-unifi
@@ -103,7 +107,7 @@ groups:
               rawQuery: true
               resultFormat: time_series
               query: >-
-                SELECT count("upgradable") FROM /^(uap|usw|ugw|udm|uxg)$/ WHERE "upgradable" = true AND time > now() - 7d GROUP BY time(1h), "name"
+                SELECT count("upgradeable") FROM /^(uap|usw|ugw|udm|uxg)$/ WHERE "upgradeable" = true AND time > now() - 7d GROUP BY time(1h), "name"
           - refId: B
             datasourceUid: __expr__
             relativeTimeRange: {from: 0, to: 0}
