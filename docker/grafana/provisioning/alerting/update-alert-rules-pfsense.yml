@@ -56,6 +56,7 @@ groups:
           source: "pfsense"
           alert_group: "updates"
           update_alert: "true"
+          phone: "true"
 
       - uid: update-pfsense-pending-7d
         title: "pfSense update pending over 7 days"
@@ -91,6 +92,7 @@ groups:
           source: "pfsense"
           alert_group: "updates"
           update_alert: "true"
+          phone: "true"
 
       - uid: update-pfsense-security-pending
         title: "pfSense SECURITY update pending"
@@ -126,6 +128,7 @@ groups:
           source: "pfsense"
           alert_group: "updates"
           update_alert: "true"
+          phone: "true"
           update_security: "true"
 
       - uid: update-pfsense-check-failing
@@ -162,3 +165,4 @@ groups:
           source: "pfsense"
           alert_group: "updates"
           update_alert: "true"
+          phone: "true"

@@ -42,7 +42,15 @@ you turn it on.
 - Every rule carries `severity` (warning or critical), `update_alert=true` and
   `alert_group=updates`. The pfSense security rule also carries
   `update_security=true`.
-- UniFi rules use `noDataState: OK`: missing poller data never pages.
+- The two UniFi pending rules use `noDataState: OK` (no data legitimately
+  means no pending update) and `execErrState: Alerting`: a failing query must
+  alert. These rules once sat in an evaluation error state for about seven
+  hours with nothing alerting, which is why the error state is not OK.
+- The rule "UniFi poller data stale" (warning, `phone=false`) fires when the
+  poller wrote no point to `usw` for 15 minutes (`for: 5m`, no data and
+  errors both alert). It is the watchdog for the data the UniFi rules read.
+  A heartbeat that proves the whole path (rule, router and delivery) end to
+  end is not part of this change and comes later.
 - pfSense rules are security detectors, so `noDataState` and `execErrState`
   are `Alerting`: a silent or broken check raises an alert instead of hiding.
   A separate rule, "pfSense update check failing or stale", fires when
@@ -107,6 +115,21 @@ Telegraf exec input for the firewall:
 
 Copy `scripts/pfsense-update-metric.sh` to that path by hand when you are
 ready. The script runs only those two read-only commands.
+
+### Label taxonomy
+
+| Label | What it controls |
+|-------|------------------|
+| `update_alert` | `true` marks an update-alerting rule: it matches the notification policy route with the 4h and 1h repeats, and its title belongs in `ALLOWED_ALERTNAMES` |
+| `severity` | `warning` or `critical`: the repeat interval, and the Pushover priority (1, or 2 for an allowlisted name with an urgent label) |
+| `phone` | `true` is the only way an alert reaches Pushover; any other value or no label keeps it off the phone (Discord is unaffected) |
+| `alert_group` | Grouping and display (`updates` for these rules); no routing effect |
+| `update_security` | `true` marks a security release: emergency priority for allowlisted names |
+
+SIEM alerts stay off the phone until they carry `phone=true`; only the update
+rules do today. The malformed-alert notice from the router is the one
+exception: it is a fault in the alerting pipeline itself, so it pushes at
+priority 1 whenever Pushover is enabled.
 
 ### Notification policy
 
