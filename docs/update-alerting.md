@@ -50,17 +50,16 @@ you turn it on.
 - A rule clears only when its query stops returning a pending update (the
   UniFi `upgradable` flag goes false, or `pfsense_update_pending` returns to
   0). There is no manual override in the rules.
-- The 24h thresholds use the rule `for` duration, so a device that is
-  updated and later has a new update starts a fresh clock.
-- UniFi escalation is exclusive: the warning covers pending for more than 24h
-  and not more than 7 days, and the critical covers more than 7 days, so the
-  warning stops when the critical starts (Grafana-managed alerting has no
-  inhibit rule). Both rules count the hourly buckets in the last 7 days that
-  held a pending point; the warning needs fewer than 168 and the critical
-  needs 168 or more, and the same number is in both rules, so they cannot
-  overlap and cannot leave a gap. A device that stops reporting for an hour
-  falls back to the warning until a full week is pending again. pfSense rules
-  keep the separate `for` durations.
+- UniFi escalation is exclusive and has no `for` clock (both rules use
+  `for: 0s`), because a `for` clock restarts whenever the data has a gap and
+  would silence an unpatched device for a day. Both rules count the hourly
+  buckets in the last 7 days that held a pending point, and require that the
+  device is pending now. The warning needs 24 to 159 buckets and the critical
+  needs 160 or more. The 160 is the same number in both rules, so they cannot
+  overlap and cannot leave a gap (Grafana-managed alerting has no inhibit
+  rule). The tolerance is about 8 hours of missing data per week (168 buckets
+  minus 160), so a short outage does not drop a critical back to a warning.
+  pfSense rules keep the separate `for` durations.
 
 ### UniFi data
 
@@ -211,8 +210,12 @@ into the n8n credential.
 
 The workflow settings do not save successful executions, manual executions or
 execution progress, so alert content is not kept in n8n history. Failed
-executions are still stored, and they carry only alert text, not the
-Pushover credential.
+executions are deliberately not stored either (`saveDataErrorExecution` is
+`none`): a failed execution keeps the first node's output, which includes the
+request headers, and the `Authorization` header carries the webhook
+credential. So failures show only in the n8n log. If an earlier import of
+this workflow stored executions, delete those executions and rotate the
+webhook credential (the Doppler value and the n8n credential together).
 
 ### Enable it
 

@@ -166,6 +166,15 @@ def test_workflow_does_not_persist_successful_executions():
     assert s["saveExecutionProgress"] is False
 
 
+def test_workflow_does_not_persist_failed_executions():
+    # a failed execution keeps the first node's output, which includes the request
+    # headers (the Authorization header carries the webhook credential)
+    assert _workflow()["settings"]["saveDataErrorExecution"] == "none"
+    text = " ".join(DOC.read_text(encoding="utf-8").lower().split())
+    assert "failed executions are deliberately not stored" in text
+    assert "rotate" in text and "n8n log" in text
+
+
 def test_cancel_only_for_namespaced_tags():
     nodes = _nodes()
     cond = json.dumps(nodes["Pushover Cancel?"]["parameters"])
@@ -382,8 +391,8 @@ def test_rule_schema():
 def test_unifi_rules_escalate_24h_then_7d():
     by = {r["uid"]: r for _, _, r in _rules()}
     warn, crit = by["update-unifi-pending-24h"], by["update-unifi-pending-7d"]
-    assert warn["for"] == "24h" and warn["labels"]["severity"] == "warning"
-    # the 7 day boundary is a query condition shared with the warning, not a longer `for`
+    # both clocks live in the condition (bucket counts), so a data gap cannot restart a `for` clock
+    assert warn["for"] == "0s" and warn["labels"]["severity"] == "warning"
     assert crit["for"] == "0s" and crit["labels"]["severity"] == "critical"
     assert not warn.get("isPaused") and not crit.get("isPaused")
     assert "upgradable" in json.dumps(warn["data"])
@@ -409,15 +418,21 @@ def test_unifi_warning_is_bounded_by_the_critical_rule_with_no_overlap_or_gap():
     full = 604800 // 3600  # buckets in a week that is pending the whole time
     expr_w = _data(warn, "C")["model"]["expression"]
     expr_c = _data(crit, "C")["model"]["expression"]
-    mw = re.fullmatch(r"\$B > 0 && \$Pc < (\d+)", expr_w)
+    mw = re.fullmatch(r"\$B > 0 && \$Pc >= (\d+) && \$Pc < (\d+)", expr_w)
     mc = re.fullmatch(r"\$B > 0 && \$Pc >= (\d+)", expr_c)
     assert mw and mc, (expr_w, expr_c)
-    assert int(mw.group(1)) == int(mc.group(1)) == full, "upper bound of warning must equal lower bound of critical"
-    # evaluate both conditions for every bucket count: exactly one fires while an update is pending
-    for pc_count in range(0, full + 40):
-        w = pc_count < int(mw.group(1))
-        c = pc_count >= int(mc.group(1))
-        assert w != c, f"overlap or gap at {pc_count} buckets"
+    w_lo, w_hi, c_lo = int(mw.group(1)), int(mw.group(2)), int(mc.group(1))
+    assert (w_lo, w_hi, c_lo) == (24, 160, 160), "24h to the tolerance bound, then critical"
+    assert w_hi == c_lo, "upper bound of warning must equal lower bound of critical"
+    assert full - c_lo == 8, "tolerance is about 8 hours of missing data per week"
+    # every bucket count from 0 to 207: nothing below 24, warning 24..159, critical 160+, never both
+    for n in range(0, 208):
+        w = w_lo <= n < w_hi
+        c = n >= c_lo
+        assert not (w and c), f"overlap at {n} buckets"
+        expected = "none" if n < 24 else ("warning" if n < 160 else "critical")
+        got = "warning" if w else ("critical" if c else "none")
+        assert got == expected, f"{n} buckets: {got}, expected {expected}"
     for rule in (warn, crit):
         assert _data(rule, "Pc")["model"]["reducer"] == "count"
         assert rule["condition"] == "C"

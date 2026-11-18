@@ -585,7 +585,8 @@
     "executionOrder": "v1",
     "saveDataSuccessExecution": "none",
     "saveManualExecutions": false,
-    "saveExecutionProgress": false
+    "saveExecutionProgress": false,
+    "saveDataErrorExecution": "none"
   },
   "staticData": null,
   "meta": null,
