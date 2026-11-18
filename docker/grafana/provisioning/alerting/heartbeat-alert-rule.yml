@@ -1,0 +1,57 @@
+# Alert path heartbeat (issue #80). Provisioned into Grafana.
+#
+# A dead-man's switch for the whole alert path. This rule fires all the time:
+# its only query is the constant 1, so it needs no data source and cannot go
+# quiet because a data source did. Each time Grafana repeats the notification
+# (every 5 minutes by the policy route in heartbeat-notification-policy.yml.example)
+# the alert travels Grafana -> contact point n8n-grafana-router -> the n8n
+# router. The router sends NO Discord or phone message for it. It pings the
+# observer set in HEARTBEAT_PING_URL, which lives outside this host's failure
+# domain, and the observer alerts through its own channels when the pings
+# stop. See docs/heartbeat.md.
+#
+# Labels: heartbeat=true makes the router take the heartbeat branch. phone=false
+# is part of the contract: the router sends /fail to the observer when it is
+# not exactly "false", and no label here can ever put the heartbeat on the phone.
+# severity=info and alert_group=heartbeat are for display only. There is no
+# update_alert label, so the update-alert policy route does not match it.
+#
+# State handling: noDataState and execErrState are OK on purpose. A rule that
+# cannot evaluate must stop the pings (the observer then alerts) and must never
+# look healthy. Do not set them to Alerting: that would keep pinging while broken.
+#
+# The folder is created by Grafana on provisioning if it does not exist.
+# Needs Grafana 10 or newer for a rule made only of expressions (unverified on a
+# live Grafana, see docs/heartbeat.md).
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: Alert path heartbeat
+    folder: Alert Path
+    interval: 1m
+    rules:
+      - uid: alert-path-heartbeat
+        title: "Alert path heartbeat"
+        condition: B
+        data:
+          - refId: A
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: A, type: math, expression: "1"}
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: B, type: threshold, expression: A, conditions: [{evaluator: {type: gt, params: [0]}}]}
+        noDataState: OK
+        execErrState: OK
+        for: 0s
+        isPaused: false
+        annotations:
+          summary: "Alert path heartbeat"
+          description: "Always firing on purpose. The n8n router turns it into a ping to the heartbeat observer and sends no message. If the observer reports missed pings, the alert path (Grafana, the contact point, n8n or the network to the observer) is broken. See docs/heartbeat.md."
+        labels:
+          severity: "info"
+          alert_group: "heartbeat"
+          heartbeat: "true"
+          phone: "false"

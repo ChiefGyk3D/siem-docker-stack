@@ -90,7 +90,7 @@
       "type": "n8n-nodes-base.switch",
       "typeVersion": 3.2,
       "position": [
-        300,
+        450,
         300
       ],
       "id": "alert-status",
@@ -621,6 +621,103 @@
       ],
       "id": "respond-error",
       "name": "Respond Error"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "heartbeat-label",
+              "leftValue": "={{ (() => { const a = (($json.body && $json.body.alerts) || [])[0]; const l = (a && a.labels) || {}; return l.heartbeat === 'true'; })() }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "heartbeat-check",
+      "name": "Heartbeat?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        300,
+        1000
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Builds the heartbeat ping for the alert-path dead-man's switch (issue #80).\n// The sink is a setting, read from the n8n container environment: HEARTBEAT_PING_URL\n// (the observer's ping URL, treated as a secret) and optional HEARTBEAT_KIND\n// ('healthchecks' by default, or 'uptimekuma'). With no valid URL the feature is\n// off: no ping and no error. n8n must allow env access in nodes\n// (N8N_BLOCK_ENV_ACCESS_IN_NODE=false); when it blocks it, the feature stays off.\n// This node never throws, never logs, and never copies alert content into the\n// request: the output is only {send, url}. A ping that fails is handled by the\n// HTTP Request node (continue on error), so it cannot fail a real alert.\n//   healthchecks: GET <base>        = all is well\n//                 GET <base>/fail   = the heartbeat broke its contract\n//   uptimekuma:   GET <push>?status=up&msg=OK\n//                 GET <push>?status=down&msg=...\n// Contract: status firing, label heartbeat=true and label phone=false. A resolved\n// heartbeat (the rule was paused or removed) sends nothing, so the observer's own\n// timeout does the alerting.\nconst MAX_URL = 512;\nlet out = { send: false };\ntry {\n  let rawUrl = '';\n  let rawKind = '';\n  try {\n    rawUrl = $env.HEARTBEAT_PING_URL;\n    rawKind = $env.HEARTBEAT_KIND;\n  } catch (e) {\n    rawUrl = '';\n  }\n  const kind = (typeof rawKind === 'string' && rawKind.trim() !== '') ? rawKind.trim().toLowerCase() : 'healthchecks';\n  const url = typeof rawUrl === 'string' ? rawUrl.trim() : '';\n  const shapeOk = url.length > 0 && url.length <= MAX_URL\n    && /^https?:\\/\\/[^\\s\\/?#@]+(?:[\\/?#]\\S*)?$/.test(url)\n    && !/[\\u0000-\\u001f\\u007f]/.test(url);\n  if (shapeOk && (kind === 'healthchecks' || kind === 'uptimekuma')) {\n    const item = $input.first().json;\n    const body = item && typeof item === 'object' ? item.body : null;\n    const alerts = body && Array.isArray(body.alerts) ? body.alerts : [];\n    const first = alerts[0] && typeof alerts[0] === 'object' ? alerts[0] : {};\n    const labels = first.labels && typeof first.labels === 'object' ? first.labels : {};\n    const status = body && typeof body.status === 'string' ? body.status : '';\n    if (status === 'firing') {\n      const good = labels.heartbeat === 'true' && labels.phone === 'false';\n      const noFragment = url.split('#')[0];\n      const base = noFragment.split('?')[0].replace(/\\/+$/, '');\n      if (kind === 'healthchecks') {\n        out = { send: true, url: good ? base : base + '/fail' };\n      } else {\n        out = { send: true, url: base + (good ? '?status=up&msg=OK' : '?status=down&msg=heartbeat%20contract%20failed') };\n      }\n    }\n  }\n} catch (e) {\n  out = { send: false };\n}\nreturn [{ json: out }];\n"
+      },
+      "id": "heartbeat-build",
+      "name": "Build Heartbeat Ping",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        600,
+        1000
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "heartbeat-send",
+              "leftValue": "={{ $json.send === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "heartbeat-send-check",
+      "name": "Heartbeat Send?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        850,
+        1000
+      ]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.url }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "heartbeat-ping",
+      "name": "Heartbeat Ping",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1100,
+        960
+      ],
+      "onError": "continueRegularOutput"
     }
   ],
   "connections": {
@@ -711,7 +808,7 @@
       "main": [
         [
           {
-            "node": "Alert Status",
+            "node": "Heartbeat?",
             "type": "main",
             "index": 0
           }
@@ -832,6 +929,64 @@
         [
           {
             "node": "Fail Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Heartbeat?": {
+      "main": [
+        [
+          {
+            "node": "Build Heartbeat Ping",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Alert Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Heartbeat Ping": {
+      "main": [
+        [
+          {
+            "node": "Heartbeat Send?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Heartbeat Send?": {
+      "main": [
+        [
+          {
+            "node": "Heartbeat Ping",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Heartbeat Ping": {
+      "main": [
+        [
+          {
+            "node": "Respond OK",
             "type": "main",
             "index": 0
           }
