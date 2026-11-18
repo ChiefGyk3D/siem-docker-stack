@@ -573,9 +573,30 @@ def test_docs_exist_and_cover_required_topics():
                    "PUSHOVER_ENABLED", "Doppler"):
         assert needle in text, needle
     assert "—" not in text, "em dash in docs"
-    assert "PUSHOVER_APP_TOKEN" not in text and "PUSHOVER_USER_KEY" not in text
+    # Doppler secret names (not environment variables): the app token is PUSHOVER_API_KEY
+    assert "PUSHOVER_APP_TOKEN" not in text
+    assert "PUSHOVER_API_KEY" in text and "PUSHOVER_USER_KEY" in text
+    assert "project `homelab`, config `prd_network`" in text
+    assert "siem-docker-stack`, config `dev`" not in text and "siem-docker-stack" not in text
     assert "N8N_BLOCK_ENV_ACCESS_IN_NODE" not in text
     assert "n8n rejects the call" not in text
+    # every doppler command names the project and config, and sets values from stdin
+    cmds = re.findall(r"`([^`]*\bdoppler [^`]*)`", text)
+    assert cmds
+    for cmd in cmds:
+        assert "--project homelab" in cmd and "--config prd_network" in cmd, cmd
+    sets = [c for c in cmds if "doppler secrets set" in c]
+    assert sets
+    for cmd in sets:
+        # the value arrives on stdin; the name is the last positional before the flags
+        assert re.match(r"^openssl rand -base64 32 \| doppler secrets set [A-Z_]+ --project", cmd), cmd
+        assert cmd.endswith("> /dev/null"), cmd
+
+
+def test_env_example_names_the_homelab_doppler_location():
+    text = ENV_EXAMPLE.read_text(encoding="utf-8")
+    assert "project homelab, config prd_network" in text
+    assert "siem-docker-stack, config dev" not in text
 
 
 # --- round 4: end-to-end routing, secret validation, unknown pfSense output ----

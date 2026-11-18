@@ -118,8 +118,11 @@ phone.
    placeholder or under 32 characters; do not use a human-chosen value. The
    secret must be unique to this contact point and never reused for any
    other webhook, credential or service. Store it in Doppler, project
-   `siem-docker-stack`, config `dev`, as `GRAFANA_WEBHOOK_SECRET`. Never write
-   it into the repo or `.env`.
+   `homelab`, config `prd_network`, as `GRAFANA_WEBHOOK_SECRET` (the owner can
+   move it later). Send the value on stdin and the output to `/dev/null`, so
+   it is never typed on a command line or echoed:
+   `openssl rand -base64 32 | doppler secrets set GRAFANA_WEBHOOK_SECRET --project homelab --config prd_network > /dev/null`.
+   Never write it into the repo or `.env`.
 2. In n8n, create a credential of type **Header Auth** named
    `grafana-webhook-auth`. Header name `Authorization`, header value
    `Bearer <the same secret>`. The value must be a non-empty secret after
@@ -130,7 +133,8 @@ phone.
    16`, and use the same URL in `contact-points.yml`. Keep that value out of
    public places.
 4. Run Grafana with the variable in its environment, for example
-   `doppler run -- docker compose up -d`. The compose file requires a
+   `doppler run --project homelab --config prd_network -- docker compose up -d`.
+   The compose file requires a
    non-empty `GRAFANA_WEBHOOK_SECRET` and refuses to start without it.
    `contact-points.yml` sends it as `authorization_credentials` with
    `authorization_scheme: Bearer`, written as `$GRAFANA_WEBHOOK_SECRET`, which
@@ -189,10 +193,12 @@ body fields:
 { "body": { "token": "<application token>", "user": "<user key>" } }
 ```
 
-Doppler (project `siem-docker-stack`, config `dev`) is the source of truth.
-You copy the two values from Doppler into the n8n credential by hand; the
-JSON here carries only the credential name and a placeholder id. To rotate,
-change the Doppler values, then paste the new ones into the n8n credential.
+Doppler (project `homelab`, config `prd_network`) is the source of truth. The
+application token is the Doppler secret `PUSHOVER_API_KEY` and the user key is
+`PUSHOVER_USER_KEY`. You copy the two values from Doppler into the n8n
+credential by hand; the JSON here carries only the credential name and a
+placeholder id. To rotate, change the Doppler values, then paste the new ones
+into the n8n credential.
 
 The workflow settings do not save successful executions, manual executions or
 execution progress, so alert content is not kept in n8n history. Failed
@@ -202,7 +208,8 @@ Pushover credential.
 ### Enable it
 
 1. Create a Pushover application and note its token and your user key.
-2. Store them in Doppler (project `siem-docker-stack`, config `dev`).
+2. Store them in Doppler (project `homelab`, config `prd_network`) as
+   `PUSHOVER_API_KEY` and `PUSHOVER_USER_KEY`; they already exist there.
 3. Create the `pushover-api` Custom Auth credential in n8n as above.
 4. Import `n8n/grafana-alert-router.json`, select the `grafana-webhook-auth`
    and `pushover-api` credentials on the nodes, set `PUSHOVER_ENABLED` to
