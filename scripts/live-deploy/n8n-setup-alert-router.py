@@ -10,7 +10,14 @@ with a value is left on the host.
 Usage:
   siem-run python3 -I n8n-setup-alert-router.py --check
   siem-run python3 -I n8n-setup-alert-router.py --credentials
-  siem-run python3 -I n8n-setup-alert-router.py --workflow router.json [WORKFLOW_ID] [--pushover-on]
+  siem-run python3 -I n8n-setup-alert-router.py --error-workflow handler.json [HANDLER_ID]
+  siem-run python3 -I n8n-setup-alert-router.py --workflow router.json [WORKFLOW_ID] [--pushover-on] [--error-workflow-id HANDLER_ID]
+
+Import order: the error handler first (--error-workflow prints its id), then the
+router with that id (--workflow ... --error-workflow-id ID), so the router's
+errorWorkflow setting points at a real workflow. Both import inactive. A re-run
+with the same id overwrites. Without --error-workflow-id the router keeps no
+errorWorkflow setting (a placeholder id would be rejected by n8n).
 
 Environment (all optional, the current values are the defaults):
   SIEM_CONFIG_DIR         private config directory (default: $HOME/.config/doppler-siem);
@@ -23,7 +30,8 @@ Environment (all optional, the current values are the defaults):
   N8N_CRED_DISCORD_ID     id of the existing Discord webhook credential in n8n
                           (default: dscwhk1479574998; an n8n internal id, not a secret)
   N8N_DISCORD_CRED_NAME   name of that credential (default: Discord Webhook Alerts)
-  N8N_ROUTER_NAME         name given to the imported workflow
+  N8N_ROUTER_NAME         name given to the imported router workflow
+  N8N_HANDLER_NAME        name given to the imported error handler workflow
 """
 import json
 import os
@@ -43,6 +51,8 @@ CRED_DISCORD_ID = os.environ.get("N8N_CRED_DISCORD_ID", "dscwhk1479574998")
 DISCORD_NAME = os.environ.get("N8N_DISCORD_CRED_NAME", "Discord Webhook Alerts")
 NEW_NAME = os.environ.get("N8N_ROUTER_NAME", "Grafana SOAR — Alert Router (authenticated)")
 NEEDED = ("GRAFANA_WEBHOOK_SECRET", "PUSHOVER_API_KEY", "PUSHOVER_USER_KEY")
+HANDLER_NAME = os.environ.get("N8N_HANDLER_NAME", "Alert Router Error Handler")
+ERROR_PLACEHOLDER = "ERROR_WORKFLOW_ID"
 PATH_PREFIX = "grafana-alerts-"
 STRIP_KEYS = ("activeVersionId", "shared", "versionMetadata", "versionCounter",
               "createdAt", "updatedAt", "triggerCount", "pinData", "isArchived")
@@ -118,11 +128,52 @@ def valid_origin(text):
     return ""
 
 
+def check_id(value, what="workflow id"):
+    if value and not re.match(r"^[0-9a-f]{16}$", value):
+        raise ValueError(what + " must be 16 hex characters")
+
+
+def patch_error_workflow(wf, reuse_id="", new_id=None):
+    """Return the error handler workflow patched for import (inactive, ids mapped)."""
+    check_id(reuse_id)
+    for key in STRIP_KEYS:
+        wf.pop(key, None)
+    wf["id"] = reuse_id or new_id or secrets.token_hex(8)
+    wf["name"] = HANDLER_NAME
+    wf["active"] = False
+    ids = credential_id_map()
+    for node in wf["nodes"]:
+        for cred in (node.get("credentials") or {}).values():
+            if cred.get("name") in ids:
+                cred["id"] = ids[cred["name"]]
+    return wf
+
+
+def parse_workflow_args(rest):
+    """Parse the arguments after the workflow file: (reuse_id, pushover_on, error_workflow_id)."""
+    reuse_id, error_id, pushover_on, i = "", "", False, 0
+    while i < len(rest):
+        arg = rest[i]
+        if arg == "--pushover-on":
+            pushover_on = True
+        elif arg == "--error-workflow-id":
+            if i + 1 >= len(rest):
+                raise ValueError("--error-workflow-id needs an id")
+            error_id = rest[i + 1]
+            i += 1
+        elif not reuse_id:
+            reuse_id = arg
+        else:
+            raise ValueError("unexpected argument: " + arg)
+        i += 1
+    return reuse_id, pushover_on, error_id
+
+
 def patch_workflow(wf, reuse_id="", pushover_on=False, origin="", webhook_path="",
-                   webhook_id=None, new_id=None):
+                   webhook_id=None, new_id=None, error_workflow_id=""):
     """Return the workflow patched for import. Mutates and returns wf."""
-    if reuse_id and not re.match(r"^[0-9a-f]{16}$", reuse_id):
-        raise ValueError("workflow id must be 16 hex characters")
+    check_id(reuse_id)
+    check_id(error_workflow_id, "error workflow id")
     for key in STRIP_KEYS:
         wf.pop(key, None)
     # n8n requires an id. Reuse the id of an earlier import of THIS workflow so a re-run
@@ -130,6 +181,11 @@ def patch_workflow(wf, reuse_id="", pushover_on=False, origin="", webhook_path="
     wf["id"] = reuse_id or new_id or secrets.token_hex(8)
     wf["name"] = NEW_NAME
     wf["active"] = False
+    settings = wf.setdefault("settings", {})
+    if error_workflow_id:
+        settings["errorWorkflow"] = error_workflow_id
+    else:
+        settings.pop("errorWorkflow", None)
     ids = credential_id_map()
     for node in wf["nodes"]:
         for cred in (node.get("credentials") or {}).values():
@@ -176,9 +232,29 @@ def grafana_origin():
     return valid_origin(out) if rc == 0 else ""
 
 
-def workflow(path, reuse_id="", pushover_on=False):
-    if reuse_id and not re.match(r"^[0-9a-f]{16}$", reuse_id):
-        sys.exit("workflow id must be 16 hex characters")
+def error_workflow(path, reuse_id=""):
+    try:
+        check_id(reuse_id)
+    except ValueError as err:
+        sys.exit(str(err))
+    with open(path, encoding="utf-8") as handle:
+        wf = json.load(handle)
+    wf = patch_error_workflow(wf, reuse_id)
+    script = "cat > /tmp/eh.json && n8n import:workflow --input=/tmp/eh.json; rc=$?; rm -f /tmp/eh.json; exit $rc"
+    rc, lines = docker_in(script, json.dumps([wf]))
+    for ln in lines[:6]:
+        print(ln[:160])
+    print("error workflow import exit code:", rc)
+    print("error workflow id:", wf["id"])
+    return rc
+
+
+def workflow(path, reuse_id="", pushover_on=False, error_workflow_id=""):
+    try:
+        check_id(reuse_id)
+        check_id(error_workflow_id, "error workflow id")
+    except ValueError as err:
+        sys.exit(str(err))
     with open(path, encoding="utf-8") as handle:
         wf = json.load(handle)
     # Reuse the private path from an earlier run (Grafana's contact point already
@@ -189,7 +265,7 @@ def workflow(path, reuse_id="", pushover_on=False):
             existing = handle.read()
     new_path = choose_webhook_path(existing)
     origin = grafana_origin()
-    wf = patch_workflow(wf, reuse_id, pushover_on, origin, new_path)
+    wf = patch_workflow(wf, reuse_id, pushover_on, origin, new_path, error_workflow_id=error_workflow_id)
     old = os.umask(0o077)
     try:
         with open(PATH_FILE, "w", encoding="utf-8") as handle:
@@ -203,6 +279,7 @@ def workflow(path, reuse_id="", pushover_on=False):
     print("workflow import exit code:", rc)
     print("new webhook path saved (mode 600):", PATH_FILE)
     print("dashboard origin constant set:", bool(origin))
+    print("error workflow set:", bool(error_workflow_id))
     return rc
 
 
@@ -211,9 +288,14 @@ def main(argv):
         return check()
     if argv[:1] == ["--credentials"]:
         return credentials()
+    if argv[:1] == ["--error-workflow"] and len(argv) >= 2:
+        return error_workflow(argv[1], argv[2] if len(argv) > 2 else "")
     if argv[:1] == ["--workflow"] and len(argv) >= 2:
-        rest = [a for a in argv[2:] if a != "--pushover-on"]
-        return workflow(argv[1], rest[0] if rest else "", "--pushover-on" in argv[2:])
+        try:
+            reuse_id, pushover_on, error_id = parse_workflow_args(argv[2:])
+        except ValueError as err:
+            sys.exit(str(err))
+        return workflow(argv[1], reuse_id, pushover_on, error_id)
     sys.exit(__doc__)
 
 

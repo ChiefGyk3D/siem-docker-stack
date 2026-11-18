@@ -86,6 +86,7 @@ the n8n container without that volume loses all of them:
 | Credential `grafana-webhook-auth` | Header Auth (`Authorization: Bearer <webhook secret>`) | `n8n-setup-alert-router.py --credentials` |
 | Credential `pushover-api` | Custom Auth with a JSON body holding the app token and user key | `n8n-setup-alert-router.py --credentials` |
 | The imported workflow (with the router code and constants) | Workflow | `n8n-setup-alert-router.py --workflow` |
+| The imported error handler workflow | Workflow (Error Trigger) | `n8n-setup-alert-router.py --error-workflow` |
 | The private webhook path | Value in the workflow and in the Grafana contact point | A new one is generated on first import and saved to `router-path` in the config directory |
 | The Discord webhook credential | Existing credential, used by the router's Discord nodes | Not recreated here: it is part of the original n8n setup |
 
@@ -107,21 +108,41 @@ Details that were learned live:
 - Pass `--pushover-on` to switch the `PUSHOVER_ENABLED` constant on. Leave it
   off until the checks below pass.
 
+Import order: credentials, then the **error handler**, then the router. The
+router's `errorWorkflow` setting must point at the handler's real id, so the
+handler is imported first and its id is passed to the router import.
+
 Steps:
 
 ```
 siem-run python3 -I scripts/live-deploy/n8n-setup-alert-router.py --credentials
-siem-run python3 -I scripts/live-deploy/n8n-setup-alert-router.py --workflow n8n/grafana-alert-router.json
+siem-run python3 -I scripts/live-deploy/n8n-setup-alert-router.py --error-workflow n8n/alert-router-error-handler.json
+siem-run python3 -I scripts/live-deploy/n8n-setup-alert-router.py --workflow n8n/grafana-alert-router.json --error-workflow-id <handler id>
 ```
 
-Check: the first prints `credentials import exit code: 0`; the second prints
-`workflow import exit code: 0`, `new webhook path saved (mode 600): ...` and
-`dashboard origin constant set: True` (False if Grafana's root URL is not a
-plain http or https origin). In n8n, the workflow `Grafana SOAR - Alert Router
-(authenticated)` exists and its webhook node has credential
-`grafana-webhook-auth`.
+The second command prints `error workflow id: <16 hex characters>`; use that
+value in the third. To re-run later, pass the earlier ids (`--error-workflow
+FILE <handler id>` and `--workflow FILE <router id> --error-workflow-id
+<handler id>`) so the imports overwrite by id instead of adding copies.
 
-Rollback: delete the imported workflow and the two credentials in n8n, and
+Check: the first prints `credentials import exit code: 0`; the second prints
+`error workflow import exit code: 0` and the id; the third prints
+`workflow import exit code: 0`, `new webhook path saved (mode 600): ...`,
+`dashboard origin constant set: True` (False if Grafana's root URL is not a
+plain http or https origin) and `error workflow set: True`. In n8n, the
+workflow `Grafana SOAR - Alert Router (authenticated)` exists, its webhook node
+has credential `grafana-webhook-auth`, and its settings name the handler as the
+error workflow. Both workflows import inactive.
+
+Publish both (the handler too: an inactive handler never runs), then restart
+n8n once: `docker restart n8n`. Publishing through the CLI needs the restart
+before the webhook and the error trigger are registered.
+
+Failed runs are not stored, by design: a stored failed run would keep the
+request headers, which carry the webhook credential. The only trace of a failure
+is the n8n container log and the notice the handler sends.
+
+Rollback: delete the two imported workflows and the two credentials in n8n, and
 remove the `router-path` file. The old router (if any) is untouched because a
 fresh import gets a new id.
 
@@ -147,7 +168,30 @@ message, `--phone-resolve` cancels the repeats. Remember the `phone` label gate:
 the test uses real update alert names; see the label taxonomy in
 `docs/update-alerting.md`.
 
-Rollback: nothing changed; the checks only send test alerts.
+The 200 now comes only after the channel steps finish: the webhook answers
+through a Respond to Webhook node at the end of the run, so a failing Discord
+step makes the checks (and Grafana) see an error status instead of a premature
+"received".
+
+Prove the failure path on purpose, in a copy, never on the live router:
+
+1. In n8n, duplicate the router workflow and give the copy its own webhook path.
+   Set the copy's error workflow to the handler.
+2. In the copy, break the `Discord - Firing` node (for example, point its
+   credential at a Discord webhook that does not exist), and publish the copy.
+3. Post one firing test alert to the copy's path (the same call
+   `n8n-test-router.py` uses for case 5).
+4. Expect: the call returns an error status (not 200); within a minute the
+   failure notice arrives on the phone (handler channel: Pushover, priority 1)
+   naming the workflow, the failed node, a short error and the execution id,
+   and no alert content. Nothing is stored in n8n's execution list (by design).
+5. Break the Pushover step instead (a wrong credential in the copy): the call
+   still returns 200, Discord still gets the alert, and Discord shows one short
+   "phone delivery failed" notice.
+6. Delete the copy.
+
+Rollback: nothing changed on the live router; the checks only send test alerts
+and the copy is deleted.
 
 ## 5. Additive Grafana deploy
 

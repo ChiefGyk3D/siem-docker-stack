@@ -369,3 +369,85 @@ def test_update_alerting_doc_links_the_runbook():
     text = (REPO_ROOT / "docs" / "update-alerting.md").read_text(encoding="utf-8")
     assert "(live-deploy-runbook.md)" in text
     assert RUNBOOK.is_file()
+
+
+# --- the error workflow (issues #78 and #79) ------------------------------------------------
+
+HANDLER = REPO_ROOT / "n8n" / "alert-router-error-handler.json"
+
+
+def handler():
+    return json.loads(HANDLER.read_text(encoding="utf-8"))
+
+
+def test_router_ships_a_placeholder_that_patching_fills_or_removes(setup):
+    assert workflow()["settings"]["errorWorkflow"] == setup.ERROR_PLACEHOLDER
+    filled = setup.patch_workflow(workflow(), error_workflow_id="0123456789abcdef")
+    assert filled["settings"]["errorWorkflow"] == "0123456789abcdef"
+    # without an id the placeholder must not reach n8n (it would point at nothing)
+    bare = setup.patch_workflow(workflow())
+    assert "errorWorkflow" not in bare["settings"]
+    for key in ("saveDataErrorExecution", "saveDataSuccessExecution"):
+        assert bare["settings"][key] == "none"
+
+
+@pytest.mark.parametrize("bad", ["short", "0123456789ABCDEF", "ERROR_WORKFLOW_ID", "0123456789abcdeg"])
+def test_error_workflow_id_must_be_16_hex(setup, bad):
+    with pytest.raises(ValueError, match="error workflow id"):
+        setup.patch_workflow(workflow(), error_workflow_id=bad)
+    with pytest.raises(ValueError):
+        setup.patch_error_workflow(handler(), reuse_id=bad)
+
+
+def test_patch_error_workflow(setup):
+    out = setup.patch_error_workflow(handler())
+    assert re.fullmatch(r"[0-9a-f]{16}", out["id"]) and out["active"] is False
+    assert out["name"] == setup.HANDLER_NAME
+    assert setup.patch_error_workflow(handler(), reuse_id="0123456789abcdef")["id"] == "0123456789abcdef"
+    assert setup.patch_error_workflow(handler(), new_id="fedcba9876543210")["id"] == "fedcba9876543210"
+    ids = setup.credential_id_map()
+    seen = {c["name"]: c["id"] for n in out["nodes"] for c in (n.get("credentials") or {}).values()}
+    assert {"pushover-api", setup.DISCORD_NAME} <= set(seen)
+    assert all(ids[name] == cid for name, cid in seen.items())
+    assert not any(n["type"].endswith(".webhook") for n in out["nodes"])
+
+
+def test_patch_error_workflow_is_idempotent(setup):
+    first = setup.patch_error_workflow(handler(), reuse_id="0123456789abcdef")
+    second = setup.patch_error_workflow(copy.deepcopy(first), reuse_id="0123456789abcdef")
+    assert first == second
+
+
+def test_patch_error_workflow_keeps_the_no_storage_settings(setup):
+    s = setup.patch_error_workflow(handler())["settings"]
+    assert s["saveDataSuccessExecution"] == "none" and s["saveDataErrorExecution"] == "none"
+
+
+@pytest.mark.parametrize("rest,expected", [
+    ([], ("", False, "")),
+    (["0123456789abcdef"], ("0123456789abcdef", False, "")),
+    (["--pushover-on"], ("", True, "")),
+    (["0123456789abcdef", "--pushover-on", "--error-workflow-id", "fedcba9876543210"],
+     ("0123456789abcdef", True, "fedcba9876543210")),
+    (["--error-workflow-id", "fedcba9876543210"], ("", False, "fedcba9876543210")),
+])
+def test_parse_workflow_args(setup, rest, expected):
+    assert setup.parse_workflow_args(rest) == expected
+
+
+@pytest.mark.parametrize("rest", [["--error-workflow-id"], ["a", "b"]])
+def test_parse_workflow_args_refuses_bad_input(setup, rest):
+    with pytest.raises(ValueError):
+        setup.parse_workflow_args(rest)
+
+
+def test_cli_refuses_a_bad_error_workflow_id_before_touching_docker(tmp_path):
+    r = _run("n8n-setup-alert-router.py", ["--workflow", str(ROUTER), "--error-workflow-id", "nope"],
+             {"SIEM_CONFIG_DIR": str(tmp_path)})
+    assert r.returncode != 0 and "error workflow id must be 16 hex characters" in r.stderr
+    r = _run("n8n-setup-alert-router.py", ["--error-workflow", str(HANDLER), "nope"],
+             {"SIEM_CONFIG_DIR": str(tmp_path)})
+    assert r.returncode != 0 and "workflow id must be 16 hex characters" in r.stderr
+    r = _run("n8n-setup-alert-router.py", ["--workflow", str(ROUTER), "--error-workflow-id"],
+             {"SIEM_CONFIG_DIR": str(tmp_path)})
+    assert r.returncode != 0 and "needs an id" in r.stderr

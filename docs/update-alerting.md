@@ -242,6 +242,60 @@ credential. So failures show only in the n8n log. If an earlier import of
 this workflow stored executions, delete those executions and rotate the
 webhook credential (the Doppler value and the n8n credential together).
 
+### Delivery and failure reporting
+
+A failed delivery is never silent. The router's webhook uses the response mode
+that waits for the run (`responseMode: responseNode` on the webhook node) and
+answers through one `Respond to Webhook` node (`respondWith: json`, a static
+body `{"status": "delivered"}`, response code 200) at the very end. So the
+caller (Grafana) gets its answer only after the channel steps finish, and a
+failed run answers with an error status, which Grafana logs and retries.
+
+How the channel steps are wired (n8n node settings used: `onError:
+continueErrorOutput` on the Discord and Pushover steps, `continueRegularOutput`
+on the notice nodes, a `Stop and Error` node, and an `If` node):
+
+- Each Discord step (firing, resolved, malformed notice) has an error output.
+  A failure there is marked (`Mark Discord Failed`, keeping only the node name
+  and a trimmed error message), the Pushover steps still run (a Discord outage
+  must not silence the phone), and at the end `Fail Run` (a `Stop and Error`
+  node) fails the run. That makes the webhook answer with an error and fires
+  the error workflow.
+- A failed Pushover step (send or cancel) never blocks Discord and never fails
+  the run. Its error output goes to a short Discord notice: "phone delivery
+  failed: Pushover Notify <short error>". The notice has no payload and no
+  headers; the error text is trimmed to 120 characters and any `Bearer` value
+  is removed. A failed notice does not fail the run either.
+- The payload builder reads the alert by node reference (`$('Normalize
+  Alert')`), because the Discord step's own output replaces the item.
+
+The error workflow `n8n/alert-router-error-handler.json` starts at an Error
+Trigger. For any failed run of the router it sends one message with the
+workflow name, the failed node name, the error message (trimmed to 300
+characters) and the execution id, through a channel independent of Discord:
+Pushover at priority 1 (credential `pushover-api`). A second channel, Discord,
+sits behind the constant `NOTIFY_DISCORD` (off by default, since Discord may be
+the failing channel); `NOTIFY_PUSHOVER` (on by default) controls the first. It
+reads only the `execution` and `workflow` parts of the error data and never
+the alert, its labels or annotations, or any header. The router setting
+`errorWorkflow` ships as the placeholder `ERROR_WORKFLOW_ID`; the import script
+fills it with the handler's real id (see `docs/live-deploy-runbook.md`) and
+drops it when no id is given.
+
+Failed runs stay unsaved by design (`saveDataErrorExecution: none`, also on the
+handler): a stored failed run keeps the first node's output, which includes the
+request headers and so the webhook credential. The traces of a failure are the
+n8n container log and the handler's notice.
+
+Unverified against a live n8n (the graph tests model these, they are not n8n):
+the webhook's `responseNode` mode answering with an error status when the run
+fails before the response node; the `continueErrorOutput` setting on the
+Discord and HTTP Request nodes, and what the error item holds (the notices read
+`$json.error.message`); `$prevNode.name` and `$('Node').isExecuted` in the
+expressions; that the error workflow fires for a run stopped by `Stop and
+Error` in a webhook-triggered, production run; and the `lastNodeExecuted`,
+`error.message` and `id` fields the handler reads.
+
 ### Enable it
 
 1. Create a Pushover application and note its token and your user key.

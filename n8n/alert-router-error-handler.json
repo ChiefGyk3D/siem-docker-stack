@@ -1,0 +1,219 @@
+{
+  "id": "YOUR_WORKFLOW_ID",
+  "name": "Alert Router Error Handler",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        300
+      ],
+      "id": "error-trigger",
+      "name": "Error Trigger"
+    },
+    {
+      "parameters": {
+        "jsCode": "const NOTIFY_PUSHOVER = true;\nconst NOTIFY_DISCORD = false;\n// NOTIFY_PUSHOVER: send the failure notice through Pushover at priority 1 (the\n// credential pushover-api). NOTIFY_DISCORD: also send it to Discord; off by\n// default because Discord may be the channel that failed.\n//\n// The notice carries exactly four facts: the workflow name, the failed node, the\n// error message (trimmed to 300 characters) and the execution id. It reads only\n// the execution and workflow parts of the error data and never copies anything\n// else from the failed run, so no alert content or request data can reach it.\n\nconst isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);\nconst s = (v, max) => {\n  if (typeof v === 'string') { return v.slice(0, max); }\n  if (typeof v === 'number' && isFinite(v)) { return String(v).slice(0, max); }\n  return '';\n};\n\nconst item = $input.first().json;\nconst ex = isObj(item) && isObj(item.execution) ? item.execution : {};\nconst wf = isObj(item) && isObj(item.workflow) ? item.workflow : {};\nconst err = isObj(ex.error) ? ex.error : {};\n\nconst name = s(wf.name, 100) || 'unknown workflow';\nconst node = s(ex.lastNodeExecuted, 100) || 'unknown node';\nconst message = s(err.message, 300).replace(/\\s+/g, ' ').replace(/Bearer\\s+\\S+/gi, '[removed]') || 'no error message';\nconst id = s(ex.id, 40) || 'unknown';\n\nconst text = ('Alert router run failed. Workflow: ' + name + '. Failed node: ' + node\n  + '. Error: ' + message + '. Execution: ' + id + '.').slice(0, 1024);\n\nreturn [{\n  json: {\n    pushoverOn: NOTIFY_PUSHOVER === true,\n    discordOn: NOTIFY_DISCORD === true,\n    pushover: { title: 'Alert router failure', message: text, priority: 1 },\n    discord: { text: text },\n  },\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        250,
+        300
+      ],
+      "id": "build-failure-notice",
+      "name": "Build Failure Notice"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "pushover-on",
+              "leftValue": "={{ $json.pushoverOn === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        500,
+        200
+      ],
+      "id": "pushover-on",
+      "name": "Pushover On?"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.pushover.net/1/messages.json",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.pushover) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        750,
+        200
+      ],
+      "id": "pushover-send",
+      "name": "Pushover Send",
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "pushover-api"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "discord-on",
+              "leftValue": "={{ $json.discordOn === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        500,
+        400
+      ],
+      "id": "discord-on",
+      "name": "Discord On?"
+    },
+    {
+      "parameters": {
+        "authentication": "webhook",
+        "operation": "sendLegacy",
+        "content": "",
+        "embeds": {
+          "values": [
+            {
+              "title": "ALERT ROUTER FAILURE",
+              "description": "={{ $json.discord.text }}",
+              "color": 15158332
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        750,
+        400
+      ],
+      "id": "discord-send",
+      "name": "Discord Send",
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Discord Webhook Alerts"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Build Failure Notice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Failure Notice": {
+      "main": [
+        [
+          {
+            "node": "Pushover On?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Discord On?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pushover On?": {
+      "main": [
+        [
+          {
+            "node": "Pushover Send",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Discord On?": {
+      "main": [
+        [
+          {
+            "node": "Discord Send",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "none",
+    "saveManualExecutions": false,
+    "saveExecutionProgress": false
+  },
+  "staticData": null,
+  "tags": []
+}
