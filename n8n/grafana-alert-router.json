@@ -208,7 +208,7 @@
           "name": "Discord Webhook Alerts"
         }
       },
-      "onError": "continueErrorOutput"
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
@@ -297,7 +297,7 @@
           "name": "Discord Webhook Alerts"
         }
       },
-      "onError": "continueErrorOutput"
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
@@ -478,20 +478,7 @@
           "name": "Discord Webhook Alerts"
         }
       },
-      "onError": "continueErrorOutput"
-    },
-    {
-      "parameters": {
-        "jsCode": "// A Discord step failed (its error output leads here). Record which node and a\n// short reason, then let the Pushover steps run: a Discord failure must not\n// silence the phone. The run fails at the end (Fail Run), so the webhook answers\n// with an error and the error workflow fires. Only the node name and a trimmed\n// error message are kept: never the alert, its labels or any header.\nlet reason = 'unknown error';\ntry {\n  const e = $input.first().json.error;\n  reason = String((e && e.message) || 'unknown error');\n} catch (x) {\n  reason = 'unknown error';\n}\nreason = reason.replace(/\\s+/g, ' ').replace(/Bearer\\s+\\S+/gi, '[removed]').slice(0, 120);\nreturn [{ json: { discordFailed: true, node: $prevNode.name, reason: reason } }];\n"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [
-        900,
-        100
-      ],
-      "id": "mark-discord-failed",
-      "name": "Mark Discord Failed"
+      "onError": "continueRegularOutput"
     },
     {
       "parameters": {
@@ -566,7 +553,7 @@
           "conditions": [
             {
               "id": "discord-failed-check",
-              "leftValue": "={{ $('Mark Discord Failed').isExecuted }}",
+              "leftValue": "={{ (() => { const names = ['Discord — Firing', 'Discord — Resolved', 'Discord — Malformed']; for (const n of names) { try { if (!$(n).isExecuted) { continue; } const e = $(n).first().json.error; const text = typeof e === 'string' ? e : (e && typeof e.message === 'string' ? e.message : (e ? 'error' : '')); if (text) { return { node: n, text: text.replace(/\\s+/g, ' ').replace(/Bearer\\s+\\S+/gi, '[removed]').slice(0, 120) }; } } catch (x) { } } return null; })() !== null }}",
               "rightValue": "",
               "operator": {
                 "type": "boolean",
@@ -590,7 +577,7 @@
     },
     {
       "parameters": {
-        "errorMessage": "={{ 'Discord delivery failed: ' + $('Mark Discord Failed').first().json.node + ' ' + $('Mark Discord Failed').first().json.reason }}"
+        "errorMessage": "={{ (() => { const f = (() => { const names = ['Discord — Firing', 'Discord — Resolved', 'Discord — Malformed']; for (const n of names) { try { if (!$(n).isExecuted) { continue; } const e = $(n).first().json.error; const text = typeof e === 'string' ? e : (e && typeof e.message === 'string' ? e.message : (e ? 'error' : '')); if (text) { return { node: n, text: text.replace(/\\s+/g, ' ').replace(/Bearer\\s+\\S+/gi, '[removed]').slice(0, 120) }; } } catch (x) { } } return null; })(); return 'Discord delivery failed: ' + (f ? f.node + ' ' + f.text : 'unknown node'); })() }}"
       },
       "type": "n8n-nodes-base.stopAndError",
       "typeVersion": 1,
@@ -722,13 +709,6 @@
             "type": "main",
             "index": 0
           }
-        ],
-        [
-          {
-            "node": "Mark Discord Failed",
-            "type": "main",
-            "index": 0
-          }
         ]
       ]
     },
@@ -740,35 +720,10 @@
             "type": "main",
             "index": 0
           }
-        ],
-        [
-          {
-            "node": "Mark Discord Failed",
-            "type": "main",
-            "index": 0
-          }
         ]
       ]
     },
     "Discord — Malformed": {
-      "main": [
-        [
-          {
-            "node": "Build Pushover Payload",
-            "type": "main",
-            "index": 0
-          }
-        ],
-        [
-          {
-            "node": "Mark Discord Failed",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Mark Discord Failed": {
       "main": [
         [
           {

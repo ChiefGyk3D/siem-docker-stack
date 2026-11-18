@@ -65,10 +65,16 @@ def test_every_channel_step_runs_before_the_response():
 def test_error_capable_nodes_have_their_error_outputs_wired():
     wf = _workflow()
     nodes = {n["name"]: n for n in wf["nodes"]}
-    for name in DISCORD_NODES + ("Pushover Notify", "Pushover Cancel Repeats"):
+    for name in ("Pushover Notify", "Pushover Cancel Repeats"):
         assert nodes[name]["onError"] == "continueErrorOutput", name
         main = wf["connections"][name]["main"]
         assert len(main) == 2 and main[0] and main[1], f"{name}: both outputs must be wired"
+    # the Discord node reports failure as an item with an error key on its NORMAL output
+    for name in DISCORD_NODES:
+        assert nodes[name]["onError"] == "continueRegularOutput", name
+        main = wf["connections"][name]["main"]
+        assert len(main) == 1 and main[0], f"{name}: one output, wired to the Pushover chain"
+    assert "Mark Discord Failed" not in nodes, "the error-output marker modeled a behavior the node does not have"
     for name in (NOTICE_SEND, NOTICE_CANCEL):
         assert nodes[name]["onError"] == "continueRegularOutput", name
 
@@ -273,3 +279,69 @@ def test_docs_describe_delivery_failure_reporting_and_what_is_unverified():
         assert needle in runbook, needle
     assert runbook.index("--error-workflow n8n/") < runbook.index("--workflow n8n/grafana-alert-router.json"), \
         "handler is imported before the router"
+
+
+# --- Discord failure is an item with an error key on the normal output (verified live) ---------
+
+
+def _failed(outputs):
+    node = _nodes()["Discord Failed?"]
+    expr = node["parameters"]["conditions"]["conditions"][0]["leftValue"]
+    from test_update_alerting import _expr, _js_eval
+    return _js_eval(_expr(expr), {"anything": 1}, {"outputs": outputs})
+
+
+@pytest.mark.parametrize("node", DISCORD_NODES)
+def test_an_error_item_on_any_discord_nodes_normal_output_counts_as_failed(node):
+    assert _failed({node: [{"error": "Forbidden"}]}) is True
+    assert _failed({node: [{"error": {"message": "Forbidden"}}]}) is True
+
+
+@pytest.mark.parametrize("outputs", [
+    {}, {DISCORD_FIRING: [{"ok": True}]}, {DISCORD_FIRING: [{"error": ""}]}, {DISCORD_FIRING: [{"error": None}]},
+    {DISCORD_FIRING: []}, {DISCORD_FIRING: [{}]}, {DISCORD_FIRING: [{"id": "123", "content": "x"}]},
+])
+def test_success_missing_and_empty_discord_results_do_not_count_as_failed(outputs):
+    assert _failed(outputs) is False
+
+
+def test_the_check_does_not_throw_for_a_node_that_did_not_run():
+    # the model's `$()` returns an empty item; a real n8n throws, so the expression must guard
+    expr = _nodes()["Discord Failed?"]["parameters"]["conditions"]["conditions"][0]["leftValue"]
+    assert "try" in expr and "catch" in expr and "isExecuted" in expr
+
+
+def test_fail_run_message_names_the_node_and_a_trimmed_error_only():
+    from test_update_alerting import _expr, _js_eval
+    node = _nodes()["Fail Run"]
+    msg = _js_eval(_expr(node["parameters"]["errorMessage"]), {"x": 1}, {"outputs": {
+        DISCORD_RESOLVED: [{"error": "Bearer SECRET-ABC123 refused " + "x" * 500}]}})
+    assert DISCORD_RESOLVED in msg and msg.startswith("Discord delivery failed")
+    assert "SECRET-ABC123" not in msg and "[removed]" in msg and len(msg) < 200
+    other = _js_eval(_expr(node["parameters"]["errorMessage"]), {"x": 1}, {"outputs": {
+        MALFORMED: [{"error": {"message": "nope"}}]}})
+    assert MALFORMED in other and "nope" in other
+
+
+@pytest.mark.parametrize("status,node", [("firing", DISCORD_FIRING), ("resolved", DISCORD_RESOLVED)])
+def test_the_modeled_discord_failure_shape_is_the_verified_one(status, node):
+    res = _run_graph(_item(status), pushover_enabled=True, fail={node})
+    assert res["response"] == "error" and node in res["error"]
+    assert "Pushover Notify" in res["notified"], "the phone still gets the alert"
+
+
+def test_a_failing_notice_node_cannot_fail_the_run_even_with_an_error_item():
+    res = _run_graph(_item("firing"), pushover_enabled=True, fail={"Pushover Notify", NOTICE_SEND})
+    assert res["response"] == "200" and NOTICE_SEND in res["failed"]
+    res = _run_graph(_item("resolved"), pushover_enabled=True, fail={"Pushover Cancel Repeats", NOTICE_CANCEL})
+    assert res["response"] == "200"
+
+
+def test_the_payload_builder_ignores_a_discord_item_that_only_has_an_error_key():
+    from test_update_alerting import _run_code_node
+    from test_update_alerting import _build_node
+    body = _item("firing")["body"]
+    ctx = {"outputs": {"Normalize Alert": [{"body": body}], DISCORD_FIRING: [{"error": "Forbidden"}]},
+           "prev": DISCORD_FIRING}
+    out = _run_code_node(_build_node(), {"error": "Forbidden"}, ctx)[0]
+    assert out["pushover"]["title"].startswith(GOOD_NAME) and out["pushover"]["priority"] == 1

@@ -774,7 +774,12 @@ def _run_graph(webhook_item, pushover_enabled=False, fail=(), wf=None):
             for code, r in zip(codes, _eval_many(codes, items[0], ctx)):
                 assert "error" not in r, f"{name}: expression failed: {r['error']} in {code[:80]}"
             res["notified"].add(name)
-            if name in fail:
+            if name in fail and t == "n8n-nodes-base.discord":
+                # Verified live: the Discord node reports a failure as ONE item with an
+                # `error` key (a string) on its NORMAL output. Its error output stays empty.
+                res["failed"].add(name)
+                outs[0] = [{"error": "boom"}]
+            elif name in fail:
                 res["failed"].add(name)
                 mode = node.get("onError")
                 err = [{"error": {"message": "boom"}}]
