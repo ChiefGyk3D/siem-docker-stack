@@ -32,6 +32,9 @@ GOOD_NAME = "UniFi update pending over 24h"
 GOOD_FP = "abcdef0123456789"
 
 
+PENDING_UNIFI = ("update-unifi-pending-24h", "update-unifi-pending-7d")
+
+
 def _workflow():
     return json.loads(ROUTER.read_text(encoding="utf-8"))
 
@@ -190,7 +193,8 @@ def test_cancel_only_for_namespaced_tags():
 def test_default_is_disabled():
     out = _run_build(_alert("firing", {"severity": "warning"}))
     assert out["enabled"] is False
-    assert _run_build(_alert("firing", {"severity": "warning"}), enabled=True)["enabled"] is True
+    # enabled alone is not enough: the alert must also carry phone=true
+    assert _run_build(_alert("firing", {"severity": "warning", "phone": "true"}), enabled=True)["enabled"] is True
 
 
 def test_priority_mapping():
@@ -266,7 +270,14 @@ def test_code_node_does_not_need_node_builtins():
 ])
 def test_malformed_bodies_never_throw_and_never_page_at_emergency(body):
     out = _run_build(body, enabled=True)
-    assert out["enabled"] is True
+    first = body["alerts"][0] if isinstance(body, dict) and isinstance(body.get("alerts"), list) \
+        and body["alerts"] else None
+    structurally_ok = (isinstance(body, dict) and body.get("status") in ("firing", "resolved")
+                       and isinstance(first, dict) and isinstance(first.get("labels", {}), dict)
+                       and isinstance(first.get("annotations", {}), dict))
+    # a structurally broken body is a pipeline fault and always pushes; a parseable one
+    # follows the phone label gate (these carry none)
+    assert out["enabled"] is (not structurally_ok)
     assert out["pushover"]["priority"] in (0, 1)
     assert out["cancelTag"] == ""
     assert isinstance(out["pushover"]["title"], str) and isinstance(out["pushover"]["message"], str)
@@ -381,8 +392,10 @@ def test_rule_schema():
         assert rule["labels"]["severity"] in {"warning", "critical"}, rule["title"]
         assert rule["labels"]["update_alert"] == "true", rule["title"]
         assert rule["for"], rule["title"]
-        if rule["uid"].startswith("update-unifi"):
+        if rule["uid"] in PENDING_UNIFI:
+            # no data legitimately means no pending update; a failing query must alert
             assert rule["noDataState"] == "OK", rule["title"]
+            assert rule["execErrState"] == "Alerting", rule["title"]
         else:
             # pfSense detector: missing data or a failed query must not look healthy
             assert rule["noDataState"] == "Alerting", rule["title"]
@@ -437,7 +450,7 @@ def test_unifi_warning_is_bounded_by_the_critical_rule_with_no_overlap_or_gap():
     for rule in (warn, crit):
         assert _data(rule, "Pc")["model"]["reducer"] == "count"
         assert rule["condition"] == "C"
-        assert rule["noDataState"] == "OK" and rule["execErrState"] == "OK"
+        assert rule["noDataState"] == "OK" and rule["execErrState"] == "Alerting"
 
 
 def test_pfsense_rules_ship_paused_and_use_metric():
@@ -720,8 +733,10 @@ def _eval_many(codes, item):
     return json.loads(r.stdout)
 
 
-def _simulate(webhook_item):
-    """Walk the real graph from the webhook. Returns (nodes reached, notification nodes)."""
+def _simulate(webhook_item, pushover_enabled=False):
+    """Walk the real graph from the webhook. Returns (nodes reached, notification nodes).
+
+    pushover_enabled flips the PUSHOVER_ENABLED constant in the payload builder."""
     wf = _workflow()
     nodes = {n["name"]: n for n in wf["nodes"]}
     hook = next(n["name"] for n in wf["nodes"] if n["type"] == "n8n-nodes-base.webhook")
@@ -746,6 +761,10 @@ def _simulate(webhook_item):
         if t == "n8n-nodes-base.webhook":
             outs[0] = items
         elif t == "n8n-nodes-base.code":
+            if pushover_enabled and "ALLOWED_ALERTNAMES" in node["parameters"]["jsCode"]:
+                node = json.loads(json.dumps(node))
+                node["parameters"]["jsCode"] = node["parameters"]["jsCode"].replace(
+                    "const PUSHOVER_ENABLED = false;", "const PUSHOVER_ENABLED = true;")
             outs[0] = _run_code_node(node, items[0])
         elif t == "n8n-nodes-base.switch":
             rules = node["parameters"]["rules"]["values"]
@@ -1091,8 +1110,10 @@ def test_unifi_rules_query_the_real_poller_field_name():
     unifi = ALERTING / "update-alert-rules-unifi.yml"
     for path in (unifi, DOC, Path(__file__)):
         assert WRONG_FIELD not in path.read_text(encoding="utf-8"), path.name
-    rules = [r for _, _, r in _rules() if r["uid"].startswith("update-unifi")]
+    rules = [r for _, _, r in _rules() if r["uid"] in PENDING_UNIFI]
     assert len(rules) == 2
+    stale = next(r for _, _, r in _rules() if r["uid"] == "update-unifi-poller-stale")
+    assert f'"{RIGHT_FIELD}"' in _data(stale, "A")["model"]["query"]
     for rule in rules:
         for ref in ("A", "P"):
             query = _data(rule, ref)["model"]["query"]
@@ -1102,3 +1123,99 @@ def test_unifi_rules_query_the_real_poller_field_name():
             assert m, query
             assert {"uap", "usw"} <= set(m.group(1).split("|")), "uap and usw must stay in the measurement regex"
     assert "verified on 2026-11-18" in " ".join(unifi.read_text(encoding="utf-8").split()).lower()
+
+
+# --- round 6: the phone label gate, rule labels, execErrState, stale-poller rule ---
+
+def _phone_body(status, labels, name=GOOD_NAME):
+    return _alert(status, labels, name=name)
+
+
+@pytest.mark.parametrize("status", ["firing", "resolved"])
+@pytest.mark.parametrize("name", [GOOD_NAME, "pfSense SECURITY update pending", "some SIEM alert"])
+@pytest.mark.parametrize("labels", [
+    {"severity": "critical"}, {"severity": "warning"}, {"severity": "info"},
+    {"severity": "critical", "update_security": "true"}, {"severity": "warning", "update_security": "true"},
+])
+def test_alert_without_phone_label_never_pushes(status, name, labels):
+    out = _run_build(_phone_body(status, labels, name), enabled=True)
+    assert out["enabled"] is False
+    for phone in ("false", "True", "yes", "1", "", "TRUE"):
+        assert _run_build(_phone_body(status, dict(labels, phone=phone), name), enabled=True)["enabled"] is False, phone
+    assert _run_build(_phone_body(status, dict(labels, phone="true"), name), enabled=True)["enabled"] is True
+
+
+def test_phone_gate_keeps_priority_and_cancel_rules():
+    crit = _run_build(_phone_body("firing", {"severity": "critical", "phone": "true"}), enabled=True)
+    assert crit["pushover"]["priority"] == 2
+    other = _run_build(_phone_body("firing", {"severity": "critical", "phone": "true"}, "some SIEM alert"), enabled=True)
+    assert other["enabled"] is True and other["pushover"]["priority"] == 1 and other["cancelTag"] == ""
+    res = _run_build(_phone_body("resolved", {"severity": "critical", "phone": "true"}), enabled=True)
+    assert res["enabled"] is True and res["cancelTag"].startswith("upd-")
+    # a resolved alert without the label must not even cancel
+    assert _run_build(_phone_body("resolved", {"severity": "critical"}), enabled=True)["enabled"] is False
+
+
+def test_malformed_notice_still_reaches_the_phone_without_the_label():
+    out = _run_build({"status": "weird", "alerts": [{}]}, enabled=True)
+    assert out["enabled"] is True and out["pushover"]["priority"] == 1
+    assert _run_build({"status": "weird", "alerts": [{}]})["enabled"] is False  # Pushover itself still off
+
+
+def test_normalize_carries_the_phone_label_through():
+    item = {"body": {"status": "firing", "alerts": [{"labels": {"alertname": GOOD_NAME, "phone": "true"}}]}}
+    out = _run_code_node(_normalize_node(), item)[0]
+    assert out["body"]["alerts"][0]["labels"]["phone"] == "true"
+    out = _run_code_node(_normalize_node(), {"body": {"status": "firing", "alerts": [
+        {"labels": {"phone": True}}]}})[0]
+    assert out["body"]["alerts"][0]["labels"]["phone"] == "true"   # booleans are coerced, then compared as strings
+
+
+@pytest.mark.parametrize("status", ["firing", "resolved"])
+def test_graph_pushes_only_when_the_label_is_set(status):
+    base = {"severity": "critical"}
+    _, without = _simulate({"headers": {}, "body": _phone_body(status, base)}, pushover_enabled=True)
+    assert "Pushover Notify" not in without and "Pushover Cancel Repeats" not in without
+    assert (DISCORD_FIRING if status == "firing" else DISCORD_RESOLVED) in without, "Discord is unchanged"
+    _, with_label = _simulate({"headers": {}, "body": _phone_body(status, dict(base, phone="true"))},
+                              pushover_enabled=True)
+    assert "Pushover Notify" in with_label
+    if status == "resolved":
+        assert "Pushover Cancel Repeats" in with_label
+
+
+def test_graph_malformed_notice_pushes_when_enabled():
+    _, notified = _simulate({"headers": {}, "body": {"status": "weird"}}, pushover_enabled=True)
+    assert "Pushover Notify" in notified
+
+
+def test_every_update_rule_sets_the_phone_label_explicitly():
+    seen = 0
+    for _, _, rule in _rules():
+        want = "false" if rule["uid"] == "update-unifi-poller-stale" else "true"
+        assert rule["labels"].get("phone") == want, rule["uid"]
+        seen += 1
+    assert seen >= 7
+
+
+def test_stale_poller_rule():
+    by = {r["uid"]: r for _, _, r in _rules()}
+    r = by["update-unifi-poller-stale"]
+    assert r["title"] == "UniFi poller data stale"
+    assert r["labels"]["severity"] == "warning" and r["labels"]["phone"] == "false"
+    assert r["noDataState"] == "Alerting" and r["execErrState"] == "Alerting"
+    assert r["for"] == "5m" and not r.get("isPaused")
+    a = _data(r, "A")
+    assert a["datasourceUid"] == "influxdb-unifi"
+    assert a["relativeTimeRange"] == {"from": 900, "to": 0}
+    assert '"usw"' in a["model"]["query"] and "now() - 15m" in a["model"]["query"]
+
+
+def test_docs_have_the_label_taxonomy_and_health_notes():
+    text = DOC.read_text(encoding="utf-8")
+    assert "Label taxonomy" in text
+    for label in ("`update_alert`", "`severity`", "`phone`", "`alert_group`", "`update_security`"):
+        assert label in text, label
+    flat = " ".join(text.split())
+    assert "stay off the phone until they carry `phone=true`" in flat
+    assert "heartbeat" in flat.lower() and "not part of this change" in flat.lower()
