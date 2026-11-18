@@ -1,0 +1,32 @@
+# Notification policy for update alerts (issue #53). SHIPPED AS AN EXAMPLE.
+#
+# Grafana provisions the notification policy as ONE tree for the whole
+# organization: loading this file replaces whatever policy tree exists today.
+# That is why it ends in .example and Grafana ignores it. To use it, merge the
+# `update_alert` route below into your existing tree (keep your other routes),
+# or copy this file to update-notification-policy.yml if the tree is empty.
+#
+# Repeat intervals: a pending update re-alerts every 4h (warning) and every
+# 1h (critical) for as long as the alert keeps firing.
+apiVersion: 1
+
+policies:
+  - orgId: 1
+    receiver: n8n-grafana-router
+    group_by: ["alertname", "grafana_folder"]
+    routes:
+      - receiver: n8n-grafana-router
+        object_matchers:
+          - ["update_alert", "=", "true"]
+        group_by: ["alertname", "name", "kind"]
+        group_wait: 30s
+        group_interval: 5m
+        routes:
+          - receiver: n8n-grafana-router
+            object_matchers:
+              - ["severity", "=", "warning"]
+            repeat_interval: 4h
+          - receiver: n8n-grafana-router
+            object_matchers:
+              - ["severity", "=", "critical"]
+            repeat_interval: 1h

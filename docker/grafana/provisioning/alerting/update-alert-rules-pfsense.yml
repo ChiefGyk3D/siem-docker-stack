@@ -1,0 +1,164 @@
+# pfSense pending-update alerts (issue #53). Provisioned PAUSED.
+#
+# These rules ship paused (isPaused: true). Enable them once the Telegraf exec
+# input from docs/update-alerting.md is deployed on the firewall and the
+# metric `pfsense_update_pending` (gauge 0/1, tags kind=core|kernel|package
+# and security=true|false) is arriving in InfluxDB database `pfsense`.
+# To enable: set isPaused to false and restart Grafana, or unpause in the UI
+# (a UI change is overwritten by the file on the next provisioning run).
+#
+# An alert clears only when the metric returns to 0, that is, when the update
+# is applied. These are security detectors, so missing data or a query error
+# (noDataState and execErrState Alerting) raises the alert instead of hiding
+# a broken check. The script
+# emits both security series every run, so a series never goes stale
+# while an update is pending.
+# The check runs every 6h on the firewall, hence the 13h query window.
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: Update pending - pfSense
+    folder: Update Alerts
+    interval: 15m
+    rules:
+      - uid: update-pfsense-pending-24h
+        title: "pfSense update pending over 24h"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 46800, to: 0}
+            datasourceUid: influxdb-pfsense
+            model:
+              refId: A
+              datasource: {type: influxdb, uid: influxdb-pfsense}
+              rawQuery: true
+              resultFormat: time_series
+              query: >-
+                SELECT last("value") FROM "pfsense_update_pending" WHERE "security" = 'false' AND time > now() - 13h GROUP BY "kind"
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: B, type: reduce, expression: A, reducer: last, settings: {mode: dropNN}}
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: C, type: threshold, expression: B, conditions: [{evaluator: {type: gt, params: [0]}}]}
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 24h
+        isPaused: true
+        annotations:
+          summary: "pfSense {{ $labels.kind }} update has been pending for over 24 hours"
+          description: "Apply the pending pfSense update (core, kernel or packages). This alert clears only when the metric returns to 0."
+        labels:
+          severity: "warning"
+          source: "pfsense"
+          alert_group: "updates"
+          update_alert: "true"
+
+      - uid: update-pfsense-pending-7d
+        title: "pfSense update pending over 7 days"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 46800, to: 0}
+            datasourceUid: influxdb-pfsense
+            model:
+              refId: A
+              datasource: {type: influxdb, uid: influxdb-pfsense}
+              rawQuery: true
+              resultFormat: time_series
+              query: >-
+                SELECT last("value") FROM "pfsense_update_pending" WHERE "security" = 'false' AND time > now() - 13h GROUP BY "kind"
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: B, type: reduce, expression: A, reducer: last, settings: {mode: dropNN}}
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: C, type: threshold, expression: B, conditions: [{evaluator: {type: gt, params: [0]}}]}
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 168h
+        isPaused: true
+        annotations:
+          summary: "pfSense {{ $labels.kind }} update has been pending for over 7 days"
+          description: "Escalated: the update has been pending for over 7 days. This alert clears only when the metric returns to 0."
+        labels:
+          severity: "critical"
+          source: "pfsense"
+          alert_group: "updates"
+          update_alert: "true"
+
+      - uid: update-pfsense-security-pending
+        title: "pfSense SECURITY update pending"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 46800, to: 0}
+            datasourceUid: influxdb-pfsense
+            model:
+              refId: A
+              datasource: {type: influxdb, uid: influxdb-pfsense}
+              rawQuery: true
+              resultFormat: time_series
+              query: >-
+                SELECT last("value") FROM "pfsense_update_pending" WHERE "security" = 'true' AND time > now() - 13h GROUP BY "kind"
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: B, type: reduce, expression: A, reducer: last, settings: {mode: dropNN}}
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: C, type: threshold, expression: B, conditions: [{evaluator: {type: gt, params: [0]}}]}
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 10m
+        isPaused: true
+        annotations:
+          summary: "pfSense {{ $labels.kind }} SECURITY update is pending"
+          description: "A pfSense security release is available. Apply it. This alert clears only when the metric returns to 0."
+        labels:
+          severity: "critical"
+          source: "pfsense"
+          alert_group: "updates"
+          update_alert: "true"
+          update_security: "true"
+
+      - uid: update-pfsense-check-failing
+        title: "pfSense update check failing or stale"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 129600, to: 0}
+            datasourceUid: influxdb-pfsense
+            model:
+              refId: A
+              datasource: {type: influxdb, uid: influxdb-pfsense}
+              rawQuery: true
+              resultFormat: time_series
+              query: >-
+                SELECT last("value") FROM "pfsense_update_check_success" WHERE time > now() - 36h
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: B, type: reduce, expression: A, reducer: last, settings: {mode: dropNN}}
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: C, type: threshold, expression: B, conditions: [{evaluator: {type: lt, params: [1]}}]}
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 10m
+        isPaused: true
+        annotations:
+          summary: "The pfSense update check is failing, or no result has arrived for over 36 hours"
+          description: "The metric pfsense_update_check_success is 0 or missing. Update alerts cannot be trusted until the check works again. Check the Telegraf exec input and scripts/pfsense-update-metric.sh on the firewall."
+        labels:
+          severity: "critical"
+          source: "pfsense"
+          alert_group: "updates"
+          update_alert: "true"
