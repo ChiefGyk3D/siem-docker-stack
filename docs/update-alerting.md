@@ -5,7 +5,7 @@ Nothing here applies an update or changes a device. The alerts read data that
 is already collected, and they clear only when the data shows the update is
 gone.
 
-Tracked in issue #53 (epic #52).
+Tracked in issue #53 (epic #52). To rebuild the live setup on an empty box, see [docs/live-deploy-runbook.md](live-deploy-runbook.md).
 
 ## Flow
 

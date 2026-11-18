@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Run a command with the SIEM alert values injected from the secret manager.
+#
+# Reads a read-only service token from a mode-600 file in a private config
+# directory (the CLI's default folder may be root-owned and is not touched). The
+# values exist only in the child process environment; nothing is printed.
+#
+# Environment (all optional):
+#   SIEM_CONFIG_DIR   private config directory that holds the file "token"
+#                     (default: $HOME/.config/doppler-siem)
+#   DOPPLER_PROJECT, DOPPLER_CONFIG
+#                     read by the secret-manager CLI itself if you set them. A
+#                     service token is already scoped to one project and config,
+#                     so they are normally unnecessary. Example values are
+#                     "homelab" and "prd_network"; override them for your setup.
+#
+# Usage: siem-run COMMAND [ARGS...]
+set -euo pipefail
+
+CFG="${SIEM_CONFIG_DIR:-$HOME/.config/doppler-siem}"
+
+if [ ! -r "$CFG/token" ]; then
+    echo "siem-run: token file missing or unreadable" >&2
+    exit 2
+fi
+
+DOPPLER_TOKEN="$(cat "$CFG/token")"
+export DOPPLER_TOKEN
+exec doppler run --config-dir "$CFG" --no-check-version --fallback-readonly -- "$@"
