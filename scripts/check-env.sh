@@ -47,6 +47,62 @@ for var in "${REQUIRED[@]}"; do
     fi
 done
 
+# The Grafana to n8n webhook secret (docs/update-alerting.md) also needs a
+# minimum length. Docker Compose reads the same .env file, so the value is
+# parsed the way Compose parses it for this variable: an unquoted value ends at
+# whitespace followed by '#', matching single or double quotes are removed, and
+# the quoted text may be followed by a comment. Anything ambiguous (a duplicate
+# assignment, an unmatched quote, a backslash, a '$' Compose would interpolate,
+# a carriage return) is rejected. The parsed value must be non-empty, not
+# whitespace-only, not a placeholder and at least 32 characters. It is never
+# printed.
+var=GRAFANA_WEBHOOK_SECRET
+count="$(grep -cE "^${var}=" "$ENV_FILE" || true)"
+line="$(grep -E "^${var}=" "$ENV_FILE" | tail -1 || true)"
+rest="${line#*=}"
+rest="${rest#"${rest%%[![:space:]]*}"}"
+re_dq='^"([^"\\]*)"([[:space:]]+#.*)?[[:space:]]*$'
+re_sq="^'([^']*)'([[:space:]]+#.*)?[[:space:]]*\$"
+parsed=""
+single=0
+parse_ok=1
+case "$rest" in
+    \"*)
+        if [[ "$rest" =~ $re_dq ]]; then parsed="${BASH_REMATCH[1]}"; else parse_ok=0; fi ;;
+    \'*)
+        if [[ "$rest" =~ $re_sq ]]; then parsed="${BASH_REMATCH[1]}"; single=1; else parse_ok=0; fi ;;
+    *)
+        parsed="${rest%%[[:space:]]#*}"
+        case "$rest" in "#"*) parsed="" ;; esac
+        parsed="${parsed%"${parsed##*[![:space:]]}"}"
+        case "$parsed" in *\"* | *\'*) parse_ok=0 ;; esac ;;
+esac
+trimmed="$(printf '%s' "$parsed" | tr -d '[:space:]')"
+unsafe=0
+case "$parsed" in
+    *\\* | *$'\r'*) unsafe=1 ;;
+    *\$*) [ "$single" -eq 0 ] && unsafe=1 ;;
+esac
+if [ -z "$line" ] || { [ "$parse_ok" -eq 1 ] && [ -z "$trimmed" ]; }; then
+    echo "check-env: ${var} is missing, empty or only whitespace" >&2
+    bad=1
+elif [ "$count" -gt 1 ]; then
+    echo "check-env: ${var} is assigned more than once; keep exactly one assignment" >&2
+    bad=1
+elif [ "$parse_ok" -eq 0 ]; then
+    echo "check-env: ${var} has an unmatched quote or a quote inside an unquoted value" >&2
+    bad=1
+elif [ "$unsafe" -eq 1 ]; then
+    echo "check-env: ${var} must not contain a backslash, carriage return or an unquoted dollar sign" >&2
+    bad=1
+elif is_placeholder "$trimmed"; then
+    echo "check-env: ${var} still has a placeholder or known default value" >&2
+    bad=1
+elif [ "${#parsed}" -lt 32 ]; then
+    echo "check-env: ${var} must be at least 32 characters (generate it with: openssl rand -base64 32)" >&2
+    bad=1
+fi
+
 if [ "$bad" -ne 0 ]; then
     echo "check-env: set strong unique values in $ENV_FILE (see README, Required secrets)" >&2
     exit 1
