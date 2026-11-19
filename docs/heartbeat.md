@@ -228,3 +228,7 @@ python3 -m pytest tests/python/test_heartbeat.py -q
 ```
 
 Node is required, as for the other router tests.
+
+## Related
+
+A second P1 channel that does not depend on n8n: [channel-redundancy.md](channel-redundancy.md).

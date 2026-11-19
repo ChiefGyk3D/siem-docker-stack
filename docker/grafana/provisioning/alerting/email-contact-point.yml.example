@@ -1,0 +1,29 @@
+# Email contact point for P1 alerts (issue #82, docs/channel-redundancy.md).
+# SHIPPED AS AN EXAMPLE: Grafana ignores .example files.
+#
+# This is a second, independent channel for P1 alerts (severity=critical and
+# phone=true). It does not go through n8n, Discord or Pushover. To use it, add the
+# entry below to the contactPoints list of contact-points.yml (or load it as its
+# own file), set the variables below in the Grafana container environment, and
+# merge the route from email-notification-policy.yml.example into your policy tree.
+#
+# Nothing sensitive is written here. Grafana interpolates $VARIABLE from its
+# container environment:
+#   P1_EMAIL_TO  one or more recipient addresses, separated by ; or ,
+# The SMTP server itself is configured by Grafana's own GF_SMTP_* variables
+# (GF_SMTP_ENABLED, GF_SMTP_HOST, GF_SMTP_USER, GF_SMTP_PASSWORD,
+# GF_SMTP_FROM_ADDRESS, GF_SMTP_STARTTLS_POLICY); see .env.example. Keep the
+# password in your secret manager. The variables must be passed to the grafana
+# service in docker-compose, like GRAFANA_WEBHOOK_SECRET.
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: email-p1
+    receivers:
+      - uid: email-p1
+        type: email
+        settings:
+          addresses: $P1_EMAIL_TO
+          singleEmail: true
+        disableResolveMessage: false
