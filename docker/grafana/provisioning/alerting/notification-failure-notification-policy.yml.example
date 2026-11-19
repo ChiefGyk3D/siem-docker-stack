@@ -1,0 +1,26 @@
+# Notification policy route for the notification failure alert (issue #81). SHIPPED AS AN EXAMPLE.
+#
+# Grafana provisions the notification policy as ONE tree for the whole
+# organization: loading this file replaces the tree. Do not load it as is. Merge
+# the `delivery_failure` route below into your existing tree, before any route
+# that would match everything (Grafana stops at the first match unless
+# `continue: true`). See heartbeat-notification-policy.yml.example for the
+# same advice.
+#
+# The receiver must be a contact point that does NOT go through the failing
+# path. discord-direct is defined in notification-failure-contact-point.yml.example.
+# To route elsewhere (email, another webhook), change only the receiver here.
+apiVersion: 1
+
+policies:
+  - orgId: 1
+    receiver: n8n-grafana-router
+    group_by: ["alertname", "grafana_folder"]
+    routes:
+      - receiver: discord-direct
+        object_matchers:
+          - ["delivery_failure", "=", "true"]
+        group_by: ["alertname", "integration"]
+        group_wait: 30s
+        group_interval: 5m
+        repeat_interval: 4h
