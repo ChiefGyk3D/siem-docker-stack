@@ -1,0 +1,12 @@
+# /etc/systemd/system/siem-state-backup.timer
+# Enable with: systemctl enable --now siem-state-backup.timer
+[Unit]
+Description=Daily encrypted backup of n8n and Grafana state
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+RandomizedDelaySec=10m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
