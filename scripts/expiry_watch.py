@@ -497,8 +497,7 @@ def parse_expiry(label, value):
         if hour is None:
             moment = dt.datetime(int(year), int(month), int(day), tzinfo=UTC)
         else:
-            if not (zulu or sign):
-                raise ValueError("a time needs a zone")
+            # the pattern only matches a time that has a zone (Z or an offset): none is guessed
             offset = dt.timedelta(0)
             if sign:
                 if int(zh) > 23 or int(zm) > 59:

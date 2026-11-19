@@ -255,7 +255,7 @@ def test_responses_over_the_size_cap_are_refused_with_or_without_a_length_header
             self.send_header("Transfer-Encoding", "chunked")
             self.end_headers()
             try:
-                for _ in range(40):
+                for _ in range(100000):  # endless for practical purposes: the client must stop reading
                     self.wfile.write(b"%x\r\n" % 65536 + b" " * 65536 + b"\r\n")
                 self.wfile.write(b"0\r\n\r\n")
             except OSError:
@@ -607,6 +607,41 @@ def test_the_shipped_example_config_parses_with_the_new_providers():
             table.pop("acknowledge_removed", None)
             table.pop("notify_disappeared", None)
             ew.PROVIDER_TYPES[table["type"]](table)  # builds: every field in the example is accepted
+
+
+def test_a_declared_huge_length_is_refused_before_the_body_is_read():
+    done = threading.Event()
+
+    class Liar(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", str(10**9))
+            self.end_headers()
+            self.wfile.write(b"[")
+            self.wfile.flush()
+            done.wait(8)  # then stalls: only the length header can stop the read in time
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Liar)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        fake = type("V", (), {"base": f"http://127.0.0.1:{srv.server_address[1]}"})
+        with pytest.raises(ew.ExpiryWatchError, match="(?i)too large"):
+            _grafana(fake, timeout_seconds=3).items()
+    finally:
+        done.set()
+        srv.shutdown()
+        t.join(5)
+        srv.server_close()
+
+
+def test_grafana_a_list_of_tokens_without_expiry_still_obeys_the_list_cap(vendor):
+    vendor.reply(GRAFANA_PATH, [_tok(f"t{n}", None) for n in range(ew.MAX_ITEMS + 1)])
+    with pytest.raises(ew.ExpiryWatchError, match="(?i)too many"):
+        _grafana(vendor).items()
 
 
 def test_a_slow_drip_response_cannot_outlast_the_overall_deadline():

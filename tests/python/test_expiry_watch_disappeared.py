@@ -41,6 +41,16 @@ def test_a_daily_date_inside_the_window_and_not_after_today_is_trusted(daily):
     assert [n.stage for n in notices] == ([] if daily == _day(5) else ["daily"])
 
 
+def test_a_daily_date_on_or_after_the_expiry_day_is_void_even_when_it_is_not_in_the_future():
+    # two days after expiry: a daily date equal to the expiry date is "not after today", yet the
+    # watch never records a daily notice on a day with no days left
+    state = _state(EXPIRES, threshold=7, daily=_day(0))
+    _, new = ew.decide([_item()], _at(-2), _cfg(), state)
+    assert new["deploy-key"]["daily"] is None and new["deploy-key"]["threshold"] is None, "the whole entry is void"
+    _, kept = ew.decide([_item()], _at(-2), _cfg(), _state(EXPIRES, threshold=7, daily=_day(1)))
+    assert kept["deploy-key"]["threshold"] == 7, "a daily date one day before expiry is a real one"
+
+
 def test_with_daily_notices_off_only_a_null_daily_date_is_valid():
     cfg = _cfg(daily_below_days=0)
     notices, _ = ew.decide([_item()], _at(5), cfg, _state(EXPIRES, threshold=7, daily=_day(5)))
