@@ -34,9 +34,11 @@ Rules every step follows:
   `ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX '...'`. Blocks marked
   "in a session" are pasted after opening one with
   `ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX`.
-- `doppler secrets set` echoes the value, so every such command ends with
-  `> /dev/null` (VERIFIED: `docs/update-alerting.md`, webhook authentication,
-  step 1). Secret values go in on stdin, never on a command line.
+- `doppler secrets set` echoes the value by default, so every such command
+  carries `--silent` and ends with `> /dev/null` (VERIFIED: `--silent` per
+  Doppler's setting-secrets page, read 2026-11-19; `> /dev/null` per
+  `docs/update-alerting.md`, webhook authentication, step 1). Secret values go
+  in on stdin, never on a command line.
 - New secrets go in project `homelab`, config `DEV_CONFIG`, never `prd_network`
   or any prd config, until the owner says the stack is live in production.
 - No secret value, host name, real domain or personal detail is written in this
@@ -148,28 +150,52 @@ if unsure). Do not use any prd config.
 
 2. Copy the webhook secret value from `prd_network` into the dev config without
    ever printing it. Doppler's own output goes straight into the second command
-   on stdin, and the second command ends in `> /dev/null` because
-   `doppler secrets set` echoes values:
+   on stdin. `doppler secrets set` echoes the value by default, so the second
+   command carries `--silent` and also ends in `> /dev/null` (both, on purpose):
 
 ```
-doppler secrets get GRAFANA_WEBHOOK_SECRET --plain --project homelab --config prd_network | doppler secrets set GRAFANA_WEBHOOK_SECRET --project homelab --config DEV_CONFIG > /dev/null
+doppler secrets get GRAFANA_WEBHOOK_SECRET --plain --project homelab --config prd_network | doppler secrets set GRAFANA_WEBHOOK_SECRET --project homelab --config DEV_CONFIG --silent > /dev/null
 ```
 
-   Method status: the stdin form of `doppler secrets set ... > /dev/null` is
-   VERIFIED as used in `docs/update-alerting.md` (webhook authentication, step
-   1). The `--plain` flag on `doppler secrets get` and the plain-text pipe
-   between the two commands are INFERRED, not checked against Doppler's
-   documentation. Run the check below; if it prints `differs` or the second
-   command errors, stop and ask, and do not fall back to typing the value.
+   Method status, from Doppler's documentation read 2026-11-19
+   (docs.doppler.com: accessing-secrets, setting-secrets, secrets-setup-guide,
+   and the CLI pages):
 
-3. Check the copy matches, printing only the result, never a value (INFERRED
-   flags as above):
+   - VERIFIED: `doppler secrets get NAME --plain` prints the value alone
+     (accessing-secrets, "Getting Values").
+   - VERIFIED: `doppler secrets set NAME` accepts the value on piped stdin
+     (setting-secrets: "interactive mode, key-value pairs, or stdin", with the
+     example `cat file | doppler secrets set TLS_CERT`). The stdin form with
+     `> /dev/null` is also used in `docs/update-alerting.md` (webhook
+     authentication, step 1).
+   - VERIFIED: `set` echoes the value by default and `--silent` suppresses it
+     (setting-secrets). Every `doppler secrets set` in this runbook carries
+     `--silent` and ends in `> /dev/null`.
+   - INFERRED: `--project`/`-p` and `--config`/`-c` are documented as general
+     flags but the docs show them only on `doppler run`; their use on
+     `secrets get` and `secrets set` is not shown. The docs site has no
+     per-command reference page for these, so the authority is the CLI itself:
+     confirm with `doppler secrets get --help` and `doppler secrets set --help`
+     before running the commands.
+   - NOT DOCUMENTED: whether `--plain` prints a trailing newline, and how `set`
+     treats a trailing newline on stdin. That is why the check in item 3 is
+     required, not optional.
+
+   If the second command errors, stop and report; do not fall back to typing the
+   value.
+
+3. Required check of the copy, printing only `same` or `differs`, never a value
+   (flags are INFERRED per item 2, so confirm with `--help` first):
 
 ```
 test "$(doppler secrets get GRAFANA_WEBHOOK_SECRET --plain --project homelab --config prd_network | sha256sum | cut -d' ' -f1)" = "$(doppler secrets get GRAFANA_WEBHOOK_SECRET --plain --project homelab --config DEV_CONFIG | sha256sum | cut -d' ' -f1)" && echo same || echo differs
 ```
 
-Expected: `same`.
+Expected: `same`. If it prints `differs`, the likely cause is a trailing newline
+added or kept by one of the two commands. Stop and report it. Do not use the
+copy, do not start the Grafana restart in steps 4 and 5 with it, and do not
+try to fix it by typing or printing the value. Delete the dev copy (see
+Rollback below) until it is resolved.
 
 Watch: the output of step 2 is empty, and no secret value appears anywhere in
 the terminal or scrollback.
@@ -423,7 +449,7 @@ echoes values:
 
 ```
 read -rs -p "Discord failure webhook URL: " VAL; echo
-printf '%s' "$VAL" | doppler secrets set DISCORD_FAILURE_WEBHOOK_URL --project homelab --config DEV_CONFIG > /dev/null
+printf '%s' "$VAL" | doppler secrets set DISCORD_FAILURE_WEBHOOK_URL --project homelab --config DEV_CONFIG --silent > /dev/null
 unset VAL
 doppler secrets --project homelab --config DEV_CONFIG --only-names | grep -c DISCORD_FAILURE_WEBHOOK_URL
 ```
@@ -581,11 +607,11 @@ verified domain, not the sandbox (sandbox sends only to authorized recipients).
 In a terminal where Doppler is logged in. The non-secret values:
 
 ```
-printf '%s' 'true' | doppler secrets set GF_SMTP_ENABLED --project homelab --config DEV_CONFIG > /dev/null
-printf '%s' 'smtp.mailgun.org:587' | doppler secrets set GF_SMTP_HOST --project homelab --config DEV_CONFIG > /dev/null
-printf '%s' 'MandatoryStartTLS' | doppler secrets set GF_SMTP_STARTTLS_POLICY --project homelab --config DEV_CONFIG > /dev/null
-printf '%s' 'alerts@example.com' | doppler secrets set GF_SMTP_FROM_ADDRESS --project homelab --config DEV_CONFIG > /dev/null
-printf '%s' 'oncall@example.com' | doppler secrets set P1_EMAIL_TO --project homelab --config DEV_CONFIG > /dev/null
+printf '%s' 'true' | doppler secrets set GF_SMTP_ENABLED --project homelab --config DEV_CONFIG --silent > /dev/null
+printf '%s' 'smtp.mailgun.org:587' | doppler secrets set GF_SMTP_HOST --project homelab --config DEV_CONFIG --silent > /dev/null
+printf '%s' 'MandatoryStartTLS' | doppler secrets set GF_SMTP_STARTTLS_POLICY --project homelab --config DEV_CONFIG --silent > /dev/null
+printf '%s' 'alerts@example.com' | doppler secrets set GF_SMTP_FROM_ADDRESS --project homelab --config DEV_CONFIG --silent > /dev/null
+printf '%s' 'oncall@example.com' | doppler secrets set P1_EMAIL_TO --project homelab --config DEV_CONFIG --silent > /dev/null
 ```
 
 Replace `alerts@example.com` and `oncall@example.com` with your own addresses (the
@@ -594,9 +620,9 @@ echo:
 
 ```
 read -rs -p "SMTP user: " VAL; echo
-printf '%s' "$VAL" | doppler secrets set GF_SMTP_USER --project homelab --config DEV_CONFIG > /dev/null
+printf '%s' "$VAL" | doppler secrets set GF_SMTP_USER --project homelab --config DEV_CONFIG --silent > /dev/null
 read -rs -p "SMTP password: " VAL; echo
-printf '%s' "$VAL" | doppler secrets set GF_SMTP_PASSWORD --project homelab --config DEV_CONFIG > /dev/null
+printf '%s' "$VAL" | doppler secrets set GF_SMTP_PASSWORD --project homelab --config DEV_CONFIG --silent > /dev/null
 unset VAL
 ```
 
@@ -743,7 +769,7 @@ in `> /dev/null`:
 
 ```
 read -rs -p "Value for EXPIRY_WATCH_ROUTER_TOKEN: " VAL; echo
-printf '%s' "$VAL" | doppler secrets set EXPIRY_WATCH_ROUTER_TOKEN --project homelab --config DEV_CONFIG > /dev/null
+printf '%s' "$VAL" | doppler secrets set EXPIRY_WATCH_ROUTER_TOKEN --project homelab --config DEV_CONFIG --silent > /dev/null
 unset VAL
 ```
 
