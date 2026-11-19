@@ -53,7 +53,6 @@ Rules every step follows:
 | Q3 | `docs/expiry-watch.md` requires `[router].url` to be https (plain http only for localhost). The n8n router is reached over plain http on the siem network (`docs/live-deploy-runbook.md`, section 4). How will the expiry watch reach it? | Step 6 |
 | Q4 | The names `FAILTEST` (workflow and credential) appear in no repo doc. The closest text is the failure-path test copy in `docs/live-deploy-runbook.md`, section 4, items 1 to 6 ("the copy", "a wrong credential in the copy"). Read the exact names in the n8n UI. | Step 3 |
 | Q5 | What is the live name of the old router workflow? The repo workflow is named "Grafana SOAR - Alert Router" and the runbook calls the new one "Grafana SOAR - Alert Router (authenticated)". Which one is live and old is not in a doc. | Step 9 |
-| Q6 | What does "Pushover on silent for the phone" mean? No doc defines it. Pushover priority 1 "bypasses quiet hours" and priority 2 repeats until acknowledged (VERIFIED: `docs/update-alerting.md`, priority mapping), so a silenced phone defeats paging. | Step 8 |
 | Q7 | `scripts/live-deploy/grafana-deploy.py` copies only four alert files (`contact-points.yml`, the two update rule files, `heartbeat-alert-rule.yml`; VERIFIED: the `FILES` tuple). It does not copy the notification failure rule or the example contact points, and it rewrites `contact-points.yml` on every run. Steps 4 and 5 therefore copy files by hand into their own files. Should the deploy script take over that job (a code change, not part of this doc)? | Steps 4, 5 |
 | Q8 | The Grafana group id for `grafana_uid`/`grafana_gid` in the backup config is not stated. The compose file sets `user: "472"` (VERIFIED) and the example says `grafana_gid = 0`. Read it with `docker exec grafana id`. | Step 2 |
 | Q9 | Which account runs the scheduled backup? The example unit uses a dedicated user and warns that docker group membership is root-equivalent (VERIFIED: `docs/examples/siem-state-backup.service`). The account and its container access are the owner's decision. | Step 2 |
@@ -76,7 +75,7 @@ item numbers are in the last column.
 | 5 | P1 email contact point | medium, restarts Grafana | step 4 (one restart at a time) | 6 |
 | 6 | Expiry watch, dry run then schedule | low until it posts | steps 1, 5 | 5 |
 | 7 | Game-day scenarios, dry run only | none | steps 1, 4 | 7 |
-| 8 | Pushover and the phone | medium, pages a real phone | step 5 (so test pages do not collide) | 9 |
+| 8 | Enable Pushover; mute before and unmute after the live tests | medium, pages a real phone | step 5 (so test pages do not collide) | 9 |
 | 9 | Deactivate the old router after a day of traffic | medium | steps 1 and 24 hours of normal traffic | 8 |
 | 10 | Game-day live runs | high, breaks things on purpose | steps 2, 4, 8, 9 | 7 |
 
@@ -778,26 +777,21 @@ What the docs say: Pushover is off by default; one constant,
 alerts with `phone=true` reach it; priority 1 bypasses quiet hours; priority 2
 (emergency) repeats until acknowledged (VERIFIED).
 
-What the docs do not say: what "on silent" means (Q6). Pick one before acting;
-this doc does not describe Pushover's own app screens, because no repo doc
-verifies them. Send a screenshot of the screen you mean.
+Owner decision (Q6, answered): the phone is muted only while the live game-day
+and failure tests run, so test pages wake no one, and it is unmuted afterward.
+Real paging stays fully on at all other times. The mute and unmute procedure is
+8b and 8c below. This doc does not describe Pushover's or the phone's own
+screens, because no repo doc verifies them; use whatever mute control you
+normally use and send a screenshot if you want it written down.
 
-- Meaning A: Pushover stays disabled in the router (`PUSHOVER_ENABLED` false)
-  until the end of testing. Nothing to do; this is the shipped state. Skip to
-  step 9.
-- Meaning B: Pushover is enabled in the router, but the phone is set to a
-  non-audible mode for testing. Priority 1 and 2 are designed to get through
-  quiet hours (VERIFIED), so silencing on the phone side overrides the design
-  and a real emergency may not wake you. Decide that consciously, set it in the
-  phone or the Pushover app by whatever means they give, and revert it after
-  game days.
-
-Prerequisites for enabling (both A and B): the credential `pushover-api` exists
+Prerequisites for enabling: the credential `pushover-api` exists
 in n8n and the Doppler values `PUSHOVER_API_KEY` and `PUSHOVER_USER_KEY` exist
 (VERIFIED: `docs/update-alerting.md`, which says they already exist in
 `prd_network`; the live check is `siem-run ... --check` in step 0).
 
-Enable (for B): in the n8n web interface open the router workflow, open the
+### 8a. Enable Pushover in the router
+
+In the n8n web interface open the router workflow, open the
 `Build Pushover Payload` Code node, change `const PUSHOVER_ENABLED = false;` to
 `true` (VERIFIED: "Enable it", item 4), save and keep the workflow active. An
 alternative is re-running the import with `--pushover-on` and the existing
@@ -806,7 +800,8 @@ HANDLER_ID`, then publish and `docker restart n8n` (VERIFIED: runbook section
 3), but whether a re-import keeps the private path and the active state is
 INFERRED, so prefer the UI edit.
 
-Test, using the documented script (VERIFIED: runbook section 4):
+Test, using the documented script (VERIFIED: runbook section 4). The phone is
+unmuted for this one, so you hear the first real pages:
 
 ```
 ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && "$HOME/bin/siem-run" python3 -I scripts/live-deploy/n8n-test-router.py --phone; echo "exit code: $?"'
@@ -822,9 +817,42 @@ ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && "$HOME/bin/
 Watch: no successful execution is listed in n8n afterward (VERIFIED: checklist
 item 6), and the heartbeat still pings and never reaches the phone.
 
+### 8b. Mute before the live tests (before step 10, and before any forced failure test)
+
+Mute the phone's alert sound for Pushover just before you inject the first live
+scenario in step 10, or before any step that sends test pages to the phone.
+Tell anyone else who receives the pages. Muting changes nothing in the stack; it
+only stops the phone from sounding.
+
+WARNING: while the phone is muted, P1 pages are NOT delivered audibly. A real
+emergency (priority 2, which repeats until acknowledged) will not wake you. Keep
+the muted window as short as the tests, and never leave the phone muted: do 8c
+the moment the last scenario is reverted and recovery is checked.
+
+### 8c. Unmute after the tests and prove it rings
+
+1. Unmute the phone.
+2. Send one real test page and confirm it rings once:
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && "$HOME/bin/siem-run" python3 -I scripts/live-deploy/n8n-test-router.py --phone; echo "exit code: $?"'
+```
+
+3. Confirm the message arrived and the phone sounded once (this sends a priority
+   1 and a priority 2 message; the doc script's behavior is VERIFIED in runbook
+   section 4, so expect the emergency one to repeat), then cancel the repeats:
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && "$HOME/bin/siem-run" python3 -I scripts/live-deploy/n8n-test-router.py --phone-resolve; echo "exit code: $?"'
+```
+
+If it did not ring, the phone is still muted or Pushover is off: fix that before
+you call the platform online.
+
 Rollback: set `PUSHOVER_ENABLED` back to `false` in the same node (VERIFIED: it
-is the shipped default) and revert any phone mode you changed. Emergency repeats
-already started stop with `--phone-resolve` or by acknowledging in the app.
+is the shipped default). Emergency repeats already started stop with
+`--phone-resolve` or by acknowledging in the app. Unmute the phone if you muted
+it.
 
 ## Step 9. Deactivate the old router workflow after a day of normal traffic (LIVE)
 
@@ -876,6 +904,9 @@ Prerequisites:
   watching (VERIFIED: checklist item 1).
 - `router_workflow_id` in the config is the NEW router, and the CLI name for
   `router-inactive` was confirmed in step 7.
+- The phone is muted per step 8b, just before the first live scenario. Unmute it
+  per step 8c as soon as the last scenario is reverted and recovery is checked.
+  A muted phone means P1 pages are NOT delivered audibly; never leave it muted.
 
 Changes need both flags: `--apply --confirm-live` (VERIFIED). Run one scenario
 at a time, from the checklist in the doc. Start with `wrong-header`, which sends
@@ -921,7 +952,8 @@ Rollback, in order of preference (VERIFIED: `docs/game-day.md`, "Rollback"):
    siem network").
 
 After any rollback, send a baseline test alert and wait one heartbeat interval
-for the observer to show up.
+for the observer to show up. When all scenarios are done, do step 8c (unmute and
+confirm one test page rings).
 
 ## Not covered
 
