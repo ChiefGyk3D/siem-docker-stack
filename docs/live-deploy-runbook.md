@@ -25,7 +25,7 @@ the values of the original deploy; override them for your host:
 | `SIEM_STAGE_DIR` | `$HOME/bin/alerting` | Staged copy of `docker/grafana/provisioning/alerting/` |
 | `SIEM_CONFIG_DIR` | `$HOME/.config/doppler-siem` | Private config directory: token file, router path file |
 | `N8N_CONTAINER`, `GRAFANA_CONTAINER` | `n8n`, `grafana` | Container names |
-| `N8N_BASE` | `http://192.0.2.19` (placeholder) | n8n address for the checks, on the Docker bridge |
+| `N8N_BASE` | looked up at run time | Full n8n URL for the checks. Unset: found from the container's address on the siem network (`scripts/n8n_address.py`; see `N8N_CONTAINER`, `SIEM_NETWORK`, `N8N_PORT`) |
 | `INFLUX_URL` | `http://influxdb:8086` | URL of the two added datasources |
 | `DOPPLER_PROJECT`, `DOPPLER_CONFIG` | unset | Only if your token is not already scoped; examples `homelab` and `prd_network` |
 
@@ -148,13 +148,17 @@ fresh import gets a new id.
 
 ## 4. Test through the Docker bridge address
 
-A macvlan container is not reachable from its own host. Find the n8n
-container's address on the bridge network (`docker inspect n8n`), and run the
-checks against that:
+A macvlan container is not reachable from its own host, so the checks go
+through the siem network. The test script finds the n8n container's address on
+that network at run time (the address changes after a recreate, so none is
+written down here):
 
 ```
-N8N_BASE=http://<n8n-bridge-address> siem-run python3 -I scripts/live-deploy/n8n-test-router.py
+siem-run python3 -I scripts/live-deploy/n8n-test-router.py
 ```
+
+It stops with a clear message if n8n is not on the siem network. To skip the
+lookup, set `N8N_BASE=http://<n8n-bridge-address>:80` for the one command.
 
 Expected: six lines ending `PASS`, then `failed cases: 0`. Cases 1 to 3 (no
 header, wrong value, wrong scheme) must be 401 or 403. Cases 4 to 6 must be
@@ -192,6 +196,34 @@ Prove the failure path on purpose, in a copy, never on the live router:
 
 Rollback: nothing changed on the live router; the checks only send test alerts
 and the copy is deleted.
+
+### Keep n8n on the siem network
+
+Warning: recreating the n8n container (`docker compose up -d` after an image or
+config change) from a compose file that does not list the siem network drops it
+off that network. Grafana then cannot resolve the name `n8n`, and alert delivery
+fails silently until it is reattached. The reference service definition
+(siem network as `external: true` plus the macvlan network) is in
+`docs/examples/n8n-compose.example.yml`; make your live compose file match it.
+
+For a container that was already recreated, reattach it. The real network name
+is usually the compose project name plus `_siem-net` (for example
+`siem_siem-net`); `docker network ls` shows it.
+
+```
+docker network connect <network-name> n8n
+```
+
+Verify Grafana reaches n8n by name. Expected: an HTTP status line (a 404 or 405
+from the webhook path is fine, it proves the name resolves and n8n answers);
+`Could not resolve host` means the container is still off the network:
+
+```
+docker exec grafana wget -S -q -O /dev/null --post-data '{}' http://n8n/webhook/probe 2>&1 | head -3
+```
+
+Then run the checks of this section; they fail with the same hint if the
+container is off the network.
 
 ## 5. Additive Grafana deploy
 

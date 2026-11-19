@@ -99,7 +99,7 @@ All scripts read configuration from environment variables. Passwords and API key
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `N8N_BASE` | N8N internal URL (Docker bridge IP) | `http://172.20.0.16:80` |
+| `N8N_BASE` | N8N internal URL. Optional: when unset, scripts look up the container's address on the siem network at run time (`scripts/n8n_address.py`; `N8N_CONTAINER`, `SIEM_NETWORK`, `N8N_PORT` adjust the lookup) | `http://192.0.2.10:80` (placeholder) |
 | `N8N_API_KEY` | N8N public API key (Settings → API; required, no default) | `eyJhbGci...` |
 | `N8N_EMAIL` | N8N login email (for internal API) | `admin@example.com` |
 | `N8N_PASSWORD` | N8N login password (required, no default) | set from your secrets manager |
@@ -207,7 +207,8 @@ For deploying just the Grafana alert router workflow to N8N. This script uses a 
 
 ```bash
 # Set environment variables
-export N8N_BASE="http://172.20.0.16:80"
+# Optional: the address is looked up at run time when N8N_BASE is unset.
+# export N8N_BASE="http://192.0.2.10:80"   # placeholder address
 export N8N_API_KEY="your-n8n-api-key"
 export N8N_EMAIL="admin@example.com"
 export N8N_PASSWORD="<n8n login password>"
