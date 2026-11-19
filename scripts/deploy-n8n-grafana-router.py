@@ -11,7 +11,8 @@ Usage:
     ssh user@siem-server 'python3 -' < scripts/deploy-n8n-grafana-router.py
 
 Required environment variables (or edit the Configuration section below):
-    N8N_BASE            N8N base URL (e.g. http://172.20.0.16:80)
+    N8N_BASE            N8N base URL (default: looked up at run time from the n8n
+                        container's address on the siem network; see n8n_address.py)
     N8N_API_KEY         N8N public API key (required, no default)
     N8N_EMAIL           N8N login email
     N8N_PASSWORD        N8N login password (required, no default)
@@ -21,6 +22,7 @@ Required environment variables (or edit the Configuration section below):
 import json
 import os
 import re
+import sys
 import urllib.request
 import urllib.error
 import http.cookiejar
@@ -47,8 +49,8 @@ def require_secret(name, value):
 
 # ── Configuration ──────────────────────────────────────────────────────
 # Set these via environment variables or edit the defaults below.
-N8N_BASE = os.environ.get("N8N_BASE", "http://172.20.0.16:80")
-N8N_API = f"{N8N_BASE}/api/v1"
+N8N_BASE = None  # resolved in main(), after the secret checks
+N8N_API = None
 N8N_KEY = os.environ.get("N8N_API_KEY")  # required, checked in main()
 N8N_EMAIL = os.environ.get("N8N_EMAIL", "admin@example.com")
 N8N_PASSWORD = os.environ.get("N8N_PASSWORD")  # required, checked in main()
@@ -178,11 +180,19 @@ def build_full_workflow(wf_id, version_id):
 
 def main():
     # No defaults for secrets: refuse before any request is made.
-    global N8N_KEY, N8N_PASSWORD, DISCORD_URL
+    global N8N_KEY, N8N_PASSWORD, DISCORD_URL, N8N_BASE, N8N_API
     N8N_KEY = require_secret("N8N_API_KEY", N8N_KEY)
     N8N_PASSWORD = require_secret("N8N_PASSWORD", N8N_PASSWORD)
     DISCORD_URL = require_secret("DISCORD_WEBHOOK_URL", DISCORD_URL)
     API_HEADERS["X-N8N-API-KEY"] = N8N_KEY
+    # The container address is not fixed: resolve it now (N8N_BASE overrides).
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import n8n_address
+    try:
+        N8N_BASE = n8n_address.resolve_n8n_base()
+    except n8n_address.N8nAddressError as err:
+        raise SystemExit(f"ERROR: {err}")
+    N8N_API = f"{N8N_BASE}/api/v1"
     # Step 1: Check if workflow already exists (by name)
     list_req = urllib.request.Request(f"{N8N_API}/workflows?limit=50", headers=API_HEADERS)
     existing = json.loads(urllib.request.urlopen(list_req).read())

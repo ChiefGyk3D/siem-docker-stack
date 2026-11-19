@@ -1,0 +1,45 @@
+# Reference only: the n8n service as it should be declared in the compose file
+# that runs n8n on your SIEM host (n8n is deployed separately from this repo's
+# docker/docker-compose.yml). Every value is a placeholder: copy the shape, not the
+# numbers, and keep secrets in your secret manager, never in this file.
+#
+# Why two networks: Grafana (and the test scripts) reach n8n by the name "n8n"
+# over the siem network. The macvlan network gives n8n its own address on the LAN
+# but cannot be reached from the Docker host itself. A recreate from a compose
+# file that lists only one of them silently drops the other. Issue #90.
+#
+# Check after every recreate: docs/live-deploy-runbook.md, "Keep n8n on the siem network" in section 4.
+
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:<pinned-version>
+    container_name: n8n
+    restart: unless-stopped
+    networks:
+      siem-net:                    # name resolution for Grafana: http://n8n/webhook/...
+        aliases:
+          - n8n
+      n8n-macvlan:
+        ipv4_address: 192.0.2.50   # placeholder: a free address on your LAN
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+networks:
+  siem-net:
+    # The siem network is created by the stack's own compose project. Declare it
+    # external here so this file never creates or removes it. The name must match
+    # `docker network ls`; compose usually prefixes it with the project name
+    # (for example docker_siem-net). Set SIEM_NETWORK to that name.
+    external: true
+    name: ${SIEM_NETWORK:-siem-net}
+  n8n-macvlan:
+    driver: macvlan
+    driver_opts:
+      parent: eth0                 # placeholder: your LAN interface
+    ipam:
+      config:
+        - subnet: 192.0.2.0/24     # placeholder: your LAN subnet
+          gateway: 192.0.2.1
+
+volumes:
+  n8n_data:

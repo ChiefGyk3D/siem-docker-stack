@@ -15,9 +15,9 @@ set -euo pipefail
 # Configuration — change these as needed
 # ---------------------------------------------------------------------------
 SIEM_SERVER="${1:-10.0.0.100}"
-N8N_IP="172.20.0.16"          # N8N on siem-net (use docker inspect to verify)
-N8N_PORT="80"
-N8N_BASE="http://${N8N_IP}:${N8N_PORT}"
+# N8N_BASE is resolved after the secret checks below: the container address on
+# the siem network is not fixed (scripts/n8n_address.py asks the container runtime;
+# set N8N_BASE yourself to skip the lookup).
 GRAFANA_URL="${GRAFANA_URL:-http://localhost:3000}"
 GRAFANA_USER="${GRAFANA_USER:-admin}"
 GRAFANA_PASS="${GRAFANA_PASS:-}"
@@ -34,6 +34,17 @@ require_secret N8N_API_KEY "${N8N_API_KEY:-}" || {
   exit 1
 }
 require_secret GRAFANA_PASS "$GRAFANA_PASS" || exit 1
+
+# The curl calls run on the SIEM server, so the lookup runs there too: the helper
+# is streamed over ssh to the remote python3 (nothing is copied or left behind).
+if [[ -z "${N8N_BASE:-}" ]]; then
+  N8N_BASE="$(ssh "${SSH_USER}@${SIEM_SERVER}" \
+    "N8N_CONTAINER=$(printf '%q' "${N8N_CONTAINER:-n8n}") SIEM_NETWORK=$(printf '%q' "${SIEM_NETWORK:-siem-net}") N8N_PORT=$(printf '%q' "${N8N_PORT:-80}") python3 -I -" \
+    < "$(dirname "$0")/n8n_address.py")" || {
+    echo "ERROR: could not resolve the n8n address on ${SIEM_SERVER}. Set N8N_BASE (for example http://192.0.2.10:80) to skip the lookup." >&2
+    exit 1
+  }
+fi
 
 # Grafana alert folder — create this in Grafana UI first, then copy the UID
 ALERT_FOLDER_UID="${ALERT_FOLDER_UID:-}"  # "SIEM Alerts"
