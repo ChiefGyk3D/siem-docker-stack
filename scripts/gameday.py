@@ -1,0 +1,427 @@
+#!/usr/bin/env python3
+"""Game-day failure tests for the alert path (issue #84, epic #62).
+
+Break one link of Grafana -> n8n router -> Discord / phone on purpose, and
+check that a failure alert still arrives through another path. One subcommand
+per scenario. See docs/game-day.md for the checklist and the rollback section.
+
+SAFETY MODEL
+  Dry-run is the default: a scenario prints what it would do, what you should
+  observe and how to revert, and changes nothing. Changes run only with BOTH
+  --apply and --confirm-live. --apply alone is refused (exit 2) and nothing is
+  run. Every change goes through an injectable runner, so the tests never touch
+  a live system. Nothing in this file is a hostname or a secret.
+
+Usage:
+  gameday.py list
+  gameday.py SCENARIO                          dry-run: print the plan
+  gameday.py SCENARIO --apply --confirm-live   run the steps
+  gameday.py SCENARIO --revert                 dry-run: print only the revert
+  gameday.py SCENARIO --revert --apply --confirm-live
+  Options: --config FILE (TOML), --log FILE (append one JSON line per run)
+
+Configuration: environment variables GAMEDAY_<KEY> win over the TOML file
+(env name = GAMEDAY_ + upper-case key). Keys:
+  n8n_container       default n8n
+  grafana_container   default grafana
+  docker              default docker (the container CLI)
+  discord_host        default discord.com (blocked inside n8n by discord-unreachable)
+  pushover_host       default api.pushover.net (phone-unreachable)
+  heartbeat_host      no default; the host of your heartbeat observer's ping URL
+  router_workflow_id  no default; the n8n id of the router workflow (router-inactive)
+  router_path         no default; the router's private webhook path (wrong-header)
+  n8n_base            optional full base URL; else looked up at run time
+The Grafana webhook secret is never read or sent: wrong-header sends a made-up value.
+"""
+import argparse
+import datetime
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+
+MARKER = "# gameday-84"
+DEFAULTS = {
+    "n8n_container": "n8n",
+    "grafana_container": "grafana",
+    "docker": "docker",
+    "discord_host": "discord.com",
+    "pushover_host": "api.pushover.net",
+}
+KEYS = (
+    "n8n_container", "grafana_container", "docker", "discord_host", "pushover_host",
+    "heartbeat_host", "router_workflow_id", "router_path", "n8n_base",
+)
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+HOST_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
+PATH_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+ID_RE = re.compile(r"^[A-Za-z0-9]{1,64}$")
+
+
+class GamedayError(Exception):
+    """Bad configuration or a refused action; the message says what to do."""
+
+
+# ---------------------------------------------------------------- configuration
+
+def load_config(env=None, config_path=None):
+    """Merge defaults, the TOML file and the environment (environment wins)."""
+    env = os.environ if env is None else env
+    cfg = dict(DEFAULTS)
+    path = config_path or env.get("GAMEDAY_CONFIG")
+    if path:
+        try:
+            import tomllib
+        except ImportError:  # pragma: no cover - python < 3.11
+            raise GamedayError("a TOML config needs Python 3.11 or newer; use GAMEDAY_* variables instead")
+        try:
+            with open(path, "rb") as fh:
+                data = tomllib.load(fh)
+        except OSError as err:
+            raise GamedayError(f"cannot read config file: {err.strerror}")
+        except tomllib.TOMLDecodeError as err:
+            raise GamedayError(f"config file is not valid TOML: {err}")
+        for key, value in data.items():
+            if key not in KEYS:
+                raise GamedayError(f"unknown config key '{key}' (allowed: {', '.join(KEYS)})")
+            if not isinstance(value, str):
+                raise GamedayError(f"config key '{key}' must be a string")
+            cfg[key] = value
+    for key in KEYS:
+        value = env.get("GAMEDAY_" + key.upper())
+        if value is not None and value.strip():
+            cfg[key] = value.strip()
+    return cfg
+
+
+def _need(cfg, key, scenario):
+    value = cfg.get(key)
+    if not value:
+        raise GamedayError(
+            f"scenario '{scenario}' needs '{key}': set GAMEDAY_{key.upper()} or put it in the TOML config")
+    return value
+
+
+def _check(value, regex, what):
+    if not regex.match(value):
+        raise GamedayError(f"{what} has characters that are not allowed")
+    return value
+
+
+# ------------------------------------------------------------------- the plan
+
+class Step:
+    """One action. kind 'exec' runs argv; kind 'http' posts to the router."""
+
+    def __init__(self, text, argv=None, http=None):
+        self.text = text
+        self.argv = argv
+        self.http = http
+
+    def describe(self):
+        if self.argv:
+            return self.text + "\n        $ " + " ".join(_quote(a) for a in self.argv)
+        return self.text
+
+
+def _quote(arg):
+    return arg if re.match(r"^[A-Za-z0-9_@%+=:,./-]+$", arg) else "'" + arg.replace("'", "'\\''") + "'"
+
+
+class Scenario:
+    def __init__(self, name, title, steps, observe, revert, note=""):
+        self.name, self.title, self.steps = name, title, steps
+        self.observe, self.revert, self.note = observe, revert, note
+
+
+def _docker(cfg, *args):
+    return [cfg["docker"], *args]
+
+
+def _hosts_block(cfg, container, host):
+    _check(container, NAME_RE, "container name")
+    _check(host, HOST_RE, "host name")
+    script = f"echo '0.0.0.0 {host} {MARKER}' >> /etc/hosts"
+    return Step(f"Make '{host}' unresolvable inside '{container}' (one marked line in /etc/hosts)",
+                _docker(cfg, "exec", "-u", "root", container, "sh", "-c", script))
+
+
+def _hosts_unblock(cfg, container):
+    _check(container, NAME_RE, "container name")
+    # /etc/hosts is a bind mount in a container, so rewrite in place, never mv or sed -i.
+    script = (f"grep -v '{MARKER}' /etc/hosts > /tmp/.gameday-hosts; "
+              "cat /tmp/.gameday-hosts > /etc/hosts; rm -f /tmp/.gameday-hosts")
+    return Step(f"Remove the marked line from /etc/hosts in '{container}'",
+                _docker(cfg, "exec", "-u", "root", container, "sh", "-c", script))
+
+
+def _stop(cfg, container):
+    _check(container, NAME_RE, "container name")
+    return Step(f"Stop container '{container}'", _docker(cfg, "stop", container))
+
+
+def _start(cfg, container):
+    _check(container, NAME_RE, "container name")
+    return Step(f"Start container '{container}'", _docker(cfg, "start", container))
+
+
+def build_scenarios(cfg):
+    """Return {name: Scenario}. A scenario whose config is missing raises on use."""
+    n8n, grafana = cfg["n8n_container"], cfg["grafana_container"]
+
+    def discord():
+        return Scenario(
+            "discord-unreachable",
+            "Discord webhook unreachable from n8n",
+            [_hosts_block(cfg, n8n, cfg["discord_host"])],
+            ["Send a test alert (n8n-test-router.py case 5 or a Grafana contact point test). "
+             "The router answers HTTP 502 {\"status\": \"delivery failed\"}.",
+             "The error handler sends ONE Pushover message (priority 1) naming the workflow, the failed node and the execution id.",
+             "Grafana logs a failed notification; the delivery-failure alert (#81) fires if its rule is loaded.",
+             "No Discord message arrives. The phone path still works for alerts labeled phone=true."],
+            [_hosts_unblock(cfg, n8n)])
+
+    def phone():
+        return Scenario(
+            "phone-unreachable",
+            "Phone channel (Pushover) unreachable from n8n",
+            [_hosts_block(cfg, n8n, cfg["pushover_host"])],
+            ["Send a test alert labeled phone=true (n8n-test-router.py --phone).",
+             "Discord still receives the alert and then a notice: \"phone delivery failed: Pushover Notify ...\".",
+             "The router answers 200 (a phone failure never fails the run)."],
+            [_hosts_unblock(cfg, n8n)],
+            "Only meaningful when PUSHOVER_ENABLED is true in the router. With it false there is no phone step to fail.")
+
+    def heartbeat():
+        host = _need(cfg, "heartbeat_host", "heartbeat-silent")
+        return Scenario(
+            "heartbeat-silent",
+            "Heartbeat pings cannot reach the observer",
+            [_hosts_block(cfg, n8n, host)],
+            ["The router keeps answering and Discord keeps working; only the ping to the observer fails.",
+             "After the observer's period plus grace (10 to 15 minutes with the documented settings) the observer "
+             "alerts through its own channels. That is the pass condition.",
+             "A ping failure shows in the n8n log, not as a Discord message."],
+            [_hosts_unblock(cfg, n8n)])
+
+    def n8n_down():
+        return Scenario(
+            "n8n-down",
+            "n8n stopped",
+            [_stop(cfg, n8n)],
+            ["Grafana cannot deliver: its notification-failure alert (#81) fires and its log shows the error.",
+             "Heartbeat pings stop; the observer alerts after period plus grace.",
+             "Nothing reaches Discord or the phone through the router while n8n is down; the alerts you see "
+             "come from Grafana's own failure path and the observer."],
+            [_start(cfg, n8n)])
+
+    def grafana_down():
+        return Scenario(
+            "grafana-down",
+            "Grafana stopped",
+            [_stop(cfg, grafana)],
+            ["No rule is evaluated, so no heartbeat is sent. The observer alerts after period plus grace.",
+             "This is the case only the external observer can catch."],
+            [_start(cfg, grafana)])
+
+    def router_inactive():
+        wid = _need(cfg, "router_workflow_id", "router-inactive")
+        _check(wid, ID_RE, "router workflow id")
+        return Scenario(
+            "router-inactive",
+            "Router workflow deactivated (webhook answers an error, not 200)",
+            [Step("Deactivate the router workflow with the n8n CLI",
+                  _docker(cfg, "exec", n8n, "n8n", "update:workflow", f"--id={wid}", "--active=false")),
+             _restart(cfg, n8n, "so the deactivation takes effect")],
+            ["Grafana gets a non-2xx from the contact point, logs a failed notification, and the "
+             "delivery-failure alert (#81) fires if loaded.",
+             "Heartbeat pings stop; the observer alerts after period plus grace.",
+             "No Discord message arrives for the test alert."],
+            [Step("Activate the router workflow again",
+                  _docker(cfg, "exec", n8n, "n8n", "update:workflow", f"--id={wid}", "--active=true")),
+             _restart(cfg, n8n, "so the activation takes effect")],
+            "UNVERIFIED against a live n8n: the CLI command name differs between n8n versions "
+            "(newer ones use publish:workflow / unpublish:workflow). Check `n8n --help` first.")
+
+    def wrong_header():
+        path = _need(cfg, "router_path", "wrong-header")
+        _check(path, PATH_RE, "router path")
+        return Scenario(
+            "wrong-header",
+            "Webhook call with a wrong Authorization header",
+            [Step("POST a harmless test body to the router with a made-up Bearer value "
+                  "(the real secret is never read)",
+                  http={"path": path, "headers": {"Authorization": "Bearer gameday-wrong-value"},
+                        "body": '{"status":"firing","alerts":[]}'})],
+            ["The router answers 401 or 403. Anything else (especially 200) is a defect: the webhook is open.",
+             "No Discord or phone message is sent; n8n logs a rejected call."],
+            [],
+            "Nothing to revert: the call changes no state.")
+
+    return {
+        "discord-unreachable": discord, "phone-unreachable": phone, "heartbeat-silent": heartbeat,
+        "n8n-down": n8n_down, "grafana-down": grafana_down, "router-inactive": router_inactive,
+        "wrong-header": wrong_header,
+    }  # factories, so one missing config key does not block the other scenarios
+
+
+def _restart(cfg, container, why):
+    _check(container, NAME_RE, "container name")
+    return Step(f"Restart container '{container}' {why}", _docker(cfg, "restart", container))
+
+
+SCENARIO_NAMES = ("discord-unreachable", "phone-unreachable", "heartbeat-silent",
+                  "n8n-down", "grafana-down", "router-inactive", "wrong-header")
+
+
+def get_scenario(cfg, name):
+    factories = build_scenarios(cfg)
+    if name not in factories:
+        raise GamedayError(f"unknown scenario '{name}' (try: list)")
+    return factories[name]()
+
+
+# ------------------------------------------------------------ real runners
+
+def real_runner(argv):
+    """Run a command; returns (returncode, short text). Never prints env or output beyond 300 chars."""
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+    except FileNotFoundError:
+        return 127, f"command not found: {argv[0]}"
+    except subprocess.TimeoutExpired:
+        return 124, "timed out after 120 seconds"
+    return proc.returncode, ((proc.stdout or "") + (proc.stderr or "")).strip()[:300]
+
+
+def real_poster(url, headers, body):
+    """POST and return the status code (or 'error:<Type>'). Used only by wrong-header."""
+    req = urllib.request.Request(url, data=body.encode(), method="POST",
+                                 headers=dict({"Content-Type": "application/json"}, **headers))
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return resp.status
+    except urllib.error.HTTPError as err:
+        return err.code
+    except Exception as err:
+        return "error:" + type(err).__name__
+
+
+def real_resolver(cfg):
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import n8n_address
+    env = dict(os.environ)
+    if cfg.get("n8n_base"):
+        env["N8N_BASE"] = cfg["n8n_base"]
+    env.setdefault("N8N_CONTAINER", cfg["n8n_container"])
+    return n8n_address.resolve_n8n_base(env)
+
+
+# ------------------------------------------------------------------ execution
+
+def render(sc, revert_only):
+    lines = [f"SCENARIO: {sc.name} - {sc.title}", f"MODE: {'revert only' if revert_only else 'inject'}"]
+    steps = sc.revert if revert_only else sc.steps
+    lines.append("WOULD DO:" if steps else "WOULD DO: nothing (no state change)")
+    for i, step in enumerate(steps, 1):
+        lines.append(f"  {i}. {step.describe()}")
+    if not revert_only:
+        lines.append("OBSERVE:")
+        lines += [f"  - {o}" for o in sc.observe]
+    lines.append("REVERT:" if sc.revert else "REVERT: none needed")
+    for i, step in enumerate(sc.revert, 1):
+        lines.append(f"  {i}. {step.describe()}")
+    if sc.note:
+        lines.append(f"NOTE: {sc.note}")
+    return "\n".join(lines)
+
+
+def run_steps(steps, cfg, run, post, resolve):
+    """Run steps in order; stop at the first failure. Returns a list of (text, ok, detail)."""
+    results = []
+    for step in steps:
+        if step.argv:
+            rc, detail = run(step.argv)
+            ok = rc == 0
+            detail = f"exit {rc}" + (f": {detail}" if detail and not ok else "")
+        else:
+            base = resolve(cfg)
+            status = post(f"{base}/webhook/{step.http['path']}", step.http["headers"], step.http["body"])
+            ok = status in (401, 403)
+            detail = f"HTTP {status} (expected 401 or 403)"
+        results.append((step.text, ok, detail))
+        if not ok:
+            break
+    return results
+
+
+def execute(argv, env=None, run=real_runner, post=real_poster, resolve=real_resolver, out=sys.stdout, clock=None):
+    """Entry point with injectable collaborators. Returns the process exit code."""
+    parser = argparse.ArgumentParser(prog="gameday.py", description=__doc__.split("\n\n")[0])
+    parser.add_argument("scenario", help="a scenario name, or 'list'")
+    parser.add_argument("--apply", action="store_true", help="run the steps (also needs --confirm-live)")
+    parser.add_argument("--confirm-live", action="store_true",
+                        help="state that you mean to change the live system")
+    parser.add_argument("--revert", action="store_true", help="print or run only the revert steps")
+    parser.add_argument("--config", help="TOML config file")
+    parser.add_argument("--log", help="append one JSON line describing this run")
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as err:
+        return err.code if isinstance(err.code, int) else 2
+
+    def say(text):
+        print(text, file=out)
+
+    if args.apply and not args.confirm_live:
+        say("REFUSED: --apply changes the live system and needs --confirm-live as well. Nothing was run.")
+        return 2
+
+    try:
+        cfg = load_config(env, args.config)
+        if args.scenario == "list":
+            for name in SCENARIO_NAMES:
+                say(name)
+            return 0
+        sc = get_scenario(cfg, args.scenario)
+        say(render(sc, args.revert))
+    except GamedayError as err:
+        say(f"ERROR: {err}")
+        return 2
+
+    if not args.apply:
+        say("DRY-RUN: nothing was changed. Add --apply --confirm-live to run the steps above.")
+        return 0
+
+    steps = sc.revert if args.revert else sc.steps
+    say("APPLYING (live):")
+    results = run_steps(steps, cfg, run, post, resolve)
+    for text, ok, detail in results:
+        say(f"  [{'ok' if ok else 'FAILED'}] {text} - {detail}")
+    failed = any(not ok for _, ok, _ in results)
+    reverted = []
+    if failed and not args.revert and sc.revert:
+        say("A step failed. Running the revert steps now.")
+        reverted = run_steps(sc.revert, cfg, run, post, resolve)
+        for text, ok, detail in reverted:
+            say(f"  [revert {'ok' if ok else 'FAILED'}] {text} - {detail}")
+        if any(not ok for _, ok, _ in reverted):
+            say("REVERT FAILED. Run the REVERT commands printed above by hand now.")
+    elif not failed and not args.revert and sc.revert:
+        say("Injected. Observe the points above, then revert with: "
+            f"gameday.py {sc.name} --revert --apply --confirm-live")
+    if args.log:
+        now = (clock or (lambda: datetime.datetime.now(datetime.timezone.utc)))()
+        rec = {"time": now.isoformat(), "scenario": sc.name, "mode": "revert" if args.revert else "inject",
+               "ok": not failed, "steps": [{"step": t, "ok": ok} for t, ok, _ in results],
+               "auto_reverted": bool(reverted)}
+        with open(args.log, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec) + "\n")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(execute(sys.argv[1:]))
