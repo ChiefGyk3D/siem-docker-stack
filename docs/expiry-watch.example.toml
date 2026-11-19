@@ -1,0 +1,54 @@
+# Credential and key expiry watch: example config (issue #76).
+# Copy to expiry-watch.toml, edit, then:
+#   python3 scripts/expiry_watch.py --config expiry-watch.toml --dry-run
+# Relative paths in this file are relative to the folder this file is in.
+# Nothing secret goes in this file: the router secret comes from an environment variable.
+
+[watch]
+# Notify once when an item gets this many days from expiry (one notice per value).
+thresholds_days = [30, 14, 7]
+# At or below this many days left, send one notice per day. 0 turns the daily notices off.
+daily_below_days = 7
+# Where the watch remembers what it already told you (JSON, created with mode 0600).
+state_file = "expiry-watch-state.json"
+
+[router]
+# The n8n alert router webhook (see docs/update-alerting.md). https only, except localhost.
+url = "https://n8n.example.com/webhook/grafana-alerts"
+# The NAME of the environment variable that holds the router bearer secret (the value of
+# the router's header credential, without the word Bearer). Never put the secret here.
+token_env = "EXPIRY_WATCH_ROUTER_TOKEN"
+timeout_seconds = 10
+
+# Channels per notice. Stages are every threshold above, "daily" and "expired".
+# Known channels: pushover, discord, matrix, email, webhook.
+#   discord  the router always posts a firing alert to Discord
+#   pushover adds the phone=true label, which the router needs to page your phone
+#   webhook  post to the router and let its own rules decide
+#   matrix, email: accepted in this file, NOT delivered yet (next slice); the run says so
+# A stage left out of this table uses ["discord"].
+[routes]
+"30" = ["discord"]
+"14" = ["discord"]
+"7" = ["discord", "pushover"]
+daily = ["discord", "pushover"]
+expired = ["discord", "pushover"]
+
+# Providers: add as many as you need.
+[[providers]]
+type = "registry"
+path = "expiry-watch-registry.example.toml"
+
+[[providers]]
+type = "tls"
+host = "www.example.com"
+port = 443
+owner = "web-team@example.com"
+runbook = "https://wiki.example.com/runbooks/renew-tls"
+# Optional settings, with their defaults:
+# name = "tls:www.example.com:443"
+# kind = "tls-cert"
+# timeout_seconds = 10      # connect and handshake, at most 60
+# verify = true             # false only for internal or self-signed certificates
+# ca_file = "internal-ca.pem"
+# server_name = "www.example.com"

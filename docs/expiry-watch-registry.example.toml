@@ -1,0 +1,24 @@
+# Registry of things that expire and have no API: SSH keys, PGP keys, domains, anything.
+# One [[item]] per thing. Every field is required. Dates are YYYY-MM-DD (UTC).
+# Item names must be unique (they identify the item in the watch's state).
+
+[[item]]
+name = "deploy-ssh-key"
+kind = "ssh-key"
+expires = 2027-03-01
+owner = "ops@example.com"
+runbook = "https://wiki.example.com/runbooks/rotate-ssh-key"
+
+[[item]]
+name = "release-signing-pgp"
+kind = "pgp-key"
+expires = 2027-06-30
+owner = "release@example.com"
+runbook = "https://wiki.example.com/runbooks/rotate-pgp-key"
+
+[[item]]
+name = "example.com"
+kind = "domain"
+expires = 2027-01-15
+owner = "dns@example.com"
+runbook = "https://wiki.example.com/runbooks/renew-domain"
