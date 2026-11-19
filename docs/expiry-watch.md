@@ -72,11 +72,17 @@ For each item the watch counts days left as the item's expiry date minus today
   delivered is not remembered, so the next run tries again. That covers a failed
   post and a notice routed only to channels that are not built yet, so fixing
   the route later still sends it.
-- The state file is not trusted. An entry that makes no sense (a threshold you
-  did not configure or that the item has not reached, a daily date in the
-  future, an expired flag before the expiry date) counts as "nothing sent yet",
-  so the watch errs toward notifying. A changed expiry date, later or earlier,
-  starts the item's history over.
+- The state file is trusted local data. It is written atomically with private
+  permissions (mode 0600), and you should keep it where only the job user can
+  write. The watch checks each entry as a whole: if any part of it makes no
+  sense (a threshold you did not configure or that the item has not reached, a
+  daily date in the future, an expired flag before the expiry date), none of
+  that entry is used and the item counts as "nothing sent yet", so the watch
+  errs toward notifying. A changed expiry date, later or earlier, also starts
+  the item's history over. This catches damage and mistakes. It cannot detect a
+  plausible forged entry (for example the right expiry date with `expired` set
+  to true), and the state is not signed or authenticated, so protect the file
+  with permissions, not with this check.
 
 There is no "resolved" message: each notice is a one-off. Rotating the item
 simply stops the notices.
@@ -99,7 +105,8 @@ repeated thresholds and files over 1 MiB. See
 | `[[providers]]` | none | One table per provider; `type` selects it |
 
 Relative paths (`state_file`, a provider's `path` or `ca_file`) are relative to
-the folder the config file is in.
+the folder the config file is in. See [Paths and symbolic links](#paths-and-symbolic-links)
+for what is refused.
 
 ### Channels and routing
 
@@ -136,6 +143,32 @@ item name. Posting uses `Authorization: Bearer <secret>`, never follows a
 redirect (so the secret is never replayed elsewhere), and a failure message
 never contains the secret.
 
+## Paths and symbolic links
+
+The config file's folder is opened once at the start of a run and that one open
+folder is used for everything that follows: the config, registry files, a TLS
+`ca_file`, and reading and writing the state file. Retargeting a link that
+names the folder while a run is in progress changes nothing for that run. The
+state file is written by creating a temporary file inside the held folder and
+renaming it there.
+
+- The folder named on the command line is allowed to be a symbolic link (or sit
+  under one, such as a home directory that is a link). It is your own choice of
+  location, resolved once, then pinned. The config file itself must not be a
+  link.
+- Below that folder, a symbolic link in any component of `state_file`, a
+  registry `path` or a `ca_file` is refused, and so is a link as the file
+  itself.
+- An absolute path is walked from `/` and no component of it may be a link.
+- The path text is checked as written, before any normalization: an empty
+  component (`a//b`, a trailing `/`), `.` and `..` are refused, so `./x`,
+  `a/./x` and `../x` are all errors.
+- FIFOs, devices and directories are refused, and files over 1 MiB.
+
+What this does not do: it does not stop someone who can already write inside the
+config folder from replacing files there. Keep the folder writable only by the
+job user.
+
 ## Providers
 
 A provider reads one source and returns items. All text is validated the same
@@ -158,10 +191,8 @@ The file holds `[[item]]` tables with all of `name`, `kind`, `expires`
 [expiry-watch-registry.example.toml](expiry-watch-registry.example.toml). The
 loader refuses duplicate keys, duplicate item names, unknown fields, a date and
 time instead of a date, an empty file, more than 1000 items, a file over 1 MiB,
-a FIFO and anything that is not a regular file. A symbolic link is refused in
-any component of the path below the config file's folder (the folder itself may
-be reached through a link), and in every component of an absolute path;
-`..` and `.` components are refused. The error names the item.
+a FIFO and anything that is not a regular file. File paths follow the rules in
+[Paths and symbolic links](#paths-and-symbolic-links). The error names the item.
 
 ### tls: a certificate probe
 
@@ -179,11 +210,15 @@ and takes the not-after date from it. `timeout_seconds` (default 10, at most 60)
 is one overall deadline for the whole probe: name resolution, connecting (at
 most 4 resolved addresses) and the handshake together. Resolution cannot be
 interrupted, so the probe runs in a worker thread and the watch stops waiting at
-the deadline; a resolver that never answers leaves one idle thread until the
-process exits. The probe sends no application data.
+the deadline exactly (no grace period). A resolver that never answers leaves
+one idle thread until the process exits, so this provider is meant for one-shot
+runs (cron or a timer, as in [Scheduling](#scheduling)), not for a long-lived
+process that would collect stalled threads. The probe sends no application
+data.
 
 Verification choice: by default the handshake **verifies** the chain and the
-host name against the system trust store, or against `ca_file` when set. A peer
+host name against the system trust store, or against `ca_file` when set (read
+through the same path rules as the other files). A peer
 that fails verification is an error shown to you, not a date. Set
 `verify = false` only for internal or self-signed certificates, or to learn
 when an already invalid certificate ended. In that mode the handshake accepts

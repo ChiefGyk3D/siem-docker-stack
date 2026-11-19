@@ -33,7 +33,7 @@ def test_reviewer_state_reproduction_still_notifies_expired():
     (_state(EXPIRES, threshold=3), 14, "14"),                          # not a configured threshold
     (_state(EXPIRES, threshold=7), 14, "14"),                          # 7 cannot have fired with 14 days left
     (_state(EXPIRES, expired=True), 14, "14"),                         # expired flag while expiry is ahead
-    (_state(EXPIRES, threshold=7, daily="2099-01-01"), 5, "daily"),               # a daily date in the future
+    (_state(EXPIRES, threshold=7, daily="2099-01-01"), 5, "7"),                   # a daily date in the future voids the whole entry
     (_state(EXPIRES + dt.timedelta(days=90), threshold=7), 14, "14"),  # provider now reports an EARLIER expiry
 ])
 def test_inconsistent_state_fails_closed_toward_notifying(state, days, stage):
@@ -122,7 +122,8 @@ def test_registry_refuses_a_symlinked_directory_component(tmp_path):
         ew.RegistryProvider({"path": "linked/registry.toml"}, base_dir=tmp_path).items()
     with pytest.raises(ew.ExpiryWatchError, match="(?i)symbolic link"):
         ew.RegistryProvider({"path": str(tmp_path / "linked" / "registry.toml")}, base_dir=tmp_path).items()
-    # a plain path works, and so does a base directory that is itself reached through a link
+    # a plain path works. A base directory reached through a link is allowed on purpose: it is the
+    # operator's own location, resolved once and then pinned (see test_expiry_watch_pinning.py)
     assert len(ew.RegistryProvider({"path": "registry.toml"}, base_dir=real).items()) == 2
     assert len(ew.RegistryProvider({"path": "registry.toml"}, base_dir=tmp_path / "linked").items()) == 2
     with pytest.raises(ew.ExpiryWatchError):

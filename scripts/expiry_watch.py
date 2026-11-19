@@ -26,7 +26,6 @@ import socket
 import ssl
 import stat
 import sys
-import tempfile
 import threading
 import time
 import tomllib
@@ -34,7 +33,6 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from pathlib import Path
 
 MAX_FILE_BYTES = 1024 * 1024
 MAX_ITEMS = 1000
@@ -62,29 +60,59 @@ class FileMissing(ExpiryWatchError):
 
 # --- bounded file reads ----------------------------------------------------------------
 
-def _open_nofollow(path, root):
-    """Open a file read-only without following a symbolic link in any component.
+class Root:
+    """A directory opened ONCE and kept open. Relative reads and writes go through this
+    descriptor, so retargeting a symbolic link that names the directory later changes
+    nothing. The directory itself is resolved the normal way (it may be a link: it is the
+    operator's own choice of location); everything below it is walked without links."""
 
-    A relative path is walked below `root` (the root itself is trusted and may be reached
-    through a link, such as a home directory). An absolute path is walked from "/", so no
-    component of it may be a link. ".." is refused. Each directory is opened relative to
-    the previous one with O_NOFOLLOW, so a swap between check and use cannot redirect it.
-    """
-    p = Path(path)
-    if p.is_absolute():
-        start, parts = "/", p.parts[1:]
+    def __init__(self, path):
+        try:
+            self.fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        except OSError as e:
+            raise ExpiryWatchError(f"cannot open the folder {path}: {e.strerror}") from None
+
+    def close(self):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+
+def split_raw_path(path):
+    """Split a path string into components by looking at the RAW text (pathlib would
+    normalize "." and doubled slashes away first). Returns (is_absolute, components)."""
+    path = os.fspath(path)
+    if not isinstance(path, str) or not path or chr(0) in path:
+        raise ExpiryWatchError("a path must be a non-empty string")
+    absolute = path.startswith("/")
+    parts = (path[1:] if absolute else path).split("/")
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        raise ExpiryWatchError(f"{path!r}: a path component may not be empty, . or .. "
+                               "(no ./, ../, doubled or trailing slashes)")
+    return absolute, parts
+
+
+def _open_parent(path, root):
+    """Walk to the directory that holds the last component of path, without following a
+    symbolic link in any component. Returns (dirfd, leaf); the caller closes dirfd.
+    A relative path is walked below `root` (a Root, or a path opened just for this call);
+    an absolute path is walked from "/"."""
+    absolute, parts = split_raw_path(path)
+    if absolute:
+        dirfd = os.open("/", os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    elif isinstance(root, Root):
+        dirfd = os.dup(root.fd)
     else:
-        start, parts = str(root) if root is not None else ".", p.parts
-    if not parts or any(part in ("..", ".") for part in parts):
-        raise ExpiryWatchError(f"{path}: the path must not be empty or contain . or .. components")
+        own = Root(root if root is not None else ".")
+        try:
+            dirfd = os.dup(own.fd)
+        finally:
+            own.close()
     nofollow = getattr(os, "O_NOFOLLOW", 0)
-    dirfd = os.open(start, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         for part in parts[:-1]:
             try:
                 nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | nofollow, dir_fd=dirfd)
-            except FileNotFoundError:
-                raise
             except OSError as e:
                 if e.errno in (errno.ELOOP, errno.ENOTDIR):
                     raise ExpiryWatchError(f"{path}: a symbolic link or a non-directory is in the path "
@@ -92,9 +120,10 @@ def _open_nofollow(path, root):
                 raise
             os.close(dirfd)
             dirfd = nxt
-        return os.open(parts[-1], os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0), dir_fd=dirfd)
-    finally:
+    except BaseException:
         os.close(dirfd)
+        raise
+    return dirfd, parts[-1]
 
 
 def read_capped(path, label, root=None):
@@ -104,7 +133,12 @@ def read_capped(path, label, root=None):
     FIFOs, devices and directories are refused as well.
     """
     try:
-        fd = _open_nofollow(path, root)
+        dirfd, leaf = _open_parent(path, root)
+        try:
+            fd = os.open(leaf, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+                         dir_fd=dirfd)
+        finally:
+            os.close(dirfd)
     except FileNotFoundError:
         raise FileMissing(f"{label}: file not found: {path}") from None
     except OSError as e:
@@ -340,6 +374,7 @@ class TlsProvider:
         self.ca_file = config.get("ca_file")
         if self.ca_file is not None and (not isinstance(self.ca_file, str) or not self.ca_file):
             raise ExpiryWatchError("tls provider: ca_file must be a path")
+        self.root = config.get("_base_dir")
         self.server_name = config.get("server_name", host)
         if not isinstance(self.server_name, str) or not _HOST.fullmatch(self.server_name):
             raise ExpiryWatchError("tls provider: server_name must be a host name")
@@ -354,7 +389,13 @@ class TlsProvider:
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
             return ctx
-        return ssl.create_default_context(cafile=self.ca_file)
+        if self.ca_file is None:
+            return ssl.create_default_context()
+        pem = read_capped(self.ca_file, "ca_file", self.root)  # same no-link rules as every other file
+        try:
+            return ssl.create_default_context(cadata=pem.decode("ascii"))
+        except UnicodeDecodeError:
+            return ssl.create_default_context(cadata=pem)
 
     def _probe(self, deadline):
         """The whole probe: resolve, connect, handshake. Runs in a worker thread (see items)."""
@@ -364,6 +405,7 @@ class TlsProvider:
                 raise TimeoutError("overall deadline reached")
             return remaining
 
+        context = self._context()  # reads ca_file first: a bad file is reported without connecting
         infos = socket.getaddrinfo(self.host, self.port, type=socket.SOCK_STREAM)[:MAX_ADDRESSES]
         last = OSError("no address")
         for family, kind, proto, _, addr in infos:
@@ -372,7 +414,7 @@ class TlsProvider:
                 raw.settimeout(left())
                 raw.connect(addr)
                 raw.settimeout(left())
-                with self._context().wrap_socket(raw, server_hostname=self.server_name) as tls:
+                with context.wrap_socket(raw, server_hostname=self.server_name) as tls:
                     tls.settimeout(left())
                     return tls.getpeercert(binary_form=True)
             except ssl.SSLError:
@@ -397,12 +439,12 @@ class TlsProvider:
         def work():
             try:
                 box["der"] = self._probe(deadline)
-            except BaseException as e:  # reported to the caller below, never lost
+            except Exception as e:  # reported to the caller below; process-control exceptions pass through
                 box["error"] = e
 
         worker = threading.Thread(target=work, daemon=True, name=f"expiry-probe-{where}")
         worker.start()
-        worker.join(self.timeout + 0.25)
+        worker.join(max(0.0, deadline - time.monotonic()))
         if worker.is_alive():
             raise ExpiryWatchError(f"tls probe of {where} failed: timed out (overall deadline {self.timeout:g}s)")
         err = box.get("error")
@@ -523,8 +565,19 @@ def parse_config(raw):
 
 
 def load_config(path):
-    path = Path(path)
-    return parse_config(read_toml(path.name, "config", path.parent))
+    """Load a config by path. The folder is opened once; see Root."""
+    folder, leaf = os.path.split(str(path))
+    root = Root(folder or ".")
+    try:
+        return load_config_in(root, leaf)
+    finally:
+        root.close()
+
+
+def load_config_in(root, leaf):
+    if leaf in ("", ".", ".."):
+        raise ExpiryWatchError("config: the path must name a file")
+    return parse_config(read_toml(leaf, "config", root))
 
 
 # --- the decision engine (pure) -----------------------------------------------------------------
@@ -542,27 +595,30 @@ def _fresh(expires):
 
 
 def _reconcile(prev, item, days, today, config):
-    """The state to trust for this item. Anything inconsistent counts as "nothing sent yet".
+    """The state to trust for this item. The WHOLE entry must be consistent, or none of it
+    is used and the item starts over ("nothing sent yet"), so a plausible field can never
+    vouch for an invalid one.
 
-    A changed expiry date (later: rotated, earlier: moved up) starts the history over. A
-    threshold must be a configured one that the item has really reached; a daily date may
-    not lie in the future; the expired flag only holds once the expiry date is reached.
+    Consistent means: same expiry date as now (a changed date, later or earlier, starts
+    over), a threshold that is None or a configured one the item has reached, a daily date
+    that is not in the future, and an expired flag only once the expiry date is reached.
+    A plausible forged entry cannot be told from a real one; the state file is trusted
+    local data, protected by its file mode (see docs/expiry-watch.md).
     """
-    st = _fresh(item.expires)
+    fresh = _fresh(item.expires)
     try:
-        if (not isinstance(prev, dict) or dt.date.fromisoformat(prev["expires"]) != item.expires):
-            return st
+        if not isinstance(prev, dict) or dt.date.fromisoformat(prev["expires"]) != item.expires:
+            return fresh
         threshold, daily, expired = prev["threshold"], prev["daily"], prev["expired"]
-        if (isinstance(threshold, int) and not isinstance(threshold, bool)
-                and threshold in config.thresholds and days <= threshold):
-            st["threshold"] = threshold
-        if isinstance(daily, str) and dt.date.fromisoformat(daily) <= today:
-            st["daily"] = daily
-        if expired is True and days <= 0:
-            st["expired"] = True
+        threshold_ok = threshold is None or (isinstance(threshold, int) and not isinstance(threshold, bool)
+                                             and threshold in config.thresholds and days <= threshold)
+        daily_ok = daily is None or (isinstance(daily, str) and dt.date.fromisoformat(daily) <= today)
+        expired_ok = isinstance(expired, bool) and (not expired or days <= 0)
     except (KeyError, TypeError, ValueError):
-        return _fresh(item.expires)
-    return st
+        return fresh
+    if not (threshold_ok and daily_ok and expired_ok):
+        return fresh
+    return {"expires": item.expires.isoformat(), "threshold": threshold, "daily": daily, "expired": expired}
 
 
 def decide(items, now, config, state):
@@ -694,21 +750,27 @@ def load_state(path, root=None):
     return doc
 
 
-def save_state(path, state):
-    path = Path(path)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".expiry-state-")
+def save_state(path, state, root=None):
+    """Write the state atomically and privately (0600). The temp file is created and renamed
+    inside the held directory, so a link retargeted meanwhile cannot redirect the write."""
+    dirfd, leaf = _open_parent(path, root)
+    tmp = f".expiry-state-{os.getpid()}-{os.urandom(6).hex()}"
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(state, fh, indent=1, sort_keys=True)
-            fh.write("\n")
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-    except BaseException:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=dirfd)
         try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                os.fchmod(fh.fileno(), 0o600)
+                json.dump(state, fh, indent=1, sort_keys=True)
+                fh.write("\n")
+            os.replace(tmp, leaf, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+        except BaseException:
+            try:
+                os.unlink(tmp, dir_fd=dirfd)
+            except OSError:
+                pass
+            raise
+    finally:
+        os.close(dirfd)
 
 
 # --- the runner -------------------------------------------------------------------------------------
@@ -722,22 +784,34 @@ def _keep_prior(new_state, state, name):
 
 
 def run(config_path, now, env=None, out=print, err=None, dry_run=False, opener=None):
-    """One pass: collect, decide, deliver, save. Returns the process exit code."""
-    env = os.environ if env is None else env
+    """One pass: collect, decide, deliver, save. Returns the process exit code.
+
+    The config file's folder is opened once and held for the whole pass (config, registry,
+    CA file, state read and state write), so the pass sees one consistent folder.
+    """
     err = err or (lambda m: print(m, file=sys.stderr))
-    config_path = Path(config_path)
-    base = config_path.parent
+    folder, leaf = os.path.split(str(config_path))
     try:
-        config = load_config(config_path)
+        root = Root(folder or ".")
+    except ExpiryWatchError as e:
+        err(f"config error: {e}")
+        return 2
+    try:
+        return _run_pass(root, leaf, now, os.environ if env is None else env, out, err, dry_run, opener)
+    finally:
+        root.close()
+
+
+def _run_pass(root, leaf, now, env, out, err, dry_run, opener):
+    try:
+        config = load_config_in(root, leaf)
         providers = []
         for table in config.providers:
             table = dict(table)
-            if isinstance(table.get("ca_file"), str):  # relative paths are relative to the config file
-                table["ca_file"] = str(base / table["ca_file"])
-            table["_base_dir"] = str(base)  # symbolic links are refused below this folder
+            table["_base_dir"] = root  # injected: providers read their files through this held folder
             providers.append(PROVIDER_TYPES[table["type"]](table))
-        state_path = base / config.state_file
-        state = load_state(config.state_file, base)
+        state_path = config.state_file
+        state = load_state(state_path, root)
     except ExpiryWatchError as e:
         err(f"config error: {e}")
         return 2
@@ -792,7 +866,7 @@ def run(config_path, now, env=None, out=print, err=None, dry_run=False, opener=N
 
     if not dry_run:
         try:
-            save_state(state_path, new_state)
+            save_state(state_path, new_state, root)
         except OSError as e:
             err(f"state error: cannot write {state_path}: {e.strerror}")
             return 1
