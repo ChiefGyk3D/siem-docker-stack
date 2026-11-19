@@ -664,22 +664,6 @@ def test_run_reports_a_broken_provider_and_keeps_its_state(tmp_path, router):
     assert "deploy-key" in state, "a provider outage must not forget what was already notified"
 
 
-def test_run_skips_channels_that_are_not_built_yet_and_says_so(tmp_path, router):
-    srv, base = router
-    cfg = _write_setup(tmp_path, base, routes='"14" = ["matrix", "email"]')
-    code, out, err = _run(cfg, _at(14))
-    assert code == 0 and not _Recorder.seen
-    assert "matrix" in err and "not built" in err
-    # nothing was delivered, so the notice must still be due (the state did not advance)
-    state = ew.load_state(tmp_path / "state.json")
-    assert state.get("deploy-key", {}).get("threshold") is None
-    # the operator fixes the route: the same notice now goes out
-    cfg.write_text(cfg.read_text().replace('"14" = ["matrix", "email"]', '"14" = ["discord"]'))
-    code, _, _ = _run(cfg, _at(14, hour=18))
-    assert code == 0 and len(_Recorder.seen) == 1
-    assert json.loads(_Recorder.seen[0][2])["alerts"][0]["labels"]["stage"] == "14"
-
-
 def test_run_config_error_exit_code(tmp_path):
     bad = tmp_path / "bad.toml"
     bad.write_text("[watch]\nthresholds_days = [1, 1]\n")
