@@ -45,6 +45,18 @@ def test_whatever_the_loader_refuses_the_writer_refuses_too(tmp_path, seen):
         ew.check_state_fits({}, seen)
 
 
+def test_the_item_states_are_checked_by_the_writer_like_the_loader_does(tmp_path):
+    good = {"expires": "2026-03-01", "threshold": None, "daily": None, "expired": False}
+    ew.check_state_fits({"a": good}, {})
+    with pytest.raises(ew.ExpiryWatchError):
+        ew.check_state_fits({"a": 1}, {})
+    with pytest.raises(ew.ExpiryWatchError):
+        ew.check_state_fits({f"i{n}": good for n in range(ew.MAX_ITEMS * 4 + 1)}, {})
+    with pytest.raises(ew.ExpiryWatchError):
+        ew.save_state(tmp_path / "s.json", {"a": {**good, "expires": "nope"}})
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_a_run_with_1001_items_in_one_provider_fails_before_notifying_or_writing(tmp_path, router):
     base, rec = router
 
