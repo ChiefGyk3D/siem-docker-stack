@@ -1,0 +1,41 @@
+# Notification policy route that also sends P1 alerts to email (issue #82). SHIPPED AS AN EXAMPLE.
+#
+# Grafana provisions the notification policy as ONE tree for the whole
+# organization: loading this file replaces whatever policy tree exists today.
+# That is why it ends in .example and Grafana ignores it. To use it, merge the
+# `email-p1` route below into your existing tree as the FIRST route (keep your
+# other routes). The contact point it names is defined in
+# email-contact-point.yml.example.
+#
+# `continue: true` makes Grafana keep matching after this route, so the same P1
+# alert still reaches n8n-grafana-router through the routes after it. n8n is
+# unaffected; email is added beside it. A P1 is severity=critical with phone=true
+# (the label pair the update rules use); the heartbeat (severity=info,
+# phone=false) never matches.
+apiVersion: 1
+
+policies:
+  - orgId: 1
+    receiver: n8n-grafana-router
+    group_by: ["alertname", "grafana_folder"]
+    routes:
+      - receiver: email-p1
+        continue: true
+        object_matchers:
+          - ["severity", "=", "critical"]
+          - ["phone", "=", "true"]
+        group_by: ["alertname"]
+        group_wait: 30s
+        group_interval: 5m
+        repeat_interval: 1h
+      # Your existing routes follow, for example the update-alert and heartbeat
+      # routes from update-notification-policy.yml.example and
+      # heartbeat-notification-policy.yml.example. P1 alerts that match none of
+      # them still reach the root receiver, n8n-grafana-router.
+      - receiver: n8n-grafana-router
+        object_matchers:
+          - ["heartbeat", "=", "true"]
+        group_by: ["alertname"]
+        group_wait: 0s
+        group_interval: 1m
+        repeat_interval: 5m
