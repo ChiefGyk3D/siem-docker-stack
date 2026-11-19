@@ -11,6 +11,11 @@ thresholds_days = [30, 14, 7]
 daily_below_days = 7
 # Where the watch remembers what it already told you (JSON, created with mode 0600).
 state_file = "expiry-watch-state.json"
+# One notice when an item that an earlier run listed is gone now and the config does not say
+# so (see "Items that disappear" in docs/expiry-watch.md). An item must be missing from this
+# many successful runs in a row. false turns the notice off for every provider.
+disappeared_after_runs = 1
+notify_disappeared = true
 
 [router]
 # The n8n alert router webhook (see docs/update-alerting.md). https only, except localhost.
@@ -20,7 +25,7 @@ url = "https://n8n.example.com/webhook/grafana-alerts"
 token_env = "EXPIRY_WATCH_ROUTER_TOKEN"
 timeout_seconds = 10
 
-# Channels per notice. Stages are every threshold above, "daily" and "expired".
+# Channels per notice. Stages are every threshold above, "daily", "expired" and "disappeared".
 # Known channels: pushover, discord, matrix, email, webhook.
 #   discord  the router always posts a firing alert to Discord
 #   pushover adds the phone=true label, which the router needs to page your phone
@@ -33,6 +38,7 @@ timeout_seconds = 10
 "7" = ["discord", "pushover"]
 daily = ["discord", "pushover"]
 expired = ["discord", "pushover"]
+disappeared = ["discord", "pushover"]
 
 # Providers: add as many as you need.
 [[providers]]
@@ -52,3 +58,35 @@ runbook = "https://wiki.example.com/runbooks/renew-tls"
 # verify = true             # false only for internal or self-signed certificates
 # ca_file = "internal-ca.pem"
 # server_name = "www.example.com"
+
+# Grafana service account tokens. The token below is a READ-ONLY token (permission
+# serviceaccounts:read, scope serviceaccounts:id:*), named by an environment variable.
+# A token with no expiry date is skipped. Add the service account ids to watch.
+[[providers]]
+type = "grafana_sa_tokens"
+url = "https://grafana.example.com"
+service_account_ids = [2, 5]
+token_env = "EXPIRY_WATCH_GRAFANA_TOKEN"
+owner = "monitoring@example.com"
+runbook = "https://wiki.example.com/runbooks/rotate-grafana-token"
+# Optional settings, with their defaults:
+# kind = "grafana-sa-token"
+# timeout_seconds = 10            # one overall deadline per request, at most 60
+# report_non_expiring = false     # print how many tokens have no expiry date and were skipped
+# notify_disappeared = true       # per provider override of [watch].notify_disappeared
+# acknowledge_removed = []        # item names whose removal is expected (see docs/expiry-watch.md)
+
+# Secret manager service tokens of one config (one provider per project and config).
+# The vendor deletes an expired token, so a token that vanishes between runs is reported
+# once by the "disappeared" notice.
+[[providers]]
+type = "doppler_tokens"
+project = "example-app"
+config = "prd"
+token_env = "EXPIRY_WATCH_DOPPLER_TOKEN"
+owner = "platform@example.com"
+runbook = "https://wiki.example.com/runbooks/rotate-service-token"
+# api_url = "https://api.doppler.com"
+# kind = "service-token"
+# timeout_seconds = 10
+# report_non_expiring = false

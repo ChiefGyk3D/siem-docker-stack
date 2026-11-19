@@ -8,8 +8,12 @@ the n8n alert router from [update-alerting.md](update-alerting.md), so the
 messages arrive where your other alerts do. It is read-only: it never changes a
 key, a certificate or a registry.
 
-Tracked in issue #76 (epic #62). This is slice 1; see
-[What is not built yet](#what-is-not-built-yet).
+Tracked in issue #76 (epic #62). Slice 1 built the engine, the registry and TLS
+providers and the router delivery. Slice 2 (issue #97) added the Grafana service
+account token and secret manager service token providers and the "disappeared"
+notice (see [Items that disappear](#items-that-disappear)). See
+[What is not built yet](#what-is-not-built-yet) and
+[What is unverified](#what-is-unverified-until-checked-against-a-live-instance).
 
 Every notice names the item, its expiry date, the days left, who owns it and a
 link to the rotation runbook.
@@ -76,7 +80,10 @@ For each item the watch counts days left as the item's expiry date minus today
   permissions (mode 0600), and you should keep it where only the job user can
   write. The watch checks each entry as a whole: if any part of it makes no
   sense (a threshold you did not configure or that the item has not reached, a
-  daily date in the future, an expired flag before the expiry date), none of
+  daily date the watch could not have recorded, that is one outside 1 to
+  `daily_below_days` days before the expiry date or after today, so with
+  `daily_below_days = 0` only "no daily date" is valid; an expired flag before
+  the expiry date), none of
   that entry is used and the item counts as "nothing sent yet", so the watch
   errs toward notifying. A changed expiry date, later or earlier, also starts
   the item's history over. This catches damage and mistakes. It cannot detect a
@@ -84,8 +91,48 @@ For each item the watch counts days left as the item's expiry date minus today
   to true), and the state is not signed or authenticated, so protect the file
   with permissions, not with this check.
 
+- An item that an earlier run listed and a later run no longer lists gets one
+  `disappeared` notice. See [Items that disappear](#items-that-disappear).
+
 There is no "resolved" message: each notice is a one-off. Rotating the item
 simply stops the notices.
+
+### Items that disappear
+
+Some vendors delete a token when it expires, so a token that runs out between
+two runs is never listed as expired: it just stops being listed. The watch
+therefore remembers, per provider, the items it saw and tells you when one is
+gone. This works for every provider, the registry file included.
+
+- The state file keeps the last seen name, kind, expiry date, owner and runbook
+  of each item, per provider, in a `seen` section (the file format is version 2;
+  a slice 1 file still loads and is upgraded on the next save).
+- An item missing from `disappeared_after_runs` runs in a row (default 1) is
+  reported once with the stage `disappeared`, severity `warning`, and its last
+  known expiry date. It is then forgotten: if it comes back and goes again, you
+  get another notice. If it is back before the count is reached, the count
+  starts over.
+- A failed provider run changes nothing. An outage is not a vanished item.
+- A notice that was not delivered stays due and is sent on the next run, like
+  every other notice.
+- To say a removal is expected (you rotated or retired the item), list its item
+  name in `acknowledge_removed` on that provider table for one run, then remove
+  the entry. An acknowledged name is dropped from the memory without a notice.
+  `notify_disappeared = false` turns the notice off for one provider, or in
+  `[watch]` for all of them. Retiring a registry entry is a removal too, so
+  acknowledge it or you get one notice.
+- A provider removed from the config is forgotten without a notice. A provider
+  whose config changes its `state_key` (the same source named differently, or
+  other service account ids) starts a new memory.
+- The notice can tell you a token vanished, not why: the vendor may have
+  deleted it as expired, or someone may have deleted it.
+- Two providers that read the same source are refused as a config error.
+- The memory has a size limit (1000 remembered items per provider, 4000 in all,
+  200 providers, and the state file at most 1 MiB). The same checks that read
+  the file back are applied before it is written. A run whose state would exceed it fails with a state error
+  (exit 1) before it sends anything or writes anything, because a file the
+  watch cannot read back would stop all monitoring. Watch fewer items or tokens.
+- Route it with `[routes].disappeared` (default `["discord"]`).
 
 ## Config reference
 
@@ -98,10 +145,14 @@ repeated thresholds and files over 1 MiB. See
 | `[watch].thresholds_days` | `[30, 14, 7]` | Days before expiry that fire once each (1 to 20 values, 1 to 3650) |
 | `[watch].daily_below_days` | `7` | At or below this many days left, notify daily; `0` turns it off |
 | `[watch].state_file` | `expiry-watch-state.json` | What was already notified (JSON, mode 0600, written atomically) |
+| `[watch].disappeared_after_runs` | `1` | An item must be missing from this many successful runs in a row (1 to 100) to count as disappeared |
+| `[watch].notify_disappeared` | `true` | `false` turns the disappeared notice off for every provider |
+| `[[providers]].acknowledge_removed` | `[]` | Item names whose removal is expected (any provider; up to 200) |
+| `[[providers]].notify_disappeared` | the `[watch]` value | Per provider override |
 | `[router].url` | required | The router webhook. https only; plain http only for localhost |
 | `[router].token_env` | required | The name of the environment variable that holds the bearer secret |
 | `[router].timeout_seconds` | `10` | Post timeout, above 0 and at most 60 |
-| `[routes]."<days>"`, `daily`, `expired` | `["discord"]` | Channels for that notice |
+| `[routes]."<days>"`, `daily`, `expired`, `disappeared` | `["discord"]` | Channels for that notice |
 | `[[providers]]` | none | One table per provider; `type` selects it |
 
 Relative paths (`state_file`, a provider's `path` or `ca_file`) are relative to
@@ -228,6 +279,105 @@ from the certificate bytes by a small reader in the script (the standard
 library gives no date for an unverified peer), which refuses anything that is
 not a well-formed certificate validity field.
 
+### grafana_sa_tokens: Grafana service account tokens
+
+```toml
+[[providers]]
+type = "grafana_sa_tokens"
+url = "https://grafana.example.com"
+service_account_ids = [2, 5]
+token_env = "EXPIRY_WATCH_GRAFANA_TOKEN"
+owner = "monitoring@example.com"
+runbook = "https://wiki.example.com/runbooks/rotate-grafana-token"
+```
+
+Lists each service account's tokens with `GET /api/serviceaccounts/<id>/tokens`
+and makes one item per token that has an expiry date, named
+`grafana-sa:<id>:<token name>`. Per token it uses `expiration` and
+`hasExpired`:
+
+- `expiration` null means the token never expires: it is skipped. With
+  `report_non_expiring = true` the run prints how many were skipped.
+- `hasExpired` true makes the token expired even if its date looks like the
+  future (a clock difference between the watch and Grafana).
+- `secondsUntilExpiration` is ignored on purpose: 0 is ambiguous.
+- `expiration` must be ISO 8601: a date, or a time with an explicit zone (`Z`
+  or an offset). Anything else, a time without a zone included, is an error
+  that names the value. The date is converted to UTC. See
+  [What is unverified](#what-is-unverified-until-checked-against-a-live-instance).
+
+Permission: the token needs `serviceaccounts:read` with scope
+`serviceaccounts:id:*` (per the Grafana API documentation). Give a dedicated
+service account a custom role with just that, create one token for it and put
+it in the environment variable. Do not assume a built-in role such as Viewer
+holds it; check with `--dry-run`. The watch only reads. A 401 or
+403 is reported as "check the token and its read permission". `url` is https
+(plain http only for localhost) and may include a path prefix, but no query.
+`service_account_ids` holds 1 to 50 different ids; one list call per id.
+
+### doppler_tokens: secret manager service tokens
+
+```toml
+[[providers]]
+type = "doppler_tokens"
+project = "example-app"
+config = "prd"
+token_env = "EXPIRY_WATCH_DOPPLER_TOKEN"
+owner = "platform@example.com"
+runbook = "https://wiki.example.com/runbooks/rotate-service-token"
+```
+
+Lists one config's service tokens with `GET /v3/configs/config/tokens?project=...&config=...`
+(`api_url` defaults to `https://api.doppler.com`) and makes one item per token
+with an `expires_at`, named `doppler:<project>/<config>:<token name>` (the slug
+when the name is empty). `expires_at` null means no expiry: skipped. Only name,
+slug and `expires_at` are read; everything else in the response, any key
+material included, is ignored and never stored. One provider reads one config;
+add a provider for each project and config.
+
+An answer that says it failed (`success` is present and not `true`, or it has an
+`error` or `errors` field at all, even an empty or null one) is a provider error, never an empty list, so a failure answer
+cannot make known tokens look vanished.
+
+The vendor deletes an expired token, so this provider can only see a token that
+is still alive. A token that expires between two runs is reported by the
+[disappeared](#items-that-disappear) notice instead, so keep that notice routed
+somewhere you read.
+
+Permission: use a token that can list the config's service tokens and nothing
+more. **The permission this list call needs is not documented by the vendor.**
+Do not assume a read-only service token works. Test it with a throwaway token
+before relying on it: make the token, then run the watch with `--dry-run`. A 401
+or 403 names the token and permission as the thing to check. Prefer the least
+privileged token that passes, and never one that can read or write the secrets
+themselves unless that is the only thing that works, in which case say so in your
+own runbook and rotate it on a schedule.
+
+### Common settings of the two token providers
+
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `token_env` | required | The NAME of the environment variable that holds the read-only token. The value is never read from the config file and never printed |
+| `owner`, `runbook` | required | Used on every notice for these tokens (the vendors do not know them) |
+| `kind` | `grafana-sa-token` or `service-token` | The kind shown on notices |
+| `timeout_seconds` | `10` | One overall deadline per request, at most 60 |
+| `report_non_expiring` | `false` | Print how many tokens have no expiry date |
+
+Both providers send the token only to the configured URL, never use a proxy
+from the environment (`HTTP_PROXY` and the like are ignored for these calls, so
+a proxy is never handed the token; the vendor must be reachable directly), end
+the request at the deadline by closing the connection (a name lookup is the
+exception: **DNS resolution cannot be interrupted**, so a stuck lookup keeps its
+worker thread until the resolver returns; at most 4 such threads can exist, and
+further requests are refused with a message saying so instead of starting more),
+never follow a
+redirect (a redirect is an error), cap a response at 1 MiB and a list at 1000
+tokens, refuse JSON with duplicate keys, `NaN` or absurd nesting, and refuse
+two tokens with the same name in one list (rename one). A failure message
+names the host and the HTTP status, never the token and never the response
+body. A missing token variable is a config error (exit 2) that names only the
+variable.
+
 ### Writing your own provider
 
 A provider is any object with one method, `items()`, that returns a list of
@@ -257,7 +407,12 @@ ew.register_provider("mine", MyProvider)
 type = "mine"
 ```
 
-Provider names are global and cannot be registered twice. Item names must be
+The watch also adds `"_env"` (the environment, for providers that read a token
+by the variable name in their config). Give the provider a `state_key` string
+attribute that names its source (for example `"mine:example.com"`) so the
+[disappeared](#items-that-disappear) memory stays attached to it; without one
+the key is the provider type and its position in the config. Provider names are
+global and cannot be registered twice. Item names must be
 unique across all providers. Run your registration, then call
 `expiry_watch.main(["--config", "..."])`. Loading providers from plain files by
 type name is not built yet.
@@ -319,11 +474,39 @@ local server with a certificate made by `openssl` at test time, and the poster
 against a local HTTP server. Run it with `python3 -m pytest
 tests/python/test_expiry_watch.py`.
 
+Slice 2 adds `tests/python/test_expiry_watch_providers.py` (both token
+providers against a fake vendor on loopback: list parsing, null expiry,
+`hasExpired`, bad dates, HTTP errors, timeouts and a slow drip, redirects not
+followed, size caps, hostile shapes, secrets never printed or sent elsewhere)
+and `tests/python/test_expiry_watch_disappeared.py` (the daily date interval
+check and the disappeared notice, with the registry provider and the vendor
+ones).
+
+## What is unverified until checked against a live instance
+
+The two token providers were written from the vendors' published API
+documentation (read 2026-11-18, partly through a summary) and tested against a
+fake server, never against a live Grafana or a live secret manager. Until you
+have run `--dry-run` against your own instance with a throwaway token, treat
+these as unconfirmed:
+
+- **The exact `expiration` string format in Grafana.** The documentation does
+  not state it for a token that has one. The watch accepts ISO 8601 and fails
+  with a clear error on anything else, a time without a zone included, rather
+  than guessing. If your Grafana returns something else, the run reports the
+  value and exits 1; please report the shape so the parser can be extended.
+- **The secret manager list permission.** The vendor does not document which
+  permission a token needs to list service tokens, so the least-privilege token
+  is found by testing (see the provider section).
+- **The secret manager `expires_at` format.** Inferred as ISO 8601 UTC with
+  milliseconds from a documentation example; the same defensive parser applies.
+- **Doppler and Grafana response fields** beyond the ones read here. Unknown
+  fields are ignored; a missing or mistyped field that is read is an error.
+- **A zero or "never" date.** A token with no expiry should be null. A date
+  before the year 2000 is treated as an error, not as a date.
+
 ## What is not built yet
 
-- **Grafana service account token and secret manager token providers.** The
-  fields those APIs expose for expiry still have to be verified against each
-  API's own docs and a live response before they are built.
 - **Direct Matrix and email delivery.** The names are accepted in the config
   and skipped with a warning. The next slice adds adapters (or router nodes)
   with their own credentials.
