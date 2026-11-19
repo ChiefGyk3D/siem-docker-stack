@@ -36,11 +36,12 @@ jobs:
         (cd docker && docker compose --env-file ../tests/compose.ci.env -f docker-compose.yml config --quiet)
         # Registry pulls time out about once a day (error pulling image configuration: i/o timeout,
         # issue 99). Pull every image first, each with a bounded retry: 3 attempts, 5 s then 15 s
-        # apart. The images and tags are unchanged and nothing waits longer than three attempts.
+        # apart, and each attempt is cut off after 60 s so a dead connection fails fast (issue 99,
+        # 119). The images and tags are unchanged and nothing waits longer than three attempts.
         pull_retry() {
           local attempt delay
           for attempt in 1 2 3; do
-            docker pull --quiet "$1" > /dev/null && return 0
+            timeout 60 docker pull --quiet "$1" > /dev/null && return 0
             [ "$attempt" -lt 3 ] || break
             delay=$((attempt == 1 ? 5 : 15))
             echo "::warning title=docker pull::$1 attempt $attempt failed, retrying in ${delay}s"
@@ -51,7 +52,7 @@ jobs:
         }
         for img in httpd:2.4 prom/prometheus:v3.10.0 prom/alertmanager:v0.27.0 \
           opensearchproject/logstash-oss-with-opensearch-output-plugin:8.9.0; do
-          pull_retry "$img"
+          pull_retry "$img" || exit 1
         done
         stage=$(mktemp -d)
         cp -r docker/prometheus/. "$stage/"
@@ -117,6 +118,7 @@ jobs:
       # is not published for arm64). No distros: the checks are about this stack's configs, not an OS.
       runners: '["ubuntu-24.04"]'
       egress-policy: block
-      # Docker Hub for the test's images (the list python-ci.yml measured), and the
+      # Docker Hub for the test's images (the list python-ci.yml measured) plus the S3 host its
+      # layer blobs redirect to (docker-images-prod.s3.dualstack.us-east-1.amazonaws.com), and the
       # four hosts the workflow-lint job needs (actionlint matcher and npm, zizmor image)
-      extra-allowed-endpoints: auth.docker.io:443 ghcr.io:443 pkg-containers.githubusercontent.com:443 production.cloudfront.docker.com:443 raw.githubusercontent.com:443 registry-1.docker.io:443 registry.npmjs.org:443
+      extra-allowed-endpoints: auth.docker.io:443 docker-images-prod.s3.dualstack.us-east-1.amazonaws.com:443 ghcr.io:443 pkg-containers.githubusercontent.com:443 production.cloudfront.docker.com:443 raw.githubusercontent.com:443 registry-1.docker.io:443 registry.npmjs.org:443
