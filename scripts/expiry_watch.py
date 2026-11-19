@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Credential and key expiry watch (issue #76, slices 1 and 2).
+"""Credential and key expiry watch (issue #76, slices 1 to 3).
 
 Reads items from providers (a registry file, a TLS probe, Grafana service account tokens,
 secret manager service tokens), decides which notices are due (thresholds, then daily, then
 expired, each threshold once; plus one notice when an item that was listed earlier is gone),
-and posts each notice to the n8n alert router in the Grafana webhook shape.
+and delivers each notice: to the n8n alert router in the Grafana webhook shape (pushover, discord,
+webhook) and directly to a Matrix room and by email (SMTP), as the routes say.
 Python 3.11+ standard library only.
 
 Usage:
@@ -13,12 +14,14 @@ Usage:
 Exit codes: 0 ok, 1 a provider or a delivery failed (details on stderr), 2 config or
 secret problem. See docs/expiry-watch.md.
 
-Secrets (the router bearer, the read-only vendor tokens) are read from the environment
+Secrets (the router bearer, the Matrix access token, the SMTP login, the read-only vendor tokens) are read from the environment
 variables named in the config. They are never read from a file, never printed and never
 included in an error message.
 """
 import argparse
 import datetime as dt
+import email.message
+import email.utils
 import errno
 import hashlib
 import http.client
@@ -26,6 +29,7 @@ import ipaddress
 import json
 import os
 import re
+import smtplib
 import socket
 import ssl
 import stat
@@ -50,12 +54,16 @@ MAX_ACKNOWLEDGED = 200
 MAX_STUCK_FETCHES = 4  # name lookups cannot be interrupted: at most this many may be pending at once
 UTC = dt.timezone.utc
 KNOWN_CHANNELS = ("pushover", "discord", "matrix", "email", "webhook")
-# Channels the n8n router can deliver today. matrix and email are the next slice.
-BUILT_CHANNELS = ("pushover", "discord", "webhook")
+# Channels the n8n router delivers. matrix and email are delivered directly by this script.
+ROUTER_CHANNELS = ("pushover", "discord", "webhook")
+MAX_MESSAGE_LINE = 600
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _TOKEN = re.compile(r"[\x21-\x7e]{1,512}")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 _HOST = re.compile(r"[A-Za-z0-9]([A-Za-z0-9.\-]{0,251}[A-Za-z0-9])?")
+_MATRIX_ROOM = re.compile(r"![A-Za-z0-9._~=+\-]{1,200}:[A-Za-z0-9.\-]{1,100}(:[0-9]{1,5})?")
+_ADDRESS = re.compile(r"[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9]([A-Za-z0-9.\-]{0,200}[A-Za-z0-9])?")
+_LINE_BREAKS = re.compile("[\u0000-\u001f\u007f-\u009f  ]")
 _ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _ISO_STAMP = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})(?:[Tt ]([0-9]{2}):([0-9]{2})(?::([0-9]{2})(?:\.([0-9]{1,9}))?)?"
                         r"(?:([Zz])|([+-])([0-9]{2}):([0-9]{2})))?")
@@ -826,6 +834,28 @@ class RouterConfig:
 
 
 @dataclass(frozen=True)
+class MatrixConfig:
+    homeserver: str
+    room_id: str
+    token_env: str
+    timeout_seconds: float
+
+
+@dataclass(frozen=True)
+class EmailConfig:
+    host: str
+    port: int
+    security: str  # "starttls", "tls" or "plaintext" (plaintext only with allow_plaintext)
+    sender: str
+    to: tuple
+    timeout_seconds: float
+    helo_name: str
+    username_env: str = None
+    password_env: str = None
+    ca_file: str = None
+
+
+@dataclass(frozen=True)
 class Config:
     thresholds: tuple
     daily_below_days: int
@@ -835,6 +865,9 @@ class Config:
     providers: tuple  # raw provider tables
     disappeared_after_runs: int = 1
     notify_disappeared: bool = True
+    delivery_budget_seconds: float = 300.0
+    matrix: MatrixConfig = None
+    email: EmailConfig = None
 
 
 def _check_url(label, url, plain=True):
@@ -877,15 +910,89 @@ def _removal_settings(table):
     return names, notify
 
 
+def _timeout(label, value, default):
+    value = default if value is None else value
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= 60:
+        raise ExpiryWatchError(f"{label} must be above 0 and at most 60")
+    return float(value)
+
+
+def _env_name(label, value):
+    if not isinstance(value, str) or not _ENV_NAME.fullmatch(value):
+        raise ExpiryWatchError(f"{label} must name an environment variable (the name, never the secret)")
+    return value
+
+
+def parse_matrix(table):
+    if not isinstance(table, dict):
+        raise ExpiryWatchError("[matrix] must be a table")
+    _only_keys("[matrix]", table, ("homeserver", "room_id", "token_env", "timeout_seconds"))
+    server = _check_url("matrix.homeserver", table.get("homeserver"), plain=False)
+    room = table.get("room_id")
+    if not isinstance(room, str) or len(room) > 255 or not _MATRIX_ROOM.fullmatch(room):
+        raise ExpiryWatchError("matrix.room_id must be a room id like !abc123:example.com (not an alias)")
+    return MatrixConfig(server.rstrip("/"), room, _env_name("matrix.token_env", table.get("token_env")),
+                        _timeout("matrix.timeout_seconds", table.get("timeout_seconds"), 10))
+
+
+def _address(label, value):
+    if not isinstance(value, str) or len(value) > 254 or not _ADDRESS.fullmatch(value):
+        raise ExpiryWatchError(f"{label} must be a plain address like name@example.com (no display name)")
+    return value
+
+
+def parse_email(table):
+    if not isinstance(table, dict):
+        raise ExpiryWatchError("[email] must be a table")
+    _only_keys("[email]", table, ("host", "port", "security", "allow_plaintext", "from", "to", "timeout_seconds",
+                                  "helo_name", "username_env", "password_env", "ca_file"))
+    host = table.get("host")
+    if not isinstance(host, str) or not (_HOST.fullmatch(host) or _is_ip(host)):
+        raise ExpiryWatchError("email.host must be a host name or an IP address")
+    security = table.get("security", "starttls")
+    if security not in ("starttls", "tls", "plaintext"):
+        raise ExpiryWatchError("email.security must be starttls, tls or plaintext")
+    allow = table.get("allow_plaintext", False)
+    if not isinstance(allow, bool):
+        raise ExpiryWatchError("email.allow_plaintext must be true or false")
+    if security == "plaintext" and not allow:
+        raise ExpiryWatchError("email.security = plaintext sends mail unencrypted: it needs allow_plaintext = true")
+    if allow and security != "plaintext":
+        raise ExpiryWatchError("email.allow_plaintext only applies to security = plaintext")
+    default_port = {"starttls": 587, "tls": 465, "plaintext": 25}[security]
+    port = _int("email.port", table.get("port", default_port), 1, 65535)
+    to = table.get("to")
+    if not isinstance(to, list) or not 1 <= len(to) <= MAX_ADDRESSES:
+        raise ExpiryWatchError(f"email.to must be a list of 1 to {MAX_ADDRESSES} addresses")
+    to = tuple(_address("email.to entry", a) for a in to)
+    sender = _address("email.from", table.get("from"))
+    helo = table.get("helo_name", "localhost")
+    if not isinstance(helo, str) or not _HOST.fullmatch(helo):
+        raise ExpiryWatchError("email.helo_name must be a host name")
+    user, pw = table.get("username_env"), table.get("password_env")
+    if (user is None) != (pw is None):
+        raise ExpiryWatchError("email.username_env and email.password_env go together")
+    if user is not None:
+        _env_name("email.username_env", user)
+        _env_name("email.password_env", pw)
+        if security == "plaintext":
+            raise ExpiryWatchError("email: a login is never sent over plaintext; use starttls or tls")
+    ca = table.get("ca_file")
+    if ca is not None and (not isinstance(ca, str) or not ca or len(ca) > 256 or _CONTROL.search(ca)):
+        raise ExpiryWatchError("email.ca_file must be a path")
+    return EmailConfig(host, port, security, sender, to,
+                       _timeout("email.timeout_seconds", table.get("timeout_seconds"), 20), helo, user, pw, ca)
+
+
 def parse_config(raw):
     if not isinstance(raw, dict):
         raise ExpiryWatchError("config must be a table")
-    _only_keys("config", raw, ("watch", "router", "routes", "providers"))
+    _only_keys("config", raw, ("watch", "router", "routes", "providers", "matrix", "email"))
     watch = raw.get("watch", {})
     if not isinstance(watch, dict):
         raise ExpiryWatchError("[watch] must be a table")
     _only_keys("[watch]", watch, ("thresholds_days", "daily_below_days", "state_file", "disappeared_after_runs",
-                                  "notify_disappeared"))
+                                  "notify_disappeared", "delivery_budget_seconds"))
     thresholds = watch.get("thresholds_days", [30, 14, 7])
     if not isinstance(thresholds, list) or not 1 <= len(thresholds) <= MAX_THRESHOLDS:
         raise ExpiryWatchError(f"thresholds_days must be a list of 1 to {MAX_THRESHOLDS} whole numbers")
@@ -896,6 +1003,9 @@ def parse_config(raw):
     state_file = watch.get("state_file", "expiry-watch-state.json")
     state_file = _text("state_file", state_file, 256)
     after_runs = _int("disappeared_after_runs", watch.get("disappeared_after_runs", 1), 1, 100)
+    budget = watch.get("delivery_budget_seconds", 300)
+    if isinstance(budget, bool) or not isinstance(budget, (int, float)) or not 0 < budget <= 3600:
+        raise ExpiryWatchError("delivery_budget_seconds must be above 0 and at most 3600")
     notify_gone = watch.get("notify_disappeared", True)
     if not isinstance(notify_gone, bool):
         raise ExpiryWatchError("notify_disappeared must be true or false")
@@ -924,6 +1034,13 @@ def parse_config(raw):
             raise ExpiryWatchError(f"routes.{stage} must be a list of channels from: {', '.join(KNOWN_CHANNELS)}")
         routes[stage] = tuple(chans)
 
+    matrix = parse_matrix(raw["matrix"]) if "matrix" in raw else None
+    mail = parse_email(raw["email"]) if "email" in raw else None
+    for stage, chans in routes.items():
+        for chan, have in (("matrix", matrix), ("email", mail)):
+            if chan in chans and have is None:
+                raise ExpiryWatchError(f"routes.{stage} lists {chan}, so the config needs a [{chan}] table")
+
     providers = raw.get("providers", [])
     if not isinstance(providers, list) or not all(isinstance(p, dict) for p in providers) or len(providers) > 200:
         raise ExpiryWatchError("[[providers]] must be a list of up to 200 tables")
@@ -934,7 +1051,7 @@ def parse_config(raw):
     return Config(thresholds=tuple(sorted(thresholds, reverse=True)), daily_below_days=daily, state_file=state_file,
                   router=RouterConfig(check_router_url(router.get("url")), token_env, float(timeout)),
                   routes=routes, providers=tuple(providers), disappeared_after_runs=after_runs,
-                  notify_disappeared=notify_gone)
+                  notify_disappeared=notify_gone, delivery_budget_seconds=float(budget), matrix=matrix, email=mail)
 
 
 def load_config(path):
@@ -1126,13 +1243,14 @@ def post_json(url, token, payload, timeout, opener=None):
     if not isinstance(token, str) or not _TOKEN.fullmatch(token):
         raise ExpiryWatchError("the router secret is empty or contains characters not allowed in a header")
     body = json.dumps(payload).encode()
+    if opener is None:  # the real path: one absolute deadline, no proxy, no redirect (see _http_exchange)
+        parts = urllib.parse.urlsplit(url)
+        _http_exchange("router", "POST", url, parts.path + (f"?{parts.query}" if parts.query else ""), token, body,
+                       timeout)
+        return
     req = urllib.request.Request(url, data=body, method="POST", headers={
         "Content-Type": "application/json", "Authorization": f"Bearer {token}"})
-    if opener is None:
-        # plain http is only allowed for loopback: never hand that bearer to an environment proxy
-        no_proxy = [urllib.request.ProxyHandler({})] if url.lower().startswith("http://") else []
-        opener = urllib.request.build_opener(*no_proxy, _NoRedirect)
-    host = urllib.parse.urlsplit(url).hostname
+    host = urllib.parse.urlsplit(url).hostname  # an injected opener is a test hook only
     try:
         with opener.open(req, timeout=timeout) as resp:
             resp.read(65536)
@@ -1141,6 +1259,323 @@ def post_json(url, token, payload, timeout, opener=None):
         raise ExpiryWatchError(f"router {host} {kind}: HTTP {e.code}") from None
     except (urllib.error.URLError, OSError) as e:
         raise ExpiryWatchError(f"router {host} unreachable: {getattr(e, 'reason', e)}") from None
+
+
+# --- direct channels: Matrix and email -------------------------------------------------------------
+
+class _Overrun(ExpiryWatchError):
+    """A delivery went past its overall deadline; its worker thread may still be running."""
+
+
+class _Deadline:
+    """ONE overall deadline for one delivery, shared by the caller and its worker thread.
+
+    The worker calls left() before every step that matters (connect, login, send) and sets each
+    socket timeout to the time left, so after the deadline it can no longer start a step. When the
+    worker is stuck anyway, the caller calls abort(): the flag stops any further step and the
+    current socket is shut down, which wakes a blocked read. A delivery that timed out therefore
+    cannot go on to authenticate or send after the caller recorded the failure."""
+
+    def __init__(self, seconds):
+        self.end = time.monotonic() + seconds
+        self.seconds = seconds
+        self.sock = None
+        self.delivered = False  # set by the worker once the server has accepted the message
+        self.aborted = threading.Event()
+
+    def left(self):
+        remaining = self.end - time.monotonic()
+        if remaining <= 0 or self.aborted.is_set():
+            raise TimeoutError("overall deadline reached")
+        return remaining
+
+    def arm(self, sock):
+        """Make the next blocking call on sock end by the deadline."""
+        self.sock = sock
+        sock.settimeout(self.left())
+
+    def abort(self):
+        self.aborted.set()
+        sock = self.sock
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except (OSError, ValueError):
+                pass
+
+
+def _run_deadline(dl, fn):
+    """Run fn() in a daemon thread under dl. A name lookup cannot be interrupted, so the number of
+    workers that may still be running is bounded (_FETCH_SLOTS, shared with the vendor reads): when
+    they are all stuck, the delivery is refused and its notice stays due. Such a worker has not
+    sent anything yet: it checks the deadline right after the lookup returns."""
+    if not _FETCH_SLOTS.acquire(blocking=False):
+        raise _Overrun("not tried, earlier requests are still stuck (a name lookup cannot be interrupted)")
+    box = {}
+
+    def work():
+        try:
+            box["value"] = fn()
+        except Exception as e:  # handed to the caller below
+            box["error"] = e
+        finally:
+            _FETCH_SLOTS.release()
+
+    worker = threading.Thread(target=work, daemon=True, name="expiry-delivery")
+    try:
+        worker.start()
+    except BaseException:
+        _FETCH_SLOTS.release()
+        raise
+    worker.join(max(0.0, dl.end - time.monotonic()))
+    if worker.is_alive():
+        dl.abort()  # no further wait: the deadline is the deadline
+        if dl.delivered:
+            return None  # only the goodbye was slow
+        raise _Overrun(f"timed out (overall deadline {dl.seconds:g}s)")
+    err = box.get("error")
+    if isinstance(err, TimeoutError):  # socket.timeout is TimeoutError
+        raise _Overrun(f"timed out (overall deadline {dl.seconds:g}s)") from None
+    if err is not None:
+        raise err
+    return box.get("value")
+
+
+def _seconds(cfg, budget):
+    """The deadline for one delivery: the configured timeout, cut to what is left of the run's budget."""
+    return cfg.timeout_seconds if budget is None else max(0.001, min(cfg.timeout_seconds, budget))
+
+
+def _clean(text, limit=MAX_MESSAGE_LINE):
+    """One line of message text: control characters and line breaks become spaces, length capped."""
+    return _LINE_BREAKS.sub(" ", str(text))[:limit]
+
+
+def build_message(notice, now):
+    """(subject, body) for the direct channels. Plain text; every line is cleaned, because item text
+    can come from a vendor API. The subject is one line of at most 200 characters."""
+    annotations = build_payload(notice, now)["alerts"][0]["annotations"]
+    subject = _clean(f"Expiry watch: {notice.item.name}: {_days_phrase(notice.days_left)}", 200)
+    body = "\n".join(_clean(line) for line in annotations["description"].split("\n"))
+    return subject, body
+
+
+def _http_exchange(label, method, url, target, token, payload, seconds):
+    """One JSON request with a bearer, under ONE absolute deadline (see _Deadline), for the router and
+    Matrix. Made with http.client: no environment proxy (it would be handed the bearer), no redirect
+    (a 3xx is an error), the live socket re-armed with the time left before every blocking call, and
+    only a capped part of the answer is read. No message made here contains the token."""
+    parts = urllib.parse.urlsplit(url)
+    host = parts.hostname
+    dl = _Deadline(seconds)
+
+    def send():
+        factory = http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
+        conn = factory(host, parts.port, timeout=dl.left())
+        try:
+            conn.connect()  # name lookup, connect and TLS (verified by the default context)
+            sock = conn.sock  # http.client drops its own reference once the answer is "close"
+            dl.arm(sock)
+            conn.request(method, target, body=payload, headers={
+                "Content-Type": "application/json", "Authorization": f"Bearer {token}", "Connection": "close"})
+            dl.arm(sock)
+            resp = conn.getresponse()
+            status = resp.status
+            total = 0
+            while total <= 65536 and not resp.isclosed():  # read and drop a capped part of the answer
+                dl.arm(sock)
+                chunk = resp.read1(8192)
+                if not chunk:
+                    break
+                total += len(chunk)
+            if not 200 <= status < 300:
+                raise _HttpStatus(status)
+        finally:
+            conn.close()
+
+    try:
+        _run_deadline(dl, send)
+    except _Overrun as e:
+        raise _Overrun(f"{label} {host}: {e}") from None
+    except _HttpStatus as e:
+        kind = "redirect refused" if 300 <= e.code < 400 else "rejected"
+        raise ExpiryWatchError(f"{label} {host} {kind}: HTTP {e.code}") from None
+    except http.client.HTTPException:
+        raise ExpiryWatchError(f"{label} {host}: the answer is not valid HTTP") from None
+    except (OSError, ValueError) as e:
+        raise ExpiryWatchError(f"{label} {host} unreachable: {getattr(e, 'strerror', None) or type(e).__name__}") from None
+
+
+def notice_key(notice):
+    """What names one logical notice: item, stage and expiry date, and for the daily stage the days
+    left (that is what makes one day's daily notice a different event from the next). Never the time
+    of an attempt."""
+    parts = [notice.item.name, notice.stage, notice.item.expires.isoformat()]
+    if notice.stage == "daily":
+        parts.append(str(notice.days_left))
+    return "|".join(parts)
+
+
+def matrix_txn_id(notice, generation=""):
+    """The Matrix transaction id of a notice: its logical key plus its generation. A retry of an
+    undelivered notice keeps the generation (the run remembers it in the state file, see `pending`),
+    so a retry, on a later day too, is the same transaction and the homeserver can drop the duplicate.
+    A notice that recurs after it was delivered gets a new generation, so it is a new event."""
+    return hashlib.sha256(f"{notice_key(notice)}|{generation}".encode()).hexdigest()[:32]
+
+
+def matrix_send(cfg, token, notice, now, budget=None, generation=""):
+    """Send one m.notice to the configured room. The token goes only to the homeserver."""
+    if not isinstance(token, str) or not _TOKEN.fullmatch(token):
+        raise ExpiryWatchError("the Matrix secret is empty or contains characters not allowed in a header")
+    subject, body = build_message(notice, now)
+    url = (f"{cfg.homeserver}/_matrix/client/v3/rooms/{urllib.parse.quote(cfg.room_id, safe='')}"
+           f"/send/m.room.message/{matrix_txn_id(notice, generation)}")
+    payload = json.dumps({"msgtype": "m.notice", "body": f"{subject}\n{body}"}).encode()
+    _http_exchange("matrix", "PUT", url, urllib.parse.urlsplit(url).path, token, payload, _seconds(cfg, budget))
+
+
+def email_secrets(cfg, env):
+    """The SMTP login from the environment, or None when no login is configured."""
+    if cfg.username_env is None:
+        return None
+    pair = []
+    for name in (cfg.username_env, cfg.password_env):
+        value = env.get(name)
+        if not value or not _TOKEN.fullmatch(value):
+            raise ExpiryWatchError(f"set the environment variable {name} (empty or not allowed in a login)")
+        pair.append(value)
+    return tuple(pair)
+
+
+def _smtp_context(cfg, root):
+    if cfg.ca_file is None:
+        return ssl.create_default_context()
+    pem = read_capped(cfg.ca_file, "ca_file", root)  # same no-link rules as every other file
+    # A context of its own, not create_default_context(cadata=...): that one ADDS the file to the
+    # system store. With ca_file set, only this CA is trusted, so a certificate from any public CA
+    # for the same name is refused. Certificate and host name checks stay on.
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.check_hostname = True
+    ctx.verify_mode = ssl.CERT_REQUIRED
+    try:
+        ctx.load_verify_locations(cadata=pem.decode("ascii"))
+    except (UnicodeDecodeError, ssl.SSLError):
+        raise ExpiryWatchError("email.ca_file is not a PEM certificate file") from None
+    return ctx
+
+
+class _Watched:
+    """Mixin for smtplib clients whose sockets are made under a _Deadline: the connect uses the time
+    left, the socket is registered so the caller can shut it down, and every command and every reply
+    re-arms the live socket with the time left. A conversation of many fast replies therefore still
+    ends at the deadline (arm raises TimeoutError once it has passed)."""
+
+    def __init__(self, *args, watch, **kwargs):
+        self._watch = watch
+        super().__init__(*args, **kwargs)  # the SMTP class may connect here, through _get_socket
+
+    def send(self, s):
+        if self.sock is not None:
+            self._watch.arm(self.sock)
+        return super().send(s)
+
+    def getreply(self):
+        if self.sock is not None:
+            self._watch.arm(self.sock)
+        return super().getreply()
+
+
+class _WatchedSMTP(_Watched, smtplib.SMTP):
+    def _get_socket(self, host, port, timeout):
+        sock = socket.create_connection((host, port), self._watch.left(), self.source_address)
+        self._watch.arm(sock)
+        return sock
+
+
+class _WatchedSMTPSSL(_Watched, smtplib.SMTP_SSL):
+
+    def _get_socket(self, host, port, timeout):
+        raw = socket.create_connection((host, port), self._watch.left(), self.source_address)
+        try:
+            tls = self.context.wrap_socket(raw, server_hostname=self._host, do_handshake_on_connect=False)
+        except BaseException:
+            raw.close()
+            raise
+        self._watch.arm(tls)  # registered before the handshake, so an abort can wake it
+        tls.do_handshake()
+        return tls
+
+
+def email_message_id(cfg, notice, generation):
+    """A Message-ID that names the notice and its generation, not the attempt. If a server queued a
+    message but its final reply was lost, the retry carries the same id, which gives the receiver
+    its best chance to recognize the duplicate. That mitigates, and cannot remove, SMTP's
+    ambiguity about whether a message was accepted."""
+    digest = hashlib.sha256(f"{notice_key(notice)}|{generation}|message-id".encode()).hexdigest()[:32]
+    return f"<{digest}@{cfg.sender.rsplit('@', 1)[1]}>"
+
+
+def email_send(cfg, env, notice, now, root=None, budget=None, generation=""):
+    """Send one plain text message. TLS is verified (system trust, or ca_file). With starttls the
+    upgrade is required: a server that does not offer it is an error, never a plaintext fallback,
+    and the login is sent only after the connection is encrypted. The EHLO name is helo_name, not
+    this machine's name. Headers are built by the email package from cleaned single-line values."""
+    login = email_secrets(cfg, env)
+    subject, body = build_message(notice, now)
+    msg = email.message.EmailMessage()
+    msg["From"], msg["To"] = cfg.sender, ", ".join(cfg.to)
+    msg["Subject"] = subject
+    msg["Date"] = email.utils.format_datetime(now.astimezone(UTC))
+    msg["Message-ID"] = email_message_id(cfg, notice, generation)
+    msg["Auto-Submitted"] = "auto-generated"
+    msg.set_content(body)
+
+    dl = _Deadline(_seconds(cfg, budget))
+
+    def send():
+        context = _smtp_context(cfg, root) if cfg.security != "plaintext" else None
+        dl.left()
+        if cfg.security == "tls":
+            conn = _WatchedSMTPSSL(cfg.host, cfg.port, local_hostname=cfg.helo_name, timeout=dl.seconds,
+                                   context=context, watch=dl)
+        else:
+            conn = _WatchedSMTP(cfg.host, cfg.port, local_hostname=cfg.helo_name, timeout=dl.seconds, watch=dl)
+        try:
+            if cfg.security == "starttls":
+                conn.starttls(context=context)
+            if login:
+                conn.login(*login)
+            conn.send_message(msg, from_addr=cfg.sender, to_addrs=list(cfg.to))
+            dl.delivered = True  # accepted by the server: a slow QUIT below cannot turn it into a failure
+        except BaseException:
+            conn.close()
+            raise
+        try:  # a polite QUIT, best effort: the message is already accepted, its outcome is settled
+            conn.quit()
+        except Exception:
+            pass
+        finally:
+            conn.close()
+
+    where = f"email {cfg.host}"
+    try:
+        _run_deadline(dl, send)
+    except _Overrun as e:
+        raise _Overrun(f"{where}: {e}") from None
+    except ExpiryWatchError:
+        raise
+    except smtplib.SMTPNotSupportedError:
+        raise ExpiryWatchError(f"{where}: the server does not offer the required TLS or login; nothing sent") from None
+    except smtplib.SMTPResponseException as e:
+        raise ExpiryWatchError(f"{where} rejected: SMTP {e.smtp_code}") from None
+    except smtplib.SMTPException as e:
+        raise ExpiryWatchError(f"{where} failed: {type(e).__name__}") from None
+    except ssl.SSLError as e:
+        raise ExpiryWatchError(f"{where}: TLS failed: {e.reason or type(e).__name__}") from None
+    except (OSError, ValueError) as e:
+        raise ExpiryWatchError(f"{where} unreachable: {getattr(e, 'strerror', None) or type(e).__name__}") from None
 
 
 # --- state file ----------------------------------------------------------------------------------
@@ -1196,27 +1631,46 @@ def _check_seen(path, seen):
     return seen
 
 
-def load_memory(path, root=None):
-    """Load the state file (relative to root when given): (item states, disappeared memory).
+_GENERATION = re.compile(r"[0-9a-f]{32}")
+
+
+def _check_pending(path, pending):
+    """The generations of notices that were not fully delivered: notice key -> 32 hex digits."""
+    if not isinstance(pending, dict) or len(pending) > MAX_ITEMS * 4:
+        raise ExpiryWatchError(f"state: {path} has an unexpected shape")
+    for key, gen in pending.items():
+        if (not isinstance(key, str) or not key or len(key) > 400 or _CONTROL.search(key)
+                or not isinstance(gen, str) or not _GENERATION.fullmatch(gen)):
+            raise ExpiryWatchError(f"state: {path} has a bad pending entry")
+    return pending
+
+
+def load_memory(path, root=None, with_pending=False):
+    """Load the state file (relative to root when given): (item states, disappeared memory), and
+    with_pending also the pending generations as a third value.
 
     A missing file is empty. Two formats load: slice 1's plain {item: state} object, and
     {"version": 2, "items": ..., "seen": ...}. Shape and types are checked here; whether the
     values make sense for an item is decided by decide(), which treats an inconsistent entry as
     "nothing sent yet".
     """
+    def result(items, seen, pending):
+        return (items, seen, pending) if with_pending else (items, seen)
+
     try:
         data = read_capped(path, "state", root)
     except FileMissing:
-        return {}, {}
+        return result({}, {}, {})
     try:
         doc = json.loads(data.decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as e:
         raise ExpiryWatchError(f"state: {path} is not valid JSON: {e}") from None
     if isinstance(doc, dict) and doc.get("version") == 2 and not isinstance(doc.get("version"), bool):
-        if set(doc) != {"version", "items", "seen"}:
+        if set(doc) not in ({"version", "items", "seen"}, {"version", "items", "seen", "pending"}):
             raise ExpiryWatchError(f"state: {path} has an unexpected shape")
-        return _check_items(path, doc["items"]), _check_seen(path, doc["seen"])
-    return _check_items(path, doc), {}
+        pending = _check_pending(path, doc["pending"]) if "pending" in doc else {}
+        return result(_check_items(path, doc["items"]), _check_seen(path, doc["seen"]), pending)
+    return result(_check_items(path, doc), {}, {})
 
 
 def load_state(path, root=None):
@@ -1224,14 +1678,20 @@ def load_state(path, root=None):
     return load_memory(path, root)[0]
 
 
-def check_state_fits(state, seen):
+def check_state_fits(state, seen, pending=None):
     """Refuse a state the loader would refuse: the same item count and byte limits, measured on
     the exact text that would be written. Returns the text."""
+    if pending and seen is None:
+        seen = {}
     doc = state if seen is None else {"version": 2, "items": state, "seen": seen}
+    if pending:
+        doc["pending"] = pending
     try:  # the very validators load_memory applies: what they refuse is never written
         _check_items("the state", state)
         if seen is not None:
             _check_seen("the state", seen)
+        if pending:
+            _check_pending("the state", pending)
     except ExpiryWatchError as e:
         raise ExpiryWatchError(f"{e} (limits: {MAX_ITEMS} remembered items per provider, {MAX_ITEMS * 4} "
                                "in all, 200 providers); watch fewer items or tokens") from None
@@ -1241,11 +1701,11 @@ def check_state_fits(state, seen):
     return text
 
 
-def save_state(path, state, root=None, seen=None):
+def save_state(path, state, root=None, seen=None, pending=None):
     """Write the state atomically and privately (0600). The temp file is created and renamed
     inside the held directory, so a link retargeted meanwhile cannot redirect the write.
     With `seen` the version 2 format is written; without it, the plain item states."""
-    text = check_state_fits(state, seen)  # before anything is created: an unloadable state is never written
+    text = check_state_fits(state, seen, pending)  # before anything is created: an unloadable state is never written
     dirfd, leaf = _open_parent(path, root)
     tmp = f".expiry-state-{os.getpid()}-{os.urandom(6).hex()}"
     try:
@@ -1321,7 +1781,7 @@ def _run_pass(root, leaf, now, env, out, err, dry_run, opener):
             keys.add(key)
             providers.append((prov, key, acked, config.notify_disappeared if notify is None else notify))
         state_path = config.state_file
-        state, seen = load_memory(state_path, root)
+        state, seen, pending = load_memory(state_path, root, with_pending=True)
     except ExpiryWatchError as e:
         err(f"config error: {e}")
         return 2
@@ -1347,6 +1807,7 @@ def _run_pass(root, leaf, now, env, out, err, dry_run, opener):
             failed = True
             results[key] = (None, acked, notify)
 
+    provider_failed = failed  # delivery failures come later and do not count here
     notices, new_state = decide(items, now, config, state)
     if failed:  # an outage must not make the watch forget what it already told you
         for name, st in state.items():
@@ -1361,18 +1822,42 @@ def _run_pass(root, leaf, now, env, out, err, dry_run, opener):
         worst = {k: dict(v) for k, v in new_seen.items()}
         for key, item, missed in gone:  # an undelivered notice puts its record back
             worst.setdefault(key, {})[item.name] = {"missed": missed, "item": _snapshot(item)}
-        check_state_fits(new_state, worst)
+        worst_pending = dict(pending) if provider_failed else {}
+        worst_pending.update({notice_key(n): "0" * 32 for n in notices})  # every notice may stay pending
+        check_state_fits(new_state, worst, worst_pending)
     except ExpiryWatchError as e:
         err(f"state error: {e}")
         return 1
 
-    postable = [n for n in notices if set(n.channels) & set(BUILT_CHANNELS)]
-    token = None
-    if postable and not dry_run:
-        token = env.get(config.router.token_env)
-        if not token or not _TOKEN.fullmatch(token):
-            err(f"config error: set the environment variable {config.router.token_env} to the router secret")
-            return 2
+    def via_router(n):
+        return bool(set(n.channels) & set(ROUTER_CHANNELS))
+
+    token = matrix_token = None
+    if not dry_run:
+        if any(via_router(n) for n in notices):
+            token = env.get(config.router.token_env)
+            if not token or not _TOKEN.fullmatch(token):
+                err(f"config error: set the environment variable {config.router.token_env} to the router secret")
+                return 2
+        if any("matrix" in n.channels for n in notices):
+            matrix_token = env.get(config.matrix.token_env)
+            if not matrix_token or not _TOKEN.fullmatch(matrix_token):
+                err(f"config error: set the environment variable {config.matrix.token_env} to the Matrix access token")
+                return 2
+        if any("email" in n.channels for n in notices):
+            try:
+                email_secrets(config.email, env)
+            except ExpiryWatchError as e:
+                err(f"config error: {e}")
+                return 2
+    dead = set()  # a channel that overran its deadline is not tried again in this run
+    budget_end = time.monotonic() + config.delivery_budget_seconds  # one budget for every delivery of the pass
+    over_budget = 0
+    # notice key -> generation, for the notices that stay due (see matrix_txn_id). When a provider
+    # failed this run, a notice that is still due may simply not have been rebuilt, so every earlier
+    # entry is carried forward; with every provider healthy, an entry whose notice is not due now is
+    # provably stale and dropped. An entry is removed when its notice is fully delivered.
+    new_pending = dict(pending) if provider_failed else {}
 
     def undo(n):
         """Undo one notice's state change because it was not delivered: it stays due."""
@@ -1387,28 +1872,66 @@ def _run_pass(root, leaf, now, env, out, err, dry_run, opener):
             tag = f"{n.item.name} [disappeared] last known expiry {n.item.expires.isoformat()}"
         else:
             tag = f"{n.item.name} [{n.stage}] {_days_phrase(n.days_left)}"
-        skipped = [c for c in n.channels if c not in BUILT_CHANNELS]
-        if skipped:
-            err(f"warning: channel(s) {', '.join(skipped)} are not built yet; no message sent for them ({tag})")
-        if n not in postable:
+        if not n.channels:
             out(f"no deliverable channel: {tag}")
             undo(n)  # nothing was sent: the notice stays due
             continue
-        payload = build_payload(n, now)
         if dry_run:
-            out(f"dry run: would post {tag}\n{json.dumps(payload, indent=1)}")
+            if via_router(n):
+                out(f"dry run: would post {tag}\n{json.dumps(build_payload(n, now), indent=1)}")
+            for chan in ("matrix", "email"):
+                if chan in n.channels:
+                    subject, body = build_message(n, now)
+                    out(f"dry run: would send {chan} {tag}\n{subject}\n{body}")
             continue
-        try:
-            post_json(config.router.url, token, payload, config.router.timeout_seconds, opener)
-            out(f"posted: {tag}")
-        except ExpiryWatchError as e:
-            err(f"delivery error: {tag}: {e}")
+        sends = []
+        # A retry of an undelivered notice keeps its generation; a notice that recurs after it was
+        # delivered gets a new one, so the homeserver sees a new event and not a repeated one.
+        generation = pending.get(notice_key(n)) or os.urandom(16).hex()
+        if via_router(n):
+            sends.append(("router", lambda n=n, b=None: post_json(
+                config.router.url, token, build_payload(n, now),
+                config.router.timeout_seconds if b is None else min(config.router.timeout_seconds, b), opener)))
+        if "matrix" in n.channels:
+            sends.append(("matrix", lambda n=n, b=None: matrix_send(config.matrix, matrix_token, n, now, b,
+                                                                    generation=generation)))
+        if "email" in n.channels:
+            sends.append(("email", lambda n=n, b=None: email_send(config.email, env, n, now, root, b,
+                                                                  generation=generation)))
+        delivered = True
+        for chan, send in sends:
+            left = budget_end - time.monotonic()
+            if left <= 0:  # the whole pass has a budget: the rest stays due for the next run
+                over_budget += 1
+                delivered = False
+                continue
+            if chan in dead:
+                err(f"delivery error: {tag}: {chan} skipped, it timed out earlier in this run")
+                delivered = False
+                continue
+            try:
+                send(b=left)
+                out(f"{'posted' if chan == 'router' else 'sent ' + chan}: {tag}")
+            except _Overrun as e:
+                dead.add(chan)
+                err(f"delivery error: {tag}: {e}")
+                delivered = False
+            except ExpiryWatchError as e:
+                err(f"delivery error: {tag}: {e}")
+                delivered = False
+        if not delivered:  # one channel failing keeps the whole notice due: a retry may repeat the others
             failed = True
-            undo(n)  # keep the notice due: retry on the next run
+            undo(n)
+            new_pending[notice_key(n)] = generation
+        else:
+            new_pending.pop(notice_key(n), None)
+    if over_budget:
+        err(f"delivery error: the delivery budget ({config.delivery_budget_seconds:g}s) ran out; "
+            f"{over_budget} delivery(ies) were not tried and stay due for the next run")
 
     if not dry_run:
         try:
-            save_state(state_path, new_state, root, seen=new_seen)
+            save_state(state_path, new_state, root, seen=new_seen, pending=new_pending)
         except OSError as e:
             err(f"state error: cannot write {state_path}: {e.strerror}")
             return 1

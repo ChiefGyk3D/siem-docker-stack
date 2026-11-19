@@ -16,6 +16,9 @@ state_file = "expiry-watch-state.json"
 # many successful runs in a row. false turns the notice off for every provider.
 disappeared_after_runs = 1
 notify_disappeared = true
+# One time budget for every delivery of a run (router, Matrix, email), at most 3600. When it is
+# gone the rest of the notices are not tried and stay due for the next run (exit code 1).
+delivery_budget_seconds = 300
 
 [router]
 # The n8n alert router webhook (see docs/update-alerting.md). https only, except localhost.
@@ -30,7 +33,10 @@ timeout_seconds = 10
 #   discord  the router always posts a firing alert to Discord
 #   pushover adds the phone=true label, which the router needs to page your phone
 #   webhook  post to the router and let its own rules decide
-#   matrix, email: accepted in this file, NOT delivered yet (next slice); the run says so
+#   matrix   the script sends it to the room in [matrix] itself (needs the [matrix] table)
+#   email    the script sends it by SMTP as set in [email] (needs the [email] table)
+# A notice routed only to matrix and/or email does not touch the router, so it does not go to
+# Discord: that is how to keep a message off the router's fixed Discord post.
 # A stage left out of this table uses ["discord"].
 [routes]
 "30" = ["discord"]
@@ -39,6 +45,32 @@ timeout_seconds = 10
 daily = ["discord", "pushover"]
 expired = ["discord", "pushover"]
 disappeared = ["discord", "pushover"]
+
+# Direct Matrix delivery. Only used when a route above lists "matrix". The access token comes
+# from the environment variable named here (never put the token in this file). The room id is
+# the internal id (!abc:example.com), not an alias. https only, except localhost.
+[matrix]
+homeserver = "https://matrix.example.com"
+room_id = "!abcdefghijklmnop:example.com"
+token_env = "EXPIRY_WATCH_MATRIX_TOKEN"
+timeout_seconds = 10        # one overall deadline per message, at most 60
+
+# Direct email delivery. Only used when a route above lists "email". The server certificate
+# and name are verified. starttls (default, port 587) must be offered by the server or nothing
+# is sent; tls is implicit TLS (port 465). A login is optional and is read from the two
+# environment variables named here, and is only ever sent over an encrypted connection.
+[email]
+host = "smtp.example.com"
+port = 587
+security = "starttls"       # starttls | tls | plaintext (plaintext also needs allow_plaintext = true)
+from = "expiry-watch@example.com"
+to = ["ops@example.com"]    # up to 4 plain addresses
+username_env = "EXPIRY_WATCH_SMTP_USER"
+password_env = "EXPIRY_WATCH_SMTP_PASSWORD"
+# Optional settings, with their defaults:
+# timeout_seconds = 20      # one overall deadline per message, at most 60
+# helo_name = "localhost"   # what the script announces itself as (not this machine's name)
+# ca_file = "internal-ca.pem"   # trust ONLY this CA, no public CA (relative to this file)
 
 # Providers: add as many as you need.
 [[providers]]

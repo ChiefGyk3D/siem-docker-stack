@@ -5,13 +5,16 @@ things that expire, warns you early enough to rotate them, keeps warning daily
 at the end, and says so once when they have expired. It is one standard-library
 Python script, `scripts/expiry_watch.py`, driven by one config file. It posts to
 the n8n alert router from [update-alerting.md](update-alerting.md), so the
-messages arrive where your other alerts do. It is read-only: it never changes a
+messages arrive where your other alerts do, and it can also send to a Matrix
+room and by email directly. It is read-only: it never changes a
 key, a certificate or a registry.
 
 Tracked in issue #76 (epic #62). Slice 1 built the engine, the registry and TLS
 providers and the router delivery. Slice 2 (issue #97) added the Grafana service
 account token and secret manager service token providers and the "disappeared"
-notice (see [Items that disappear](#items-that-disappear)). See
+notice (see [Items that disappear](#items-that-disappear)). Slice 3 (issue #98)
+added direct Matrix and email delivery (see
+[Matrix and email](#matrix-and-email-direct-delivery)). See
 [What is not built yet](#what-is-not-built-yet) and
 [What is unverified](#what-is-unverified-until-checked-against-a-live-instance).
 
@@ -74,8 +77,8 @@ For each item the watch counts days left as the item's expiry date minus today
   for the new date. An item that disappears from its provider loses its state.
 - The watch remembers all of this in `state_file`. A notice that was not
   delivered is not remembered, so the next run tries again. That covers a failed
-  post and a notice routed only to channels that are not built yet, so fixing
-  the route later still sends it.
+  delivery to any one of its channels, and a notice with an empty channel
+  list, so fixing the route later still sends it.
 - The state file is trusted local data. It is written atomically with private
   permissions (mode 0600), and you should keep it where only the job user can
   write. The watch checks each entry as a whole: if any part of it makes no
@@ -147,12 +150,15 @@ repeated thresholds and files over 1 MiB. See
 | `[watch].state_file` | `expiry-watch-state.json` | What was already notified (JSON, mode 0600, written atomically) |
 | `[watch].disappeared_after_runs` | `1` | An item must be missing from this many successful runs in a row (1 to 100) to count as disappeared |
 | `[watch].notify_disappeared` | `true` | `false` turns the disappeared notice off for every provider |
+| `[watch].delivery_budget_seconds` | `300` | One time budget for all deliveries of a run (router, Matrix, email), above 0 and at most 3600 |
 | `[[providers]].acknowledge_removed` | `[]` | Item names whose removal is expected (any provider; up to 200) |
 | `[[providers]].notify_disappeared` | the `[watch]` value | Per provider override |
 | `[router].url` | required | The router webhook. https only; plain http only for localhost |
 | `[router].token_env` | required | The name of the environment variable that holds the bearer secret |
 | `[router].timeout_seconds` | `10` | Post timeout, above 0 and at most 60 |
-| `[routes]."<days>"`, `daily`, `expired`, `disappeared` | `["discord"]` | Channels for that notice |
+| `[routes]."<days>"`, `daily`, `expired`, `disappeared` | `["discord"]` | Channels for that notice. `matrix` and `email` need their table (below) |
+| `[matrix]` | none | Direct Matrix delivery, see [Matrix and email](#matrix-and-email-direct-delivery) |
+| `[email]` | none | Direct SMTP delivery, same section |
 | `[[providers]]` | none | One table per provider; `type` selects it |
 
 Relative paths (`state_file`, a provider's `path` or `ca_file`) are relative to
@@ -165,17 +171,119 @@ Routing is per notice, so you can send the early warnings to chat only and the
 last week to your phone. The channel names are `pushover`, `discord`, `matrix`,
 `email` and `webhook`.
 
-| Channel | Slice 1 behavior |
+| Channel | Behavior |
 |---------|------------------|
 | `discord` | The router posts every firing alert to Discord |
 | `pushover` | Adds the label `phone=true`, which is the only way an alert reaches the router's Pushover step. Pushover must be enabled in the router (`PUSHOVER_ENABLED`, see [update-alerting.md](update-alerting.md)) |
 | `webhook` | Posts to the router; its own rules decide what happens |
-| `matrix`, `email` | Accepted in the config, **not delivered yet**. The run prints a warning on stderr naming the channel |
+| `matrix` | The script sends it to a Matrix room itself, see [Matrix and email](#matrix-and-email-direct-delivery) |
+| `email` | The script sends it by SMTP itself, same section |
 
-A notice whose channels are only `matrix` and `email` posts nothing, because
-posting would send an unwanted Discord message. The router always sends
-Discord for a firing alert, so there is no way to say "phone only" in this
-slice.
+The script posts to the router only when a notice lists `pushover`, `discord`
+or `webhook`. A notice routed only to `matrix` and/or `email` never touches the
+router, so it sends no Discord message. The router always sends Discord for a
+firing alert, so "phone only" through the router is still not possible; route
+to `email` or `matrix` for a notice that must stay off Discord.
+
+A notice that lists several channels is delivered to each. If any one of them
+fails, the run exits 1 and the whole notice stays due, so the next run tries
+again. That retry may deliver the channels that already worked a second time
+(Matrix should drop the duplicate by its transaction id, which is inferred
+from the API description and not verified; the router and email do not). A route that lists `matrix` or `email` without the matching `[matrix]` or
+`[email]` table is a config error.
+
+### Matrix and email (direct delivery)
+
+Both channels are built with the Python standard library only. Their secrets
+come from environment variables named in the config, never from a file, and are
+never printed or put in an error message. A missing or malformed secret is a
+config error (exit 2) only when a notice for that channel is due and not in a
+dry run.
+
+```toml
+[matrix]
+homeserver = "https://matrix.example.com"
+room_id = "!abcdefghijklmnop:example.com"
+token_env = "EXPIRY_WATCH_MATRIX_TOKEN"
+timeout_seconds = 10
+
+[email]
+host = "smtp.example.com"
+port = 587
+security = "starttls"
+from = "expiry-watch@example.com"
+to = ["ops@example.com"]
+username_env = "EXPIRY_WATCH_SMTP_USER"
+password_env = "EXPIRY_WATCH_SMTP_PASSWORD"
+```
+
+**Matrix.** The script sends one `m.notice` message per notice with
+`PUT /_matrix/client/v3/rooms/{roomId}/send/m.room.message/{txnId}` and an
+`Authorization: Bearer` header. Use an access token for a dedicated bot user
+that has joined the room and can send messages; the script never joins a room,
+never reads one and never sends anything else. `room_id` must be the internal
+room id, not an alias. `homeserver` is https (plain http only for localhost),
+may carry a path prefix and must not carry credentials, a query or a
+fragment. The transaction id is a hash of the item, stage and expiry date (and,
+for the `daily` stage only, the days left) plus a random generation, never of
+the time of the attempt. A notice that was not fully delivered keeps its
+generation in a `pending` section of the state file, so its retry, on a later
+day too, reuses the id and the homeserver can drop the duplicate (how long a
+homeserver remembers a transaction id is its own choice). Once the notice is
+delivered the generation is forgotten, so the same notice recurring later (for
+example an item that disappears, returns and disappears again) is a new event.
+A run in which a provider fails carries every earlier `pending` entry forward
+(the notice may still be due but could not be rebuilt); when every provider
+answered, an entry whose notice is no longer due is dropped.
+A redirect
+is never followed (the token is not replayed anywhere else), and only an
+`https` or loopback server receives the token. TLS uses the system trust store.
+
+**Email.** One plain text message per notice, to up to four plain addresses
+(`name@example.com`; display names, quotes and comments are refused).
+
+| `security` | What happens |
+|------------|--------------|
+| `starttls` (default, port 587) | Connects, requires the server to offer STARTTLS, upgrades and verifies the certificate and host name, then logs in (if configured) and sends. A server that does not offer STARTTLS is an error and nothing is sent: there is no fallback to plaintext |
+| `tls` (port 465) | Implicit TLS from the first byte, certificate and host name verified |
+| `plaintext` (port 25) | Unencrypted. Refused unless `allow_plaintext = true`, and refused together with a login. Only for a relay on a trusted local network |
+
+The `Message-ID` of a message is a hash of the notice key and the same
+generation Matrix uses, not a fresh random value per attempt. If a mail server
+queues a message and then loses its final reply, the retry carries the same
+`Message-ID`, which gives the receiving side its best chance to recognize the
+duplicate. This mitigates, but cannot eliminate, SMTP's ambiguity about whether
+a message was accepted: a retry can still deliver a second copy, and a receiver
+that does not deduplicate by `Message-ID` will show both.
+
+`ca_file` trusts ONLY the CA (or CAs) in that PEM file and no public CA: a
+certificate from any other CA is refused even if it is valid for the host name
+(read with the same no-link rules as every other file; a file that is not PEM is
+a config error). Leave it out to use the system store. The script announces itself with
+`helo_name` (default `localhost`), not the machine's own name.
+
+Hardening that applies to both: every value that came from a provider (item
+name, owner, link) is cleaned before it goes into a message, so a control
+character or line break in a vendor token name cannot add a mail header, a
+recipient or extra Matrix content; the From and To addresses come only from the
+config; each delivery, to the router too, has one absolute deadline of
+`timeout_seconds` (connect, TLS, login and send together; every blocking call is
+re-armed with the time left, so a peer that answers a byte at a time cannot
+stretch it, and the caller returns at the deadline with no extra wait). A
+delivery that passes it cannot go on to log in
+or send afterwards: the worker checks the deadline before every step, and the
+connection is shut down. A name lookup cannot be interrupted, so the number of
+lookups that may still be pending is bounded; when they are all stuck, deliveries
+are refused and their notices stay due. A channel that overran its deadline is
+skipped for the rest of that run. The whole pass also has one delivery budget,
+`[watch].delivery_budget_seconds` (default 300, at most 3600), shared by the
+router, Matrix and email: each delivery gets the smaller of its timeout and what
+is left of the budget, and once the budget is gone the remaining deliveries are
+not tried, their notices stay due for the next run, and the run exits 1 with a
+message that says so. A slow server therefore cannot stretch one run into hours
+(for a large backlog, raise the budget or run more often); response
+bodies are read up to a cap. The message carries the item name, date, days
+left, owner and runbook link and nothing else.
 
 Pushover priority is the router's decision: an alert name the router does not
 know is capped at priority 1. To let expired notices page at emergency
@@ -474,6 +582,13 @@ local server with a certificate made by `openssl` at test time, and the poster
 against a local HTTP server. Run it with `python3 -m pytest
 tests/python/test_expiry_watch.py`.
 
+Slice 3 adds `tests/python/test_expiry_watch_channels.py`: the Matrix and email
+config rules, message cleaning, the Matrix sender against a fake homeserver on
+loopback (bearer, transaction id, redirect, errors), the email sender against a
+fake SMTP server (plaintext opt-in, required STARTTLS, untrusted certificate,
+implicit TLS, header injection, rejections) and the runner (routing, retries,
+dry run, secrets only when due).
+
 Slice 2 adds `tests/python/test_expiry_watch_providers.py` (both token
 providers against a fake vendor on loopback: list parsing, null expiry,
 `hasExpired`, bad dates, HTTP errors, timeouts and a slow drip, redirects not
@@ -505,11 +620,18 @@ these as unconfirmed:
 - **A zero or "never" date.** A token with no expiry should be null. A date
   before the year 2000 is treated as an error, not as a date.
 
+- **Matrix and email delivery.** Written from the Matrix client-server API
+  (`m.room.message` send, v3) and Python's `smtplib`, and tested only against
+  fakes on loopback. Never run against a live homeserver or a live mail server.
+  Check `--dry-run` first, then one real notice to a test room and a test
+  mailbox. Unconfirmed in particular: that your homeserver accepts the bot
+  token for the room, that your mail server accepts the sender address, and
+  that the message is not filtered as spam.
+- **Matrix end-to-end encrypted rooms.** The script sends plain `m.notice`
+  events and cannot encrypt. Use an unencrypted room.
+
 ## What is not built yet
 
-- **Direct Matrix and email delivery.** The names are accepted in the config
-  and skipped with a warning. The next slice adds adapters (or router nodes)
-  with their own credentials.
 - **ntfy and other generic channels** beyond `webhook` through the router.
 - **Grafana alert rules** driven by an expiry state metric, and a collector
   that writes days left as a metric, so Grafana can alert without the script.
