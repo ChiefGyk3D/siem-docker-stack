@@ -865,6 +865,7 @@ class Config:
     providers: tuple  # raw provider tables
     disappeared_after_runs: int = 1
     notify_disappeared: bool = True
+    delivery_budget_seconds: float = 300.0
     matrix: MatrixConfig = None
     email: EmailConfig = None
 
@@ -991,7 +992,7 @@ def parse_config(raw):
     if not isinstance(watch, dict):
         raise ExpiryWatchError("[watch] must be a table")
     _only_keys("[watch]", watch, ("thresholds_days", "daily_below_days", "state_file", "disappeared_after_runs",
-                                  "notify_disappeared"))
+                                  "notify_disappeared", "delivery_budget_seconds"))
     thresholds = watch.get("thresholds_days", [30, 14, 7])
     if not isinstance(thresholds, list) or not 1 <= len(thresholds) <= MAX_THRESHOLDS:
         raise ExpiryWatchError(f"thresholds_days must be a list of 1 to {MAX_THRESHOLDS} whole numbers")
@@ -1002,6 +1003,9 @@ def parse_config(raw):
     state_file = watch.get("state_file", "expiry-watch-state.json")
     state_file = _text("state_file", state_file, 256)
     after_runs = _int("disappeared_after_runs", watch.get("disappeared_after_runs", 1), 1, 100)
+    budget = watch.get("delivery_budget_seconds", 300)
+    if isinstance(budget, bool) or not isinstance(budget, (int, float)) or not 0 < budget <= 3600:
+        raise ExpiryWatchError("delivery_budget_seconds must be above 0 and at most 3600")
     notify_gone = watch.get("notify_disappeared", True)
     if not isinstance(notify_gone, bool):
         raise ExpiryWatchError("notify_disappeared must be true or false")
@@ -1047,7 +1051,7 @@ def parse_config(raw):
     return Config(thresholds=tuple(sorted(thresholds, reverse=True)), daily_below_days=daily, state_file=state_file,
                   router=RouterConfig(check_router_url(router.get("url")), token_env, float(timeout)),
                   routes=routes, providers=tuple(providers), disappeared_after_runs=after_runs,
-                  notify_disappeared=notify_gone, matrix=matrix, email=mail)
+                  notify_disappeared=notify_gone, delivery_budget_seconds=float(budget), matrix=matrix, email=mail)
 
 
 def load_config(path):
@@ -1262,9 +1266,52 @@ class _Overrun(ExpiryWatchError):
     """A delivery went past its overall deadline; its worker thread may still be running."""
 
 
-def _bounded(seconds, fn):
-    """Run fn() with ONE overall deadline. A server that answers one byte at a time cannot hold the
-    run past `seconds`: the worker is a daemon thread and the caller stops waiting."""
+DEADLINE_GRACE = 2.0  # how long the caller waits past a deadline for the worker to notice it
+
+
+class _Deadline:
+    """ONE overall deadline for one delivery, shared by the caller and its worker thread.
+
+    The worker calls left() before every step that matters (connect, login, send) and sets each
+    socket timeout to the time left, so after the deadline it can no longer start a step. When the
+    worker is stuck anyway, the caller calls abort(): the flag stops any further step and the
+    current socket is shut down, which wakes a blocked read. A delivery that timed out therefore
+    cannot go on to authenticate or send after the caller recorded the failure."""
+
+    def __init__(self, seconds):
+        self.end = time.monotonic() + seconds
+        self.seconds = seconds
+        self.sock = None
+        self.aborted = threading.Event()
+
+    def left(self):
+        remaining = self.end - time.monotonic()
+        if remaining <= 0 or self.aborted.is_set():
+            raise TimeoutError("overall deadline reached")
+        return remaining
+
+    def arm(self, sock):
+        """Make the next blocking call on sock end by the deadline."""
+        self.sock = sock
+        sock.settimeout(self.left())
+
+    def abort(self):
+        self.aborted.set()
+        sock = self.sock
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except (OSError, ValueError):
+                pass
+
+
+def _run_deadline(dl, fn):
+    """Run fn() in a daemon thread under dl. A name lookup cannot be interrupted, so the number of
+    workers that may still be running is bounded (_FETCH_SLOTS, shared with the vendor reads): when
+    they are all stuck, the delivery is refused and its notice stays due. Such a worker has not
+    sent anything yet: it checks the deadline right after the lookup returns."""
+    if not _FETCH_SLOTS.acquire(blocking=False):
+        raise _Overrun("not tried, earlier requests are still stuck (a name lookup cannot be interrupted)")
     box = {}
 
     def work():
@@ -1272,15 +1319,31 @@ def _bounded(seconds, fn):
             box["value"] = fn()
         except Exception as e:  # handed to the caller below
             box["error"] = e
+        finally:
+            _FETCH_SLOTS.release()
 
     worker = threading.Thread(target=work, daemon=True, name="expiry-delivery")
-    worker.start()
-    worker.join(seconds)
+    try:
+        worker.start()
+    except BaseException:
+        _FETCH_SLOTS.release()
+        raise
+    worker.join(max(0.0, dl.end - time.monotonic()) + DEADLINE_GRACE)
     if worker.is_alive():
-        raise _Overrun(f"timed out (overall deadline {seconds:g}s)")
-    if "error" in box:
-        raise box["error"]
+        dl.abort()
+        worker.join(1.0)
+        raise _Overrun(f"timed out (overall deadline {dl.seconds:g}s)")
+    err = box.get("error")
+    if isinstance(err, TimeoutError):  # socket.timeout is TimeoutError
+        raise _Overrun(f"timed out (overall deadline {dl.seconds:g}s)") from None
+    if err is not None:
+        raise err
     return box.get("value")
+
+
+def _seconds(cfg, budget):
+    """The deadline for one delivery: the configured timeout, cut to what is left of the run's budget."""
+    return cfg.timeout_seconds if budget is None else max(0.001, min(cfg.timeout_seconds, budget))
 
 
 def _clean(text, limit=MAX_MESSAGE_LINE):
@@ -1297,38 +1360,66 @@ def build_message(notice, now):
     return subject, body
 
 
-def matrix_send(cfg, token, notice, now, opener=None):
-    """Send one m.notice to the configured room. The transaction id is a hash of the notice and the
-    day, so a retry of the same notice is dropped by the homeserver instead of repeated. The token
-    goes only to the homeserver, no redirect is followed, and no message made here contains it."""
+def matrix_txn_id(notice):
+    """The Matrix transaction id of a notice. It names the LOGICAL notice (item, stage, expiry date;
+    for the daily stage also the days left, which is what makes one day's notice a different event
+    from the next) and never the time of the attempt, so a retry, on a later day too, is the same
+    transaction and the homeserver can drop the duplicate."""
+    parts = [notice.item.name, notice.stage, notice.item.expires.isoformat()]
+    if notice.stage == "daily":
+        parts.append(str(notice.days_left))
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:32]
+
+
+def matrix_send(cfg, token, notice, now, budget=None):
+    """Send one m.notice to the configured room. The token goes only to the homeserver. Made with
+    http.client: no environment proxy, no redirect (a 3xx is an error), a capped response, and one
+    overall deadline (see _Deadline). No message made here contains the token."""
     if not isinstance(token, str) or not _TOKEN.fullmatch(token):
         raise ExpiryWatchError("the Matrix secret is empty or contains characters not allowed in a header")
     subject, body = build_message(notice, now)
-    txn = hashlib.sha256(f"{notice.item.name}|{notice.stage}|{notice.item.expires.isoformat()}|"
-                         f"{now.astimezone(UTC).date().isoformat()}".encode()).hexdigest()[:32]
     url = (f"{cfg.homeserver}/_matrix/client/v3/rooms/{urllib.parse.quote(cfg.room_id, safe='')}"
-           f"/send/m.room.message/{txn}")
-    req = urllib.request.Request(url, data=json.dumps({"msgtype": "m.notice", "body": f"{subject}\n{body}"}).encode(),
-                                 method="PUT", headers={"Content-Type": "application/json",
-                                                        "Authorization": f"Bearer {token}"})
-    if opener is None:
-        no_proxy = [urllib.request.ProxyHandler({})] if url.lower().startswith("http://") else []
-        opener = urllib.request.build_opener(*no_proxy, _NoRedirect)
-    host = urllib.parse.urlsplit(url).hostname
+           f"/send/m.room.message/{matrix_txn_id(notice)}")
+    parts = urllib.parse.urlsplit(url)
+    host = parts.hostname
+    payload = json.dumps({"msgtype": "m.notice", "body": f"{subject}\n{body}"}).encode()
+    dl = _Deadline(_seconds(cfg, budget))
 
     def send():
-        with opener.open(req, timeout=cfg.timeout_seconds) as resp:
-            resp.read(65536)
+        factory = http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
+        conn = factory(host, parts.port, timeout=dl.left())
+        try:
+            conn.connect()  # name lookup, connect and TLS (verified by the default context)
+            sock = conn.sock  # http.client drops its own reference once the answer is "close"
+            dl.arm(sock)
+            conn.request("PUT", parts.path, body=payload, headers={
+                "Content-Type": "application/json", "Authorization": f"Bearer {token}", "Connection": "close"})
+            dl.arm(sock)
+            resp = conn.getresponse()
+            status = resp.status
+            total = 0
+            while total <= 65536:  # read and drop a capped part of the answer
+                dl.arm(sock)
+                chunk = resp.read1(8192)
+                if not chunk:
+                    break
+                total += len(chunk)
+            if not 200 <= status < 300:
+                raise _HttpStatus(status)
+        finally:
+            conn.close()
 
     try:
-        _bounded(cfg.timeout_seconds, send)
-    except urllib.error.HTTPError as e:
-        kind = "redirect refused" if 300 <= e.code < 400 else "rejected"
-        raise ExpiryWatchError(f"matrix {host} {kind}: HTTP {e.code}") from None
+        _run_deadline(dl, send)
     except _Overrun as e:
         raise _Overrun(f"matrix {host}: {e}") from None
-    except (urllib.error.URLError, OSError) as e:
-        raise ExpiryWatchError(f"matrix {host} unreachable: {getattr(e, 'reason', e)}") from None
+    except _HttpStatus as e:
+        kind = "redirect refused" if 300 <= e.code < 400 else "rejected"
+        raise ExpiryWatchError(f"matrix {host} {kind}: HTTP {e.code}") from None
+    except http.client.HTTPException:
+        raise ExpiryWatchError(f"matrix {host}: the answer is not valid HTTP") from None
+    except (OSError, ValueError) as e:
+        raise ExpiryWatchError(f"matrix {host} unreachable: {getattr(e, 'strerror', None) or type(e).__name__}") from None
 
 
 def email_secrets(cfg, env):
@@ -1348,13 +1439,52 @@ def _smtp_context(cfg, root):
     if cfg.ca_file is None:
         return ssl.create_default_context()
     pem = read_capped(cfg.ca_file, "ca_file", root)  # same no-link rules as every other file
+    # A context of its own, not create_default_context(cadata=...): that one ADDS the file to the
+    # system store. With ca_file set, only this CA is trusted, so a certificate from any public CA
+    # for the same name is refused. Certificate and host name checks stay on.
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.check_hostname = True
+    ctx.verify_mode = ssl.CERT_REQUIRED
     try:
-        return ssl.create_default_context(cadata=pem.decode("ascii"))
-    except UnicodeDecodeError:
-        return ssl.create_default_context(cadata=pem)
+        ctx.load_verify_locations(cadata=pem.decode("ascii"))
+    except (UnicodeDecodeError, ssl.SSLError):
+        raise ExpiryWatchError("email.ca_file is not a PEM certificate file") from None
+    return ctx
 
 
-def email_send(cfg, env, notice, now, root=None):
+class _WatchedSMTP(smtplib.SMTP):
+    """smtplib.SMTP whose sockets are made under a _Deadline: the connect uses the time left, and
+    the socket is registered so the caller can shut it down."""
+
+    def __init__(self, *args, watch, **kwargs):
+        self._watch = watch
+        super().__init__(*args, **kwargs)
+
+    def _get_socket(self, host, port, timeout):
+        sock = socket.create_connection((host, port), self._watch.left(), self.source_address)
+        self._watch.arm(sock)
+        return sock
+
+
+class _WatchedSMTPSSL(smtplib.SMTP_SSL):
+    def __init__(self, *args, watch, **kwargs):
+        self._watch = watch
+        super().__init__(*args, **kwargs)
+
+    def _get_socket(self, host, port, timeout):
+        raw = socket.create_connection((host, port), self._watch.left(), self.source_address)
+        try:
+            tls = self.context.wrap_socket(raw, server_hostname=self._host, do_handshake_on_connect=False)
+        except BaseException:
+            raw.close()
+            raise
+        self._watch.arm(tls)  # registered before the handshake, so an abort can wake it
+        tls.do_handshake()
+        return tls
+
+
+def email_send(cfg, env, notice, now, root=None, budget=None):
     """Send one plain text message. TLS is verified (system trust, or ca_file). With starttls the
     upgrade is required: a server that does not offer it is an error, never a plaintext fallback,
     and the login is sent only after the connection is encrypted. The EHLO name is helo_name, not
@@ -1369,23 +1499,30 @@ def email_send(cfg, env, notice, now, root=None):
     msg["Auto-Submitted"] = "auto-generated"
     msg.set_content(body)
 
+    dl = _Deadline(_seconds(cfg, budget))
+
     def send():
         context = _smtp_context(cfg, root) if cfg.security != "plaintext" else None
+        dl.left()
         if cfg.security == "tls":
-            conn = smtplib.SMTP_SSL(cfg.host, cfg.port, local_hostname=cfg.helo_name,
-                                    timeout=cfg.timeout_seconds, context=context)
+            conn = _WatchedSMTPSSL(cfg.host, cfg.port, local_hostname=cfg.helo_name, timeout=dl.seconds,
+                                   context=context, watch=dl)
         else:
-            conn = smtplib.SMTP(cfg.host, cfg.port, local_hostname=cfg.helo_name, timeout=cfg.timeout_seconds)
+            conn = _WatchedSMTP(cfg.host, cfg.port, local_hostname=cfg.helo_name, timeout=dl.seconds, watch=dl)
         with conn:
             if cfg.security == "starttls":
+                dl.arm(conn.sock)
                 conn.starttls(context=context)
+                dl.arm(conn.sock)  # the TLS socket replaced the plain one
             if login:
+                dl.arm(conn.sock)
                 conn.login(*login)
+            dl.arm(conn.sock)  # raises once the deadline has passed: nothing is sent after it
             conn.send_message(msg, from_addr=cfg.sender, to_addrs=list(cfg.to))
 
     where = f"email {cfg.host}"
     try:
-        _bounded(cfg.timeout_seconds, send)
+        _run_deadline(dl, send)
     except _Overrun as e:
         raise _Overrun(f"{where}: {e}") from None
     except ExpiryWatchError:
@@ -1647,6 +1784,8 @@ def _run_pass(root, leaf, now, env, out, err, dry_run, opener):
                 err(f"config error: {e}")
                 return 2
     dead = set()  # a channel that overran its deadline is not tried again in this run
+    budget_end = time.monotonic() + config.delivery_budget_seconds  # one budget for every delivery of the pass
+    over_budget = 0
 
     def undo(n):
         """Undo one notice's state change because it was not delivered: it stays due."""
@@ -1675,20 +1814,26 @@ def _run_pass(root, leaf, now, env, out, err, dry_run, opener):
             continue
         sends = []
         if via_router(n):
-            sends.append(("router", lambda n=n: post_json(config.router.url, token, build_payload(n, now),
-                                                         config.router.timeout_seconds, opener)))
+            sends.append(("router", lambda n=n, b=None: post_json(
+                config.router.url, token, build_payload(n, now),
+                config.router.timeout_seconds if b is None else min(config.router.timeout_seconds, b), opener)))
         if "matrix" in n.channels:
-            sends.append(("matrix", lambda n=n: matrix_send(config.matrix, matrix_token, n, now)))
+            sends.append(("matrix", lambda n=n, b=None: matrix_send(config.matrix, matrix_token, n, now, b)))
         if "email" in n.channels:
-            sends.append(("email", lambda n=n: email_send(config.email, env, n, now, root)))
+            sends.append(("email", lambda n=n, b=None: email_send(config.email, env, n, now, root, b)))
         delivered = True
         for chan, send in sends:
+            left = budget_end - time.monotonic()
+            if left <= 0:  # the whole pass has a budget: the rest stays due for the next run
+                over_budget += 1
+                delivered = False
+                continue
             if chan in dead:
                 err(f"delivery error: {tag}: {chan} skipped, it timed out earlier in this run")
                 delivered = False
                 continue
             try:
-                send()
+                send(b=left)
                 out(f"{'posted' if chan == 'router' else 'sent ' + chan}: {tag}")
             except _Overrun as e:
                 dead.add(chan)
@@ -1700,6 +1845,9 @@ def _run_pass(root, leaf, now, env, out, err, dry_run, opener):
         if not delivered:  # one channel failing keeps the whole notice due: a retry may repeat the others
             failed = True
             undo(n)
+    if over_budget:
+        err(f"delivery error: the delivery budget ({config.delivery_budget_seconds:g}s) ran out; "
+            f"{over_budget} delivery(ies) were not tried and stay due for the next run")
 
     if not dry_run:
         try:

@@ -10,6 +10,7 @@ import json
 import socketserver
 import ssl
 import threading
+import time
 
 import pytest
 
@@ -26,10 +27,12 @@ class _Matrix(http.server.BaseHTTPRequestHandler):
     seen = []
     status = 200
     redirect_to = None
+    delay = 0.0
 
     def do_PUT(self):
         body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         type(self).seen.append((self.command, self.path, dict(self.headers), body))
+        time.sleep(type(self).delay)
         if type(self).redirect_to:
             self.send_response(307)
             self.send_header("Location", type(self).redirect_to)
@@ -45,7 +48,7 @@ class _Matrix(http.server.BaseHTTPRequestHandler):
 
 @pytest.fixture
 def matrix():
-    _Matrix.seen, _Matrix.status, _Matrix.redirect_to = [], 200, None
+    _Matrix.seen, _Matrix.status, _Matrix.redirect_to, _Matrix.delay = [], 200, None, 0.0
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Matrix)
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
@@ -69,6 +72,7 @@ class _SmtpHandler(socketserver.StreamRequestHandler):
             sess["tls"] = True
 
         def send(line):
+            time.sleep(srv.reply_delay)
             self.wfile.write(line.encode() + b"\r\n")
             self.wfile.flush()
 
@@ -125,10 +129,10 @@ class _SmtpServer(socketserver.ThreadingTCPServer):
     daemon_threads = True
 
 
-def _start_smtp(starttls_ctx=None, implicit_ctx=None, offer_auth=True, data_reply="250 queued"):
+def _start_smtp(starttls_ctx=None, implicit_ctx=None, offer_auth=True, data_reply="250 queued", reply_delay=0.0):
     srv = _SmtpServer(("127.0.0.1", 0), _SmtpHandler)
     srv.sessions, srv.starttls_ctx, srv.implicit_ctx = [], starttls_ctx, implicit_ctx
-    srv.offer_auth, srv.data_reply = offer_auth, data_reply
+    srv.offer_auth, srv.data_reply, srv.reply_delay = offer_auth, data_reply, reply_delay
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
     return srv, t
@@ -543,3 +547,116 @@ def test_shipped_example_config_parses_with_the_channel_tables_and_has_no_secret
     cfg = ew.parse_config(tomllib.loads(text))
     assert cfg.matrix is not None and cfg.email is not None
     assert MATRIX_TOKEN not in text and SMTP_PASSWORD not in text
+
+
+# --- review round 1: deadlines, budget, ca_file, transaction ids --------------------------------
+
+def test_a_timed_out_email_never_authenticates_or_sends_afterwards():
+    """Finding 1. Every reply is slower than nothing but faster than the per-call timeout, so only an
+    overall deadline stops the delivery. After it raised, the worker must not go on to send."""
+    srv, t = _start_smtp(reply_delay=0.6)
+    try:
+        cfg = _ecfg(srv.server_address[1], security="plaintext", allow_plaintext=True, timeout_seconds=1)
+        started = time.monotonic()
+        with pytest.raises(ew.ExpiryWatchError):
+            ew.email_send(cfg, {}, _notice(channels=("email",)), _at(14), root=None)
+        assert time.monotonic() - started < 3.5
+        time.sleep(4)  # the old code finished the whole conversation in the background in about 3 seconds
+        assert all(s["data"] is None for s in srv.sessions), "a message was delivered after the failure"
+    finally:
+        _stop(srv, t)
+
+
+def test_a_slow_matrix_server_is_cut_off_at_the_deadline(matrix):
+    """Finding 1, Matrix side (regression guard: the earlier code also stopped waiting)."""
+    _Matrix.delay = 2.5
+    cfg = _mcfg(matrix, timeout_seconds=1)
+    started = time.monotonic()
+    with pytest.raises(ew.ExpiryWatchError, match="(?i)timed out|deadline") as exc:
+        ew.matrix_send(cfg, MATRIX_TOKEN, _notice(), _at(14))
+    assert time.monotonic() - started < 2.4 and MATRIX_TOKEN not in str(exc.value)
+
+
+def test_the_deadline_object_refuses_work_after_expiry_and_after_abort():
+    dl = ew._Deadline(0.05)
+    assert dl.left() > 0
+    time.sleep(0.1)
+    with pytest.raises(TimeoutError):
+        dl.left()
+    dl2 = ew._Deadline(30)
+    dl2.abort()
+    with pytest.raises(TimeoutError):
+        dl2.left()
+
+
+@pytest.mark.parametrize("bad", [0, -1, 3601, True, "10"])
+def test_delivery_budget_is_validated(bad):
+    with pytest.raises(ew.ExpiryWatchError, match="delivery_budget_seconds"):
+        ew.parse_config(_base(watch={"delivery_budget_seconds": bad}))
+
+
+def test_the_run_has_one_delivery_budget_and_leaves_the_rest_due(tmp_path, matrix):
+    """Finding 2. Three due notices, each answered slower than the budget allows for all three."""
+    cfg = _setup(tmp_path, "http://127.0.0.1:1", matrix_url=matrix)
+    cfg.write_text(cfg.read_text().replace('state_file = "state.json"',
+                                           'state_file = "state.json"\ndelivery_budget_seconds = 0.7'))
+    reg = "".join(f'[[item]]\nname = "key-{i}"\nkind = "ssh-key"\nexpires = 2026-03-01\nowner = "ops@example.com"\n'
+                  f'runbook = "{RUNBOOK}"\n' for i in range(3))
+    (tmp_path / "registry.toml").write_text(reg)
+    _Matrix.delay = 0.4
+    started = time.monotonic()
+    code, out, err = _run(cfg, _at(14))
+    assert code == 1 and time.monotonic() - started < 1.4
+    assert len(_Matrix.seen) <= 2, "the third delivery must not be tried once the budget is gone"
+    assert "timed out" in err or "budget" in err
+    # nothing is lost: with time to spare the next run delivers every notice that is still due
+    cfg.write_text(cfg.read_text().replace("delivery_budget_seconds = 0.7", "delivery_budget_seconds = 30"))
+    _Matrix.delay = 0.0
+    before = len(_Matrix.seen)
+    code, _, err = _run(cfg, _at(14, hour=18))
+    assert code == 0, err
+    names = {json.loads(b)["body"].split(":")[1].strip() for _, _, _, b in _Matrix.seen}
+    assert {"key-0", "key-1", "key-2"} <= names and len(_Matrix.seen) > before
+
+
+def test_ca_file_replaces_the_system_trust_store(tmp_path):
+    """Finding 3. With ca_file only that CA is trusted, not that CA plus every public one."""
+    _, crt = _server_ctx(tmp_path)
+    (tmp_path / "ca.pem").write_bytes(crt.read_bytes())
+    root = ew.Root(str(tmp_path))
+    try:
+        ctx = ew._smtp_context(_ecfg(2525, ca_file="ca.pem"), root)
+    finally:
+        root.close()
+    assert len(ctx.get_ca_certs()) == 1
+    assert ctx.check_hostname is True and ctx.verify_mode == ssl.CERT_REQUIRED
+
+
+def test_a_ca_file_that_is_not_pem_is_a_config_error(tmp_path):
+    (tmp_path / "ca.pem").write_text("not a certificate")
+    root = ew.Root(str(tmp_path))
+    try:
+        with pytest.raises(ew.ExpiryWatchError, match="(?i)ca_file"):
+            ew._smtp_context(_ecfg(2525, ca_file="ca.pem"), root)
+    finally:
+        root.close()
+
+
+def test_matrix_transaction_id_names_the_logical_notice_not_the_attempt_day():
+    """Finding 4. The same notice retried on a later day, when days_left has moved on, is the same
+    transaction. Only the daily stage is a different event from one day to the next."""
+    base = _notice(stage="14", days=14)
+    assert ew.matrix_txn_id(base) == ew.matrix_txn_id(_notice(stage="14", days=13))
+    assert ew.matrix_txn_id(_notice(stage="expired", days=-1)) == ew.matrix_txn_id(_notice(stage="expired", days=-2))
+    assert ew.matrix_txn_id(_notice(stage="daily", days=5)) != ew.matrix_txn_id(_notice(stage="daily", days=4))
+    assert ew.matrix_txn_id(_notice(stage="daily", days=5)) == ew.matrix_txn_id(_notice(stage="daily", days=5))
+    assert ew.matrix_txn_id(base) != ew.matrix_txn_id(_notice(stage="7", days=7))
+    other = _notice(_item(expires=dt.date(2026, 6, 1)), stage="14", days=14)
+    assert ew.matrix_txn_id(base) != ew.matrix_txn_id(other)
+
+
+def test_a_matrix_retry_across_midnight_reuses_the_transaction(matrix):
+    cfg = _mcfg(matrix)
+    ew.matrix_send(cfg, MATRIX_TOKEN, _notice(stage="14", days=14), _at(14, hour=23))
+    ew.matrix_send(cfg, MATRIX_TOKEN, _notice(stage="14", days=13), _at(13, hour=1))
+    assert _Matrix.seen[0][1] == _Matrix.seen[1][1]

@@ -16,6 +16,9 @@ state_file = "expiry-watch-state.json"
 # many successful runs in a row. false turns the notice off for every provider.
 disappeared_after_runs = 1
 notify_disappeared = true
+# One time budget for every delivery of a run (router, Matrix, email), at most 3600. When it is
+# gone the rest of the notices are not tried and stay due for the next run (exit code 1).
+delivery_budget_seconds = 300
 
 [router]
 # The n8n alert router webhook (see docs/update-alerting.md). https only, except localhost.
@@ -67,7 +70,7 @@ password_env = "EXPIRY_WATCH_SMTP_PASSWORD"
 # Optional settings, with their defaults:
 # timeout_seconds = 20      # one overall deadline per message, at most 60
 # helo_name = "localhost"   # what the script announces itself as (not this machine's name)
-# ca_file = "internal-ca.pem"   # trust this CA instead of the system store (relative to this file)
+# ca_file = "internal-ca.pem"   # trust ONLY this CA, no public CA (relative to this file)
 
 # Providers: add as many as you need.
 [[providers]]

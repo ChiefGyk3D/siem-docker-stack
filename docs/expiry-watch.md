@@ -150,6 +150,7 @@ repeated thresholds and files over 1 MiB. See
 | `[watch].state_file` | `expiry-watch-state.json` | What was already notified (JSON, mode 0600, written atomically) |
 | `[watch].disappeared_after_runs` | `1` | An item must be missing from this many successful runs in a row (1 to 100) to count as disappeared |
 | `[watch].notify_disappeared` | `true` | `false` turns the disappeared notice off for every provider |
+| `[watch].delivery_budget_seconds` | `300` | One time budget for all deliveries of a run (router, Matrix, email), above 0 and at most 3600 |
 | `[[providers]].acknowledge_removed` | `[]` | Item names whose removal is expected (any provider; up to 200) |
 | `[[providers]].notify_disappeared` | the `[watch]` value | Per provider override |
 | `[router].url` | required | The router webhook. https only; plain http only for localhost |
@@ -223,8 +224,11 @@ that has joined the room and can send messages; the script never joins a room,
 never reads one and never sends anything else. `room_id` must be the internal
 room id, not an alias. `homeserver` is https (plain http only for localhost),
 may carry a path prefix and must not carry credentials, a query or a
-fragment. The transaction id is a hash of the item, stage, expiry date and the
-UTC day, so a retry of the same notice is dropped by the homeserver. A redirect
+fragment. The transaction id is a hash of the item, stage and expiry date (and,
+for the `daily` stage only, the days left), never of the time of the attempt, so
+a retry of the same notice, on a later day too, reuses it and the homeserver can
+drop the duplicate (how long a homeserver remembers a transaction id is its own
+choice). A redirect
 is never followed (the token is not replayed anywhere else), and only an
 `https` or loopback server receives the token. TLS uses the system trust store.
 
@@ -237,16 +241,29 @@ is never followed (the token is not replayed anywhere else), and only an
 | `tls` (port 465) | Implicit TLS from the first byte, certificate and host name verified |
 | `plaintext` (port 25) | Unencrypted. Refused unless `allow_plaintext = true`, and refused together with a login. Only for a relay on a trusted local network |
 
-`ca_file` trusts one private CA instead of the system store (read with the same
-no-link rules as every other file). The script announces itself with
+`ca_file` trusts ONLY the CA (or CAs) in that PEM file and no public CA: a
+certificate from any other CA is refused even if it is valid for the host name
+(read with the same no-link rules as every other file; a file that is not PEM is
+a config error). Leave it out to use the system store. The script announces itself with
 `helo_name` (default `localhost`), not the machine's own name.
 
 Hardening that applies to both: every value that came from a provider (item
 name, owner, link) is cleaned before it goes into a message, so a control
 character or line break in a vendor token name cannot add a mail header, a
 recipient or extra Matrix content; the From and To addresses come only from the
-config; each delivery has one overall deadline of `timeout_seconds`, and a
-channel that overran its deadline is skipped for the rest of that run; response
+config; each delivery has one overall deadline of `timeout_seconds` (connect,
+TLS, login and send together). A delivery that passes it cannot go on to log in
+or send afterwards: the worker checks the deadline before every step, and the
+connection is shut down. A name lookup cannot be interrupted, so the number of
+lookups that may still be pending is bounded; when they are all stuck, deliveries
+are refused and their notices stay due. A channel that overran its deadline is
+skipped for the rest of that run. The whole pass also has one delivery budget,
+`[watch].delivery_budget_seconds` (default 300, at most 3600), shared by the
+router, Matrix and email: each delivery gets the smaller of its timeout and what
+is left of the budget, and once the budget is gone the remaining deliveries are
+not tried, their notices stay due for the next run, and the run exits 1 with a
+message that says so. A slow server therefore cannot stretch one run into hours
+(for a large backlog, raise the budget or run more often); response
 bodies are read up to a cap. The message carries the item name, date, days
 left, owner and runbook link and nothing else.
 
