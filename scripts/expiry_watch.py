@@ -1508,7 +1508,16 @@ class _WatchedSMTPSSL(_Watched, smtplib.SMTP_SSL):
         return tls
 
 
-def email_send(cfg, env, notice, now, root=None, budget=None):
+def email_message_id(cfg, notice, generation):
+    """A Message-ID that names the notice and its generation, not the attempt. If a server queued a
+    message but its final reply was lost, the retry carries the same id, which gives the receiver
+    its best chance to recognize the duplicate. That mitigates, and cannot remove, SMTP's
+    ambiguity about whether a message was accepted."""
+    digest = hashlib.sha256(f"{notice_key(notice)}|{generation}|message-id".encode()).hexdigest()[:32]
+    return f"<{digest}@{cfg.sender.rsplit('@', 1)[1]}>"
+
+
+def email_send(cfg, env, notice, now, root=None, budget=None, generation=""):
     """Send one plain text message. TLS is verified (system trust, or ca_file). With starttls the
     upgrade is required: a server that does not offer it is an error, never a plaintext fallback,
     and the login is sent only after the connection is encrypted. The EHLO name is helo_name, not
@@ -1519,7 +1528,7 @@ def email_send(cfg, env, notice, now, root=None, budget=None):
     msg["From"], msg["To"] = cfg.sender, ", ".join(cfg.to)
     msg["Subject"] = subject
     msg["Date"] = email.utils.format_datetime(now.astimezone(UTC))
-    msg["Message-ID"] = email.utils.make_msgid(domain=cfg.sender.rsplit("@", 1)[1])
+    msg["Message-ID"] = email_message_id(cfg, notice, generation)
     msg["Auto-Submitted"] = "auto-generated"
     msg.set_content(body)
 
@@ -1798,6 +1807,7 @@ def _run_pass(root, leaf, now, env, out, err, dry_run, opener):
             failed = True
             results[key] = (None, acked, notify)
 
+    provider_failed = failed  # delivery failures come later and do not count here
     notices, new_state = decide(items, now, config, state)
     if failed:  # an outage must not make the watch forget what it already told you
         for name, st in state.items():
@@ -1812,7 +1822,9 @@ def _run_pass(root, leaf, now, env, out, err, dry_run, opener):
         worst = {k: dict(v) for k, v in new_seen.items()}
         for key, item, missed in gone:  # an undelivered notice puts its record back
             worst.setdefault(key, {})[item.name] = {"missed": missed, "item": _snapshot(item)}
-        check_state_fits(new_state, worst, {notice_key(n): "0" * 32 for n in notices})  # every notice may stay pending
+        worst_pending = dict(pending) if provider_failed else {}
+        worst_pending.update({notice_key(n): "0" * 32 for n in notices})  # every notice may stay pending
+        check_state_fits(new_state, worst, worst_pending)
     except ExpiryWatchError as e:
         err(f"state error: {e}")
         return 1
@@ -1841,7 +1853,11 @@ def _run_pass(root, leaf, now, env, out, err, dry_run, opener):
     dead = set()  # a channel that overran its deadline is not tried again in this run
     budget_end = time.monotonic() + config.delivery_budget_seconds  # one budget for every delivery of the pass
     over_budget = 0
-    new_pending = {}  # notice key -> generation, for the notices that stay due (see matrix_txn_id)
+    # notice key -> generation, for the notices that stay due (see matrix_txn_id). When a provider
+    # failed this run, a notice that is still due may simply not have been rebuilt, so every earlier
+    # entry is carried forward; with every provider healthy, an entry whose notice is not due now is
+    # provably stale and dropped. An entry is removed when its notice is fully delivered.
+    new_pending = dict(pending) if provider_failed else {}
 
     def undo(n):
         """Undo one notice's state change because it was not delivered: it stays due."""
@@ -1880,7 +1896,8 @@ def _run_pass(root, leaf, now, env, out, err, dry_run, opener):
             sends.append(("matrix", lambda n=n, b=None: matrix_send(config.matrix, matrix_token, n, now, b,
                                                                     generation=generation)))
         if "email" in n.channels:
-            sends.append(("email", lambda n=n, b=None: email_send(config.email, env, n, now, root, b)))
+            sends.append(("email", lambda n=n, b=None: email_send(config.email, env, n, now, root, b,
+                                                                  generation=generation)))
         delivered = True
         for chan, send in sends:
             left = budget_end - time.monotonic()
@@ -1906,6 +1923,8 @@ def _run_pass(root, leaf, now, env, out, err, dry_run, opener):
             failed = True
             undo(n)
             new_pending[notice_key(n)] = generation
+        else:
+            new_pending.pop(notice_key(n), None)
     if over_budget:
         err(f"delivery error: the delivery budget ({config.delivery_budget_seconds:g}s) ran out; "
             f"{over_budget} delivery(ies) were not tried and stay due for the next run")

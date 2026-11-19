@@ -232,6 +232,9 @@ day too, reuses the id and the homeserver can drop the duplicate (how long a
 homeserver remembers a transaction id is its own choice). Once the notice is
 delivered the generation is forgotten, so the same notice recurring later (for
 example an item that disappears, returns and disappears again) is a new event.
+A run in which a provider fails carries every earlier `pending` entry forward
+(the notice may still be due but could not be rebuilt); when every provider
+answered, an entry whose notice is no longer due is dropped.
 A redirect
 is never followed (the token is not replayed anywhere else), and only an
 `https` or loopback server receives the token. TLS uses the system trust store.
@@ -244,6 +247,14 @@ is never followed (the token is not replayed anywhere else), and only an
 | `starttls` (default, port 587) | Connects, requires the server to offer STARTTLS, upgrades and verifies the certificate and host name, then logs in (if configured) and sends. A server that does not offer STARTTLS is an error and nothing is sent: there is no fallback to plaintext |
 | `tls` (port 465) | Implicit TLS from the first byte, certificate and host name verified |
 | `plaintext` (port 25) | Unencrypted. Refused unless `allow_plaintext = true`, and refused together with a login. Only for a relay on a trusted local network |
+
+The `Message-ID` of a message is a hash of the notice key and the same
+generation Matrix uses, not a fresh random value per attempt. If a mail server
+queues a message and then loses its final reply, the retry carries the same
+`Message-ID`, which gives the receiving side its best chance to recognize the
+duplicate. This mitigates, but cannot eliminate, SMTP's ambiguity about whether
+a message was accepted: a retry can still deliver a second copy, and a receiver
+that does not deduplicate by `Message-ID` will show both.
 
 `ca_file` trusts ONLY the CA (or CAs) in that PEM file and no public CA: a
 certificate from any other CA is refused even if it is valid for the host name

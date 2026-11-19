@@ -114,6 +114,8 @@ class _SmtpHandler(socketserver.StreamRequestHandler):
                             break
                         lines.append(row)
                     sess["data"] = "".join(lines)
+                    if srv.drop_after_data:  # queued, but the final reply never comes
+                        return
                     send(srv.data_reply)
                 elif verb == "QUIT":
                     send("221 bye")
@@ -133,6 +135,7 @@ def _start_smtp(starttls_ctx=None, implicit_ctx=None, offer_auth=True, data_repl
     srv = _SmtpServer(("127.0.0.1", 0), _SmtpHandler)
     srv.sessions, srv.starttls_ctx, srv.implicit_ctx = [], starttls_ctx, implicit_ctx
     srv.offer_auth, srv.data_reply, srv.reply_delay = offer_auth, data_reply, reply_delay
+    srv.drop_after_data = False
     t = threading.Thread(target=srv.serve_forever, daemon=True)
     t.start()
     return srv, t
@@ -799,3 +802,74 @@ def test_the_pending_section_of_the_state_file_is_validated(tmp_path):
         path.write_text(json.dumps({**good, "pending": bad}))
         with pytest.raises(ew.ExpiryWatchError):
             ew.load_memory(str(path), None, with_pending=True)
+
+
+# --- review round 3: pending survives a provider outage; stable Message-ID ---------------------
+
+def _pending(tmp_path):
+    return json.loads((tmp_path / "state.json").read_text()).get("pending", {})
+
+
+def test_pending_generation_survives_a_run_where_the_provider_fails(tmp_path, matrix, smtp_plain):
+    cfg = _setup(tmp_path, "http://127.0.0.1:1", matrix_url=matrix, smtp_port=smtp_plain.server_address[1],
+                 routes='"14" = ["matrix", "email"]')
+    good_registry = (tmp_path / "registry.toml").read_text()
+    smtp_plain.data_reply = "451 try later"
+    assert _run(cfg, _at(14))[0] == 1  # matrix took it, email did not
+    first = dict(_pending(tmp_path))
+    assert len(first) == 1 and len(_Matrix.seen) == 1
+    (tmp_path / "registry.toml").write_text("not toml [[")  # the provider fails; no notice can be rebuilt
+    code, _, err = _run(cfg, _at(14, hour=15))
+    assert code == 1 and "registry" in err
+    assert _pending(tmp_path) == first, "the generation must be carried through a provider outage"
+    (tmp_path / "registry.toml").write_text(good_registry)
+    smtp_plain.data_reply = "250 queued"
+    assert _run(cfg, _at(13))[0] == 0
+    assert len(_Matrix.seen) == 2 and _Matrix.seen[0][1] == _Matrix.seen[1][1]
+    assert _pending(tmp_path) == {}, "forgotten only once the notice was fully delivered"
+
+
+def test_pending_generation_is_dropped_when_the_notice_is_provably_no_longer_due(tmp_path, matrix, smtp_plain):
+    cfg = _setup(tmp_path, "http://127.0.0.1:1", matrix_url=matrix, smtp_port=smtp_plain.server_address[1],
+                 routes='"14" = ["matrix", "email"]')
+    smtp_plain.data_reply = "451 try later"
+    assert _run(cfg, _at(14))[0] == 1 and len(_pending(tmp_path)) == 1
+    # the item is rotated to a far date while every provider is healthy: nothing is due, nothing is kept
+    (tmp_path / "registry.toml").write_text(
+        f'[[item]]\nname = "deploy-key"\nkind = "ssh-key"\nexpires = 2030-01-01\nowner = "ops@example.com"\n'
+        f'runbook = "{RUNBOOK}"\n')
+    assert _run(cfg, _at(13))[0] == 0
+    assert _pending(tmp_path) == {}
+
+
+def _message_id(data):
+    for line in data.split("\r\n"):
+        if line.lower().startswith("message-id:"):
+            return line.split(":", 1)[1].strip()
+    raise AssertionError("no Message-ID header")
+
+
+def test_a_retry_after_an_ambiguous_smtp_acceptance_carries_the_same_message_id(tmp_path):
+    """The server queues the message and then drops the connection without its final reply."""
+    srv, t = _start_smtp()
+    srv.drop_after_data = True
+    try:
+        cfg = _setup(tmp_path, "http://127.0.0.1:1", smtp_port=srv.server_address[1], routes='"14" = ["email"]')
+        assert _run(cfg, _at(14))[0] == 1  # the client cannot know the mail was queued
+        srv.drop_after_data = False
+        assert _run(cfg, _at(13))[0] == 0
+        copies = [s["data"] for s in srv.sessions if s["data"]]
+        assert len(copies) == 2 and _message_id(copies[0]) == _message_id(copies[1])
+        assert _pending(tmp_path) == {}
+    finally:
+        _stop(srv, t)
+
+
+def test_message_id_is_stable_per_generation_and_new_for_a_new_one(smtp_plain):
+    cfg = _ecfg(smtp_plain.server_address[1], security="plaintext", allow_plaintext=True)
+    n = _notice(channels=("email",))
+    for gen in ("aaaa", "aaaa", "bbbb"):
+        ew.email_send(cfg, {}, n, _at(14), root=None, generation=gen)
+    ids = [_message_id(s["data"]) for s in smtp_plain.sessions]
+    assert ids[0] == ids[1] != ids[2]
+    assert ids[0].startswith("<") and ids[0].endswith("@example.com>")
