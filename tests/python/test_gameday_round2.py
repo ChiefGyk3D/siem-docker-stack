@@ -66,6 +66,7 @@ def shim_cat(tmp_path, mode):
     body = {
         "partial": 'head -c 7 "$1"; exit 1',
         "dead": "exit 1",
+        "silent_short": 'head -c 7 "$1"; exit 0',
     }[mode]
     (d / "cat").write_text(
         "#!/bin/sh\n"
@@ -87,6 +88,43 @@ def test_writer_failing_after_a_partial_write_restores_the_original_exactly(name
     assert hosts.read_bytes() == orig
 
 
+def test_a_silently_short_write_is_caught_by_the_byte_comparison_and_restored(hosts, tmp_path):
+    hosts.write_bytes(CASES["plain"])
+    shim = shim_cat(tmp_path, "silent_short")
+    # the shim's head -c writes to the real stdout, i.e. the hosts file, then exits 0
+    r = sh(gd.hosts_remove_script(LINE, str(hosts)), path_prefix=shim)
+    assert r.returncode != 0
+    assert hosts.read_bytes() == CASES["plain"]
+
+
+def shim_grep(tmp_path, filter_cmd):
+    d = tmp_path / "gshim"
+    d.mkdir()
+    real = shutil.which("grep")
+    (d / "grep").write_text(
+        "#!/bin/sh\n"
+        'case "$*" in\n'
+        + {"drop_first": f'  *-vxF*) {real} "$@" | sed 1d ;;\n',
+           "keep_all": f'  *-vxF*) for f; do :; done; {REAL_CAT} "$f" ;;\n'}[filter_cmd] +
+        f'  *) exec {real} "$@" ;;\n'
+        "esac\n")
+    (d / "grep").chmod(0o755)
+    return d
+
+
+def test_a_transform_that_loses_an_extra_line_is_refused(hosts, tmp_path):
+    hosts.write_bytes(CASES["plain"])
+    r = sh(gd.hosts_remove_script(LINE, str(hosts)), path_prefix=shim_grep(tmp_path, "drop_first"))
+    assert r.returncode != 0 and hosts.read_bytes() == CASES["plain"]
+
+
+def test_a_transform_that_keeps_the_marker_is_refused(hosts, tmp_path):
+    hosts.write_bytes(CASES["plain"])
+    r = sh(gd.hosts_remove_script(LINE, str(hosts)), path_prefix=shim_grep(tmp_path, "keep_all"))
+    assert r.returncode != 0 and hosts.read_bytes() == CASES["plain"]
+    assert b"marker still present" in r.stderr or b"line count" in r.stderr
+
+
 def test_failed_restore_says_so_and_keeps_the_backup(hosts, tmp_path):
     orig = CASES["plain"]
     hosts.write_bytes(orig)
@@ -95,6 +133,8 @@ def test_failed_restore_says_so_and_keeps_the_backup(hosts, tmp_path):
     r = sh(gd.hosts_remove_script(LINE, str(hosts)), path_prefix=shim)
     assert r.returncode != 0
     assert b"RESTORE FAILED" in r.stderr and b"/orig" in r.stderr
+    kept = re.search(rb"kept in (\S+)/orig", r.stderr).group(1).decode()
+    assert open(kept + "/orig", "rb").read() == orig  # the backup survives for the operator
 
 
 def test_remove_leaves_no_backup_directory_behind_on_success(hosts, tmp_path):
