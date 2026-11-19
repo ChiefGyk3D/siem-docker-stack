@@ -43,7 +43,8 @@ INFLUX_URL = os.environ.get("INFLUX_URL", "http://influxdb:8086")
 ALERT_DIR = SIEM + "/grafana/provisioning/alerting"
 DS_FILE = SIEM + "/grafana/provisioning/datasources/alerting-influx.yml"
 COMPOSE = SIEM + "/docker-compose.yml"
-FILES = ("contact-points.yml", "update-alert-rules-unifi.yml", "update-alert-rules-pfsense.yml")
+FILES = ("contact-points.yml", "update-alert-rules-unifi.yml", "update-alert-rules-pfsense.yml",
+         "heartbeat-alert-rule.yml")
 OLD_URL = "http://n8n/webhook/grafana-alerts"
 ANCHOR = "      - GF_SERVER_ROOT_URL="
 PASS_LINE = "      - GRAFANA_WEBHOOK_SECRET\n"
