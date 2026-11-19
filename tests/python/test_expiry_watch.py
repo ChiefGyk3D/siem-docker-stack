@@ -498,7 +498,7 @@ def test_providers_are_plugins_behind_one_interface(tmp_path):
             ew.register_provider("static-test", Static)  # no silent override
     finally:
         del ew.PROVIDER_TYPES["static-test"]
-    assert set(ew.PROVIDER_TYPES) == {"registry", "tls"}
+    assert set(ew.PROVIDER_TYPES) == {"registry", "tls", "grafana_sa_tokens", "doppler_tokens"}
 
 
 # --- state file ------------------------------------------------------------------------
