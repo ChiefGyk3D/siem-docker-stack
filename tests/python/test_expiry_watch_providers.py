@@ -607,3 +607,40 @@ def test_the_shipped_example_config_parses_with_the_new_providers():
             table.pop("acknowledge_removed", None)
             table.pop("notify_disappeared", None)
             ew.PROVIDER_TYPES[table["type"]](table)  # builds: every field in the example is accepted
+
+
+def test_a_slow_drip_response_cannot_outlast_the_overall_deadline():
+    """Each byte arrives inside the socket timeout, so only the overall deadline can stop this."""
+    done = threading.Event()
+
+    class Drip(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", "60")
+            self.end_headers()
+            try:
+                for _ in range(60):
+                    if done.wait(0.3):
+                        return
+                    self.wfile.write(b" ")
+                    self.wfile.flush()
+            except OSError:
+                pass
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Drip)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        fake = type("V", (), {"base": f"http://127.0.0.1:{srv.server_address[1]}"})
+        t0 = time.monotonic()
+        with pytest.raises(ew.ExpiryWatchError, match="(?i)timed out"):
+            _grafana(fake, timeout_seconds=1).items()
+        assert time.monotonic() - t0 < 2.5
+    finally:
+        done.set()
+        srv.shutdown()
+        t.join(5)
+        srv.server_close()
