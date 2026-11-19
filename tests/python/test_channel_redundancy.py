@@ -58,7 +58,8 @@ def test_no_secret_or_address_value_is_written_in_the_files():
         for domain in re.findall(r"[\w.+-]+@([\w.-]+)", text):
             assert domain.endswith("example.com"), (f.name, domain)
         for host in re.findall(r"https?://([\w.-]+)", text):
-            assert host.endswith("example.com") or host == "localhost", (f.name, host)
+            cited = f is DOC and host in {"documentation.mailgun.com", "grafana.com"}
+            assert host.endswith("example.com") or host == "localhost" or cited, (f.name, host)
     # every $VAR the contact file uses is a documented, empty key in .env.example
     env = ENV_EXAMPLE.read_text(encoding="utf-8")
     body = "\n".join(l for l in CONTACT_FILE.read_text(encoding="utf-8").splitlines() if not l.lstrip().startswith("#"))
@@ -66,6 +67,14 @@ def test_no_secret_or_address_value_is_written_in_the_files():
     assert used, "the contact point must reference the environment"
     for var in used:
         assert re.search(rf"(?m)^# {var}=\s*$", env), var
+
+
+def test_the_provisioning_files_name_no_provider_or_host():
+    for f in (CONTACT_FILE, POLICY_FILE):
+        text = f.read_text(encoding="utf-8").lower()
+        for bad in ("mailgun", "sendgrid", "ses.", "smtp.", "gmail", "postmark", "sparkpost", "mandrill"):
+            assert bad not in text.replace("gf_smtp", ""), (f.name, bad)
+        assert not re.search(r"https?://", text), f.name
 
 
 def test_the_policy_sends_p1_to_email_with_a_continue_route_before_the_n8n_routes():

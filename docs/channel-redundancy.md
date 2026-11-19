@@ -76,6 +76,45 @@ Not done by this repository. Live change, each step:
 6. Send a test P1 and confirm the mail arrives, then confirm Discord and the
    phone still receive it. Live change.
 
+## Provider-neutral checklist
+
+The provisioning files name no provider. Any SMTP provider works through the
+`GF_SMTP_*` variables. Before you enable it (each is an owner step):
+
+- The sending domain is verified with the provider's DNS records.
+- The sending domain is separate from any primary domain, so a deliverability
+  problem there never touches your main mail.
+- The SMTP user and password live only in the secret manager dev config.
+- STARTTLS on port 587 (`GF_SMTP_STARTTLS_POLICY=MandatoryStartTLS`).
+- The From address (`GF_SMTP_FROM_ADDRESS`) is on the verified domain.
+- Send a test from the email contact point's test button in Grafana, then
+  confirm it arrived.
+
+## Example: Mailgun
+
+Mailgun is the owner's likely provider. Read from Mailgun's SMTP page
+(https://documentation.mailgun.com/docs/mailgun/user-manual/sending-messages/send-smtp,
+read 2026-11-19) and its sandbox page
+(https://documentation.mailgun.com/docs/mailgun/user-manual/domains/domains-sandbox,
+read 2026-11-19):
+
+- Host: the page's example uses `smtp.mailgun.org`. It names no other host.
+- Ports: 25, 465, 587 and 2525; 587 is recommended. Port 465 requires a TLS
+  connection; 25, 587 and 2525 start unencrypted and may upgrade with STARTTLS,
+  which is why `MandatoryStartTLS` matters.
+- Credentials are per domain, under Sending, Domain Settings, SMTP Credentials
+  (or the HTTP API).
+- A sandbox domain can only send to authorized recipients.
+
+So the values are `GF_SMTP_HOST=smtp.mailgun.org:587` and
+`GF_SMTP_STARTTLS_POLICY=MandatoryStartTLS`, with the user and password from the
+domain's SMTP Credentials tab, stored in the secret manager.
+
+INFERRED, not read on those pages: the SMTP username format, the EU region host
+(an EU region account may need a different host; check Mailgun's current
+documentation for your region), and the sandbox daily or monthly caps. Use a
+real verified domain rather than the sandbox for alerts.
+
 ## Rollback
 
 Live change, each step: remove the `email-p1` route from the policy tree, remove
@@ -92,9 +131,22 @@ and `example.com`; the route is first, has `continue: true` and matches only
 `n8n-grafana-router`; the example files are not auto-loaded; `.env.example` has
 the new keys, empty.
 
-Not verified: Grafana never loaded these files; no email was sent; the exact
-semantics of `continue` and of the `email` contact point on the running Grafana
-version were not checked against its documentation or a live instance; the
+Verified against Grafana's documentation on 2026-11-19: the `[smtp]` keys
+`enabled`, `host`, `user`, `password`, `from_address` and `startTLS_policy`
+(values `OpportunisticStartTLS`, `MandatoryStartTLS`, `NoStartTLS`) at
+https://grafana.com/docs/grafana/latest/setup-grafana/configure-grafana/#smtp;
+the `continue` option ("continue matching sibling policies even after the alert
+matched the current policy") and top-to-bottom order at
+https://grafana.com/docs/grafana/latest/alerting/configure-notifications/create-notification-policy/;
+the email contact point's addresses and single email options, and that OSS
+needs SMTP configured first, at
+https://grafana.com/docs/grafana/latest/alerting/configure-notifications/manage-contact-points/integrations/configure-email/.
+Inferred: the `GF_SMTP_*` names (the page gives the `GF_<SECTION>_<KEY>` rule,
+not these names); the provisioning keys `addresses` and `singleEmail` and the
+`;` or `,` separator (the page documents UI options only); that the test button
+exists in your version.
+
+Not verified: Grafana never loaded these files; no email was sent; the
 Doppler dev config name is a guess; double paging behavior and the SMTP
 provider's own limits are untested; the heartbeat observer's fallback for P1 is
 described in [heartbeat.md](heartbeat.md) and is not exercised by this change.
