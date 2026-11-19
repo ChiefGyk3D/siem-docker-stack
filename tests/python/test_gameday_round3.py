@@ -133,6 +133,16 @@ def test_returns_the_canonical_target_not_the_symlink(tmp_path):
     assert got == os.path.realpath(tools / "realdocker") and got != str(good / "docker")
 
 
+def test_a_trusted_directory_that_is_itself_a_link_into_a_writable_directory_is_refused(tmp_path):
+    atk = mk(tmp_path / "atk", 0o777)
+    tools = mk(tmp_path / "tools")
+    exe(tools / "realdocker")
+    (atk / "docker").symlink_to(tools / "realdocker")  # the target itself is perfectly safe
+    entry = tmp_path / "entry"
+    entry.symlink_to(atk)
+    assert resolve(tmp_path, [entry]) is None
+
+
 def test_a_target_outside_the_trusted_root_is_refused(tmp_path):
     root = mk(tmp_path / "root")
     outside = mk(tmp_path / "outside")
