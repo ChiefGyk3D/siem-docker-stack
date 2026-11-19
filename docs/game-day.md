@@ -94,6 +94,25 @@ the private directory is removed; on failure it is kept and its path is printed.
 other byte is preserved, with one exception: a file with no final newline keeps none
 unless this run's line was last. Adding a line to such a file inserts the missing newline first.
 
+Container side, as root: the script sets its own `PATH` first
+(`/usr/sbin:/usr/bin:/sbin:/bin`) and never searches the container's `PATH`, so a
+writable directory in it cannot plant a `grep` or `cat`. It needs `sh`, `grep`, `cat`,
+`cmp`, `mktemp`, `tail`, `od`, `tr`, `wc`, `head`, `mv`, `rm`, `kill`, `sleep` and `mkdir`
+in those directories (BusyBox has all of them). The script does not check who can
+write those directories inside the container; the image must keep them root-owned.
+It was tested under GNU `sh` only, not BusyBox `ash`.
+
+Locking: every add and remove takes one lock, a directory named after the hosts file
+with `.gameday-lock` added, holding the owner's pid. A second run waits (30 tries, one
+second apart) and then fails; a lock whose pid is gone is treated as stale and broken
+(moved aside atomically, so only one waiter wins). If a run was killed in the instant
+between creating the lock and writing the pid, the lock stays and the message names
+it: remove it by hand once no game-day script is running. Just before the write the
+live file is compared with the backup; if anything changed (another tool appended a
+line) nothing is written and the run fails. A restore happens only when the file holds
+the start of our own new content (our partial write); if another writer changed it, the
+restore is skipped, the backup is kept and the message says so.
+
 Residual risk, stated plainly: the symlink check runs before the copy, before the
 write and before a restore, but it is a path check, not a held file descriptor, so
 `sh` cannot make check and write atomic. To exploit the gap an actor must already be
@@ -103,8 +122,16 @@ followed by the write; a swap earlier is caught and the run fails loudly.
 
 The container CLI (`docker` or `podman`) is found only in `/usr/bin`,
 `/usr/local/bin`, `/bin` and `/snap/bin`, never through your `PATH`, and must be a
-root-owned file that nobody else can write, in a directory the same way. Anything
-else is refused (exit code 127 on the step) and the command runs with that fixed `PATH`.
+root-owned file that nobody else can write. Links are resolved first; the resolved
+file, its directory and every directory above it up to `/` must be root-owned and not
+group or world writable, and that resolved path (not the link) is what runs. The child
+`PATH` lists only trusted directories that pass the same test. Anything else is refused
+(exit code 127 on the step). Residual: renaming a directory between the check and the
+start needs root already.
+
+`--log` files: an existing log must be a regular file you own, mode 0600 with no
+group or world bits, and have a single hard link, otherwise a warning is printed and
+the log is skipped (a revert is never blocked). Short writes are completed.
 
 ## Checklist
 

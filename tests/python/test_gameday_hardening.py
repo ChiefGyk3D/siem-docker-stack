@@ -74,7 +74,8 @@ def test_hosts_remove_fails_loudly_when_grep_fails_and_changes_nothing(hosts, tm
     stub.mkdir()
     (stub / "grep").write_text("#!/bin/sh\nexit 2\n")
     (stub / "grep").chmod(0o755)
-    r = sh(gd.hosts_remove_script(LINE, str(hosts)), env={"PATH": f"{stub}:/usr/bin:/bin"})
+    script = gd.hosts_remove_script(LINE, str(hosts))
+    r = sh(script.replace(gd.SAFE_BIN_PATH, f"{stub}:{gd.SAFE_BIN_PATH}", 1))
     assert r.returncode != 0
     assert hosts.read_text() == ORIGINAL + LINE + "\n"
 

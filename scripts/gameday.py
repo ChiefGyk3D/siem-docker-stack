@@ -50,7 +50,10 @@ MARKER = "# gameday-84"  # the line marker is MARKER + "-" + the run id
 CLI_ALLOWED = ("docker", "podman")
 RUN_ID_RE = re.compile(r"[0-9a-f]{8,32}")
 TRUSTED_DIRS = ("/usr/bin", "/usr/local/bin", "/bin", "/snap/bin")
-TRUSTED_UID = 0  # the owner a trusted binary must have
+TRUSTED_UID = 0  # the owner a trusted binary and every directory above it must have
+TRUSTED_ROOT = "/"  # ownership is checked on every directory from here down to the binary
+SAFE_BIN_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"  # PATH inside the container for the hosts scripts
+BIN_PATH_RE = re.compile(r"[A-Za-z0-9_./:-]{1,512}")
 PLACEHOLDER_ID = "<RUN_ID>"  # shown in a dry-run revert when no --run-id was given
 DEFAULTS = {
     "n8n_container": "n8n",
@@ -157,12 +160,44 @@ def hosts_line(host, run_id):
     return f"0.0.0.0 {host} {MARKER}-{run_id}"
 
 
-_SH_HEAD = r"""set -eu
+_SH_HEAD = r"""PATH='@P@'
+export PATH
+set -eu
 H='@H@'
 L='@L@'
+LK="$H.gameday-lock"
+D=''
+ok=0
+locked=0
+cleanup() {
+  if [ -n "$D" ]; then
+    if [ "$ok" = 1 ]; then rm -rf "$D"; else echo "backup kept in $D" >&2; fi
+  fi
+  if [ "$locked" = 1 ]; then rm -rf "$LK"; fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
 chk() { [ -f "$H" ] && [ ! -L "$H" ]; }
 chk || { echo 'hosts file missing or a symlink' >&2; exit 1; }
 if echo x | grep -a x >/dev/null 2>&1; then G='grep -a'; else G=grep; fi
+tries=0
+while ! mkdir "$LK" 2>/dev/null; do
+  pid=$(cat "$LK/pid" 2>/dev/null || true)
+  if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+    if mv "$LK" "$LK.stale.$$" 2>/dev/null; then
+      got=$(cat "$LK.stale.$$/pid" 2>/dev/null || true)
+      if [ "$got" = "$pid" ]; then rm -rf "$LK.stale.$$"; else mv "$LK.stale.$$" "$LK" 2>/dev/null || rm -rf "$LK.stale.$$"; fi
+    fi
+    continue
+  fi
+  tries=$((tries + 1))
+  [ "$tries" -le @TRIES@ ] || { echo "another hosts edit holds the lock $LK (remove it if no game-day script is running)" >&2; exit 1; }
+  sleep @SLEEP@
+done
+locked=1
+printf '%s\n' "$$" > "$LK/pid"
+printf '%s\n' "$L" > "$LK/run"
 """
 
 _SH_ADD = r"""rc=0; $G -qxF -- "$L" "$H" || rc=$?
@@ -178,9 +213,7 @@ rc=0; $G -qxF -- "$L" "$H" || rc=$?
 _SH_REMOVE = r"""rc=0; $G -qxF -- "$L" "$H" || rc=$?
 if [ "$rc" -eq 1 ]; then echo 'line already absent'; exit 0; fi
 [ "$rc" -eq 0 ]
-ok=0
 D=$(mktemp -d "${TMPDIR:-/tmp}/gameday.XXXXXX")
-trap 'if [ "$ok" = 1 ]; then rm -rf "$D"; else echo "backup kept in $D" >&2; fi' EXIT
 chk || { echo 'hosts file changed under us' >&2; exit 1; }
 cat "$H" > "$D/orig"
 cmp -s "$D/orig" "$H"
@@ -198,36 +231,59 @@ if [ "$(tail -c 1 "$D/orig" | od -An -tx1 | tr -d ' \n')" != 0a ] && [ "$(tail -
   mv "$D/new2" "$D/new"
 fi
 chk || { echo 'hosts file changed under us' >&2; exit 1; }
+cmp -s "$D/orig" "$H" || { echo 'hosts file changed since the backup was taken; nothing written' >&2; exit 1; }
 if cat "$D/new" > "$H" && cmp -s "$D/new" "$H"; then ok=1; exit 0; fi
 echo 'write failed; restoring the original' >&2
 chk || { echo 'RESTORE FAILED: hosts file replaced; original kept in '"$D"'/orig' >&2; exit 1; }
-if cat "$D/orig" > "$H" && cmp -s "$D/orig" "$H"; then echo 'original restored' >&2; ok=1; exit 1; fi
-echo 'RESTORE FAILED: original kept in '"$D"'/orig' >&2
+if cmp -s "$D/orig" "$H"; then echo 'original is intact' >&2; ok=1; exit 1; fi
+sz=$(wc -c < "$H")
+nsz=$(wc -c < "$D/new")
+if [ "$sz" -le "$nsz" ] && head -c "$sz" "$D/new" | cmp -s - "$H"; then
+  if cat "$D/orig" > "$H" && cmp -s "$D/orig" "$H"; then echo 'original restored' >&2; ok=1; exit 1; fi
+  echo 'RESTORE FAILED: original kept in '"$D"'/orig' >&2
+  exit 1
+fi
+echo 'RESTORE SKIPPED: the hosts file was changed by another writer; original kept in '"$D"'/orig' >&2
 exit 1
 """
 
 
-def _sh(body, line, path):
-    return (_SH_HEAD + body).replace("@H@", path).replace("@L@", line)
+def _sh(body, line, path, bin_path, lock_tries, lock_sleep):
+    bin_path = SAFE_BIN_PATH if bin_path is None else bin_path
+    if not BIN_PATH_RE.fullmatch(bin_path):
+        raise GamedayError("container PATH text has characters that are not allowed")
+    if not re.fullmatch(r"[0-9]{1,4}", str(lock_tries)) or not re.fullmatch(r"[0-9]{1,2}(\.[0-9]{1,3})?", str(lock_sleep)):
+        raise GamedayError("lock settings are not valid")
+    return ((_SH_HEAD + body).replace("@P@", bin_path).replace("@H@", path).replace("@L@", line)
+            .replace("@TRIES@", str(lock_tries)).replace("@SLEEP@", str(lock_sleep)))
 
 
-def hosts_add_script(line, path="/etc/hosts"):
-    """Shell text that appends exactly `line`. Any failed step is a nonzero exit. No temp file."""
-    return _sh(_SH_ADD, line, path)
+def hosts_add_script(line, path="/etc/hosts", bin_path=None, lock_tries=30, lock_sleep="1"):
+    """Shell text that appends exactly `line` under the hosts lock. Any failed step is a nonzero exit.
+
+    The script sets its own PATH first (SAFE_BIN_PATH), so a writable directory in the container's
+    PATH is never searched. It needs these utilities in those directories: sh, grep, cat, cmp,
+    mktemp, tail, od, tr, wc, head, mv, rm, kill, sleep, mkdir (BusyBox provides all of them).
+    """
+    return _sh(_SH_ADD, line, path, bin_path, lock_tries, lock_sleep)
 
 
-def hosts_remove_script(line, path="/etc/hosts"):
+def hosts_remove_script(line, path="/etc/hosts", bin_path=None, lock_tries=30, lock_sleep="1"):
     """Shell text that removes every copy of exactly `line` and nothing else.
 
-    The file is never held in a shell variable. The new content goes to a private mktemp -d
-    directory (removed by a trap on success; kept with a message on failure), is verified,
-    and a backup of the original sits beside it. The target is rewritten in place (it may be a
-    bind mount that cannot be renamed over), compared with cmp, and restored from the backup on
-    any write or verify failure. The symlink check runs before the copy, before the write and
-    before a restore. Residual: a root-equivalent actor inside the container can still swap the
-    path between the last check and the write; see docs/game-day.md.
+    Same PATH and utility rules as hosts_add_script. One lock (a mkdir lock next to the file, with
+    pid metadata, bounded wait and stale-owner handling) serializes every add and remove. The file
+    is never held in a shell variable. The new content goes to a private mktemp -d directory
+    (removed by a trap on success; kept with a message on failure) next to a backup of the original.
+    Just before the write the live file is compared with the backup and nothing is written if it
+    changed. The target is rewritten in place (it may be a bind mount that cannot be renamed over),
+    compared with cmp, and restored from the backup only if what is there is a prefix of the new
+    content (our own partial write); anything else means another writer changed it and the restore
+    is skipped. The symlink check runs before the copy, before the write and before a restore.
+    Residual: a root-equivalent actor inside the container can still swap the path between the last
+    check and the write; see docs/game-day.md.
     """
-    return _sh(_SH_REMOVE, line, path)
+    return _sh(_SH_REMOVE, line, path, bin_path, lock_tries, lock_sleep)
 
 
 def _hosts_block(cfg, container, host, rid):
@@ -379,28 +435,52 @@ def get_scenario(cfg, name, rid=PLACEHOLDER_ID):
 
 # ------------------------------------------------------------ real runners
 
-def resolve_cli(name, dirs=None, owner_uid=None):
-    """Find `name` in a fixed set of trusted directories and return its absolute path, or None.
+def _dirs_ok(path, owner_uid, root):
+    """True when `path` (already canonical) is at or below `root` and every directory from root down
+    to it is owned by owner_uid and not group or world writable."""
+    root = os.path.realpath(root)
+    if os.path.commonpath([root, path]) != root:
+        return False
+    chain, cur = [root], root
+    for part in os.path.relpath(path, root).split(os.sep):
+        if part in ("", "."):
+            continue
+        cur = os.path.join(cur, part)
+        chain.append(cur)
+    for d in chain:
+        try:
+            st = os.lstat(d)
+        except OSError:
+            return False
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != owner_uid or st.st_mode & 0o022:
+            return False
+    return True
 
-    The caller's PATH is never consulted. The file (after following links) must be a regular
-    executable owned by owner_uid and not group or world writable, in a directory with the same
-    owner that is not group or world writable.
+
+def resolve_cli(name, dirs=None, owner_uid=None, root=None):
+    """Find `name` in a fixed set of trusted directories and return its CANONICAL absolute path, or None.
+
+    The caller's PATH is never consulted. Links are resolved here, and the result (not the link) is
+    what gets executed. The trusted directory itself and every directory from `root` down to the
+    resolved file must be owned by owner_uid and not group or world writable, and the file must be a
+    regular executable owned by owner_uid that is not group or world writable. Residual: the final
+    parent is root-controlled, so a rename there needs root already.
     """
     dirs = TRUSTED_DIRS if dirs is None else dirs
     owner_uid = TRUSTED_UID if owner_uid is None else owner_uid
+    root = TRUSTED_ROOT if root is None else root
     for d in dirs:
-        candidate = os.path.join(d, name)
-        if not os.path.exists(candidate):
+        real = os.path.realpath(os.path.join(d, name))
+        if not os.path.isfile(real) or not _dirs_ok(os.path.realpath(d), owner_uid, root):
             continue
-        real = os.path.realpath(candidate)
+        if not _dirs_ok(os.path.dirname(real), owner_uid, root):
+            continue
         try:
-            st = os.stat(real)
-            dst = os.stat(os.path.dirname(real))
+            st = os.lstat(real)
         except OSError:
             continue
-        if (stat.S_ISREG(st.st_mode) and st.st_mode & 0o111 and st.st_uid == owner_uid
-                and not st.st_mode & 0o022 and dst.st_uid == owner_uid and not dst.st_mode & 0o022):
-            return candidate
+        if stat.S_ISREG(st.st_mode) and st.st_mode & 0o111 and st.st_uid == owner_uid and not st.st_mode & 0o022:
+            return real
     return None
 
 
@@ -410,9 +490,11 @@ def real_runner(argv):
     if exe is None:
         return 127, f"no trusted '{argv[0]}' found in {', '.join(TRUSTED_DIRS)} (root-owned, not writable by others)"
     env = dict(os.environ)
-    env["PATH"] = ":".join(TRUSTED_DIRS)
+    good = [d for d in TRUSTED_DIRS if os.path.isdir(d) and _dirs_ok(os.path.realpath(d), TRUSTED_UID, TRUSTED_ROOT)]
+    env["PATH"] = ":".join(good)
     try:
-        proc = subprocess.run([exe, *argv[1:]], capture_output=True, text=True, timeout=120, env=env)
+        proc = subprocess.run([argv[0], *argv[1:]], executable=exe, capture_output=True, text=True,
+                              timeout=120, env=env)
     except FileNotFoundError:
         return 127, f"command not found: {argv[0]}"
     except subprocess.TimeoutExpired:
@@ -515,8 +597,12 @@ def run_steps(steps, cfg, run, post, resolve, results=None):
     return [tuple(e) for e in results]
 
 
-def write_log(path, rec):
-    """Append one JSON line, private and without following symlinks. Returns an error text or ''."""
+def write_log(path, rec, write=os.write):
+    """Append one JSON line, private and without following symlinks. Returns an error text or ''.
+
+    An existing file must be a regular file we own, with no group or world permission bits and a
+    single link. The whole record is written (short writes are completed; a zero write is a failure).
+    """
     flags = os.O_APPEND | os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK
     try:
         fd = os.open(path, flags, 0o600)
@@ -528,7 +614,16 @@ def write_log(path, rec):
             return "log path is not a regular file"
         if st.st_uid != os.geteuid():
             return "log file is owned by another user"
-        os.write(fd, (json.dumps(rec) + "\n").encode())
+        if st.st_mode & 0o077:
+            return "log file must be private (mode 0600); it has group or world permissions"
+        if st.st_nlink != 1:
+            return "log file has more than one hard link"
+        data = (json.dumps(rec) + "\n").encode()
+        while data:
+            n = write(fd, data)
+            if not n or n < 0:
+                return "cannot write log (write made no progress)"
+            data = data[n:]
     except OSError as err:
         return f"cannot write log ({err.strerror})"
     finally:

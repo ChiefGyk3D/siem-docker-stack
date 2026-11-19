@@ -23,8 +23,9 @@ REAL_MKTEMP = shutil.which("mktemp")
 
 
 def sh(script, path_prefix=None, cwd=None):
-    env = {"PATH": (f"{path_prefix}:" if path_prefix else "") + "/usr/bin:/bin"}
-    return subprocess.run(["sh", "-c", script], capture_output=True, env=env, cwd=cwd)
+    if path_prefix:  # the script resets PATH itself, so a shim dir goes into that setting
+        script = script.replace(gd.SAFE_BIN_PATH, f"{path_prefix}:{gd.SAFE_BIN_PATH}", 1)
+    return subprocess.run(["sh", "-c", script], capture_output=True, env={"PATH": "/usr/bin:/bin"}, cwd=cwd)
 
 
 def expected_after_remove(orig: bytes) -> bytes:
@@ -213,7 +214,7 @@ def test_resolve_cli_picks_the_trusted_dir_not_the_path(tmp_path, monkeypatch):
     make_exe(good / "docker", "#!/bin/sh\necho trusted\n")
     make_exe(evil / "docker", "#!/bin/sh\necho evil\n")
     monkeypatch.setenv("PATH", f"{evil}:/usr/bin:/bin")
-    assert gd.resolve_cli("docker", (str(good),), os.geteuid()) == str(good / "docker")
+    assert gd.resolve_cli("docker", (str(good),), os.geteuid(), str(tmp_path)) == str(good / "docker")
 
 
 def test_real_runner_runs_the_trusted_binary_even_with_a_malicious_path(tmp_path, monkeypatch):
@@ -225,6 +226,7 @@ def test_real_runner_runs_the_trusted_binary_even_with_a_malicious_path(tmp_path
     make_exe(evil / "docker", f"#!/bin/sh\necho evil > '{owned}'\n")
     monkeypatch.setattr(gd, "TRUSTED_DIRS", (str(good),))
     monkeypatch.setattr(gd, "TRUSTED_UID", os.geteuid())
+    monkeypatch.setattr(gd, "TRUSTED_ROOT", str(tmp_path))
     monkeypatch.setenv("PATH", f"{evil}:/usr/bin:/bin")
     rc, out = gd.real_runner(["docker", "stop", "n8n"])
     assert rc == 0 and out == "trusted" and not owned.exists()
@@ -243,6 +245,7 @@ def test_untrusted_cli_is_refused(problem, tmp_path, monkeypatch):
         d.chmod(0o777)  # after make_exe, which sets 755
     monkeypatch.setattr(gd, "TRUSTED_DIRS", (str(d),))
     monkeypatch.setattr(gd, "TRUSTED_UID", uid)
+    monkeypatch.setattr(gd, "TRUSTED_ROOT", str(tmp_path))
     rc, out = gd.real_runner(["docker", "stop", "n8n"])
     assert rc == 127 and "trusted" in out
 
@@ -253,6 +256,7 @@ def test_real_runner_does_not_pass_the_callers_path_on(tmp_path, monkeypatch):
     make_exe(good / "docker", '#!/bin/sh\necho "$PATH"\n')
     monkeypatch.setattr(gd, "TRUSTED_DIRS", (str(good),))
     monkeypatch.setattr(gd, "TRUSTED_UID", os.geteuid())
+    monkeypatch.setattr(gd, "TRUSTED_ROOT", str(tmp_path))
     monkeypatch.setenv("PATH", "/evil:/usr/bin")
     rc, out = gd.real_runner(["docker", "ps"])
     assert out == str(good) and "evil" not in out
@@ -260,7 +264,7 @@ def test_real_runner_does_not_pass_the_callers_path_on(tmp_path, monkeypatch):
 
 def test_default_trusted_dirs_are_the_fixed_set():
     assert gd.TRUSTED_DIRS == ("/usr/bin", "/usr/local/bin", "/bin", "/snap/bin")
-    assert gd.TRUSTED_UID == 0
+    assert gd.TRUSTED_UID == 0 and gd.TRUSTED_ROOT == "/"
 
 
 # ---- 4. fullmatch for every validator ---------------------------------------------
