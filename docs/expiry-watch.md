@@ -68,8 +68,15 @@ For each item the watch counts days left as the item's expiry date minus today
 - Rotation resets the state. When an item shows a later expiry date than the
   last one the watch saw, its history starts over and the thresholds fire again
   for the new date. An item that disappears from its provider loses its state.
-- The watch remembers all of this in `state_file`. A notice that could not be
-  delivered is not remembered, so the next run tries again.
+- The watch remembers all of this in `state_file`. A notice that was not
+  delivered is not remembered, so the next run tries again. That covers a failed
+  post and a notice routed only to channels that are not built yet, so fixing
+  the route later still sends it.
+- The state file is not trusted. An entry that makes no sense (a threshold you
+  did not configure or that the item has not reached, a daily date in the
+  future, an expired flag before the expiry date) counts as "nothing sent yet",
+  so the watch errs toward notifying. A changed expiry date, later or earlier,
+  starts the item's history over.
 
 There is no "resolved" message: each notice is a one-off. Rotating the item
 simply stops the notices.
@@ -151,8 +158,10 @@ The file holds `[[item]]` tables with all of `name`, `kind`, `expires`
 [expiry-watch-registry.example.toml](expiry-watch-registry.example.toml). The
 loader refuses duplicate keys, duplicate item names, unknown fields, a date and
 time instead of a date, an empty file, more than 1000 items, a file over 1 MiB,
-a symlink, a FIFO and anything that is not a regular file. The error names the
-item.
+a FIFO and anything that is not a regular file. A symbolic link is refused in
+any component of the path below the config file's folder (the folder itself may
+be reached through a link), and in every component of an absolute path;
+`..` and `.` components are refused. The error names the item.
 
 ### tls: a certificate probe
 
@@ -166,8 +175,12 @@ runbook = "https://wiki.example.com/runbooks/renew-tls"
 ```
 
 It connects, completes the TLS handshake, reads the certificate the peer sent
-and takes the not-after date from it. Connect and handshake share one timeout
-(default 10 seconds, at most 60). It sends no application data.
+and takes the not-after date from it. `timeout_seconds` (default 10, at most 60)
+is one overall deadline for the whole probe: name resolution, connecting (at
+most 4 resolved addresses) and the handshake together. Resolution cannot be
+interrupted, so the probe runs in a worker thread and the watch stops waiting at
+the deadline; a resolver that never answers leaves one idle thread until the
+process exits. The probe sends no application data.
 
 Verification choice: by default the handshake **verifies** the chain and the
 host name against the system trust store, or against `ca_file` when set. A peer
@@ -192,7 +205,8 @@ import expiry_watch as ew
 
 class MyProvider:
     def __init__(self, config):
-        self.config = config              # the [[providers]] table as a dict
+        self.config = config              # the [[providers]] table as a dict; the watch
+                                          # also adds "_base_dir", the config file's folder
 
     def items(self):
         # read your source here; build every item through Item.build so the

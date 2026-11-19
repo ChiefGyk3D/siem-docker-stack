@@ -16,6 +16,7 @@ is never read from a file, never printed and never included in an error message.
 """
 import argparse
 import datetime as dt
+import errno
 import hashlib
 import ipaddress
 import json
@@ -26,6 +27,8 @@ import ssl
 import stat
 import sys
 import tempfile
+import threading
+import time
 import tomllib
 import urllib.error
 import urllib.parse
@@ -36,6 +39,7 @@ from pathlib import Path
 MAX_FILE_BYTES = 1024 * 1024
 MAX_ITEMS = 1000
 MAX_THRESHOLDS = 20
+MAX_ADDRESSES = 4
 MAX_DAYS = 3650
 UTC = dt.timezone.utc
 KNOWN_CHANNELS = ("pushover", "discord", "matrix", "email", "webhook")
@@ -52,16 +56,60 @@ class ExpiryWatchError(Exception):
     """A problem the operator must see: bad config, bad input, failed provider or delivery."""
 
 
+class FileMissing(ExpiryWatchError):
+    """A file that does not exist (the state file may legitimately be missing)."""
+
+
 # --- bounded file reads ----------------------------------------------------------------
 
-def read_capped(path, label):
-    """Read a regular file of at most MAX_FILE_BYTES. Symlinks, FIFOs and devices are refused."""
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+def _open_nofollow(path, root):
+    """Open a file read-only without following a symbolic link in any component.
+
+    A relative path is walked below `root` (the root itself is trusted and may be reached
+    through a link, such as a home directory). An absolute path is walked from "/", so no
+    component of it may be a link. ".." is refused. Each directory is opened relative to
+    the previous one with O_NOFOLLOW, so a swap between check and use cannot redirect it.
+    """
+    p = Path(path)
+    if p.is_absolute():
+        start, parts = "/", p.parts[1:]
+    else:
+        start, parts = str(root) if root is not None else ".", p.parts
+    if not parts or any(part in ("..", ".") for part in parts):
+        raise ExpiryWatchError(f"{path}: the path must not be empty or contain . or .. components")
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    dirfd = os.open(start, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
-        fd = os.open(str(path), flags)
+        for part in parts[:-1]:
+            try:
+                nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | nofollow, dir_fd=dirfd)
+            except FileNotFoundError:
+                raise
+            except OSError as e:
+                if e.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise ExpiryWatchError(f"{path}: a symbolic link or a non-directory is in the path "
+                                           f"({part}); symbolic links are refused") from None
+                raise
+            os.close(dirfd)
+            dirfd = nxt
+        return os.open(parts[-1], os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0), dir_fd=dirfd)
+    finally:
+        os.close(dirfd)
+
+
+def read_capped(path, label, root=None):
+    """Read a regular file of at most MAX_FILE_BYTES.
+
+    No component of the path below `root` (or of an absolute path) may be a symbolic link;
+    FIFOs, devices and directories are refused as well.
+    """
+    try:
+        fd = _open_nofollow(path, root)
     except FileNotFoundError:
-        raise ExpiryWatchError(f"{label}: file not found: {path}") from None
+        raise FileMissing(f"{label}: file not found: {path}") from None
     except OSError as e:
+        if e.errno == errno.ELOOP:
+            raise ExpiryWatchError(f"{label}: {path} is a symbolic link; symbolic links are refused") from None
         raise ExpiryWatchError(f"{label}: cannot read {path}: {e.strerror}") from None
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
@@ -75,8 +123,8 @@ def read_capped(path, label):
     return data
 
 
-def read_toml(path, label):
-    data = read_capped(path, label)
+def read_toml(path, label, root=None):
+    data = read_capped(path, label, root)
     try:
         # tomllib rejects duplicate keys and tables itself.
         return tomllib.loads(data.decode("utf-8"))
@@ -162,14 +210,16 @@ class RegistryProvider:
     FIELDS = ("name", "kind", "expires", "owner", "runbook")
 
     def __init__(self, config, base_dir="."):
-        _only_keys("registry provider", config, ("type", "path"))
+        _only_keys("registry provider", config, ("type", "path", "_base_dir"))
+        if "_base_dir" in config:  # set by run(): the config file's folder
+            base_dir = config["_base_dir"]
         path = config.get("path")
         if not isinstance(path, str) or not path:
             raise ExpiryWatchError("registry provider: path is required")
-        self.path = Path(base_dir) / path
+        self.path, self.root = path, base_dir
 
     def items(self):
-        doc = read_toml(self.path, "registry")
+        doc = read_toml(self.path, "registry", self.root)
         _only_keys("registry", doc, ("item",))
         raw = doc.get("item")
         if not isinstance(raw, list) or not all(isinstance(t, dict) for t in raw):
@@ -196,9 +246,12 @@ class RegistryProvider:
         return items
 
 
-def _der_read(buf, pos, want=None):
-    """Read one DER element at pos. Returns (tag, content_start, content_end)."""
-    if pos + 2 > len(buf):
+def _der_read(buf, pos, limit, want=None):
+    """Read one DER element at pos that must lie entirely inside buf[:limit].
+
+    Returns (tag, content_start, content_end). Lengths must be minimal (canonical DER).
+    """
+    if pos + 2 > limit:
         raise ExpiryWatchError("certificate is truncated")
     tag = buf[pos]
     if want is not None and tag != want:
@@ -209,12 +262,14 @@ def _der_read(buf, pos, want=None):
         length = first
     else:
         count = first & 0x7F
-        if count == 0 or count > 4 or pos + count > len(buf):
+        if count == 0 or count > 4 or pos + count > limit:
             raise ExpiryWatchError("certificate has an unsupported length encoding")
         length = int.from_bytes(buf[pos:pos + count], "big")
+        if length < 0x80 or buf[pos] == 0:
+            raise ExpiryWatchError("certificate has a non-canonical length encoding")
         pos += count
-    if pos + length > len(buf):
-        raise ExpiryWatchError("certificate is truncated")
+    if pos + length > limit:
+        raise ExpiryWatchError("certificate has an element that runs past its enclosing structure")
     return tag, pos, pos + length
 
 
@@ -232,18 +287,24 @@ def _der_time(buf, tag, start, end):
 
 
 def der_not_after(der):
-    """notAfter of a DER X.509 certificate. Reads only the validity field; trusts nothing else."""
-    _, cert_start, cert_end = _der_read(der, 0, 0x30)
-    _, pos, tbs_end = _der_read(der, cert_start, 0x30)
+    """notAfter of a DER X.509 certificate. Reads only the validity field; trusts nothing else.
+
+    Every element must fit inside the structure that encloses it, the validity sequence
+    must be consumed exactly by its two times, and nothing may follow the certificate.
+    """
+    _, cert_start, cert_end = _der_read(der, 0, len(der), 0x30)
+    if cert_end != len(der):
+        raise ExpiryWatchError("certificate has data after its end")
+    _, pos, tbs_end = _der_read(der, cert_start, cert_end, 0x30)
     if pos < tbs_end and der[pos] == 0xA0:  # explicit version
-        pos = _der_read(der, pos)[2]
+        pos = _der_read(der, pos, tbs_end)[2]
     for _ in range(3):  # serial, signature algorithm, issuer
-        pos = _der_read(der, pos)[2]
-    _, v_start, v_end = _der_read(der, pos, 0x30)
-    tag, s, e = _der_read(der, v_start)  # notBefore
+        pos = _der_read(der, pos, tbs_end)[2]
+    _, v_start, v_end = _der_read(der, pos, tbs_end, 0x30)
+    tag, s, e = _der_read(der, v_start, v_end)  # notBefore
     _der_time(der, tag, s, e)
-    tag, s, e = _der_read(der, e)  # notAfter
-    if e > v_end:
+    tag, s, e = _der_read(der, e, v_end)  # notAfter
+    if e != v_end:
         raise ExpiryWatchError("certificate has an invalid validity field")
     return _der_time(der, tag, s, e)
 
@@ -260,7 +321,7 @@ class TlsProvider:
     """
 
     FIELDS = ("type", "host", "port", "name", "kind", "owner", "runbook", "verify", "ca_file",
-              "server_name", "timeout_seconds")
+              "server_name", "timeout_seconds", "_base_dir")
 
     def __init__(self, config):
         _only_keys("tls provider", config, self.FIELDS)
@@ -295,15 +356,63 @@ class TlsProvider:
             return ctx
         return ssl.create_default_context(cafile=self.ca_file)
 
-    def items(self):
-        where = f"{self.host}:{self.port}"
-        try:
-            with socket.create_connection((self.host, self.port), timeout=self.timeout) as raw:
-                raw.settimeout(self.timeout)
+    def _probe(self, deadline):
+        """The whole probe: resolve, connect, handshake. Runs in a worker thread (see items)."""
+        def left():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("overall deadline reached")
+            return remaining
+
+        infos = socket.getaddrinfo(self.host, self.port, type=socket.SOCK_STREAM)[:MAX_ADDRESSES]
+        last = OSError("no address")
+        for family, kind, proto, _, addr in infos:
+            raw = socket.socket(family, kind, proto)
+            try:
+                raw.settimeout(left())
+                raw.connect(addr)
+                raw.settimeout(left())
                 with self._context().wrap_socket(raw, server_hostname=self.server_name) as tls:
-                    der = tls.getpeercert(binary_form=True)
-        except (OSError, ssl.SSLError, ValueError) as e:
-            raise ExpiryWatchError(f"tls probe of {where} failed: {e}") from None
+                    tls.settimeout(left())
+                    return tls.getpeercert(binary_form=True)
+            except ssl.SSLError:
+                raise
+            except OSError as e:
+                last = e
+            finally:
+                raw.close()
+        raise last
+
+    def items(self):
+        """Probe with ONE overall deadline of timeout_seconds, name resolution included.
+
+        getaddrinfo cannot be interrupted, so the probe runs in a daemon worker thread and
+        the caller stops waiting at the deadline. A resolver that never answers leaves one
+        idle thread behind until the process ends (a cron job exits right away).
+        """
+        where = f"{self.host}:{self.port}"
+        box = {}
+        deadline = time.monotonic() + self.timeout
+
+        def work():
+            try:
+                box["der"] = self._probe(deadline)
+            except BaseException as e:  # reported to the caller below, never lost
+                box["error"] = e
+
+        worker = threading.Thread(target=work, daemon=True, name=f"expiry-probe-{where}")
+        worker.start()
+        worker.join(self.timeout + 0.25)
+        if worker.is_alive():
+            raise ExpiryWatchError(f"tls probe of {where} failed: timed out (overall deadline {self.timeout:g}s)")
+        err = box.get("error")
+        if isinstance(err, TimeoutError) or isinstance(err, socket.timeout):
+            raise ExpiryWatchError(f"tls probe of {where} failed: timed out (overall deadline {self.timeout:g}s)")
+        if isinstance(err, (OSError, ssl.SSLError, ValueError)):
+            raise ExpiryWatchError(f"tls probe of {where} failed: {err}") from None
+        if err is not None:
+            raise err
+        der = box.get("der")
         if not der:
             raise ExpiryWatchError(f"tls probe of {where} failed: the peer sent no certificate")
         not_after = der_not_after(der)
@@ -414,7 +523,8 @@ def parse_config(raw):
 
 
 def load_config(path):
-    return parse_config(read_toml(path, "config"))
+    path = Path(path)
+    return parse_config(read_toml(path.name, "config", path.parent))
 
 
 # --- the decision engine (pure) -----------------------------------------------------------------
@@ -431,26 +541,46 @@ def _fresh(expires):
     return {"expires": expires.isoformat(), "threshold": None, "daily": None, "expired": False}
 
 
+def _reconcile(prev, item, days, today, config):
+    """The state to trust for this item. Anything inconsistent counts as "nothing sent yet".
+
+    A changed expiry date (later: rotated, earlier: moved up) starts the history over. A
+    threshold must be a configured one that the item has really reached; a daily date may
+    not lie in the future; the expired flag only holds once the expiry date is reached.
+    """
+    st = _fresh(item.expires)
+    try:
+        if (not isinstance(prev, dict) or dt.date.fromisoformat(prev["expires"]) != item.expires):
+            return st
+        threshold, daily, expired = prev["threshold"], prev["daily"], prev["expired"]
+        if (isinstance(threshold, int) and not isinstance(threshold, bool)
+                and threshold in config.thresholds and days <= threshold):
+            st["threshold"] = threshold
+        if isinstance(daily, str) and dt.date.fromisoformat(daily) <= today:
+            st["daily"] = daily
+        if expired is True and days <= 0:
+            st["expired"] = True
+    except (KeyError, TypeError, ValueError):
+        return _fresh(item.expires)
+    return st
+
+
 def decide(items, now, config, state):
     """Return (notices, new_state). Pure: no clock, no I/O, `state` is not modified.
 
     Per item: each threshold fires once (the lowest one already crossed, so a missed run
     does not replay the earlier ones), then one notice per UTC day while days left is at
-    or below daily_below_days, then one expired notice. A later expiry date than the one
-    last seen means the item was rotated and its state starts over. Items no longer
-    supplied lose their state.
+    or below daily_below_days, then one expired notice. A different expiry date than the one
+    last seen (rotated or moved up) and any inconsistent state entry start the item over.
+    Items no longer supplied lose their state.
     """
     if now.tzinfo is None:
         raise ValueError("now must be timezone-aware")
     today = now.astimezone(UTC).date()
     notices, new_state = [], {}
     for item in sorted(items, key=lambda i: i.name):
-        prev = state.get(item.name)
-        st = dict(prev) if prev else _fresh(item.expires)
-        if prev and item.expires > dt.date.fromisoformat(prev["expires"]):
-            st = _fresh(item.expires)
-        st["expires"] = item.expires.isoformat()
         days = (item.expires - today).days
+        st = _reconcile(state.get(item.name), item, days, today, config)
         stage = None
         if days <= 0:
             if not st["expired"]:
@@ -530,12 +660,18 @@ def post_json(url, token, payload, timeout, opener=None):
 
 # --- state file ----------------------------------------------------------------------------------
 
-def load_state(path):
-    path = Path(path)
-    if not path.exists() and not path.is_symlink():
+def load_state(path, root=None):
+    """Load the state file (relative to root when given). A missing file is an empty state.
+
+    Shape and types are checked here; whether the values make sense for an item is decided
+    by decide(), which treats an inconsistent entry as "nothing sent yet".
+    """
+    try:
+        data = read_capped(path, "state", root)
+    except FileMissing:
         return {}
     try:
-        doc = json.loads(read_capped(path, "state").decode("utf-8"))
+        doc = json.loads(data.decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as e:
         raise ExpiryWatchError(f"state: {path} is not valid JSON: {e}") from None
     if not isinstance(doc, dict) or len(doc) > MAX_ITEMS * 4:
@@ -577,6 +713,14 @@ def save_state(path, state):
 
 # --- the runner -------------------------------------------------------------------------------------
 
+def _keep_prior(new_state, state, name):
+    """Undo one item's state change because its notice was not delivered."""
+    if name in state:
+        new_state[name] = state[name]
+    else:
+        new_state.pop(name, None)
+
+
 def run(config_path, now, env=None, out=print, err=None, dry_run=False, opener=None):
     """One pass: collect, decide, deliver, save. Returns the process exit code."""
     env = os.environ if env is None else env
@@ -588,12 +732,12 @@ def run(config_path, now, env=None, out=print, err=None, dry_run=False, opener=N
         providers = []
         for table in config.providers:
             table = dict(table)
-            for key in ("path", "ca_file"):  # relative paths are relative to the config file
-                if isinstance(table.get(key), str):
-                    table[key] = str(base / table[key])
+            if isinstance(table.get("ca_file"), str):  # relative paths are relative to the config file
+                table["ca_file"] = str(base / table["ca_file"])
+            table["_base_dir"] = str(base)  # symbolic links are refused below this folder
             providers.append(PROVIDER_TYPES[table["type"]](table))
         state_path = base / config.state_file
-        state = load_state(state_path)
+        state = load_state(config.state_file, base)
     except ExpiryWatchError as e:
         err(f"config error: {e}")
         return 2
@@ -632,6 +776,7 @@ def run(config_path, now, env=None, out=print, err=None, dry_run=False, opener=N
             err(f"warning: channel(s) {', '.join(skipped)} are not built yet; no message sent for them ({tag})")
         if n not in postable:
             out(f"no deliverable channel: {tag}")
+            _keep_prior(new_state, state, n.item.name)  # nothing was sent: the notice stays due
             continue
         payload = build_payload(n, now)
         if dry_run:
@@ -643,10 +788,7 @@ def run(config_path, now, env=None, out=print, err=None, dry_run=False, opener=N
         except ExpiryWatchError as e:
             err(f"delivery error: {tag}: {e}")
             failed = True
-            if n.item.name in state:  # keep the notice due: retry on the next run
-                new_state[n.item.name] = state[n.item.name]
-            else:
-                new_state.pop(n.item.name, None)
+            _keep_prior(new_state, state, n.item.name)  # keep the notice due: retry on the next run
 
     if not dry_run:
         try:
