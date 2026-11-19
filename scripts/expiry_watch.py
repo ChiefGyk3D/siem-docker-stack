@@ -21,6 +21,7 @@ import argparse
 import datetime as dt
 import errno
 import hashlib
+import http.client
 import ipaddress
 import json
 import os
@@ -505,9 +506,9 @@ def parse_expiry(label, value):
                 offset = dt.timedelta(hours=int(zh), minutes=int(zm)) * (1 if sign == "+" else -1)
             moment = dt.datetime(int(year), int(month), int(day), int(hour), int(minute), int(second or 0),
                                  int((frac or "0")[:6].ljust(6, "0")), tzinfo=dt.timezone(offset))
-    except ValueError:
+        date = moment.astimezone(UTC).date()  # can overflow at the calendar edges: inside the guard
+    except (ValueError, OverflowError):
         raise ExpiryWatchError(f"{label}: the expiry date is not a valid ISO 8601 date (got {value[:40]!r})") from None
-    date = moment.astimezone(UTC).date()
     if date.year < 2000:
         raise ExpiryWatchError(f"{label}: the expiry date {date.isoformat()} is not plausible (a zero date?)")
     return date
@@ -531,51 +532,98 @@ def _refuse_constant(name):
     raise ValueError("not a JSON value")
 
 
-def http_get_json(url, token, timeout, opener=None):
-    """GET url with the bearer, return the parsed JSON. Bounded three ways: one overall deadline
-    (a worker thread, like the TLS probe), a response size cap, and no redirects. The secret goes
-    only to `url`, and no message made here contains it or the response body."""
+class _HttpStatus(Exception):
+    def __init__(self, code):
+        self.code = code
+
+
+class _TooLarge(Exception):
+    pass
+
+
+def http_get_json(url, token, timeout):
+    """GET url with the bearer, return the parsed JSON.
+
+    Made with http.client directly: environment proxies are never used (a proxy would be handed
+    the bearer), redirects are never followed (a 3xx is an error), the response is capped, and
+    the whole call has one deadline that is enforced, not just waited for: the reader re-arms the
+    socket timeout with the time left, and when the deadline passes the socket is shut down so
+    the worker thread ends. Only a name lookup cannot be interrupted (see the TLS provider). The
+    secret goes only to `url`, and no message made here contains it or the response body."""
     _check_url("url", url)
     if not isinstance(token, str) or not _TOKEN.fullmatch(token):
         raise ExpiryWatchError("the vendor token is empty or contains characters not allowed in a header")
-    req = urllib.request.Request(url, method="GET", headers={
-        "Authorization": f"Bearer {token}", "Accept": "application/json"})
-    opener = opener or urllib.request.build_opener(_NoRedirect)
-    host = urllib.parse.urlsplit(url).hostname
+    parts = urllib.parse.urlsplit(url)
+    host = parts.hostname
+    target = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+    deadline = time.monotonic() + timeout
     box = {}
 
     def work():
+        conn = None
         try:
-            with opener.open(req, timeout=timeout) as resp:
-                length = resp.headers.get("Content-Length")
-                if length is not None and length.strip().isdigit() and int(length) > MAX_RESPONSE_BYTES:
-                    raise OverflowError
-                box["data"] = resp.read(MAX_RESPONSE_BYTES + 1)
+            factory = http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
+            conn = factory(host, parts.port, timeout=timeout)
+            box["conn"] = conn
+            conn.request("GET", target, headers={"Authorization": f"Bearer {token}", "Accept": "application/json",
+                                                 "Connection": "close"})
+            resp = conn.getresponse()
+            if not 200 <= resp.status < 300:
+                raise _HttpStatus(resp.status)
+            length = resp.getheader("Content-Length")
+            if length is not None and length.strip().isdigit() and int(length) > MAX_RESPONSE_BYTES:
+                raise _TooLarge
+            chunks, total = [], 0
+            while True:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise TimeoutError("overall deadline reached")
+                if conn.sock is not None:
+                    conn.sock.settimeout(left)
+                chunk = resp.read1(65536)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_RESPONSE_BYTES:
+                    raise _TooLarge
+                chunks.append(chunk)
+            box["data"] = b"".join(chunks)
         except Exception as e:  # reported below; process-control exceptions pass through
             box["error"] = e
+        finally:
+            if conn is not None:
+                conn.close()
 
     worker = threading.Thread(target=work, daemon=True, name=f"expiry-get-{host}")
     worker.start()
     worker.join(timeout)
     if worker.is_alive():
+        conn = box.get("conn")
+        sock = getattr(conn, "sock", None)
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)  # wakes a blocked read so the worker can end
+            except OSError:
+                pass
+        worker.join(1.0)
         raise ExpiryWatchError(f"{host} did not answer: timed out (overall deadline {timeout:g}s)")
     err = box.get("error")
-    if isinstance(err, urllib.error.HTTPError):
+    if isinstance(err, _HttpStatus):
         if 300 <= err.code < 400:
             raise ExpiryWatchError(f"{host} redirect refused: HTTP {err.code} (the token is never sent elsewhere)")
         hint = " (check the token and its read permission)" if err.code in (401, 403) else ""
         raise ExpiryWatchError(f"{host} rejected the request: HTTP {err.code}{hint}")
-    if isinstance(err, (TimeoutError, socket.timeout)):
+    if isinstance(err, TimeoutError):  # socket.timeout is TimeoutError
         raise ExpiryWatchError(f"{host} did not answer: timed out")
-    if isinstance(err, OverflowError):
+    if isinstance(err, _TooLarge):
         raise ExpiryWatchError(f"{host}: the response is too large (limit {MAX_RESPONSE_BYTES} bytes)")
-    if isinstance(err, (urllib.error.URLError, OSError, ValueError)):
-        raise ExpiryWatchError(f"{host} unreachable: {getattr(err, 'reason', err)}") from None
+    if isinstance(err, http.client.HTTPException):
+        raise ExpiryWatchError(f"{host}: the answer is not valid HTTP") from None
+    if isinstance(err, (OSError, ValueError)):
+        raise ExpiryWatchError(f"{host} unreachable: {err}") from None
     if err is not None:
         raise err
     data = box.get("data", b"")
-    if len(data) > MAX_RESPONSE_BYTES:
-        raise ExpiryWatchError(f"{host}: the response is too large (limit {MAX_RESPONSE_BYTES} bytes)")
     try:
         return json.loads(data.decode("utf-8"), object_pairs_hook=_no_duplicate_keys, parse_constant=_refuse_constant)
     except (ValueError, UnicodeDecodeError, RecursionError):
@@ -611,7 +659,6 @@ class _VendorTokens:
         except ExpiryWatchError as e:
             raise ExpiryWatchError(f"{self.LABEL}: {e}") from None
         self._today = lambda: dt.datetime.now(UTC).date()
-        self._opener = None
         self.last_note = None
 
     def _item(self, name, expires):
@@ -653,7 +700,7 @@ class GrafanaProvider(_VendorTokens):
         items, names, skipped = [], set(), 0
         base = self.url.rstrip("/")
         for sid in self.ids:
-            body = http_get_json(f"{base}/api/serviceaccounts/{sid}/tokens", self._token, self.timeout, self._opener)
+            body = http_get_json(f"{base}/api/serviceaccounts/{sid}/tokens", self._token, self.timeout)
             if not isinstance(body, list):
                 raise ExpiryWatchError(f"{self.LABEL}: service account {sid}: expected a list of tokens")
             if len(body) > MAX_ITEMS:
@@ -713,7 +760,11 @@ class DopplerProvider(_VendorTokens):
     def items(self):
         query = urllib.parse.urlencode({"project": self.project, "config": self.config})
         body = http_get_json(f"{self.api_url.rstrip('/')}/v3/configs/config/tokens?{query}", self._token,
-                             self.timeout, self._opener)
+                             self.timeout)
+        if isinstance(body, dict) and (("success" in body and body["success"] is not True)
+                                       or body.get("error") or body.get("errors")):
+            # a 200 that says it failed is not an empty inventory: it must not make tokens vanish
+            raise ExpiryWatchError(f"{self.LABEL}: the answer reports a failure (success is not true, or it has an error)")
         tokens = body.get("tokens") if isinstance(body, dict) else None
         if not isinstance(tokens, list):
             raise ExpiryWatchError(f"{self.LABEL}: expected an object with a list called tokens")
@@ -1061,7 +1112,10 @@ def post_json(url, token, payload, timeout, opener=None):
     body = json.dumps(payload).encode()
     req = urllib.request.Request(url, data=body, method="POST", headers={
         "Content-Type": "application/json", "Authorization": f"Bearer {token}"})
-    opener = opener or urllib.request.build_opener(_NoRedirect)
+    if opener is None:
+        # plain http is only allowed for loopback: never hand that bearer to an environment proxy
+        no_proxy = [urllib.request.ProxyHandler({})] if url.lower().startswith("http://") else []
+        opener = urllib.request.build_opener(*no_proxy, _NoRedirect)
     host = urllib.parse.urlsplit(url).hostname
     try:
         with opener.open(req, timeout=timeout) as resp:
@@ -1154,11 +1208,25 @@ def load_state(path, root=None):
     return load_memory(path, root)[0]
 
 
+def check_state_fits(state, seen):
+    """Refuse a state the loader would refuse: the same item count and byte limits, measured on
+    the exact text that would be written. Returns the text."""
+    doc = state if seen is None else {"version": 2, "items": state, "seen": seen}
+    remembered = sum(len(r) for r in (seen or {}).values())
+    if len(state) > MAX_ITEMS * 4 or remembered > MAX_ITEMS * 4:
+        raise ExpiryWatchError(f"state: too many items to remember (limit {MAX_ITEMS * 4} items and "
+                               f"{MAX_ITEMS * 4} remembered ones); watch fewer items or tokens")
+    text = json.dumps(doc, indent=1, sort_keys=True) + "\n"
+    if len(text.encode("utf-8")) > MAX_FILE_BYTES:
+        raise ExpiryWatchError(f"state: too large to write (limit {MAX_FILE_BYTES} bytes); watch fewer items or tokens")
+    return text
+
+
 def save_state(path, state, root=None, seen=None):
     """Write the state atomically and privately (0600). The temp file is created and renamed
     inside the held directory, so a link retargeted meanwhile cannot redirect the write.
     With `seen` the version 2 format is written; without it, the plain item states."""
-    doc = state if seen is None else {"version": 2, "items": state, "seen": seen}
+    text = check_state_fits(state, seen)  # before anything is created: an unloadable state is never written
     dirfd, leaf = _open_parent(path, root)
     tmp = f".expiry-state-{os.getpid()}-{os.urandom(6).hex()}"
     try:
@@ -1166,8 +1234,7 @@ def save_state(path, state, root=None, seen=None):
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 os.fchmod(fh.fileno(), 0o600)
-                json.dump(doc, fh, indent=1, sort_keys=True)
-                fh.write("\n")
+                fh.write(text)
             os.replace(tmp, leaf, src_dir_fd=dirfd, dst_dir_fd=dirfd)
         except BaseException:
             try:
@@ -1271,6 +1338,15 @@ def _run_pass(root, leaf, now, env, out, err, dry_run, opener):
         notices.append(Notice(item, "disappeared", (item.expires - today).days, config.routes["disappeared"],
                               origin=(key, missed)))
 
+    try:  # before any notice is sent: a state that could not be saved and read back is a failed run
+        worst = {k: dict(v) for k, v in new_seen.items()}
+        for key, item, missed in gone:  # an undelivered notice puts its record back
+            worst.setdefault(key, {})[item.name] = {"missed": missed, "item": _snapshot(item)}
+        check_state_fits(new_state, worst)
+    except ExpiryWatchError as e:
+        err(f"state error: {e}")
+        return 1
+
     postable = [n for n in notices if set(n.channels) & set(BUILT_CHANNELS)]
     token = None
     if postable and not dry_run:
@@ -1316,6 +1392,9 @@ def _run_pass(root, leaf, now, env, out, err, dry_run, opener):
             save_state(state_path, new_state, root, seen=new_seen)
         except OSError as e:
             err(f"state error: cannot write {state_path}: {e.strerror}")
+            return 1
+        except ExpiryWatchError as e:
+            err(f"state error: {e}")
             return 1
     return 1 if failed else 0
 

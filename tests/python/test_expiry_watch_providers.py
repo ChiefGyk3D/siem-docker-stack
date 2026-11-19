@@ -21,7 +21,7 @@ TODAY = dt.date(2026, 1, 1)
 class FakeVendor:
     """Serves canned replies by path, records every request, and can hang or redirect."""
 
-    def __init__(self):
+    def __init__(self, host="127.0.0.1"):
         self.requests = []          # (path with query, headers dict)
         self.replies = {}           # path (no query) -> (status, body bytes, extra headers)
         self.release = threading.Event()
@@ -46,11 +46,13 @@ class FakeVendor:
                 except OSError:
                     pass
 
+            do_POST = do_GET
+
             def log_message(self, *a):
                 pass
 
-        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+        self.server = http.server.ThreadingHTTPServer((host, 0), Handler)
+        self.base = f"http://{host}:{self.server.server_address[1]}"
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
 
