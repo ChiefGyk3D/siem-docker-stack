@@ -1243,13 +1243,14 @@ def post_json(url, token, payload, timeout, opener=None):
     if not isinstance(token, str) or not _TOKEN.fullmatch(token):
         raise ExpiryWatchError("the router secret is empty or contains characters not allowed in a header")
     body = json.dumps(payload).encode()
+    if opener is None:  # the real path: one absolute deadline, no proxy, no redirect (see _http_exchange)
+        parts = urllib.parse.urlsplit(url)
+        _http_exchange("router", "POST", url, parts.path + (f"?{parts.query}" if parts.query else ""), token, body,
+                       timeout)
+        return
     req = urllib.request.Request(url, data=body, method="POST", headers={
         "Content-Type": "application/json", "Authorization": f"Bearer {token}"})
-    if opener is None:
-        # plain http is only allowed for loopback: never hand that bearer to an environment proxy
-        no_proxy = [urllib.request.ProxyHandler({})] if url.lower().startswith("http://") else []
-        opener = urllib.request.build_opener(*no_proxy, _NoRedirect)
-    host = urllib.parse.urlsplit(url).hostname
+    host = urllib.parse.urlsplit(url).hostname  # an injected opener is a test hook only
     try:
         with opener.open(req, timeout=timeout) as resp:
             resp.read(65536)
@@ -1266,9 +1267,6 @@ class _Overrun(ExpiryWatchError):
     """A delivery went past its overall deadline; its worker thread may still be running."""
 
 
-DEADLINE_GRACE = 2.0  # how long the caller waits past a deadline for the worker to notice it
-
-
 class _Deadline:
     """ONE overall deadline for one delivery, shared by the caller and its worker thread.
 
@@ -1282,6 +1280,7 @@ class _Deadline:
         self.end = time.monotonic() + seconds
         self.seconds = seconds
         self.sock = None
+        self.delivered = False  # set by the worker once the server has accepted the message
         self.aborted = threading.Event()
 
     def left(self):
@@ -1328,10 +1327,11 @@ def _run_deadline(dl, fn):
     except BaseException:
         _FETCH_SLOTS.release()
         raise
-    worker.join(max(0.0, dl.end - time.monotonic()) + DEADLINE_GRACE)
+    worker.join(max(0.0, dl.end - time.monotonic()))
     if worker.is_alive():
-        dl.abort()
-        worker.join(1.0)
+        dl.abort()  # no further wait: the deadline is the deadline
+        if dl.delivered:
+            return None  # only the goodbye was slow
         raise _Overrun(f"timed out (overall deadline {dl.seconds:g}s)")
     err = box.get("error")
     if isinstance(err, TimeoutError):  # socket.timeout is TimeoutError
@@ -1360,30 +1360,14 @@ def build_message(notice, now):
     return subject, body
 
 
-def matrix_txn_id(notice):
-    """The Matrix transaction id of a notice. It names the LOGICAL notice (item, stage, expiry date;
-    for the daily stage also the days left, which is what makes one day's notice a different event
-    from the next) and never the time of the attempt, so a retry, on a later day too, is the same
-    transaction and the homeserver can drop the duplicate."""
-    parts = [notice.item.name, notice.stage, notice.item.expires.isoformat()]
-    if notice.stage == "daily":
-        parts.append(str(notice.days_left))
-    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:32]
-
-
-def matrix_send(cfg, token, notice, now, budget=None):
-    """Send one m.notice to the configured room. The token goes only to the homeserver. Made with
-    http.client: no environment proxy, no redirect (a 3xx is an error), a capped response, and one
-    overall deadline (see _Deadline). No message made here contains the token."""
-    if not isinstance(token, str) or not _TOKEN.fullmatch(token):
-        raise ExpiryWatchError("the Matrix secret is empty or contains characters not allowed in a header")
-    subject, body = build_message(notice, now)
-    url = (f"{cfg.homeserver}/_matrix/client/v3/rooms/{urllib.parse.quote(cfg.room_id, safe='')}"
-           f"/send/m.room.message/{matrix_txn_id(notice)}")
+def _http_exchange(label, method, url, target, token, payload, seconds):
+    """One JSON request with a bearer, under ONE absolute deadline (see _Deadline), for the router and
+    Matrix. Made with http.client: no environment proxy (it would be handed the bearer), no redirect
+    (a 3xx is an error), the live socket re-armed with the time left before every blocking call, and
+    only a capped part of the answer is read. No message made here contains the token."""
     parts = urllib.parse.urlsplit(url)
     host = parts.hostname
-    payload = json.dumps({"msgtype": "m.notice", "body": f"{subject}\n{body}"}).encode()
-    dl = _Deadline(_seconds(cfg, budget))
+    dl = _Deadline(seconds)
 
     def send():
         factory = http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
@@ -1392,13 +1376,13 @@ def matrix_send(cfg, token, notice, now, budget=None):
             conn.connect()  # name lookup, connect and TLS (verified by the default context)
             sock = conn.sock  # http.client drops its own reference once the answer is "close"
             dl.arm(sock)
-            conn.request("PUT", parts.path, body=payload, headers={
+            conn.request(method, target, body=payload, headers={
                 "Content-Type": "application/json", "Authorization": f"Bearer {token}", "Connection": "close"})
             dl.arm(sock)
             resp = conn.getresponse()
             status = resp.status
             total = 0
-            while total <= 65536:  # read and drop a capped part of the answer
+            while total <= 65536 and not resp.isclosed():  # read and drop a capped part of the answer
                 dl.arm(sock)
                 chunk = resp.read1(8192)
                 if not chunk:
@@ -1412,14 +1396,43 @@ def matrix_send(cfg, token, notice, now, budget=None):
     try:
         _run_deadline(dl, send)
     except _Overrun as e:
-        raise _Overrun(f"matrix {host}: {e}") from None
+        raise _Overrun(f"{label} {host}: {e}") from None
     except _HttpStatus as e:
         kind = "redirect refused" if 300 <= e.code < 400 else "rejected"
-        raise ExpiryWatchError(f"matrix {host} {kind}: HTTP {e.code}") from None
+        raise ExpiryWatchError(f"{label} {host} {kind}: HTTP {e.code}") from None
     except http.client.HTTPException:
-        raise ExpiryWatchError(f"matrix {host}: the answer is not valid HTTP") from None
+        raise ExpiryWatchError(f"{label} {host}: the answer is not valid HTTP") from None
     except (OSError, ValueError) as e:
-        raise ExpiryWatchError(f"matrix {host} unreachable: {getattr(e, 'strerror', None) or type(e).__name__}") from None
+        raise ExpiryWatchError(f"{label} {host} unreachable: {getattr(e, 'strerror', None) or type(e).__name__}") from None
+
+
+def notice_key(notice):
+    """What names one logical notice: item, stage and expiry date, and for the daily stage the days
+    left (that is what makes one day's daily notice a different event from the next). Never the time
+    of an attempt."""
+    parts = [notice.item.name, notice.stage, notice.item.expires.isoformat()]
+    if notice.stage == "daily":
+        parts.append(str(notice.days_left))
+    return "|".join(parts)
+
+
+def matrix_txn_id(notice, generation=""):
+    """The Matrix transaction id of a notice: its logical key plus its generation. A retry of an
+    undelivered notice keeps the generation (the run remembers it in the state file, see `pending`),
+    so a retry, on a later day too, is the same transaction and the homeserver can drop the duplicate.
+    A notice that recurs after it was delivered gets a new generation, so it is a new event."""
+    return hashlib.sha256(f"{notice_key(notice)}|{generation}".encode()).hexdigest()[:32]
+
+
+def matrix_send(cfg, token, notice, now, budget=None, generation=""):
+    """Send one m.notice to the configured room. The token goes only to the homeserver."""
+    if not isinstance(token, str) or not _TOKEN.fullmatch(token):
+        raise ExpiryWatchError("the Matrix secret is empty or contains characters not allowed in a header")
+    subject, body = build_message(notice, now)
+    url = (f"{cfg.homeserver}/_matrix/client/v3/rooms/{urllib.parse.quote(cfg.room_id, safe='')}"
+           f"/send/m.room.message/{matrix_txn_id(notice, generation)}")
+    payload = json.dumps({"msgtype": "m.notice", "body": f"{subject}\n{body}"}).encode()
+    _http_exchange("matrix", "PUT", url, urllib.parse.urlsplit(url).path, token, payload, _seconds(cfg, budget))
 
 
 def email_secrets(cfg, env):
@@ -1453,24 +1466,35 @@ def _smtp_context(cfg, root):
     return ctx
 
 
-class _WatchedSMTP(smtplib.SMTP):
-    """smtplib.SMTP whose sockets are made under a _Deadline: the connect uses the time left, and
-    the socket is registered so the caller can shut it down."""
+class _Watched:
+    """Mixin for smtplib clients whose sockets are made under a _Deadline: the connect uses the time
+    left, the socket is registered so the caller can shut it down, and every command and every reply
+    re-arms the live socket with the time left. A conversation of many fast replies therefore still
+    ends at the deadline (arm raises TimeoutError once it has passed)."""
 
     def __init__(self, *args, watch, **kwargs):
         self._watch = watch
-        super().__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)  # the SMTP class may connect here, through _get_socket
 
+    def send(self, s):
+        if self.sock is not None:
+            self._watch.arm(self.sock)
+        return super().send(s)
+
+    def getreply(self):
+        if self.sock is not None:
+            self._watch.arm(self.sock)
+        return super().getreply()
+
+
+class _WatchedSMTP(_Watched, smtplib.SMTP):
     def _get_socket(self, host, port, timeout):
         sock = socket.create_connection((host, port), self._watch.left(), self.source_address)
         self._watch.arm(sock)
         return sock
 
 
-class _WatchedSMTPSSL(smtplib.SMTP_SSL):
-    def __init__(self, *args, watch, **kwargs):
-        self._watch = watch
-        super().__init__(*args, **kwargs)
+class _WatchedSMTPSSL(_Watched, smtplib.SMTP_SSL):
 
     def _get_socket(self, host, port, timeout):
         raw = socket.create_connection((host, port), self._watch.left(), self.source_address)
@@ -1509,16 +1533,22 @@ def email_send(cfg, env, notice, now, root=None, budget=None):
                                    context=context, watch=dl)
         else:
             conn = _WatchedSMTP(cfg.host, cfg.port, local_hostname=cfg.helo_name, timeout=dl.seconds, watch=dl)
-        with conn:
+        try:
             if cfg.security == "starttls":
-                dl.arm(conn.sock)
                 conn.starttls(context=context)
-                dl.arm(conn.sock)  # the TLS socket replaced the plain one
             if login:
-                dl.arm(conn.sock)
                 conn.login(*login)
-            dl.arm(conn.sock)  # raises once the deadline has passed: nothing is sent after it
             conn.send_message(msg, from_addr=cfg.sender, to_addrs=list(cfg.to))
+            dl.delivered = True  # accepted by the server: a slow QUIT below cannot turn it into a failure
+        except BaseException:
+            conn.close()
+            raise
+        try:  # a polite QUIT, best effort: the message is already accepted, its outcome is settled
+            conn.quit()
+        except Exception:
+            pass
+        finally:
+            conn.close()
 
     where = f"email {cfg.host}"
     try:
@@ -1592,27 +1622,46 @@ def _check_seen(path, seen):
     return seen
 
 
-def load_memory(path, root=None):
-    """Load the state file (relative to root when given): (item states, disappeared memory).
+_GENERATION = re.compile(r"[0-9a-f]{32}")
+
+
+def _check_pending(path, pending):
+    """The generations of notices that were not fully delivered: notice key -> 32 hex digits."""
+    if not isinstance(pending, dict) or len(pending) > MAX_ITEMS * 4:
+        raise ExpiryWatchError(f"state: {path} has an unexpected shape")
+    for key, gen in pending.items():
+        if (not isinstance(key, str) or not key or len(key) > 400 or _CONTROL.search(key)
+                or not isinstance(gen, str) or not _GENERATION.fullmatch(gen)):
+            raise ExpiryWatchError(f"state: {path} has a bad pending entry")
+    return pending
+
+
+def load_memory(path, root=None, with_pending=False):
+    """Load the state file (relative to root when given): (item states, disappeared memory), and
+    with_pending also the pending generations as a third value.
 
     A missing file is empty. Two formats load: slice 1's plain {item: state} object, and
     {"version": 2, "items": ..., "seen": ...}. Shape and types are checked here; whether the
     values make sense for an item is decided by decide(), which treats an inconsistent entry as
     "nothing sent yet".
     """
+    def result(items, seen, pending):
+        return (items, seen, pending) if with_pending else (items, seen)
+
     try:
         data = read_capped(path, "state", root)
     except FileMissing:
-        return {}, {}
+        return result({}, {}, {})
     try:
         doc = json.loads(data.decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as e:
         raise ExpiryWatchError(f"state: {path} is not valid JSON: {e}") from None
     if isinstance(doc, dict) and doc.get("version") == 2 and not isinstance(doc.get("version"), bool):
-        if set(doc) != {"version", "items", "seen"}:
+        if set(doc) not in ({"version", "items", "seen"}, {"version", "items", "seen", "pending"}):
             raise ExpiryWatchError(f"state: {path} has an unexpected shape")
-        return _check_items(path, doc["items"]), _check_seen(path, doc["seen"])
-    return _check_items(path, doc), {}
+        pending = _check_pending(path, doc["pending"]) if "pending" in doc else {}
+        return result(_check_items(path, doc["items"]), _check_seen(path, doc["seen"]), pending)
+    return result(_check_items(path, doc), {}, {})
 
 
 def load_state(path, root=None):
@@ -1620,14 +1669,20 @@ def load_state(path, root=None):
     return load_memory(path, root)[0]
 
 
-def check_state_fits(state, seen):
+def check_state_fits(state, seen, pending=None):
     """Refuse a state the loader would refuse: the same item count and byte limits, measured on
     the exact text that would be written. Returns the text."""
+    if pending and seen is None:
+        seen = {}
     doc = state if seen is None else {"version": 2, "items": state, "seen": seen}
+    if pending:
+        doc["pending"] = pending
     try:  # the very validators load_memory applies: what they refuse is never written
         _check_items("the state", state)
         if seen is not None:
             _check_seen("the state", seen)
+        if pending:
+            _check_pending("the state", pending)
     except ExpiryWatchError as e:
         raise ExpiryWatchError(f"{e} (limits: {MAX_ITEMS} remembered items per provider, {MAX_ITEMS * 4} "
                                "in all, 200 providers); watch fewer items or tokens") from None
@@ -1637,11 +1692,11 @@ def check_state_fits(state, seen):
     return text
 
 
-def save_state(path, state, root=None, seen=None):
+def save_state(path, state, root=None, seen=None, pending=None):
     """Write the state atomically and privately (0600). The temp file is created and renamed
     inside the held directory, so a link retargeted meanwhile cannot redirect the write.
     With `seen` the version 2 format is written; without it, the plain item states."""
-    text = check_state_fits(state, seen)  # before anything is created: an unloadable state is never written
+    text = check_state_fits(state, seen, pending)  # before anything is created: an unloadable state is never written
     dirfd, leaf = _open_parent(path, root)
     tmp = f".expiry-state-{os.getpid()}-{os.urandom(6).hex()}"
     try:
@@ -1717,7 +1772,7 @@ def _run_pass(root, leaf, now, env, out, err, dry_run, opener):
             keys.add(key)
             providers.append((prov, key, acked, config.notify_disappeared if notify is None else notify))
         state_path = config.state_file
-        state, seen = load_memory(state_path, root)
+        state, seen, pending = load_memory(state_path, root, with_pending=True)
     except ExpiryWatchError as e:
         err(f"config error: {e}")
         return 2
@@ -1757,7 +1812,7 @@ def _run_pass(root, leaf, now, env, out, err, dry_run, opener):
         worst = {k: dict(v) for k, v in new_seen.items()}
         for key, item, missed in gone:  # an undelivered notice puts its record back
             worst.setdefault(key, {})[item.name] = {"missed": missed, "item": _snapshot(item)}
-        check_state_fits(new_state, worst)
+        check_state_fits(new_state, worst, {notice_key(n): "0" * 32 for n in notices})  # every notice may stay pending
     except ExpiryWatchError as e:
         err(f"state error: {e}")
         return 1
@@ -1786,6 +1841,7 @@ def _run_pass(root, leaf, now, env, out, err, dry_run, opener):
     dead = set()  # a channel that overran its deadline is not tried again in this run
     budget_end = time.monotonic() + config.delivery_budget_seconds  # one budget for every delivery of the pass
     over_budget = 0
+    new_pending = {}  # notice key -> generation, for the notices that stay due (see matrix_txn_id)
 
     def undo(n):
         """Undo one notice's state change because it was not delivered: it stays due."""
@@ -1813,12 +1869,16 @@ def _run_pass(root, leaf, now, env, out, err, dry_run, opener):
                     out(f"dry run: would send {chan} {tag}\n{subject}\n{body}")
             continue
         sends = []
+        # A retry of an undelivered notice keeps its generation; a notice that recurs after it was
+        # delivered gets a new one, so the homeserver sees a new event and not a repeated one.
+        generation = pending.get(notice_key(n)) or os.urandom(16).hex()
         if via_router(n):
             sends.append(("router", lambda n=n, b=None: post_json(
                 config.router.url, token, build_payload(n, now),
                 config.router.timeout_seconds if b is None else min(config.router.timeout_seconds, b), opener)))
         if "matrix" in n.channels:
-            sends.append(("matrix", lambda n=n, b=None: matrix_send(config.matrix, matrix_token, n, now, b)))
+            sends.append(("matrix", lambda n=n, b=None: matrix_send(config.matrix, matrix_token, n, now, b,
+                                                                    generation=generation)))
         if "email" in n.channels:
             sends.append(("email", lambda n=n, b=None: email_send(config.email, env, n, now, root, b)))
         delivered = True
@@ -1845,13 +1905,14 @@ def _run_pass(root, leaf, now, env, out, err, dry_run, opener):
         if not delivered:  # one channel failing keeps the whole notice due: a retry may repeat the others
             failed = True
             undo(n)
+            new_pending[notice_key(n)] = generation
     if over_budget:
         err(f"delivery error: the delivery budget ({config.delivery_budget_seconds:g}s) ran out; "
             f"{over_budget} delivery(ies) were not tried and stay due for the next run")
 
     if not dry_run:
         try:
-            save_state(state_path, new_state, root, seen=new_seen)
+            save_state(state_path, new_state, root, seen=new_seen, pending=new_pending)
         except OSError as e:
             err(f"state error: cannot write {state_path}: {e.strerror}")
             return 1

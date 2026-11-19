@@ -225,10 +225,14 @@ never reads one and never sends anything else. `room_id` must be the internal
 room id, not an alias. `homeserver` is https (plain http only for localhost),
 may carry a path prefix and must not carry credentials, a query or a
 fragment. The transaction id is a hash of the item, stage and expiry date (and,
-for the `daily` stage only, the days left), never of the time of the attempt, so
-a retry of the same notice, on a later day too, reuses it and the homeserver can
-drop the duplicate (how long a homeserver remembers a transaction id is its own
-choice). A redirect
+for the `daily` stage only, the days left) plus a random generation, never of
+the time of the attempt. A notice that was not fully delivered keeps its
+generation in a `pending` section of the state file, so its retry, on a later
+day too, reuses the id and the homeserver can drop the duplicate (how long a
+homeserver remembers a transaction id is its own choice). Once the notice is
+delivered the generation is forgotten, so the same notice recurring later (for
+example an item that disappears, returns and disappears again) is a new event.
+A redirect
 is never followed (the token is not replayed anywhere else), and only an
 `https` or loopback server receives the token. TLS uses the system trust store.
 
@@ -251,8 +255,11 @@ Hardening that applies to both: every value that came from a provider (item
 name, owner, link) is cleaned before it goes into a message, so a control
 character or line break in a vendor token name cannot add a mail header, a
 recipient or extra Matrix content; the From and To addresses come only from the
-config; each delivery has one overall deadline of `timeout_seconds` (connect,
-TLS, login and send together). A delivery that passes it cannot go on to log in
+config; each delivery, to the router too, has one absolute deadline of
+`timeout_seconds` (connect, TLS, login and send together; every blocking call is
+re-armed with the time left, so a peer that answers a byte at a time cannot
+stretch it, and the caller returns at the deadline with no extra wait). A
+delivery that passes it cannot go on to log in
 or send afterwards: the worker checks the deadline before every step, and the
 connection is shut down. A name lookup cannot be interrupted, so the number of
 lookups that may still be pending is bounded; when they are all stuck, deliveries

@@ -660,3 +660,142 @@ def test_a_matrix_retry_across_midnight_reuses_the_transaction(matrix):
     ew.matrix_send(cfg, MATRIX_TOKEN, _notice(stage="14", days=14), _at(14, hour=23))
     ew.matrix_send(cfg, MATRIX_TOKEN, _notice(stage="14", days=13), _at(13, hour=1))
     assert _Matrix.seen[0][1] == _Matrix.seen[1][1]
+
+
+# --- review round 2: router deadline, tight deadlines, notice generations ----------------------
+
+class _Drip(http.server.BaseHTTPRequestHandler):
+    """Answers 200, then keeps the body going one small chunk at a time for about 3 seconds."""
+    seen = 0
+    drip = True
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        type(self).seen += 1
+        self.send_response(200)
+        self.send_header("Connection", "close")
+        self.end_headers()
+        try:
+            for _ in range(20 if type(self).drip else 0):
+                self.wfile.write(b"x")
+                self.wfile.flush()
+                time.sleep(0.15)
+        except OSError:
+            pass
+
+    def log_message(self, *a):
+        pass
+
+
+@pytest.fixture
+def drip():
+    _Drip.seen, _Drip.drip = 0, True
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Drip)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    yield f"http://127.0.0.1:{srv.server_address[1]}"
+    srv.shutdown()
+    t.join(5)
+    srv.server_close()
+
+
+def test_a_slow_drip_router_answer_is_cut_off_at_the_absolute_deadline(drip):
+    started = time.monotonic()
+    with pytest.raises(ew.ExpiryWatchError, match="(?i)timed out|deadline") as exc:
+        ew.post_json(drip + "/h", "router-secret-value", {"a": 1}, timeout=0.5)
+    assert time.monotonic() - started < 1.2, "every chunk arrives inside the socket timeout; only the deadline stops it"
+    assert "router-secret-value" not in str(exc.value)
+
+
+def test_the_run_budget_also_bounds_a_slow_drip_router(tmp_path, drip):
+    cfg = _setup(tmp_path, drip, routes='"14" = ["discord"]')
+    cfg.write_text(cfg.read_text().replace('state_file = "state.json"',
+                                           'state_file = "state.json"\ndelivery_budget_seconds = 0.6'))
+    reg = "".join(f'[[item]]\nname = "key-{i}"\nkind = "ssh-key"\nexpires = 2026-03-01\nowner = "ops@example.com"\n'
+                  f'runbook = "{RUNBOOK}"\n' for i in range(2))
+    (tmp_path / "registry.toml").write_text(reg)
+    started = time.monotonic()
+    code, _, err = _run(cfg, _at(14))
+    assert code == 1 and time.monotonic() - started < 1.5 and _Drip.seen <= 1
+    _Drip.drip = False  # the router recovers: both notices are still due
+    cfg.write_text(cfg.read_text().replace("delivery_budget_seconds = 0.6", "delivery_budget_seconds = 30"))
+    seen_before = _Drip.seen
+    code, _, err = _run(cfg, _at(14, hour=18))
+    assert code == 0, err
+    assert _Drip.seen - seen_before == 2
+
+
+def test_run_deadline_returns_at_the_deadline_even_when_the_worker_never_does():
+    gate = threading.Event()
+    try:
+        started = time.monotonic()
+        with pytest.raises(ew._Overrun):
+            ew._run_deadline(ew._Deadline(0.05), gate.wait)
+        assert time.monotonic() - started < 0.5
+    finally:
+        gate.set()
+
+
+def test_an_smtp_transaction_of_individually_fast_replies_still_ends_at_the_deadline():
+    """Every reply comes inside the socket timeout; their sum passes the deadline."""
+    srv, t = _start_smtp(reply_delay=0.3)
+    try:
+        cfg = _ecfg(srv.server_address[1], security="plaintext", allow_plaintext=True, timeout_seconds=1)
+        started = time.monotonic()
+        with pytest.raises(ew.ExpiryWatchError):
+            ew.email_send(cfg, {}, _notice(channels=("email",)), _at(14), root=None)
+        assert time.monotonic() - started < 1.5
+        time.sleep(2.5)
+        assert all(s["data"] is None for s in srv.sessions)
+    finally:
+        _stop(srv, t)
+
+
+def test_matrix_transaction_id_changes_with_the_notice_generation():
+    n = _notice(stage="disappeared", days=10)
+    assert ew.matrix_txn_id(n, "aaaa") == ew.matrix_txn_id(n, "aaaa")
+    assert ew.matrix_txn_id(n, "aaaa") != ew.matrix_txn_id(n, "bbbb")
+
+
+def _replace_registry(tmp_path, name):
+    (tmp_path / "registry.toml").write_text(
+        f'[[item]]\nname = "{name}"\nkind = "ssh-key"\nexpires = 2026-03-01\nowner = "ops@example.com"\n'
+        f'runbook = "{RUNBOOK}"\n')
+
+
+def test_a_second_disappear_return_disappear_cycle_is_a_new_matrix_event(tmp_path, matrix):
+    """Round 2 Low. Same item, same stage, same expiry date, two separate lifecycles."""
+    cfg = _setup(tmp_path, "http://127.0.0.1:1", matrix_url=matrix, routes='disappeared = ["matrix"]')
+    assert _run(cfg, _at(59))[0] == 0
+    _replace_registry(tmp_path, "other-key")
+    assert _run(cfg, _at(58))[0] == 0 and len(_Matrix.seen) == 1
+    _replace_registry(tmp_path, "deploy-key")
+    assert _run(cfg, _at(57))[0] == 0
+    _replace_registry(tmp_path, "other-key")
+    assert _run(cfg, _at(56))[0] == 0
+    # (other-key also vanishes when deploy-key comes back; only deploy-key's two notices matter here)
+    mine = [path for _, path, _, body in _Matrix.seen if b"deploy-key" in body]
+    assert len(mine) == 2 and mine[0] != mine[1], "the homeserver must see the second lifecycle as new"
+
+
+def test_a_failed_matrix_notice_keeps_its_generation_for_the_retry_across_days(tmp_path, matrix):
+    cfg = _setup(tmp_path, "http://127.0.0.1:1", matrix_url=matrix)
+    _Matrix.status = 500
+    assert _run(cfg, _at(14))[0] == 1
+    assert "pending" in json.loads((tmp_path / "state.json").read_text())
+    _Matrix.status = 200
+    assert _run(cfg, _at(13))[0] == 0
+    assert _Matrix.seen[0][1] == _Matrix.seen[1][1], "a retry is the same Matrix transaction"
+    assert "pending" not in json.loads((tmp_path / "state.json").read_text()), "delivered: nothing to remember"
+
+
+def test_the_pending_section_of_the_state_file_is_validated(tmp_path):
+    good = {"version": 2, "items": {}, "seen": {}, "pending": {"deploy-key|14|2026-03-01": "0123456789abcdef" * 2}}
+    path = tmp_path / "s.json"
+    path.write_text(json.dumps(good))
+    assert ew.load_memory(str(path), None, with_pending=True)[2] == good["pending"]
+    for bad in ({"k": "short"}, {"k": 5}, {"k\n": "0123456789abcdef" * 2}, ["x"],
+                {f"k{i}": "0123456789abcdef" * 2 for i in range(20000)}):
+        path.write_text(json.dumps({**good, "pending": bad}))
+        with pytest.raises(ew.ExpiryWatchError):
+            ew.load_memory(str(path), None, with_pending=True)
