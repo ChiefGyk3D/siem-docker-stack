@@ -48,8 +48,7 @@ Rules every step follows:
 
 | # | Question | Where it bites |
 |---|----------|----------------|
-| Q1 | What is the exact name of the `homelab` dev config? `docs/channel-redundancy.md` calls it "a guess". List it with `doppler configs --project homelab` (INFERRED command; check `doppler configs --help`). | Steps 4, 5, 6 |
-| Q2 | One process must see both `GRAFANA_WEBHOOK_SECRET` (today in `prd_network`) and the new dev values, or Compose refuses to start Grafana (VERIFIED: `docker/docker-compose.yml` requires it non-empty). A Doppler service token is scoped to one config, and `siem-run` reads one token file (`docs/live-deploy-runbook.md`, section 2). How do both reach the Grafana restart? Options are the owner's: a second token and wrapper, config inheritance in the secret manager, or a copy of the secret into dev. A copy reuses a shared secret across configs, which `docs/update-alerting.md` says to avoid. | Steps 4, 5 |
+| Q1 | What is the exact name of the `homelab` dev config? `docs/channel-redundancy.md` calls it "a guess". List it with `doppler configs --project homelab` (INFERRED command; check `doppler configs --help`). | Steps 0b, 4, 5, 6 |
 | Q3 | `docs/expiry-watch.md` requires `[router].url` to be https (plain http only for localhost). The n8n router is reached over plain http on the siem network (`docs/live-deploy-runbook.md`, section 4). How will the expiry watch reach it? | Step 6 |
 | Q4 | The names `FAILTEST` (workflow and credential) appear in no repo doc. The closest text is the failure-path test copy in `docs/live-deploy-runbook.md`, section 4, items 1 to 6 ("the copy", "a wrong credential in the copy"). Read the exact names in the n8n UI. | Step 3 |
 | Q5 | What is the live name of the old router workflow? The repo workflow is named "Grafana SOAR - Alert Router" and the runbook calls the new one "Grafana SOAR - Alert Router (authenticated)". Which one is live and old is not in a doc. | Step 9 |
@@ -67,7 +66,7 @@ item numbers are in the last column.
 
 | Step | What | Risk | Depends on | Request item |
 |------|------|------|-----------|--------------|
-| 0 | Preflight | none | nothing | |
+| 0 | Preflight, then 0b: one dev config for every new Grafana value | low | nothing | |
 | 1 | Read the heartbeat ping log | none, read only | heartbeat deployed | 1 |
 | 2 | First live backup and restore rehearsal | low | step 0 | 4 |
 | 3 | Delete the FAILTEST workflow and credential | low, irreversible | step 2 (a backup exists) | 2 |
@@ -115,9 +114,74 @@ Expected: three lines `... : present` and `exit code: 0` (VERIFIED: runbook
 section 2). `siem-run: token file missing or unreadable` means section 2 of that
 runbook is incomplete.
 
-Resolve Q1 and Q2 here before steps 4 and 5.
+Resolve Q1 here before steps 4 and 5, then do step 0b.
 
 Rollback: nothing changed.
+
+## Step 0b. One dev config for every new Grafana value (LIVE)
+
+Owner decision: all values the Grafana restart needs live in ONE dev config of
+the `homelab` Doppler project, and the restart reads only that config. That
+config holds the new SMTP values (step 5), the failure webhook URL (step 4) and a
+copy of `GRAFANA_WEBHOOK_SECRET`. The copy is needed because Compose refuses to
+start Grafana without that variable (VERIFIED: `docker/docker-compose.yml`
+requires it non-empty). `prd_network` is not changed by anything in this step or
+in steps 4 and 5: it is only read, once, to make the copy.
+
+The dev config name is not in any doc (Q1). This file writes it as the
+placeholder `DEV_CONFIG`; replace it with the real name in every command below
+and in steps 4 to 6.
+
+Prerequisites: Doppler CLI logged in on the machine where you run these
+commands, with access to project `homelab`.
+
+1. Find or confirm the dev config (INFERRED command; check `doppler configs
+   --help`):
+
+```
+doppler configs --project homelab
+```
+
+Pick the existing dev config, or create one in the Doppler web interface under
+the dev environment (this doc does not describe that screen; send a screenshot
+if unsure). Do not use any prd config.
+
+2. Copy the webhook secret value from `prd_network` into the dev config without
+   ever printing it. Doppler's own output goes straight into the second command
+   on stdin, and the second command ends in `> /dev/null` because
+   `doppler secrets set` echoes values:
+
+```
+doppler secrets get GRAFANA_WEBHOOK_SECRET --plain --project homelab --config prd_network | doppler secrets set GRAFANA_WEBHOOK_SECRET --project homelab --config DEV_CONFIG > /dev/null
+```
+
+   Method status: the stdin form of `doppler secrets set ... > /dev/null` is
+   VERIFIED as used in `docs/update-alerting.md` (webhook authentication, step
+   1). The `--plain` flag on `doppler secrets get` and the plain-text pipe
+   between the two commands are INFERRED, not checked against Doppler's
+   documentation. Run the check below; if it prints `differs` or the second
+   command errors, stop and ask, and do not fall back to typing the value.
+
+3. Check the copy matches, printing only the result, never a value (INFERRED
+   flags as above):
+
+```
+test "$(doppler secrets get GRAFANA_WEBHOOK_SECRET --plain --project homelab --config prd_network | sha256sum | cut -d' ' -f1)" = "$(doppler secrets get GRAFANA_WEBHOOK_SECRET --plain --project homelab --config DEV_CONFIG | sha256sum | cut -d' ' -f1)" && echo same || echo differs
+```
+
+Expected: `same`.
+
+Watch: the output of step 2 is empty, and no secret value appears anywhere in
+the terminal or scrollback.
+
+Note that the copy now holds a shared secret in two configs. `docs/update-alerting.md`
+says the secret must be unique to the router contact point and never reused for
+other services; this is the same contact point, and the owner chose it. Rotate
+both together (VERIFIED: "Rotate by changing the Doppler value and the n8n
+credential together"; add the dev copy to that list).
+
+Rollback: delete `GRAFANA_WEBHOOK_SECRET` from the dev config in Doppler. Nothing
+in `prd_network` was changed, and the live Grafana is unaffected until step 4d.
 
 ## Step 1. Read the Healthchecks ping log (LIVE, read only)
 
@@ -349,7 +413,7 @@ Prerequisites:
 - A datasource with uid `prometheus` exists in the live Grafana (VERIFIED in
   `docker/grafana/provisioning/datasources/datasources.yml`; INFERRED for the
   live stack, check the datasource list).
-- Q1, Q2 and Q7 settled.
+- Step 0b done, and Q1 and Q7 settled.
 
 ### 4a. Store the webhook URL in Doppler dev
 
@@ -409,16 +473,23 @@ section 5.)
 ### 4d. Restart Grafana and check
 
 Grafana reads provisioning files only at startup (VERIFIED: runbook section 5).
-The restart must run with the secrets of Q2 in its environment:
+The restart reads only the one dev config from step 0b (owner decision). The
+`doppler run --project ... --config ... --` form is VERIFIED in
+`docs/update-alerting.md`, step 4 of its webhook authentication list, there with
+`prd_network`:
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd /opt/siem && "$HOME/bin/siem-run" docker compose up -d grafana; echo "exit code: $?"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd /opt/siem && doppler run --project homelab --config DEV_CONFIG -- docker compose up -d grafana; echo "exit code: $?"'
 ```
 
-(Using `siem-run` here is INFERRED to supply the values; it only supplies what
-its token's config holds, which is Q2.) Compose refusing to start with
-`GRAFANA_WEBHOOK_SECRET must be set and non-empty` means Q2 is not solved; the
-container stays on its old definition until it is.
+(That the Doppler CLI on LOGGING_BOX is logged in to project `homelab` with
+access to the dev config is INFERRED; the runbook's token file serves `siem-run`
+only.) Compose refusing to start with `GRAFANA_WEBHOOK_SECRET must be set and
+non-empty` means the copy in step 0b is missing; the container stays on its old
+definition until it is fixed. Any other variable Grafana needs from the old
+`prd_network` setup, such as the Pushover or datasource values, must also be in
+this config (INFERRED: compare `docker/docker-compose.yml` with the config before
+you restart).
 
 Check:
 
@@ -497,7 +568,7 @@ Prerequisites (VERIFIED: the provider-neutral checklist):
 - An SMTP login for that domain, a From address on the verified domain, and the
   recipient address or addresses for `P1_EMAIL_TO`.
 - Step 4 is finished and checked (one Grafana restart at a time).
-- Q1 and Q2 settled.
+- Step 0b done and Q1 settled.
 
 Mailgun values (VERIFIED against the page cited in `docs/channel-redundancy.md`,
 read 2026-11-19 by that doc): host `smtp.mailgun.org`, port 587, STARTTLS.
@@ -561,7 +632,7 @@ sudo install -m 644 REPO_DIR/docker/grafana/provisioning/alerting/email-contact-
 ### 5d. Restart Grafana and check
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd /opt/siem && "$HOME/bin/siem-run" docker compose up -d grafana; echo "exit code: $?"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd /opt/siem && doppler run --project homelab --config DEV_CONFIG -- docker compose up -d grafana; echo "exit code: $?"'
 ```
 
 Check `docker logs --since 5m grafana 2>&1 | tail -40` for SMTP or provisioning
@@ -687,7 +758,7 @@ ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && doppler run
 ```
 
 (`doppler run` form VERIFIED in `docs/update-alerting.md`; its use with this
-script is INFERRED. If the watch runs under `siem-run` instead, that is Q2.)
+script is INFERRED.)
 
 Watch:
 
@@ -712,7 +783,7 @@ Confirm the messages arrive and the state file `/etc/expiry-watch/expiry-watch-s
 exists with mode 0600 (VERIFIED). Then schedule it with the systemd service and
 timer in `docs/expiry-watch.md`, "Scheduling". That doc's examples read the
 router secret from an `EnvironmentFile` (mode 0600, owned by the job user); in
-this setup you would instead wrap `ExecStart` in `doppler run` or decide Q2/Q11
+this setup you would instead wrap `ExecStart` in `doppler run` or decide Q11
 differently. The doc also warns that nothing alerts you if the schedule stops;
 use job monitoring (VERIFIED).
 
@@ -777,7 +848,7 @@ What the docs say: Pushover is off by default; one constant,
 alerts with `phone=true` reach it; priority 1 bypasses quiet hours; priority 2
 (emergency) repeats until acknowledged (VERIFIED).
 
-Owner decision (Q6, answered): the phone is muted only while the live game-day
+Owner decision: the phone is muted only while the live game-day
 and failure tests run, so test pages wake no one, and it is unmuted afterward.
 Real paging stays fully on at all other times. The mute and unmute procedure is
 8b and 8c below. This doc does not describe Pushover's or the phone's own
