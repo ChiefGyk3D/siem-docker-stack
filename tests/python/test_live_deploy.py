@@ -282,6 +282,10 @@ def test_router_path_validation(gdeploy, path, ok):
 
 # --- command-line behavior ----------------------------------------------------------------
 
+STAGED = ("contact-points.yml", "update-alert-rules-unifi.yml", "update-alert-rules-pfsense.yml",
+          "heartbeat-alert-rule.yml")
+
+
 def _run(script, args, env):
     base = {"PATH": "/usr/bin:/bin"}
     base.update(env)
@@ -295,7 +299,7 @@ def _stage_dirs(tmp_path, compose_text=COMPOSE):
         d.mkdir()
     (siem / "docker-compose.yml").write_text(compose_text, encoding="utf-8")
     (cfg / "router-path").write_text("grafana-alerts-" + "z" * 20, encoding="utf-8")
-    for name in ("contact-points.yml", "update-alert-rules-unifi.yml", "update-alert-rules-pfsense.yml"):
+    for name in STAGED:
         src = REPO_ROOT / "docker" / "grafana" / "provisioning" / "alerting" / name
         shutil.copy(src, stage / name)
     return {"SIEM_DIR": str(siem), "SIEM_STAGE_DIR": str(stage), "SIEM_CONFIG_DIR": str(cfg)}
@@ -308,6 +312,50 @@ def test_grafana_deploy_stage_prints_the_plan(tmp_path):
     assert r.stdout.strip() == "staged files ok; router path length 35; compose: insert after line 5"
     assert "GRAFANA_WEBHOOK_SECRET" not in (tmp_path / "siem" / "docker-compose.yml").read_text(encoding="utf-8"), \
         "--stage must not change anything"
+
+
+def test_grafana_deploy_ships_the_heartbeat_rule_file(gdeploy):
+    assert "heartbeat-alert-rule.yml" in gdeploy.FILES
+    assert len(set(gdeploy.FILES)) == len(gdeploy.FILES)
+    # every file the deploy copies exists in the repository's alerting folder
+    for name in gdeploy.FILES:
+        assert (CONTACT.parent / name).is_file(), name
+
+
+def test_grafana_deploy_stage_requires_the_heartbeat_rule_file(tmp_path):
+    env = _stage_dirs(tmp_path)
+    (tmp_path / "stage" / "heartbeat-alert-rule.yml").unlink()
+    r = _run("grafana-deploy.py", ["--stage"], env)
+    assert r.returncode != 0 and "missing staged file: heartbeat-alert-rule.yml" in r.stderr
+
+
+def test_grafana_deploy_apply_copies_the_heartbeat_rule_with_mode_644(gdeploy, tmp_path, monkeypatch):
+    env = _stage_dirs(tmp_path)
+    alert = tmp_path / "alerting"
+    alert.mkdir()
+    (alert / "unrelated.yml").write_text("keep", encoding="utf-8")
+    (alert / "heartbeat-alert-rule.yml").write_text("old", encoding="utf-8")
+    (alert / "heartbeat-alert-rule.yml").chmod(0o600)
+    monkeypatch.setattr(gdeploy, "STAGE", env["SIEM_STAGE_DIR"])
+    monkeypatch.setattr(gdeploy, "PATH_FILE", str(tmp_path / "cfg" / "router-path"))
+    monkeypatch.setattr(gdeploy, "COMPOSE", str(tmp_path / "siem" / "docker-compose.yml"))
+    monkeypatch.setattr(gdeploy, "SIEM", str(tmp_path / "siem"))
+    monkeypatch.setattr(gdeploy, "ALERT_DIR", str(alert))
+    monkeypatch.setattr(gdeploy, "DS_FILE", str(tmp_path / "ds.yml"))
+    monkeypatch.setenv("GRAFANA_WEBHOOK_SECRET", "x")
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+    monkeypatch.setattr(gdeploy.subprocess, "run", fake_run)
+    assert gdeploy.main(["--apply"]) == 0
+    src = (CONTACT.parent / "heartbeat-alert-rule.yml").read_text(encoding="utf-8")
+    assert (alert / "heartbeat-alert-rule.yml").read_text(encoding="utf-8") == src
+    assert (alert / "heartbeat-alert-rule.yml").stat().st_mode & 0o777 == 0o644
+    assert (alert / "unrelated.yml").read_text(encoding="utf-8") == "keep", "deploys stay additive"
+    assert calls and calls[0][-3:] == ["up", "-d", gdeploy.SERVICE]
 
 
 def test_grafana_deploy_stage_refuses_bad_inputs(tmp_path):

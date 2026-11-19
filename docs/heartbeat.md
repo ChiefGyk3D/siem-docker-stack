@@ -180,11 +180,15 @@ the private layer so they still reach you.
 
 ## Enable it
 
-1. Copy `heartbeat-alert-rule.yml` into Grafana's provisioning alerting folder
-   (next to the other rule files; the live deploy script copies a fixed list, so
-   add it by hand or extend the list) and restart Grafana.
+1. Deploy `heartbeat-alert-rule.yml` into Grafana's provisioning alerting folder
+   (next to the other rule files). `scripts/live-deploy/grafana-deploy.py`
+   copies it with the other alerting files ([live-deploy-runbook.md](live-deploy-runbook.md),
+   step 5); stage it with the others. Grafana loads a new rule file only at
+   startup, so restart Grafana (the script's `--apply` recreates the container).
 2. Merge the `heartbeat` route from `heartbeat-notification-policy.yml.example`
-   into your notification policy tree (Alerting, Notification policies).
+   into your notification policy tree (Alerting, Notification policies). This
+   stays a manual or API merge, not part of the deploy: Grafana loads one
+   policy tree per organization, so a provisioned file would replace the tree.
 3. Import the updated `n8n/grafana-alert-router.json` and activate it.
 4. Set `HEARTBEAT_PING_URL` (and `HEARTBEAT_KIND`) on the n8n container and
    restart it. `.env.example` lists the names.

@@ -196,8 +196,8 @@ and the copy is deleted.
 ## 5. Additive Grafana deploy
 
 1. Stage the files: copy `docker/grafana/provisioning/alerting/contact-points.yml`,
-   `update-alert-rules-unifi.yml` and `update-alert-rules-pfsense.yml` to
-   `SIEM_STAGE_DIR`.
+   `update-alert-rules-unifi.yml`, `update-alert-rules-pfsense.yml` and
+   `heartbeat-alert-rule.yml` to `SIEM_STAGE_DIR`.
 2. Plan (changes nothing):
 
 ```
@@ -219,7 +219,9 @@ siem-run python3 -I scripts/live-deploy/grafana-deploy.py --apply
 What it does, and only this:
 
 - Writes the alerting folder `grafana/provisioning/alerting/` (the contact
-  point gets the private webhook path; the pfSense rules stay paused).
+  point gets the private webhook path; the pfSense rules stay paused; the
+  heartbeat rule file is copied as is, same mode, and files in the folder
+  that are not on this list are left alone).
 - Writes one new datasource file with two extra InfluxDB datasources, ids
   `influxdb-pfsense` and `influxdb-unifi` (names `InfluxDB-pfSense-alerts` and
   `InfluxDB-UniFi-alerts`). Existing datasources are not changed, because
@@ -228,7 +230,9 @@ What it does, and only this:
   `GF_SERVER_ROOT_URL` line in the Grafana service of the live compose file,
   after saving a backup `docker-compose.yml.bak-<date>`. A second run finds the
   line and does not add it again.
-- Recreates only the Grafana container (`docker compose up -d grafana`).
+- Recreates only the Grafana container (`docker compose up -d grafana`). That
+  restart is what makes Grafana load a new rule file such as
+  `heartbeat-alert-rule.yml`; file provisioning reads the folder at startup.
 
 Check:
 
