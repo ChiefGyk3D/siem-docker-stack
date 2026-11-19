@@ -855,10 +855,20 @@ def preflight_restore(cfg: Config, parts: list, src: str, work: str) -> None:
             _require(cfg, "helper_image", "grafana_uid", "grafana_gid")
 
 
+def require_n8n_running(rt, cfg: Config) -> None:
+    """Fail closed before any mutation: the import steps and the key install's cleanup use docker exec,
+    which cannot work on a stopped container. A state read that fails also refuses."""
+    if not rt.is_running(cfg.n8n_container):
+        raise BackupError(
+            f"{cfg.n8n_container} is not running; the n8n restore needs it up. "
+            "Start n8n and re-run the restore. Nothing was changed")
+
+
 def restore_n8n(rt, cfg: Config, src: str, restore_key: bool) -> None:
     present = {n for n in N8N_MEMBERS if os.path.exists(os.path.join(src, n))}
     if not {"workflows.json", "credentials.json"} <= present:
         raise BackupError("archive has no n8n workflows and credentials")
+    require_n8n_running(rt, cfg)
     if "n8n-config" in present:
         probe = tempfile.mkdtemp(prefix="siem-probe-", dir=cfg.temp_dir or None)
         try:
@@ -901,7 +911,22 @@ def install_n8n_key(rt, cfg: Config, src: str) -> None:
                                   install_argv(tmp, key, cfg.n8n_uid, cfg.n8n_gid, cfg.n8n_key_mode, [])),
             f"Check the key file {key} (a leftover {tmp} may hold the new key), then start the container by hand.")
     finally:
-        _quiet_rm(rt, cfg.n8n_container, ["rm", "-f", tmp])
+        _remove_in_volume(rt, cfg, tmp)
+
+
+def _remove_in_volume(rt, cfg: Config, path: str) -> None:
+    """Best-effort removal of a file in n8n's volume that works whether or not the container is up."""
+    try:
+        up = rt.is_running(cfg.n8n_container)
+    except BackupError:
+        up = False
+    try:
+        if up:
+            rt.exec(cfg.n8n_container, ["rm", "-f", path])
+        else:  # docker exec needs a running container; a helper shares the volumes instead
+            rt.run_helper(cfg.n8n_container, cfg.helper_image, ["sh", "-c", 'rm -f -- "$1"', "sh", path])
+    except Exception:  # noqa: BLE001  cleanup must never mask the primary error
+        pass
 
 
 def restore_grafana(rt, cfg: Config, src: str) -> None:
@@ -1020,6 +1045,8 @@ def run_restore(cfg: Config, rt, enc, archive: str, identity: str, apply: bool =
             out("dry run: nothing changed. Re-run with --apply to restore.")
             return parts
         preflight_restore(cfg, parts, extract_dir, work)
+        if "n8n" in parts:
+            require_n8n_running(rt, cfg)  # before the safety backup, which also needs docker exec
         out("backing up what will be replaced (encrypted) first")
         safety = run_backup(cfg, rt, enc, None, prefix=SAFETY_PREFIX, now=now)
         out(f"safety backup: {safety}")

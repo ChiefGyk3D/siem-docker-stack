@@ -295,7 +295,9 @@ leaving Grafana stopped. Before touching anything it checks the Grafana
 database with `PRAGMA integrity_check` and that ownership settings exist. It
 stops at the first error. Options: `--only n8n|grafana`, and
 `--restore-n8n-key` (needed on a fresh host, where the running n8n key differs
-from the backup's).
+from the backup's). The n8n restore refuses to start, before any change, if the n8n container is
+not running (start n8n and re-run), and a leftover key temp file is removed
+through the helper container if n8n is down at cleanup.
 
 File ownership: `docker cp` gives no useful owner, so in container mode the
 restored `grafana.db` (and n8n key) is copied to a temp name, then a throwaway
