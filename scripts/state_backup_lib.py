@@ -475,15 +475,19 @@ def _quiet_rm(rt, container: str, args: list) -> None:
         pass
 
 
-def run_while_stopped(rt, container: str, body, hint: str) -> None:
+def run_while_stopped(rt, container: str, body, hint: str, require_running: bool = False) -> None:
     """Stop `container`, run body(), and always attempt a start afterwards.
 
     A container that was already stopped is left stopped. A stop that reports
     failure may still have stopped the container, so the attempt itself (not its
     success) triggers the restart. start is idempotent.
     If the restart also fails, both errors are kept in the recovery message.
+    require_running: a container found stopped is refused (body never runs) instead of left stopped.
     """
     if not rt.is_running(container):  # also fails before any mutation if the state is unknown
+        if require_running:
+            raise BackupError(f"{container} is not running (it stopped during the restore); "
+                              "Start n8n and re-run the restore. Nothing was replaced")
         body()
         return  # it was stopped when we found it, so it stays stopped
     stop_attempted = False
@@ -899,34 +903,56 @@ def restore_n8n(rt, cfg: Config, src: str, restore_key: bool) -> None:
 
 
 def install_n8n_key(rt, cfg: Config, src: str) -> None:
-    """Replace n8n's key file. n8n is restarted whatever happens; the old key stays until the final rename."""
+    """Replace n8n's key file. n8n is restarted whatever happens; the old key stays until the final rename.
+
+    n8n must still be running when the stop begins (a stop-state read that says otherwise refuses),
+    because the imports that follow need it. A temp key file that cannot be removed is an error.
+    """
     _require(cfg, "helper_image", "n8n_uid", "n8n_gid")
     key = cfg.n8n_key_file
     tmp = key + ".restore"
-    rt.cp_to(cfg.n8n_container, src, tmp)  # running container: the old key is untouched
+    primary = None
     try:
+        rt.cp_to(cfg.n8n_container, src, tmp)  # running container: the old key is untouched
         run_while_stopped(
             rt, cfg.n8n_container,
             lambda: rt.run_helper(cfg.n8n_container, cfg.helper_image,
                                   install_argv(tmp, key, cfg.n8n_uid, cfg.n8n_gid, cfg.n8n_key_mode, [])),
-            f"Check the key file {key} (a leftover {tmp} may hold the new key), then start the container by hand.")
-    finally:
+            f"Check the key file {key} (a leftover {tmp} may hold the new key), then start the container by hand.",
+            require_running=True)
+    except BaseException as exc:  # re-raised below once cleanup was attempted
+        primary = exc
+    try:
         _remove_in_volume(rt, cfg, tmp)
+    except BackupError as cleanup_err:
+        raise BackupError(
+            f"RECOVERY NEEDED: {tmp} may still exist and hold the backup's n8n key ({cleanup_err}); "
+            f"earlier error: {primary if primary is not None else 'none'}. Remove it by hand.") from None
+    if primary is not None:
+        raise primary
 
 
 def _remove_in_volume(rt, cfg: Config, path: str) -> None:
-    """Best-effort removal of a file in n8n's volume that works whether or not the container is up."""
+    """Remove a file in n8n's volume: docker exec if n8n is up, else (or if that fails) a helper container.
+
+    Raises BackupError when neither method worked, so a leftover is never silent."""
     try:
         up = rt.is_running(cfg.n8n_container)
     except BackupError:
         up = False
-    try:
-        if up:
+    errors = []
+    if up:
+        try:
             rt.exec(cfg.n8n_container, ["rm", "-f", path])
-        else:  # docker exec needs a running container; a helper shares the volumes instead
-            rt.run_helper(cfg.n8n_container, cfg.helper_image, ["sh", "-c", 'rm -f -- "$1"', "sh", path])
-    except Exception:  # noqa: BLE001  cleanup must never mask the primary error
-        pass
+            return
+        except Exception as exc:  # noqa: BLE001  fall back to the helper
+            errors.append(f"exec: {exc}")
+    try:  # docker exec needs a running container; a helper shares the volumes instead
+        rt.run_helper(cfg.n8n_container, cfg.helper_image, ["sh", "-c", 'rm -f -- "$1"', "sh", path])
+        return
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"helper: {exc}")
+    raise BackupError("cleanup failed (" + "; ".join(errors) + ")")
 
 
 def restore_grafana(rt, cfg: Config, src: str) -> None:
