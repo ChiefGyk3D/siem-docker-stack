@@ -33,10 +33,10 @@ def hosts(tmp_path):
 
 # ---- 1. hosts scripts --------------------------------------------------------
 
-def test_hosts_scenarios_use_a_run_unique_exact_line_and_no_shared_tmp():
+def test_hosts_scenarios_use_a_run_unique_exact_line_and_no_fixed_tmp_name():
     _, out, _ = go(["discord-unreachable", "--run-id", RID])
     assert f"# gameday-84-{RID}" in out
-    assert "/tmp" not in out and "mktemp" not in out and "sed -i" not in out
+    assert ".gameday-hosts" not in out and "sed -i" not in out and "mktemp -d" in out  # no fixed shared name
 
 
 def test_hosts_add_then_remove_restores_the_exact_original(hosts):

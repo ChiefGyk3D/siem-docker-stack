@@ -48,7 +48,9 @@ import urllib.request
 
 MARKER = "# gameday-84"  # the line marker is MARKER + "-" + the run id
 CLI_ALLOWED = ("docker", "podman")
-RUN_ID_RE = re.compile(r"^[0-9a-f]{8,32}$")
+RUN_ID_RE = re.compile(r"[0-9a-f]{8,32}")
+TRUSTED_DIRS = ("/usr/bin", "/usr/local/bin", "/bin", "/snap/bin")
+TRUSTED_UID = 0  # the owner a trusted binary must have
 PLACEHOLDER_ID = "<RUN_ID>"  # shown in a dry-run revert when no --run-id was given
 DEFAULTS = {
     "n8n_container": "n8n",
@@ -61,10 +63,10 @@ KEYS = (
     "n8n_container", "grafana_container", "docker", "discord_host", "pushover_host",
     "heartbeat_host", "router_workflow_id", "router_path", "n8n_base",
 )
-NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
-HOST_RE = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
-PATH_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
-ID_RE = re.compile(r"^[A-Za-z0-9]{1,64}$")
+NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
+HOST_RE = re.compile(r"[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?")
+PATH_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
+ID_RE = re.compile(r"[A-Za-z0-9]{1,64}")
 
 
 class GamedayError(Exception):
@@ -114,7 +116,7 @@ def _need(cfg, key, scenario):
 
 
 def _check(value, regex, what):
-    if not regex.match(value):
+    if not regex.fullmatch(value):
         raise GamedayError(f"{what} has characters that are not allowed")
     return value
 
@@ -137,7 +139,7 @@ class Step:
 
 
 def _quote(arg):
-    return arg if re.match(r"^[A-Za-z0-9_@%+=:,./-]+$", arg) else "'" + arg.replace("'", "'\\''") + "'"
+    return arg if re.fullmatch(r"[A-Za-z0-9_@%+=:,./-]+", arg) else "'" + arg.replace("'", "'\\''") + "'"
 
 
 class Scenario:
@@ -155,36 +157,77 @@ def hosts_line(host, run_id):
     return f"0.0.0.0 {host} {MARKER}-{run_id}"
 
 
-def _guard(path):
-    return (f"H='{path}'\n"
-            "[ -f \"$H\" ] && [ ! -L \"$H\" ] || { echo 'hosts file missing or a symlink' >&2; exit 1; }\n")
+_SH_HEAD = r"""set -eu
+H='@H@'
+L='@L@'
+chk() { [ -f "$H" ] && [ ! -L "$H" ]; }
+chk || { echo 'hosts file missing or a symlink' >&2; exit 1; }
+if echo x | grep -a x >/dev/null 2>&1; then G='grep -a'; else G=grep; fi
+"""
+
+_SH_ADD = r"""rc=0; $G -qxF -- "$L" "$H" || rc=$?
+if [ "$rc" -eq 0 ]; then exit 0; fi
+[ "$rc" -eq 1 ]
+chk || { echo 'hosts file changed under us' >&2; exit 1; }
+if [ -s "$H" ] && [ "$(tail -c 1 "$H" | od -An -tx1 | tr -d ' \n')" != 0a ]; then printf '\n' >> "$H"; fi
+printf '%s\n' "$L" >> "$H"
+rc=0; $G -qxF -- "$L" "$H" || rc=$?
+[ "$rc" -eq 0 ]
+"""
+
+_SH_REMOVE = r"""rc=0; $G -qxF -- "$L" "$H" || rc=$?
+if [ "$rc" -eq 1 ]; then echo 'line already absent'; exit 0; fi
+[ "$rc" -eq 0 ]
+ok=0
+D=$(mktemp -d "${TMPDIR:-/tmp}/gameday.XXXXXX")
+trap 'if [ "$ok" = 1 ]; then rm -rf "$D"; else echo "backup kept in $D" >&2; fi' EXIT
+chk || { echo 'hosts file changed under us' >&2; exit 1; }
+cat "$H" > "$D/orig"
+cmp -s "$D/orig" "$H"
+total=$($G -c '' "$H" || [ $? -eq 1 ])
+gone=$($G -cxF -- "$L" "$H" || [ $? -eq 1 ])
+$G -vxF -- "$L" "$H" > "$D/new" || [ $? -eq 1 ]
+[ -s "$D/new" ] || { echo 'refusing to leave an empty hosts file' >&2; exit 1; }
+rc=0; $G -qxF -- "$L" "$D/new" || rc=$?
+[ "$rc" -eq 1 ] || { echo 'marker still present in the new content' >&2; exit 1; }
+have=$($G -c '' "$D/new" || [ $? -eq 1 ])
+[ "$have" -eq $((total - gone)) ] || { echo 'line count check failed' >&2; exit 1; }
+if [ "$(tail -c 1 "$D/orig" | od -An -tx1 | tr -d ' \n')" != 0a ] && [ "$(tail -n 1 "$D/orig")" != "$L" ]; then
+  n=$(wc -c < "$D/new")
+  head -c $((n - 1)) "$D/new" > "$D/new2"
+  mv "$D/new2" "$D/new"
+fi
+chk || { echo 'hosts file changed under us' >&2; exit 1; }
+if cat "$D/new" > "$H" && cmp -s "$D/new" "$H"; then ok=1; exit 0; fi
+echo 'write failed; restoring the original' >&2
+chk || { echo 'RESTORE FAILED: hosts file replaced; original kept in '"$D"'/orig' >&2; exit 1; }
+if cat "$D/orig" > "$H" && cmp -s "$D/orig" "$H"; then echo 'original restored' >&2; ok=1; exit 1; fi
+echo 'RESTORE FAILED: original kept in '"$D"'/orig' >&2
+exit 1
+"""
+
+
+def _sh(body, line, path):
+    return (_SH_HEAD + body).replace("@H@", path).replace("@L@", line)
 
 
 def hosts_add_script(line, path="/etc/hosts"):
-    """Shell text that appends exactly `line`. Fails (nonzero) on any error. No temp file."""
-    return ("set -eu\n" + _guard(path) + f"L='{line}'\n"
-            "rc=0; grep -qxF -- \"$L\" \"$H\" || rc=$?\n"
-            "if [ \"$rc\" -eq 0 ]; then exit 0; fi\n"
-            "[ \"$rc\" -eq 1 ]\n"
-            "printf '%s\\n' \"$L\" >> \"$H\"\n"
-            "grep -qxF -- \"$L\" \"$H\"\n")
+    """Shell text that appends exactly `line`. Any failed step is a nonzero exit. No temp file."""
+    return _sh(_SH_ADD, line, path)
 
 
 def hosts_remove_script(line, path="/etc/hosts"):
     """Shell text that removes every copy of exactly `line` and nothing else.
 
-    No shared temp name: the file is read into a variable and written back in place.
-    set -eu plus an explicit check make any failed step a nonzero exit.
+    The file is never held in a shell variable. The new content goes to a private mktemp -d
+    directory (removed by a trap on success; kept with a message on failure), is verified,
+    and a backup of the original sits beside it. The target is rewritten in place (it may be a
+    bind mount that cannot be renamed over), compared with cmp, and restored from the backup on
+    any write or verify failure. The symlink check runs before the copy, before the write and
+    before a restore. Residual: a root-equivalent actor inside the container can still swap the
+    path between the last check and the write; see docs/game-day.md.
     """
-    return ("set -eu\n" + _guard(path) + f"L='{line}'\n"
-            "rc=0; grep -qxF -- \"$L\" \"$H\" || rc=$?\n"
-            "if [ \"$rc\" -eq 1 ]; then echo 'line already absent'; exit 0; fi\n"
-            "[ \"$rc\" -eq 0 ]\n"
-            "new=$(grep -vxF -- \"$L\" \"$H\" || [ $? -eq 1 ])\n"
-            "[ -n \"$new\" ] || { echo 'refusing to leave an empty hosts file' >&2; exit 1; }\n"
-            "printf '%s\\n' \"$new\" > \"$H\"\n"
-            "rc=0; grep -qxF -- \"$L\" \"$H\" || rc=$?\n"
-            "[ \"$rc\" -eq 1 ]\n")
+    return _sh(_SH_REMOVE, line, path)
 
 
 def _hosts_block(cfg, container, host, rid):
@@ -336,10 +379,40 @@ def get_scenario(cfg, name, rid=PLACEHOLDER_ID):
 
 # ------------------------------------------------------------ real runners
 
+def resolve_cli(name, dirs=None, owner_uid=None):
+    """Find `name` in a fixed set of trusted directories and return its absolute path, or None.
+
+    The caller's PATH is never consulted. The file (after following links) must be a regular
+    executable owned by owner_uid and not group or world writable, in a directory with the same
+    owner that is not group or world writable.
+    """
+    dirs = TRUSTED_DIRS if dirs is None else dirs
+    owner_uid = TRUSTED_UID if owner_uid is None else owner_uid
+    for d in dirs:
+        candidate = os.path.join(d, name)
+        if not os.path.exists(candidate):
+            continue
+        real = os.path.realpath(candidate)
+        try:
+            st = os.stat(real)
+            dst = os.stat(os.path.dirname(real))
+        except OSError:
+            continue
+        if (stat.S_ISREG(st.st_mode) and st.st_mode & 0o111 and st.st_uid == owner_uid
+                and not st.st_mode & 0o022 and dst.st_uid == owner_uid and not dst.st_mode & 0o022):
+            return candidate
+    return None
+
+
 def real_runner(argv):
-    """Run a command; returns (returncode, short text). Never prints env or output beyond 300 chars."""
+    """Run a command; returns (returncode, short text). Output beyond 300 characters is cut."""
+    exe = resolve_cli(argv[0])
+    if exe is None:
+        return 127, f"no trusted '{argv[0]}' found in {', '.join(TRUSTED_DIRS)} (root-owned, not writable by others)"
+    env = dict(os.environ)
+    env["PATH"] = ":".join(TRUSTED_DIRS)
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+        proc = subprocess.run([exe, *argv[1:]], capture_output=True, text=True, timeout=120, env=env)
     except FileNotFoundError:
         return 127, f"command not found: {argv[0]}"
     except subprocess.TimeoutExpired:
@@ -493,7 +566,7 @@ def execute(argv, env=None, run=real_runner, post=real_poster, resolve=real_reso
             for name in SCENARIO_NAMES:
                 say(name)
             return 0
-        if args.run_id is not None and not RUN_ID_RE.match(args.run_id):
+        if args.run_id is not None and not RUN_ID_RE.fullmatch(args.run_id):
             raise GamedayError("--run-id must be 8 to 32 lower-case hex characters")
         rid = args.run_id or (PLACEHOLDER_ID if args.revert else os.urandom(6).hex())
         sc = get_scenario(cfg, args.scenario, rid)

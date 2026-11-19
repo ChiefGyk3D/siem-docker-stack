@@ -59,7 +59,11 @@ router_workflow_id = "REPLACE_ME"
 ## Scenarios
 
 Run `python3 scripts/gameday.py list` for the names. Each one is
-`python3 scripts/gameday.py SCENARIO [--apply --confirm-live] [--revert]`.
+`python3 scripts/gameday.py SCENARIO` previews it,
+`python3 scripts/gameday.py SCENARIO --apply --confirm-live` injects it (the
+three hosts scenarios print a run id), and
+`python3 scripts/gameday.py SCENARIO --revert --run-id ID --apply --confirm-live`
+reverts it. Only the hosts scenarios need the id; the others ignore it.
 
 | Scenario | What it breaks | Expected observation |
 |----------|----------------|----------------------|
@@ -79,6 +83,29 @@ with `--run-id <id>`: it removes only that run's line, and every other line
 with `set -eu`, refuses a symlinked or empty hosts file, and checks the line is
 gone. A container recreate also clears the line.
 
+How the hosts edit is made safe: the file is never held in a shell variable. The
+script copies the original to a private `mktemp -d` directory (a per-run backup on
+the container's filesystem), writes the new content there with `grep -vxF`, checks
+it (not empty, the marker gone, line count equal to the original minus the removed
+copies), then rewrites `/etc/hosts` in place (it is usually a bind mount, which
+cannot be renamed over) and compares it byte for byte with `cmp`. Any write or
+compare failure restores the original from the backup and exits nonzero. On success
+the private directory is removed; on failure it is kept and its path is printed. Every
+other byte is preserved, with one exception: a file with no final newline keeps none
+unless this run's line was last. Adding a line to such a file inserts the missing newline first.
+
+Residual risk, stated plainly: the symlink check runs before the copy, before the
+write and before a restore, but it is a path check, not a held file descriptor, so
+`sh` cannot make check and write atomic. To exploit the gap an actor must already be
+root-equivalent inside the container (or able to replace `/etc/hosts` there), at which
+point the container is theirs. A swap between the last check and the write would be
+followed by the write; a swap earlier is caught and the run fails loudly.
+
+The container CLI (`docker` or `podman`) is found only in `/usr/bin`,
+`/usr/local/bin`, `/bin` and `/snap/bin`, never through your `PATH`, and must be a
+root-owned file that nobody else can write, in a directory the same way. Anything
+else is refused (exit code 127 on the step) and the command runs with that fixed `PATH`.
+
 ## Checklist
 
 For each scenario you run:
@@ -91,7 +118,7 @@ For each scenario you run:
 5. [ ] Send a test alert if the scenario needs one (see the table) and watch
        every OBSERVE line from the plan. Note what arrived, through which path,
        and how long it took.
-6. [ ] Revert: `gameday.py SCENARIO --revert --apply --confirm-live`.
+6. [ ] Revert: `gameday.py SCENARIO --revert --run-id ID --apply --confirm-live` (ID is the run id printed at injection).
 7. [ ] Verify recovery: a test alert arrives again, the heartbeat resumes, the
        observer shows up.
 8. [ ] Record the result (below).
@@ -109,7 +136,7 @@ broken link. A scenario with no alert is a finding: file an issue.
 
 Every scenario prints its revert. In order of preference:
 
-1. `gameday.py SCENARIO --revert [--run-id <id>] --apply --confirm-live` (the id is needed for the three hosts scenarios).
+1. `gameday.py SCENARIO --revert --run-id <id> --apply --confirm-live` (the id is needed for the three hosts scenarios).
 2. By hand, the same commands the plan printed:
    - hosts line: run `gameday.py SCENARIO --revert --run-id <id>` without `--apply` to print the exact
      command for your run, and paste it. Lost the id? `docker exec n8n grep gameday-84 /etc/hosts`
