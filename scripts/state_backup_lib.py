@@ -341,7 +341,7 @@ def make_temp_dir(cfg: Config) -> str:
     if base:
         os.makedirs(base, mode=0o700, exist_ok=True)
     path = tempfile.mkdtemp(prefix="siem-state-", dir=base)
-    os.chmod(path, 0o700)
+    os.chmod(path, stat.S_IRWXU)
     return path
 
 
