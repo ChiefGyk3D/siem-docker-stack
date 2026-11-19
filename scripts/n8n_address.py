@@ -9,9 +9,11 @@ base URL (used by shell scripts); as a module, scripts call resolve_n8n_base().
 Environment (all optional):
   N8N_BASE        full base URL; when set it wins and the runtime is not asked
   N8N_CONTAINER   container name (default: n8n)
-  SIEM_NETWORK    network to read the address from (default: siem-net; use the
-                  compose-prefixed name, for example docker_siem-net, if your
-                  project name prefixes it)
+  SIEM_NETWORK    exact name of the network to read the address from. Unset:
+                  the one attached network named siem-net or ending in _siem-net
+                  (compose prefixes the project name, for example siem_siem-net;
+                  `docker network ls` shows the real name). Zero or several
+                  matches is an error that tells you to set this.
   N8N_PORT        port on that address (default: 80)
 
 Exit status 1 with a message on stderr when the address cannot be found.
@@ -34,7 +36,7 @@ def resolve_n8n_base(env=None, run=subprocess.run):
         return override.rstrip("/")
 
     container = env.get("N8N_CONTAINER") or "n8n"
-    network = env.get("SIEM_NETWORK") or "siem-net"
+    explicit = env.get("SIEM_NETWORK") or ""
     port = env.get("N8N_PORT") or "80"
     hint = "Set N8N_BASE to the full URL (for example http://192.0.2.10:80) to skip the lookup."
 
@@ -58,12 +60,31 @@ def resolve_n8n_base(env=None, run=subprocess.run):
     except ValueError:
         raise N8nAddressError(f"docker inspect of '{container}' returned unexpected output. {hint}")
 
-    if network not in networks:
-        raise N8nAddressError(
-            f"container '{container}' is not attached to network '{network}'. "
-            f"Reattach it with: docker network connect {network} {container}  "
-            f"(and fix its compose file so a recreate keeps the network). {hint}"
-        )
+    attached = ", ".join(sorted(networks)) or "none"
+    if explicit:
+        network = explicit  # an explicit name is an exact match
+        if network not in networks:
+            raise N8nAddressError(
+                f"container '{container}' is not attached to network '{network}' "
+                f"(attached: {attached}). Reattach it with: docker network connect {network} {container}  "
+                f"and fix its compose file so a recreate keeps the network. {hint}"
+            )
+    else:
+        matches = sorted(n for n in networks if n == "siem-net" or n.endswith("_siem-net"))
+        if not matches:
+            raise N8nAddressError(
+                f"container '{container}' is not attached to a siem network "
+                f"(looked for siem-net or *_siem-net; attached: {attached}). Reattach it with: "
+                f"docker network connect <network-name> {container}  (find the name with "
+                f"`docker network ls`, usually the compose project name plus _siem-net), "
+                f"or set SIEM_NETWORK to the exact name. {hint}"
+            )
+        if len(matches) > 1:
+            raise N8nAddressError(
+                f"container '{container}' is on more than one siem network ({', '.join(matches)}). "
+                f"Set SIEM_NETWORK to the exact name to use. {hint}"
+            )
+        network = matches[0]
     address = (networks[network] or {}).get("IPAddress") or ""
     if not address:
         raise N8nAddressError(f"container '{container}' has no address on network '{network}'. {hint}")

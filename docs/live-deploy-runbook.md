@@ -206,11 +206,12 @@ fails silently until it is reattached. The reference service definition
 (siem network as `external: true` plus the macvlan network) is in
 `docs/examples/n8n-compose.example.yml`; make your live compose file match it.
 
-For a container that was already recreated, reattach it (substitute your
-network name from `docker network ls`):
+For a container that was already recreated, reattach it. The real network name
+is usually the compose project name plus `_siem-net` (for example
+`siem_siem-net`); `docker network ls` shows it.
 
 ```
-docker network connect siem-net n8n
+docker network connect <network-name> n8n
 ```
 
 Verify Grafana reaches n8n by name. Expected: an HTTP status line (a 404 or 405

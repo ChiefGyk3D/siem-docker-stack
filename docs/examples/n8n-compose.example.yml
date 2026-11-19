@@ -16,7 +16,7 @@ services:
     container_name: n8n
     restart: unless-stopped
     networks:
-      siem-net:                    # name resolution for Grafana: http://n8n/webhook/...
+      siem-net:                    # key above; name resolution for Grafana: http://n8n/webhook/...
         aliases:
           - n8n
       n8n-macvlan:
@@ -28,10 +28,11 @@ networks:
   siem-net:
     # The siem network is created by the stack's own compose project. Declare it
     # external here so this file never creates or removes it. The name must match
-    # `docker network ls`; compose usually prefixes it with the project name
-    # (for example docker_siem-net). Set SIEM_NETWORK to that name.
+    # `docker network ls`. Compose prefixes the project name, so the real name is
+    # usually the project name plus _siem-net (for example siem_siem-net).
+    # Set SIEM_NETWORK to that name.
     external: true
-    name: ${SIEM_NETWORK:-siem-net}
+    name: ${SIEM_NETWORK:-siem_siem-net}
   n8n-macvlan:
     driver: macvlan
     driver_opts:

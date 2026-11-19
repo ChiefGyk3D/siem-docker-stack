@@ -39,7 +39,7 @@ require_secret GRAFANA_PASS "$GRAFANA_PASS" || exit 1
 # is streamed over ssh to the remote python3 (nothing is copied or left behind).
 if [[ -z "${N8N_BASE:-}" ]]; then
   N8N_BASE="$(ssh "${SSH_USER}@${SIEM_SERVER}" \
-    "N8N_CONTAINER=$(printf '%q' "${N8N_CONTAINER:-n8n}") SIEM_NETWORK=$(printf '%q' "${SIEM_NETWORK:-siem-net}") N8N_PORT=$(printf '%q' "${N8N_PORT:-80}") python3 -I -" \
+    "N8N_CONTAINER=$(printf '%q' "${N8N_CONTAINER:-n8n}") SIEM_NETWORK=$(printf '%q' "${SIEM_NETWORK:-}") N8N_PORT=$(printf '%q' "${N8N_PORT:-80}") python3 -I -" \
     < "$(dirname "$0")/n8n_address.py")" || {
     echo "ERROR: could not resolve the n8n address on ${SIEM_SERVER}. Set N8N_BASE (for example http://192.0.2.10:80) to skip the lookup." >&2
     exit 1

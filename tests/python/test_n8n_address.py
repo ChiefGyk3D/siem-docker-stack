@@ -54,9 +54,38 @@ def test_not_on_siem_network_message_names_the_fix():
     with pytest.raises(mod.N8nAddressError) as exc:
         mod.resolve_n8n_base({}, fake_runtime(nets))
     msg = str(exc.value)
-    assert "not attached to network 'siem-net'" in msg
-    assert "docker network connect siem-net n8n" in msg
-    assert "N8N_BASE" in msg
+    assert "not attached to a siem network" in msg
+    assert "macvlan" in msg  # lists what it is attached to
+    assert "docker network connect <network-name> n8n" in msg
+    assert "SIEM_NETWORK" in msg and "N8N_BASE" in msg
+
+
+def test_compose_prefixed_network_resolves_without_siem_network_set():
+    nets = {"automation-vlan25": {"IPAddress": "198.51.100.4"}, "siem_siem-net": {"IPAddress": "192.0.2.9"}}
+    assert mod.resolve_n8n_base({}, fake_runtime(nets)) == "http://192.0.2.9:80"
+
+
+def test_two_matching_networks_fail_and_list_candidates():
+    nets = {"siem-net": {"IPAddress": "192.0.2.9"}, "other_siem-net": {"IPAddress": "192.0.2.20"}}
+    with pytest.raises(mod.N8nAddressError) as exc:
+        mod.resolve_n8n_base({}, fake_runtime(nets))
+    msg = str(exc.value)
+    assert "siem-net" in msg and "other_siem-net" in msg and "SIEM_NETWORK" in msg
+
+
+def test_suffix_must_be_whole_name_part():
+    nets = {"mysiem-net": {"IPAddress": "192.0.2.9"}}
+    with pytest.raises(mod.N8nAddressError):
+        mod.resolve_n8n_base({}, fake_runtime(nets))
+
+
+def test_explicit_siem_network_is_an_exact_match():
+    nets = {"siem_siem-net": {"IPAddress": "192.0.2.9"}}
+    with pytest.raises(mod.N8nAddressError) as exc:
+        mod.resolve_n8n_base({"SIEM_NETWORK": "siem-net"}, fake_runtime(nets))
+    assert "siem_siem-net" in str(exc.value) and "siem-net" in str(exc.value)
+    ok = mod.resolve_n8n_base({"SIEM_NETWORK": "siem_siem-net"}, fake_runtime(nets))
+    assert ok == "http://192.0.2.9:80"
 
 
 def test_empty_address_is_an_error():

@@ -19,7 +19,7 @@ Environment (all optional):
                    from the n8n container's address on the siem Docker network
                    (a macvlan address is not reachable from its own host). Set it
                    to skip the lookup. Lookup variables: N8N_CONTAINER (n8n),
-                   SIEM_NETWORK (siem-net), N8N_PORT (80). See scripts/n8n_address.py.
+                   SIEM_NETWORK (unset: the attached network named siem-net or *_siem-net), N8N_PORT (80). See scripts/n8n_address.py.
   SIEM_CONFIG_DIR  private config directory with the file "router-path"
                    (default: $HOME/.config/doppler-siem)
 """
