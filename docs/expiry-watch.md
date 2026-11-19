@@ -127,8 +127,9 @@ gone. This works for every provider, the registry file included.
 - The notice can tell you a token vanished, not why: the vendor may have
   deleted it as expired, or someone may have deleted it.
 - Two providers that read the same source are refused as a config error.
-- The memory has a size limit (4000 remembered items in all, and the state file
-  at most 1 MiB). A run whose state would exceed it fails with a state error
+- The memory has a size limit (1000 remembered items per provider, 4000 in all,
+  200 providers, and the state file at most 1 MiB). The same checks that read
+  the file back are applied before it is written. A run whose state would exceed it fails with a state error
   (exit 1) before it sends anything or writes anything, because a file the
   watch cannot read back would stop all monitoring. Watch fewer items or tokens.
 - Route it with `[routes].disappeared` (default `["discord"]`).
@@ -334,8 +335,8 @@ slug and `expires_at` are read; everything else in the response, any key
 material included, is ignored and never stored. One provider reads one config;
 add a provider for each project and config.
 
-An answer that says it failed (`success` is not `true`, or it has an `error` or
-`errors` field) is a provider error, never an empty list, so a failure answer
+An answer that says it failed (`success` is present and not `true`, or it has an
+`error` or `errors` field at all, even an empty or null one) is a provider error, never an empty list, so a failure answer
 cannot make known tokens look vanished.
 
 The vendor deletes an expired token, so this provider can only see a token that
@@ -365,7 +366,11 @@ own runbook and rotate it on a schedule.
 Both providers send the token only to the configured URL, never use a proxy
 from the environment (`HTTP_PROXY` and the like are ignored for these calls, so
 a proxy is never handed the token; the vendor must be reachable directly), end
-the request at the deadline by closing the connection, never follow a
+the request at the deadline by closing the connection (a name lookup is the
+exception: **DNS resolution cannot be interrupted**, so a stuck lookup keeps its
+worker thread until the resolver returns; at most 4 such threads can exist, and
+further requests are refused with a message saying so instead of starting more),
+never follow a
 redirect (a redirect is an error), cap a response at 1 MiB and a list at 1000
 tokens, refuse JSON with duplicate keys, `NaN` or absurd nesting, and refuse
 two tokens with the same name in one list (rename one). A failure message

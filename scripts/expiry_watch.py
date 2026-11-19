@@ -47,6 +47,7 @@ MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_SERVICE_ACCOUNTS = 50
 MAX_MISSED = 1000
 MAX_ACKNOWLEDGED = 200
+MAX_STUCK_FETCHES = 4  # name lookups cannot be interrupted: at most this many may be pending at once
 UTC = dt.timezone.utc
 KNOWN_CHANNELS = ("pushover", "discord", "matrix", "email", "webhook")
 # Channels the n8n router can deliver today. matrix and email are the next slice.
@@ -532,6 +533,12 @@ def _refuse_constant(name):
     raise ValueError("not a JSON value")
 
 
+# One slot per fetch thread that may still be running. A worker stuck in getaddrinfo() cannot be
+# stopped, so the number of such workers is bounded instead: when all slots are held by stuck
+# lookups, new requests are refused at once rather than adding another thread.
+_FETCH_SLOTS = threading.BoundedSemaphore(MAX_STUCK_FETCHES)
+
+
 class _HttpStatus(Exception):
     def __init__(self, code):
         self.code = code
@@ -546,9 +553,10 @@ def http_get_json(url, token, timeout):
 
     Made with http.client directly: environment proxies are never used (a proxy would be handed
     the bearer), redirects are never followed (a 3xx is an error), the response is capped, and
-    the whole call has one deadline that is enforced, not just waited for: the reader re-arms the
-    socket timeout with the time left, and when the deadline passes the socket is shut down so
-    the worker thread ends. Only a name lookup cannot be interrupted (see the TLS provider). The
+    the whole call has one deadline: the reader re-arms the socket timeout with the time left, and
+    when the deadline passes the socket is shut down so the worker thread ends. A name lookup
+    CANNOT be interrupted: its worker stays until the lookup returns, and at most MAX_STUCK_FETCHES
+    such workers exist at once (later requests are refused, not given another thread). The
     secret goes only to `url`, and no message made here contains it or the response body."""
     _check_url("url", url)
     if not isinstance(token, str) or not _TOKEN.fullmatch(token):
@@ -558,6 +566,9 @@ def http_get_json(url, token, timeout):
     target = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
     deadline = time.monotonic() + timeout
     box = {}
+    if not _FETCH_SLOTS.acquire(blocking=False):
+        raise ExpiryWatchError(f"{host}: not requested, earlier requests are still stuck (a name lookup cannot "
+                               "be interrupted); fix name resolution")
 
     def work():
         conn = None
@@ -593,9 +604,14 @@ def http_get_json(url, token, timeout):
         finally:
             if conn is not None:
                 conn.close()
+            _FETCH_SLOTS.release()
 
     worker = threading.Thread(target=work, daemon=True, name=f"expiry-get-{host}")
-    worker.start()
+    try:
+        worker.start()
+    except BaseException:
+        _FETCH_SLOTS.release()
+        raise
     worker.join(timeout)
     if worker.is_alive():
         conn = box.get("conn")
@@ -762,9 +778,9 @@ class DopplerProvider(_VendorTokens):
         body = http_get_json(f"{self.api_url.rstrip('/')}/v3/configs/config/tokens?{query}", self._token,
                              self.timeout)
         if isinstance(body, dict) and (("success" in body and body["success"] is not True)
-                                       or body.get("error") or body.get("errors")):
+                                       or "error" in body or "errors" in body):
             # a 200 that says it failed is not an empty inventory: it must not make tokens vanish
-            raise ExpiryWatchError(f"{self.LABEL}: the answer reports a failure (success is not true, or it has an error)")
+            raise ExpiryWatchError(f"{self.LABEL}: the answer reports a failure (success is not true, or it has an error or errors field)")
         tokens = body.get("tokens") if isinstance(body, dict) else None
         if not isinstance(tokens, list):
             raise ExpiryWatchError(f"{self.LABEL}: expected an object with a list called tokens")
@@ -1212,10 +1228,13 @@ def check_state_fits(state, seen):
     """Refuse a state the loader would refuse: the same item count and byte limits, measured on
     the exact text that would be written. Returns the text."""
     doc = state if seen is None else {"version": 2, "items": state, "seen": seen}
-    remembered = sum(len(r) for r in (seen or {}).values())
-    if len(state) > MAX_ITEMS * 4 or remembered > MAX_ITEMS * 4:
-        raise ExpiryWatchError(f"state: too many items to remember (limit {MAX_ITEMS * 4} items and "
-                               f"{MAX_ITEMS * 4} remembered ones); watch fewer items or tokens")
+    try:  # the very validators load_memory applies: what they refuse is never written
+        _check_items("the state", state)
+        if seen is not None:
+            _check_seen("the state", seen)
+    except ExpiryWatchError as e:
+        raise ExpiryWatchError(f"{e} (limits: {MAX_ITEMS} remembered items per provider, {MAX_ITEMS * 4} "
+                               "in all, 200 providers); watch fewer items or tokens") from None
     text = json.dumps(doc, indent=1, sort_keys=True) + "\n"
     if len(text.encode("utf-8")) > MAX_FILE_BYTES:
         raise ExpiryWatchError(f"state: too large to write (limit {MAX_FILE_BYTES} bytes); watch fewer items or tokens")

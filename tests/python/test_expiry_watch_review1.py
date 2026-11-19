@@ -66,6 +66,11 @@ def test_the_router_post_to_loopback_http_does_not_use_a_proxy_either(proxy_env)
     {"success": 0, "tokens": []},
     {"tokens": [], "error": "internal"},
     {"tokens": [], "errors": ["x"]},
+    {"success": True, "error": {}, "tokens": []},     # an empty error field is still an error field
+    {"success": True, "errors": [], "tokens": []},
+    {"success": True, "error": None, "tokens": []},
+    {"success": True, "error": "", "tokens": []},
+    {"success": True, "errors": None, "tokens": []},
 ])
 def test_doppler_failure_envelopes_are_errors(payload):
     v = FakeVendor()
@@ -77,14 +82,17 @@ def test_doppler_failure_envelopes_are_errors(payload):
         v.close()
 
 
-def test_a_200_failure_envelope_does_not_make_known_tokens_disappear(tmp_path, router):
+@pytest.mark.parametrize("bad", [{"success": False, "tokens": []}, {"success": True, "error": {}, "tokens": []},
+                                 {"success": True, "errors": [], "tokens": []},
+                                 {"success": True, "error": None, "tokens": []}])
+def test_a_200_failure_envelope_does_not_make_known_tokens_disappear(tmp_path, router, bad):
     base, rec = router
     v = FakeVendor()
     try:
         cfg = _setup(tmp_path, base, v.base)
         v.reply(DOPPLER_PATH, {"success": True, "tokens": [_dp_tok("ci", "2026-03-10T00:00:00.000Z")]})
         assert _run(cfg, _at(100), env=ENV)[0] == 0
-        v.reply(DOPPLER_PATH, {"success": False, "tokens": []})
+        v.reply(DOPPLER_PATH, bad)
         code, _, err = _run(cfg, _at(99), env=ENV)
         assert code == 1 and "provider error" in err and not rec.seen
         v.reply(DOPPLER_PATH, {"success": True, "tokens": [_dp_tok("ci", "2026-03-10T00:00:00.000Z")]})
@@ -115,7 +123,7 @@ def test_whatever_the_watch_saves_can_be_loaded_and_what_cannot_be_loaded_is_ref
     try:
         ew.save_state(path, state, seen=seen)
     except ew.ExpiryWatchError as e:
-        assert "limit" in str(e).lower()
+        assert any(w in str(e).lower() for w in ("limit", "too many", "unexpected shape"))
         assert not path.exists(), "an unloadable state must not be written"
     else:
         assert ew.load_memory(path) == (state, seen), "a saved state must load back unchanged"
