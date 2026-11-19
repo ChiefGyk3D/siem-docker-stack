@@ -68,6 +68,15 @@ def test_der_reader_refuses_validity_outside_the_tbs_structure():
         ew.der_not_after(_tlv(0x30, tbs + validity))
 
 
+def test_der_reader_refuses_a_validity_whose_content_spills_out_of_the_tbs():
+    validity = _tlv(0x30, _utc("250101000000Z") + _utc("491231235959Z"))
+    fields = _tlv(0x02, b"\x01") + _tlv(0x30, b"") + _tlv(0x30, b"") + validity[:2]  # header only inside the TBS
+    tbs = _tlv(0x30, fields)
+    der = _tlv(0x30, tbs + validity[2:] + _tlv(0x30, b"") + _tlv(0x03, b"\x00"))
+    with pytest.raises(ew.ExpiryWatchError, match="(?i)enclosing"):
+        ew.der_not_after(der)
+
+
 def _cert(validity, extra_in_validity=b"", trailing=b""):
     if extra_in_validity:
         validity = _tlv(0x30, validity[2:] + extra_in_validity)
