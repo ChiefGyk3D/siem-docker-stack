@@ -23,6 +23,9 @@ per scenario).
   never touch a live system. A step that fails triggers the revert steps at once;
   if the revert fails too, the script says so and you run the printed revert by
   hand.
+- Options are matched exactly: abbreviations such as `--app` are rejected.
+- An interrupt (Ctrl-C), a timeout or any error during a live step runs the revert
+  before the script exits, and the revert cannot hide the original error.
 - It never reads or sends the Grafana webhook secret. `wrong-header` sends a
   made-up value.
 - Pick a maintenance window and tell whoever receives the alerts. Real messages
@@ -38,13 +41,13 @@ repository: keep the file outside it.
 |-----|---------|---------|
 | `n8n_container` | `n8n` | all but grafana-down |
 | `grafana_container` | `grafana` | grafana-down |
-| `docker` | `docker` | the container CLI |
+| `docker` | `docker` | the container CLI; only `docker` or `podman` is accepted |
 | `discord_host` | `discord.com` | discord-unreachable |
 | `pushover_host` | `api.pushover.net` | phone-unreachable |
 | `heartbeat_host` | none, required | heartbeat-silent (host of the observer's ping URL) |
 | `router_workflow_id` | none, required | router-inactive |
 | `router_path` | none, required | wrong-header (the router's private webhook path) |
-| `n8n_base` | looked up at run time | wrong-header (see `scripts/n8n_address.py`) |
+| `n8n_base` | looked up at run time | wrong-header (see `scripts/n8n_address.py`); must be `http(s)://<loopback or private IP>[:port]`, no user info or path, never link-local; redirects are not followed |
 
 ```toml
 # gameday.toml, kept outside the repository
@@ -68,8 +71,13 @@ Run `python3 scripts/gameday.py list` for the names. Each one is
 | `router-inactive` | Router workflow deactivated | Grafana gets an error and logs a failed notification; heartbeat stops |
 | `wrong-header` | One webhook call with a wrong header | 401 or 403; anything else is a defect |
 
-The three name-resolution scenarios add one line marked `# gameday-84` to
-`/etc/hosts` inside the n8n container. A container recreate also clears it.
+The three name-resolution scenarios add one exact line, marked
+`# gameday-84-<run id>`, to `/etc/hosts` inside the n8n container. The run id is
+random, printed when you inject, and also written to the `--log` record. Revert
+with `--run-id <id>`: it removes only that run's line, and every other line
+(including other runs' lines) is left alone. The script uses no temp file, runs
+with `set -eu`, refuses a symlinked or empty hosts file, and checks the line is
+gone. A container recreate also clears the line.
 
 ## Checklist
 
@@ -90,7 +98,8 @@ For each scenario you run:
 
 ## Recording results
 
-`--log FILE` appends one JSON line per run (time, scenario, mode, whether each
+`--log FILE` (created mode 0600, never through a symlink, regular files only; a
+log problem prints a warning and never blocks a revert) appends one JSON line per run (time, scenario, mode, whether each
 step succeeded). It holds no commands, values or output. Add what you observed
 (path, delay, anything missing) to the issue or your run notes. A scenario passes
 only when the failure alert arrived through a path that does not depend on the
@@ -100,9 +109,11 @@ broken link. A scenario with no alert is a finding: file an issue.
 
 Every scenario prints its revert. In order of preference:
 
-1. `gameday.py SCENARIO --revert --apply --confirm-live`.
+1. `gameday.py SCENARIO --revert [--run-id <id>] --apply --confirm-live` (the id is needed for the three hosts scenarios).
 2. By hand, the same commands the plan printed:
-   - hosts line: `docker exec -u root n8n sh -c "grep -v '# gameday-84' /etc/hosts > /tmp/.gameday-hosts; cat /tmp/.gameday-hosts > /etc/hosts; rm -f /tmp/.gameday-hosts"`
+   - hosts line: run `gameday.py SCENARIO --revert --run-id <id>` without `--apply` to print the exact
+     command for your run, and paste it. Lost the id? `docker exec n8n grep gameday-84 /etc/hosts`
+     shows the line; edit `/etc/hosts` in the container by hand or recreate it (next item).
    - stopped container: `docker start n8n` (or `grafana`)
    - deactivated router: activate it again in the n8n editor, or run the
      `update:workflow --active=true` command from the plan, then restart n8n.

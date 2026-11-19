@@ -35,15 +35,21 @@ The Grafana webhook secret is never read or sent: wrong-header sends a made-up v
 """
 import argparse
 import datetime
+import ipaddress
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
-MARKER = "# gameday-84"
+MARKER = "# gameday-84"  # the line marker is MARKER + "-" + the run id
+CLI_ALLOWED = ("docker", "podman")
+RUN_ID_RE = re.compile(r"^[0-9a-f]{8,32}$")
+PLACEHOLDER_ID = "<RUN_ID>"  # shown in a dry-run revert when no --run-id was given
 DEFAULTS = {
     "n8n_container": "n8n",
     "grafana_container": "grafana",
@@ -94,6 +100,8 @@ def load_config(env=None, config_path=None):
         value = env.get("GAMEDAY_" + key.upper())
         if value is not None and value.strip():
             cfg[key] = value.strip()
+    if cfg["docker"] not in CLI_ALLOWED:
+        raise GamedayError(f"'docker' must be one of: {', '.join(CLI_ALLOWED)}")
     return cfg
 
 
@@ -116,10 +124,11 @@ def _check(value, regex, what):
 class Step:
     """One action. kind 'exec' runs argv; kind 'http' posts to the router."""
 
-    def __init__(self, text, argv=None, http=None):
+    def __init__(self, text, argv=None, http=None, needs_id=False):
         self.text = text
         self.argv = argv
         self.http = http
+        self.needs_id = needs_id  # the argv carries the run id
 
     def describe(self):
         if self.argv:
@@ -141,21 +150,62 @@ def _docker(cfg, *args):
     return [cfg["docker"], *args]
 
 
-def _hosts_block(cfg, container, host):
+def hosts_line(host, run_id):
+    """The one line this run adds. The run id makes it exact and unique."""
+    return f"0.0.0.0 {host} {MARKER}-{run_id}"
+
+
+def _guard(path):
+    return (f"H='{path}'\n"
+            "[ -f \"$H\" ] && [ ! -L \"$H\" ] || { echo 'hosts file missing or a symlink' >&2; exit 1; }\n")
+
+
+def hosts_add_script(line, path="/etc/hosts"):
+    """Shell text that appends exactly `line`. Fails (nonzero) on any error. No temp file."""
+    return ("set -eu\n" + _guard(path) + f"L='{line}'\n"
+            "rc=0; grep -qxF -- \"$L\" \"$H\" || rc=$?\n"
+            "if [ \"$rc\" -eq 0 ]; then exit 0; fi\n"
+            "[ \"$rc\" -eq 1 ]\n"
+            "printf '%s\\n' \"$L\" >> \"$H\"\n"
+            "grep -qxF -- \"$L\" \"$H\"\n")
+
+
+def hosts_remove_script(line, path="/etc/hosts"):
+    """Shell text that removes every copy of exactly `line` and nothing else.
+
+    No shared temp name: the file is read into a variable and written back in place.
+    set -eu plus an explicit check make any failed step a nonzero exit.
+    """
+    return ("set -eu\n" + _guard(path) + f"L='{line}'\n"
+            "rc=0; grep -qxF -- \"$L\" \"$H\" || rc=$?\n"
+            "if [ \"$rc\" -eq 1 ]; then echo 'line already absent'; exit 0; fi\n"
+            "[ \"$rc\" -eq 0 ]\n"
+            "new=$(grep -vxF -- \"$L\" \"$H\" || [ $? -eq 1 ])\n"
+            "[ -n \"$new\" ] || { echo 'refusing to leave an empty hosts file' >&2; exit 1; }\n"
+            "printf '%s\\n' \"$new\" > \"$H\"\n"
+            "rc=0; grep -qxF -- \"$L\" \"$H\" || rc=$?\n"
+            "[ \"$rc\" -eq 1 ]\n")
+
+
+def _hosts_block(cfg, container, host, rid):
     _check(container, NAME_RE, "container name")
     _check(host, HOST_RE, "host name")
-    script = f"echo '0.0.0.0 {host} {MARKER}' >> /etc/hosts"
-    return Step(f"Make '{host}' unresolvable inside '{container}' (one marked line in /etc/hosts)",
-                _docker(cfg, "exec", "-u", "root", container, "sh", "-c", script))
+    if rid != PLACEHOLDER_ID:
+        _check(rid, RUN_ID_RE, "run id")
+    return Step(f"Make '{host}' unresolvable inside '{container}' (one exact line in /etc/hosts, run {rid})",
+                _docker(cfg, "exec", "-u", "root", container, "sh", "-c", hosts_add_script(hosts_line(host, rid))),
+                needs_id=True)
 
 
-def _hosts_unblock(cfg, container):
+def _hosts_unblock(cfg, container, host, rid):
     _check(container, NAME_RE, "container name")
-    # /etc/hosts is a bind mount in a container, so rewrite in place, never mv or sed -i.
-    script = (f"grep -v '{MARKER}' /etc/hosts > /tmp/.gameday-hosts; "
-              "cat /tmp/.gameday-hosts > /etc/hosts; rm -f /tmp/.gameday-hosts")
-    return Step(f"Remove the marked line from /etc/hosts in '{container}'",
-                _docker(cfg, "exec", "-u", "root", container, "sh", "-c", script))
+    _check(host, HOST_RE, "host name")
+    if rid != PLACEHOLDER_ID:
+        _check(rid, RUN_ID_RE, "run id")
+    return Step(f"Remove only this run's line ({rid}) from /etc/hosts in '{container}'",
+                _docker(cfg, "exec", "-u", "root", container, "sh", "-c",
+                        hosts_remove_script(hosts_line(host, rid))),
+                needs_id=True)
 
 
 def _stop(cfg, container):
@@ -168,7 +218,7 @@ def _start(cfg, container):
     return Step(f"Start container '{container}'", _docker(cfg, "start", container))
 
 
-def build_scenarios(cfg):
+def build_scenarios(cfg, rid=PLACEHOLDER_ID):
     """Return {name: Scenario}. A scenario whose config is missing raises on use."""
     n8n, grafana = cfg["n8n_container"], cfg["grafana_container"]
 
@@ -176,23 +226,23 @@ def build_scenarios(cfg):
         return Scenario(
             "discord-unreachable",
             "Discord webhook unreachable from n8n",
-            [_hosts_block(cfg, n8n, cfg["discord_host"])],
+            [_hosts_block(cfg, n8n, cfg["discord_host"], rid)],
             ["Send a test alert (n8n-test-router.py case 5 or a Grafana contact point test). "
              "The router answers HTTP 502 {\"status\": \"delivery failed\"}.",
              "The error handler sends ONE Pushover message (priority 1) naming the workflow, the failed node and the execution id.",
              "Grafana logs a failed notification; the delivery-failure alert (#81) fires if its rule is loaded.",
              "No Discord message arrives. The phone path still works for alerts labeled phone=true."],
-            [_hosts_unblock(cfg, n8n)])
+            [_hosts_unblock(cfg, n8n, cfg["discord_host"], rid)])
 
     def phone():
         return Scenario(
             "phone-unreachable",
             "Phone channel (Pushover) unreachable from n8n",
-            [_hosts_block(cfg, n8n, cfg["pushover_host"])],
+            [_hosts_block(cfg, n8n, cfg["pushover_host"], rid)],
             ["Send a test alert labeled phone=true (n8n-test-router.py --phone).",
              "Discord still receives the alert and then a notice: \"phone delivery failed: Pushover Notify ...\".",
              "The router answers 200 (a phone failure never fails the run)."],
-            [_hosts_unblock(cfg, n8n)],
+            [_hosts_unblock(cfg, n8n, cfg["pushover_host"], rid)],
             "Only meaningful when PUSHOVER_ENABLED is true in the router. With it false there is no phone step to fail.")
 
     def heartbeat():
@@ -200,12 +250,12 @@ def build_scenarios(cfg):
         return Scenario(
             "heartbeat-silent",
             "Heartbeat pings cannot reach the observer",
-            [_hosts_block(cfg, n8n, host)],
+            [_hosts_block(cfg, n8n, host, rid)],
             ["The router keeps answering and Discord keeps working; only the ping to the observer fails.",
              "After the observer's period plus grace (10 to 15 minutes with the documented settings) the observer "
              "alerts through its own channels. That is the pass condition.",
              "A ping failure shows in the n8n log, not as a Discord message."],
-            [_hosts_unblock(cfg, n8n)])
+            [_hosts_unblock(cfg, n8n, host, rid)])
 
     def n8n_down():
         return Scenario(
@@ -277,8 +327,8 @@ SCENARIO_NAMES = ("discord-unreachable", "phone-unreachable", "heartbeat-silent"
                   "n8n-down", "grafana-down", "router-inactive", "wrong-header")
 
 
-def get_scenario(cfg, name):
-    factories = build_scenarios(cfg)
+def get_scenario(cfg, name, rid=PLACEHOLDER_ID):
+    factories = build_scenarios(cfg, rid)
     if name not in factories:
         raise GamedayError(f"unknown scenario '{name}' (try: list)")
     return factories[name]()
@@ -297,12 +347,39 @@ def real_runner(argv):
     return proc.returncode, ((proc.stdout or "") + (proc.stderr or "")).strip()[:300]
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: the request would carry the Authorization header along."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+
+
+def validate_base(base):
+    """Accept only http(s)://<loopback or private IP>[:port][/]. Returns the base without a trailing slash."""
+    try:
+        parts = urllib.parse.urlsplit(base)
+        host, port = parts.hostname, parts.port  # port raises ValueError when out of range
+        ip = ipaddress.ip_address(host) if host else None
+    except ValueError:
+        raise GamedayError("n8n base URL is not valid (use http://<private IP>:<port>)")
+    if parts.scheme not in ("http", "https") or ip is None or parts.username is not None or parts.password is not None:
+        raise GamedayError("n8n base URL must be http(s)://<private IP>[:port] with no user info")
+    if parts.path not in ("", "/") or parts.query or parts.fragment:
+        raise GamedayError("n8n base URL must have no path, query or fragment")
+    if ip.is_unspecified or ip.is_multicast or ip.is_link_local or not (ip.is_loopback or ip.is_private):
+        raise GamedayError("n8n base URL must be a loopback or private address (not link-local or public)")
+    return base.rstrip("/")
+
+
 def real_poster(url, headers, body):
-    """POST and return the status code (or 'error:<Type>'). Used only by wrong-header."""
+    """POST and return the status code (or 'error:<Type>'). Redirects are not followed."""
     req = urllib.request.Request(url, data=body.encode(), method="POST",
                                  headers=dict({"Content-Type": "application/json"}, **headers))
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with _OPENER.open(req, timeout=20) as resp:
             return resp.status
     except urllib.error.HTTPError as err:
         return err.code
@@ -339,33 +416,63 @@ def render(sc, revert_only):
     return "\n".join(lines)
 
 
-def run_steps(steps, cfg, run, post, resolve):
-    """Run steps in order; stop at the first failure. Returns a list of (text, ok, detail)."""
-    results = []
+def run_steps(steps, cfg, run, post, resolve, results=None):
+    """Run steps in order; stop at the first failure. `results` (a list) is filled as steps start,
+    so a caller still sees what began when an exception escapes. Each entry: [text, ok, detail]."""
+    results = [] if results is None else results
     for step in steps:
+        entry = [step.text, False, "started, outcome unknown"]
+        results.append(entry)  # recorded BEFORE the call: an interrupted step may have applied
         if step.argv:
             rc, detail = run(step.argv)
             ok = rc == 0
             detail = f"exit {rc}" + (f": {detail}" if detail and not ok else "")
         else:
-            base = resolve(cfg)
+            try:
+                base = validate_base(resolve(cfg))
+            except GamedayError as err:
+                entry[1:] = [False, f"refused: {err}"]
+                break
             status = post(f"{base}/webhook/{step.http['path']}", step.http["headers"], step.http["body"])
             ok = status in (401, 403)
             detail = f"HTTP {status} (expected 401 or 403)"
-        results.append((step.text, ok, detail))
+        entry[1:] = [ok, detail]
         if not ok:
             break
-    return results
+    return [tuple(e) for e in results]
+
+
+def write_log(path, rec):
+    """Append one JSON line, private and without following symlinks. Returns an error text or ''."""
+    flags = os.O_APPEND | os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    try:
+        fd = os.open(path, flags, 0o600)
+    except OSError as err:
+        return f"cannot open log ({err.strerror})"
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return "log path is not a regular file"
+        if st.st_uid != os.geteuid():
+            return "log file is owned by another user"
+        os.write(fd, (json.dumps(rec) + "\n").encode())
+    except OSError as err:
+        return f"cannot write log ({err.strerror})"
+    finally:
+        os.close(fd)
+    return ""
 
 
 def execute(argv, env=None, run=real_runner, post=real_poster, resolve=real_resolver, out=sys.stdout, clock=None):
     """Entry point with injectable collaborators. Returns the process exit code."""
-    parser = argparse.ArgumentParser(prog="gameday.py", description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(prog="gameday.py", description=__doc__.split("\n\n")[0],
+                                     allow_abbrev=False)
     parser.add_argument("scenario", help="a scenario name, or 'list'")
     parser.add_argument("--apply", action="store_true", help="run the steps (also needs --confirm-live)")
     parser.add_argument("--confirm-live", action="store_true",
                         help="state that you mean to change the live system")
     parser.add_argument("--revert", action="store_true", help="print or run only the revert steps")
+    parser.add_argument("--run-id", help="hex id of the injection to revert (printed when you inject)")
     parser.add_argument("--config", help="TOML config file")
     parser.add_argument("--log", help="append one JSON line describing this run")
     try:
@@ -386,8 +493,15 @@ def execute(argv, env=None, run=real_runner, post=real_poster, resolve=real_reso
             for name in SCENARIO_NAMES:
                 say(name)
             return 0
-        sc = get_scenario(cfg, args.scenario)
+        if args.run_id is not None and not RUN_ID_RE.match(args.run_id):
+            raise GamedayError("--run-id must be 8 to 32 lower-case hex characters")
+        rid = args.run_id or (PLACEHOLDER_ID if args.revert else os.urandom(6).hex())
+        sc = get_scenario(cfg, args.scenario, rid)
+        if args.apply and args.revert and rid == PLACEHOLDER_ID and any(s.needs_id for s in sc.revert):
+            raise GamedayError("reverting this scenario needs --run-id (printed when it was injected)")
         say(render(sc, args.revert))
+        if not args.revert and any(s.needs_id for s in sc.steps):
+            say(f"RUN ID: {rid}  (revert with: gameday.py {sc.name} --revert --run-id {rid} --apply --confirm-live)")
     except GamedayError as err:
         say(f"ERROR: {err}")
         return 2
@@ -398,28 +512,43 @@ def execute(argv, env=None, run=real_runner, post=real_poster, resolve=real_reso
 
     steps = sc.revert if args.revert else sc.steps
     say("APPLYING (live):")
-    results = run_steps(steps, cfg, run, post, resolve)
+    results, reverted, pending = [], [], None
+    try:
+        run_steps(steps, cfg, run, post, resolve, results)
+    except BaseException as exc:  # includes KeyboardInterrupt: a started step may have applied
+        pending = exc
     for text, ok, detail in results:
         say(f"  [{'ok' if ok else 'FAILED'}] {text} - {detail}")
-    failed = any(not ok for _, ok, _ in results)
-    reverted = []
+    failed = pending is not None or any(not e[1] for e in results)
+    if pending is not None:
+        say(f"INTERRUPTED by {type(pending).__name__}; the last step may have been applied.")
     if failed and not args.revert and sc.revert:
-        say("A step failed. Running the revert steps now.")
-        reverted = run_steps(sc.revert, cfg, run, post, resolve)
+        say("A step failed or was interrupted. Running the revert steps now.")
+        try:
+            run_steps(sc.revert, cfg, run, post, resolve, reverted)
+        except BaseException as exc:  # never mask the original problem
+            say(f"REVERT INTERRUPTED by {type(exc).__name__}.")
+            reverted.append(["revert", False, "interrupted"])
         for text, ok, detail in reverted:
             say(f"  [revert {'ok' if ok else 'FAILED'}] {text} - {detail}")
-        if any(not ok for _, ok, _ in reverted):
+        if any(not e[1] for e in reverted):
             say("REVERT FAILED. Run the REVERT commands printed above by hand now.")
     elif not failed and not args.revert and sc.revert:
         say("Injected. Observe the points above, then revert with: "
-            f"gameday.py {sc.name} --revert --apply --confirm-live")
+            f"gameday.py {sc.name} --revert{' --run-id ' + rid if any(s.needs_id for s in sc.steps) else ''} "
+            "--apply --confirm-live")
     if args.log:
         now = (clock or (lambda: datetime.datetime.now(datetime.timezone.utc)))()
         rec = {"time": now.isoformat(), "scenario": sc.name, "mode": "revert" if args.revert else "inject",
-               "ok": not failed, "steps": [{"step": t, "ok": ok} for t, ok, _ in results],
+               "ok": not failed, "steps": [{"step": e[0], "ok": e[1]} for e in results],
                "auto_reverted": bool(reverted)}
-        with open(args.log, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(rec) + "\n")
+        if any(s.needs_id for s in sc.steps) and not args.revert:
+            rec["run_id"] = rid
+        problem = write_log(args.log, rec)
+        if problem:
+            say(f"WARNING: log not written: {problem}. The result above still stands.")
+    if pending is not None:
+        raise pending
     return 1 if failed else 0
 
 

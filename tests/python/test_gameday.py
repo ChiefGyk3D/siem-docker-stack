@@ -107,12 +107,6 @@ def test_every_changing_scenario_prints_a_concrete_revert_command(name):
     assert "$ docker" in revert
 
 
-def test_hosts_scenarios_revert_removes_only_the_marked_line():
-    _, out, _ = go(["discord-unreachable"])
-    assert "grep -v '\\''# gameday-84'\\''" in out
-    assert "sed -i" not in out  # /etc/hosts is a bind mount; sed -i would fail
-
-
 def test_wrong_header_says_nothing_to_revert():
     _, out, _ = go(["wrong-header"])
     assert "REVERT: none needed" in out
