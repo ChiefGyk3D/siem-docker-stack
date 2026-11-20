@@ -870,163 +870,328 @@ def test_round4_f4_a_bad_count_stops_before_listing_anything(tmp_path, bad):
 
 def test_round4_f4_the_owner_decision_for_n_is_documented():
     flat = " ".join(RUNBOOK.split())
-    assert "OWNER DECISION: the value of N" in flat and "never by hand" in flat
+    assert "OWNER DECISION: the value of N" not in flat  # decided 2026-11-20, see the decision pins below
+    assert 'DECIDED 2026-11-20 (owner: "3 others"): N is 3' in flat and "never by hand" in flat
+    assert all(" 3 " in c for c in PRUNE_CALLS)  # both documented calls use the decided count
 
 
-# ---- issue #177: the box reads dev_network through the siem-net-run wrapper, never a bare doppler run ----
+# ---- issue #179: owner decisions of 2026-11-20 and the scratch rehearsal ----------------
 
-def test_issue177_no_bare_doppler_run_for_dev_network_remains():
-    for line in CODE_LINES:
-        assert not ("doppler run" in line and "dev_network" in line), line
-        assert not ("doppler run" in line and "DEV_CONFIG" in line), line
-
-
-def test_issue177_the_wrapper_is_used_for_the_restarts_and_the_recreate():
-    assert CODE.count('"$HOME/bin/siem-net-run"') >= 5  # 4d, 4g, 5d, the recreate, the 6.3 tests
-    assert not any("docker compose up -d grafana" in l and "siem-net-run" not in l for l in CODE_LINES)
-
-
-def test_issue177_the_two_resolved_owner_decisions_are_gone():
-    assert "how the box reads `dev_network`" not in FLAT
-    assert "OWNER DECISION: how n8n's variables reach" not in FLAT
-    assert "Recommended: (a)" not in FLAT
-
-
-def test_issue177_the_token_step_names_scope_storage_readback_and_rotation():
-    text = section("### 0b.5 ", "## Step 0c.")
-    flat = " ".join(text.split())
-    for needle in ("doppler configs tokens create", "--access read", "--plain", "--project homelab",
-                   "--config dev_network", "umask 077", "doppler configs tokens revoke",
-                   "$HOME/.config/doppler-siem-net", "stat -c", "never echoed", "scripts/siem-net-run"):
-        assert needle in flat, needle
-    # the create command's output goes into a pipe to the box, never to the terminal
-    create = [l for l in text.splitlines() if "tokens create" in l and l.lstrip().startswith("doppler")]
-    assert create and all("| ssh" in l for l in create), create
-    assert "read/write" in flat  # says that write access is refused
+def test_issue179_the_four_owner_decisions_are_pinned():
+    flat = " ".join(RUNBOOK.split())
+    for quote in ('owner: "Rehearse on a scratch n8n first"', 'owner: "Service-account-owned folder"',
+                  'owner: "3 others"', 'owner: "Skip it for now"'):
+        assert quote in flat, quote
+    assert "OWNER DECISION: run item 3" not in flat
+    assert "OWNER DECISION (with Q9a)" not in flat
+    assert "OWNER DECISION: the export-to-import round trip" not in flat
+    s2c = " ".join(section("### 2c. First run, by hand", "### 2d.").split())
+    assert "/var/backups/siem-state" in s2c and "/var/lib/SERVICE_ACCOUNT/backups" in s2c
+    assert "by-hand root run keeps `/var/backups/siem-state`" in s2c
+    assert "/var/lib/SERVICE_ACCOUNT/backups" in " ".join(section("### 2e. Schedule it", "## Step 3.").split())
+    s63 = " ".join(section("### 6.3 Test the router limits", "### 6a.").split())
+    assert "item 3" in s63 and "skipped for now" in s63 and "optional later step" in s63
+    assert "3. The window (only if you chose to run it)" in s63
 
 
-def test_issue177_the_wrapper_is_described_where_siem_run_is():
-    live = (REPO_ROOT / "docs" / "live-deploy-runbook.md").read_text(encoding="utf-8")
-    assert "siem-net-run" in live
-    assert "siem-net-run" in (REPO_ROOT / "docs" / "design" / "secrets-sources.md").read_text(encoding="utf-8")
+def test_issue179_other_owner_decisions_are_left_alone():
+    assert FLAT.count("OWNER DECISION") >= 3  # the decisions that are not answered stay open
 
 
-# ---- issue #177, Daybreak round 1: allowlists, no fallback file, atomic token replacement ----
-
-# Names the Grafana restarts also need beyond what the repo compose file names: the manual compose
-# lines of step 4b (one) and 5b (seven). They are checked against those steps below.
-GRAFANA_EXTRAS = ["DISCORD_FAILURE_WEBHOOK_URL", "GF_SMTP_ENABLED", "GF_SMTP_FROM_ADDRESS", "GF_SMTP_HOST",
-                  "GF_SMTP_PASSWORD", "GF_SMTP_STARTTLS_POLICY", "GF_SMTP_USER", "P1_EMAIL_TO"]
+REHEARSAL_SECTION = section("### 6.0a ", "### 6.1 ")
+REHEARSE = def_fence("owner_rehearse_router")
 
 
-def compose_grafana_names():
-    """Every name the grafana service of docker/docker-compose.yml interpolates or passes through."""
-    compose = (REPO_ROOT / "docker" / "docker-compose.yml").read_text(encoding="utf-8")
-    block = re.search(r"^  grafana:\n(.*?)(?=^  [a-z0-9_-]+:\n)", compose, flags=re.S | re.M).group(1)
-    return sorted(set(re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)", block))
-                  | set(re.findall(r"^\s+- ([A-Z][A-Z0-9_]*)\s*$", block, flags=re.M)))
+def test_issue179_the_rehearsal_is_a_step_before_the_import_in_the_documented_format():
+    assert RUNBOOK.index("### 6.0a ") < RUNBOOK.index("**3. Re-import the router")
+    assert_under(REHEARSE, "### 6.0a ", "### 6.1 ")
+    flat = " ".join(REHEARSAL_SECTION.split())
+    for label in ("Target:", "Change:", "Evidence you get:", "Blast radius:", "Rollback:"):
+        assert label in flat, label
+    assert "What this rehearsal does NOT prove" in flat
+    for gap in ("live webhook registration", "Grafana path", "real credentials"):
+        assert gap in flat, gap
+    assert "different, random encryption key" in flat and "never the live key" in flat
+    assert "names only, never a value" in flat or "names only" in flat
+    assert "nothing" in flat.lower() and "INFERRED" in flat and "https://docs.n8n.io/hosting/cli-commands/, read 2026-11-20" in flat
+    assert "Until the owner has run it" in flat and "stays INFERRED, not VERIFIED" in flat
+    # the rollback text no longer calls the export format verified
+    assert "is INFERRED, not VERIFIED" in " ".join(item3().split())
 
 
-def test_issue177_the_grafana_allowlist_is_computed_from_the_compose_file():
-    everything = set(compose_grafana_names()) | set(GRAFANA_EXTRAS)
-    step4 = {"DISCORD_FAILURE_WEBHOOK_URL", "GRAFANA_WEBHOOK_SECRET"}  # stored in 0b and 4a: must exist
-    step5 = step4 | {n for n in GRAFANA_EXTRAS if n.startswith("GF_SMTP")} | {"P1_EMAIL_TO"}  # plus 5a's seven
-    lines = [l for l in CODE_LINES if "docker compose up -d" in l and "grafana" in l and "siem-net-run" in l]
-    assert len(lines) == 3, lines  # 4d, 4g, 5d
-    for line, required in zip(lines, (step4, step4, step5)):
-        want = ('"$HOME/bin/siem-net-run" --require ' + ",".join(sorted(required)) + " --optional "
-                + ",".join(sorted(everything - required)) + " -- docker compose up -d --no-deps grafana")
-        assert want in line, line
-    for name in GRAFANA_EXTRAS[:1]:
-        assert name in section("### 4b.", "### 4c.")
-    smtp = section("### 5a.", "### 5b.")
-    for name in GRAFANA_EXTRAS[1:]:
-        assert name in smtp, name
+def test_issue179_the_rehearsal_block_has_no_network_no_published_port_and_never_touches_the_live_folders():
+    assert "0.0.0.0" not in REHEARSAL_SECTION and "0.0.0.0" not in REHEARSE
+    run = next(l for l in REHEARSE.splitlines() if "docker run" in l)
+    assert "--network none" in run
+    assert not re.search(r"\s(-p|--publish|-P|--publish-all)\b", run), run  # no published port at all
+    for bad in ("--network host", "--network=host", "container:", "127.0.0.1:", "--network bridge", "--privileged"):
+        assert bad not in run, bad
+    assert "SCRATCH_PORT" not in REHEARSE and "ss -ltn" not in REHEARSE  # the port check is gone with the port
+    assert "/opt/n8n" not in REHEARSE and "N8N_COMPOSE_DIR" not in REHEARSE and "n8n_data" not in REHEARSE
+    mounts = re.findall(r'-v "([^"]+)"', run)
+    assert len(mounts) == 2 and all(m.startswith("$SCRATCH_DIR/") for m in mounts), mounts
+    assert "--env-file" in run and not re.search(r" -e ", run)  # the key never goes through argv
+    assert "publish:workflow" not in REHEARSE and "docker compose" not in REHEARSE
+    assert "docker restart" not in REHEARSE and "docker stop" not in REHEARSE
 
 
-def test_issue177_every_wrapper_call_names_an_allowlist_and_none_is_a_process_control_name():
-    calls = [l for l in CODE_LINES if "siem-net-run" in l and "install" not in l and "rm " not in l]
-    assert calls
-    for line in calls:
-        for m in re.finditer(r'siem-net-run" (?!--(?:require|optional) |--only )', line):
-            assert False, "a wrapper call without a name list: " + line
-        assert "--only " not in line  # the old spelling
-    names = set()
-    for line in CODE_LINES:
-        for m in re.finditer(r"--(?:require|optional) ([A-Za-z0-9_,]+)", line):
-            names.update(m.group(1).split(","))
-    script = (REPO_ROOT / "scripts" / "siem-net-run").read_text(encoding="utf-8")
-    start = script.index("PERMITTED_NAMES=(") + len("PERMITTED_NAMES=(")
-    table = set(script[start:script.index(")", start)].split())
-    assert names and names <= table, sorted(names - table)  # every name the runbook passes is in the wrapper's table
+def test_issue179_the_scratch_container_carries_every_limit_flag():
+    run = next(l for l in REHEARSE.splitlines() if "docker run" in l)
+    for flag in ("--memory 1g", "--memory-swap 1g", "--cpus 1", "--pids-limit 256", "--security-opt no-new-privileges",
+                 "--cap-drop ALL", "--restart no", "--network none", "--user"):
+        assert flag in run, flag
+    flat = " ".join(REHEARSAL_SECTION.split())
+    assert "--read-only" in flat and "unverified" in flat  # said plainly why it is left out
+    assert "https://docs.n8n.io/deploy/host-n8n/configure-n8n/basic-configuration/use-environment-variables/deployment.md" in flat
+    for name in ("N8N_DIAGNOSTICS_ENABLED=false", "N8N_VERSION_NOTIFICATIONS_ENABLED=false", "N8N_TEMPLATES_ENABLED=false"):
+        assert name in REHEARSE, name
 
 
-def test_issue177_the_n8n_recreate_allowlist_is_the_preserve_list():
-    block = def_fence("owner_recreate_n8n")
-    # "$2", not "$PRESERVE": a variable set as a prefix of the same command is not visible to its own arguments
-    assert '"$HOME/bin/siem-net-run" --require "$2" -- sh -c' in block
-    for call in CALLS:
-        req, preserve = re.search(r'owner_recreate_n8n "([^"]*)" "([^"]*)"', call).groups()
-        assert set(req.split()) == set(preserve.split(",")), call  # every name the compose file takes is required
-        assert set(preserve.split(",")) <= {"HEARTBEAT_PING_URL", "HEARTBEAT_KIND", "EXPIRY_WATCH_ROUTER_TOKEN"}
+def test_issue179_the_doc_says_what_remains_after_a_dead_terminal_with_a_read_back():
+    flat = " ".join(REHEARSAL_SECTION.split())
+    assert "INT, TERM and HUP" in flat and "kill -9" in flat
+    leftovers = [f for f in fences(REHEARSAL_SECTION) if "docker rm -f n8n-rehearsal" in f and "owner_rehearse" not in f]
+    assert len(leftovers) == 1
+    for needle in ("docker ps -a --filter name=n8n-rehearsal", 'rm -rf -- "$HOME/n8n-rehearsal"', "No such file or directory"):
+        assert needle in leftovers[0] + REHEARSAL_SECTION, needle
 
 
-def test_issue177_the_recreate_passes_its_allowlist_to_the_wrapper(tmp_path):
-    status, out, log = run_blocks(tmp_path, [CHK, RECREATE, CALLS[1]])
-    assert status == 0 and "netargs --require HEARTBEAT_PING_URL,HEARTBEAT_KIND,EXPIRY_WATCH_ROUTER_TOKEN --" in log
+def test_issue179_the_block_traps_signals_runs_the_same_teardown_and_uses_private_modes():
+    assert re.search(r"trap '[^\n]*owner_rehearse_down[^\n]*INTR=1[^\n]*' INT TERM HUP", REHEARSE)
+    assert re.search(r"trap '[^\n]*owner_rehearse_down[^\n]*' EXIT", REHEARSE)
+    assert REHEARSE.count("trap - INT TERM HUP EXIT") >= 1
+    assert "mkdir -m 700" in REHEARSE and REHEARSE.count("umask 077") >= 3 and "install -m 600" in REHEARSE
 
 
-def test_issue177_the_token_is_replaced_atomically_and_the_old_one_is_revoked_after_the_check():
-    text = section("### 0b.5 ", "## Step 0c.")
-    flat = " ".join(text.split())
-    assert 'cat > "$HOME/.config/doppler-siem-net/token"' not in text  # never truncates the live token
-    assert "doppler-siem-net.new" in text and "mv -T" in text and "umask 077" in text
-    assert text.index("mv -T") < text.index("revoke --project")  # the swap comes before the revoke
-    assert "--no-fallback" in flat and "fails closed" in flat.lower() and "Doppler outage" in flat
-    assert "--require" in flat and "--optional" in flat and "LD_PRELOAD" in flat and "ZDOTDIR" in flat
-    assert "fixed table" in flat and "exit 3" in flat
-    assert "GF_SMTP_HOST" in flat
-    # round 3: no equivalence claim, a table of routing values with consequences, and an owner decision
-    assert "same trust as editing" not in flat and "equivalent" not in flat.lower()
-    routing = " ".join(section("Routing and destination values", "You need, on your own machine").split())
-    for name in ("BIND_ADDR", "SIEM_HOST", "GF_SMTP_HOST", "GRAFANA_VERSION", "GRAFANA_PORT", "GRAFANA_INFLUX_USER",
-                 "WAZUH_GRAFANA_RO_USER", "DISCORD_FAILURE_WEBHOOK_URL", "HEARTBEAT_PING_URL", "P1_EMAIL_TO",
-                 "GF_SMTP_STARTTLS_POLICY", "GF_SMTP_ENABLED", "GF_SMTP_FROM_ADDRESS", "HEARTBEAT_KIND",
-                 "GRAFANA_ADMIN_USER"):
-        assert name in routing, name
-    assert "OWNER DECISION" in routing and ".env" in routing and "dev_network" in routing
-    assert "doppler activity" in routing and "NOT verified" in routing  # how to check, and what is unverified
-    assert "does not inherit the token" in flat or "do not inherit the token" in flat
-    assert "not a sandbox" in flat
-    item4 = [l for l in text.splitlines() if "SIEM_NET_CONFIG_DIR=" in l]
-    assert item4 and "--require GRAFANA_WEBHOOK_SECRET --" in item4[0]
+R_STUBS = r'''
+docker() {
+  echo "docker $*" >> "$LOG"
+  if [ -n "$SIG" ] && [[ "$*" == *"import:workflow"* ]]; then kill -s "$SIG" $$; return 0; fi
+  if [ -n "$FAIL" ] && [[ "$*" == *"$FAIL"* ]]; then return 7; fi
+  case "$1" in
+    inspect) echo "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" ;;
+    ps) [ -n "$CTR_EXISTS" ] && echo abc123 ;;
+    cp) case "$2" in n8n:*)
+          if [ -d "$3" ]; then t="${3%/}/router.json"; else t="$3"; fi
+          case "$DEST" in
+            symlink) ln -s "$SYMTARGET" "$t" ;;
+            dir) mkdir "$t" ;;
+            empty) : > "$t" ;;
+            hard) printf '%s' "$STUBJSON" > "$t"; ln "$t" "$t.extra" ;;
+            big) head -c 6000000 /dev/zero > "$t" ;;
+            *) printf '%s' "$STUBJSON" > "$t" ;;
+          esac ;;
+        esac ;;
+    exec)
+      case "$*" in
+        "exec n8n mktemp -d "*) echo "${MKTEMP_OUT:-/tmp/router-rehearsal.AbC123}" ;;
+        *"export:workflow"*"/work/scratch.json"*) printf '%s' "$SCJSON" > "$HOME/n8n-rehearsal/work/scratch.json" ;;
+        *"n8n-rehearsal n8n list:workflow"*) echo "aaaaaaaaaaaaaaaa|Router" ;;
+      esac ;;
+  esac
+  return 0
+}
+sleep() { :; }
+openssl() { case "$OSSL" in fail) return 1;; short) echo abcd;; *) command openssl "$@";; esac; }
+OWNER_FRESH=1
+'''
+CRED_JSON = '{"nodes":[{"credentials":{"discordWebhookApi":{"id":"1","name":"Discord"}}},{}]}'
 
 
-def _table_names(text):
-    names = []
-    for cell in re.findall(r"^\| ((?:`[A-Z][A-Z0-9_]*`(?:, )?)+) \|", text, flags=re.M):
-        names += re.findall(r"`([A-Z][A-Z0-9_]*)`", cell)
-    return names
+def run_rehearsal(tmp_path, fail="", ctr_exists="", pre_dir=False, scjson=CRED_JSON, sig="", bad_id=False, ossl="", dest="", mk_out="", block=None):
+    """Run the COMPLETE documented fence once and return the real process status, the output, the stub log."""
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    if pre_dir:
+        (home / "n8n-rehearsal").mkdir()
+        (home / "n8n-rehearsal" / "keep.txt").write_text("keep")
+    log = tmp_path / "log"
+    log.write_text("")
+    values = dict(VARS, ROUTER_ID="bad" if bad_id else VARS["ROUTER_ID"])
+    overrides = "\n".join("%s=%s" % kv for kv in values.items())
+    target = tmp_path / "symtarget.json"
+    target.write_text(CRED_JSON)
+    script = "\n".join([R_STUBS, CHK, overrides, block or REHEARSE])  # nothing after the fence: its own status is the process status
+    env = dict(os.environ, HOME=str(home), LOG=str(log), FAIL=fail, STUBJSON=CRED_JSON, SCJSON=scjson,
+               CTR_EXISTS=ctr_exists, SIG=sig, OSSL=ossl, DEST=dest,
+               SYMTARGET=str(target), MKTEMP_OUT=mk_out)
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, timeout=60)
+    return out.returncode, out.stdout + out.stderr, log.read_text(), home / "n8n-rehearsal"
 
 
-def test_issue177_every_name_in_the_wrappers_table_is_in_exactly_one_runbook_table():
-    script = (REPO_ROOT / "scripts" / "siem-net-run").read_text(encoding="utf-8")
-    start = script.index("PERMITTED_NAMES=(") + len("PERMITTED_NAMES=(")
-    permitted = script[start:script.index(")", start)].split()
-    assert len(permitted) == 25, permitted
-    text = section("### 0b.5 ", "## Step 0c.")
-    secrets = _table_names(section("Secret values (who must never see them)", "Routing and destination values"))
-    routing = _table_names(section("Routing and destination values", "You need, on your own machine"))
-    assert len(secrets) == len(set(secrets)) and len(routing) == len(set(routing))
-    assert not set(secrets) & set(routing), sorted(set(secrets) & set(routing))  # never in both
-    missing = [n for n in permitted if n not in secrets and n not in routing]
-    assert not missing, missing  # in neither table
-    extra = (set(secrets) | set(routing)) - set(permitted)
-    assert not extra, sorted(extra)  # a name the wrapper no longer permits
-    assert "P1_EMAIL_TO" in routing and "GF_SMTP_STARTTLS_POLICY" in routing and "GRAFANA_ADMIN_USER" in routing
-    assert "GF_SMTP_PASSWORD" in secrets and "GRAFANA_ADMIN_PASS" in secrets
-    assert "25" in text  # the text says how many names the table holds
+def test_issue179_rehearsal_success_tears_down_and_has_no_network_or_published_port(tmp_path):
+    rc, out, log, scratch = run_rehearsal(tmp_path)
+    assert rc == 0 and "rehearsal exit code: 0" in out and "teardown ok" in out, out
+    assert "rehearsal compare ok: 2 nodes in both" in out and "discordWebhookApi:Discord" in out
+    assert not scratch.exists()
+    run = next(l for l in log.splitlines() if l.startswith("docker run"))
+    assert "--network none" in run and " -p " not in run and "--publish" not in run and "127.0.0.1" not in run
+    for flag in ("--memory 1g", "--memory-swap 1g", "--cpus 1", "--pids-limit 256", "--security-opt no-new-privileges",
+                 "--cap-drop ALL", "--restart no"):
+        assert flag in run, flag
+    assert "0.0.0.0" not in log and "/opt/n8n" not in log and "N8N_ENCRYPTION_KEY" not in log
+    assert "publish:workflow" not in log and run.count(" -v ") == 2 and str(scratch) in run
+    assert "docker rm -f n8n-rehearsal" in log
+    assert "docker exec n8n rm -rf -- /tmp/router-rehearsal.AbC123" in log  # the live side is cleaned too
+    assert "docker exec n8n mktemp -d /tmp/router-rehearsal.XXXXXX" in log
+    assert "/tmp/router-rehearsal.json" not in log  # the old predictable path is never named
+    assert "--output=/tmp/router-rehearsal.AbC123/router.json" in log
+    assert "docker cp n8n:/tmp/router-rehearsal.AbC123/router.json" in log
 
 
-def test_issue177_the_old_fallback_readonly_claim_is_gone():
-    assert "--fallback-readonly" not in RUNBOOK.replace("`--fallback-readonly` in `siem-run`", "")
+def test_issue179_round2_the_live_export_never_uses_a_predictable_path():
+    assert "/tmp/router-rehearsal.json" not in REHEARSE
+    assert "mktemp -d /tmp/router-rehearsal.XXXXXX" in REHEARSE
+    assert "INFERRED to exist in the n8n image" in REHEARSE  # said at the point of failure too
+    flat = " ".join(REHEARSAL_SECTION.split())
+    assert "never an existing or symlinked path" in flat and "LIVE LEFTOVER" in flat
+
+
+def test_issue179_round2_an_unusable_live_folder_name_stops_before_any_export(tmp_path):
+    rc, out, log, scratch = run_rehearsal(tmp_path, fail="mktemp")
+    assert rc != 0 and "making a new private folder inside the live container" in out, out
+    assert "export:workflow" not in log and "docker run" not in log and "rm -rf" not in log
+    assert not scratch.exists()
+
+
+def test_issue179_round2_a_failed_removal_of_the_live_export_returns_nonzero_and_names_the_path(tmp_path):
+    rc, out, log, scratch = run_rehearsal(tmp_path, fail="n8n rm -rf")
+    assert rc != 0, out  # even though every rehearsal stage itself passed
+    assert "LIVE LEFTOVER: /tmp/router-rehearsal.AbC123" in out
+    assert "docker exec n8n rm -rf -- /tmp/router-rehearsal.AbC123" in out
+    assert "rehearsal exit code: 0" not in out
+    assert log.count("docker exec n8n rm -rf -- /tmp/router-rehearsal.AbC123") >= 2  # retried by the final teardown
+    assert not scratch.exists()
+
+
+@pytest.mark.parametrize("sig", ["INT", "TERM", "HUP"])
+def test_issue179_round2_a_failed_removal_on_the_trap_path_is_reported_and_nonzero(tmp_path, sig):
+    rc, out, log, scratch = run_rehearsal(tmp_path, fail="n8n rm -rf", sig=sig)
+    assert rc != 0 and "LIVE LEFTOVER: /tmp/router-rehearsal.AbC123" in out and "teardown INCOMPLETE" in out, out
+    assert not scratch.exists()
+
+
+@pytest.mark.parametrize("ossl", ["fail", "short"])
+def test_issue179_round2_a_failed_or_short_key_stops_before_docker_run(tmp_path, ossl):
+    rc, out, log, scratch = run_rehearsal(tmp_path, ossl=ossl)
+    assert rc != 0 and "REHEARSAL FAILED at: the scratch key file" in out, out
+    assert "docker run" not in log and "export:workflow" not in log
+    assert not scratch.exists()
+
+
+@pytest.mark.parametrize("kw,msg", [
+    ({"ctr_exists": "1"}, "a container named n8n-rehearsal already exists"),
+    ({"bad_id": True}, "bad workflow id"),
+])
+def test_issue179_rehearsal_refuses_touches_nothing_and_the_block_exits_nonzero(tmp_path, kw, msg):
+    rc, out, log, scratch = run_rehearsal(tmp_path, **kw)
+    assert rc != 0 and msg in out, out  # the pasted block's own status, not a status the test printed
+    assert not scratch.exists()
+    assert "docker run" not in log and "docker rm" not in log and "export:workflow" not in log
+
+
+def test_issue179_rehearsal_refuses_an_existing_folder_never_deletes_it_and_exits_nonzero(tmp_path):
+    rc, out, log, scratch = run_rehearsal(tmp_path, pre_dir=True)
+    assert rc == 1 and "already exists" in out, out
+    assert (scratch / "keep.txt").read_text() == "keep"  # a refusal never tears down what it did not make
+    assert "docker run" not in log and "docker rm" not in log
+
+
+def test_issue179_a_stale_function_gate_exits_nonzero(tmp_path):
+    script = "\n".join([R_STUBS, CHK, REHEARSE.replace('= "$OWNER_SUM_REHEARSE"', '= "tampered"')])
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=dict(os.environ, HOME=str(tmp_path), LOG=str(tmp_path / "l")), timeout=30)
+    assert out.returncode != 0 and "STALE FUNCTION" in out.stdout
+
+
+@pytest.mark.parametrize("fail,started", [
+    ("export:workflow --id", False), ("run -d", True), ("list:workflow", True),
+    ("import:workflow", True), ("/work/scratch.json", True),
+])
+def test_issue179_every_stage_failure_exits_nonzero_and_tears_down(tmp_path, fail, started):
+    rc, out, log, scratch = run_rehearsal(tmp_path, fail=fail)
+    assert rc != 0 and "REHEARSAL FAILED at" in out and "rehearsal exit code: 0" not in out, out
+    assert "rehearsal exit code: %d" % rc in out  # the printed status is the returned status
+    assert not scratch.exists(), "the scratch folder must be removed"
+    assert ("docker rm -f n8n-rehearsal" in log) == started
+    assert "teardown ok" in out
+    assert "publish:workflow" not in log
+
+
+@pytest.mark.parametrize("scjson,what", [
+    ('{"nodes":[{}]}', "node count"),
+    ('{"nodes":[{"credentials":{"discordWebhookApi":{"id":"1","name":"Other"}}},{}]}', "credential references differ"),
+])
+def test_issue179_a_changed_node_count_or_credential_list_exits_nonzero_and_tears_down(tmp_path, scjson, what):
+    rc, out, log, scratch = run_rehearsal(tmp_path, scjson=scjson)
+    assert rc != 0 and what in out, out
+    assert not scratch.exists() and "docker rm -f n8n-rehearsal" in log
+
+
+@pytest.mark.parametrize("sig", ["INT", "TERM", "HUP"])
+def test_issue179_a_signal_mid_run_removes_the_container_and_the_folder(tmp_path, sig):
+    rc, out, log, scratch = run_rehearsal(tmp_path, sig=sig)
+    assert rc == 130 and "REHEARSAL INTERRUPTED" in out and "rehearsal exit code: 130" in out, out
+    assert not scratch.exists(), "the scratch folder (it holds the workflow export) must be gone"
+    assert "docker rm -f n8n-rehearsal" in log
+
+
+def test_issue179_the_rehearsal_key_file_is_private_and_not_the_live_key():
+    assert "umask 077" in REHEARSE and '= 600' in REHEARSE and "openssl rand -hex 32" in REHEARSE
+    assert "docker exec n8n env" not in REHEARSE and "inspect --format '{{.Config.Env" not in REHEARSE
+
+
+# ---- Daybreak round 3: the copy out of the live container, and mutation checks ----------
+
+@pytest.mark.parametrize("dest", ["symlink", "dir", "empty", "hard", "big"])
+def test_issue179_round3_a_bad_copy_destination_stops_before_parsing_and_tears_down(tmp_path, dest):
+    rc, out, log, scratch = run_rehearsal(tmp_path, dest=dest)
+    assert rc != 0 and "REHEARSAL FAILED at: reading the live export" in out, out
+    assert "docker run" not in log and "import:workflow" not in log  # nothing parsed, nothing started
+    assert not scratch.exists() and "docker exec n8n rm -rf -- /tmp/router-rehearsal.AbC123" in log
+
+
+def test_issue179_round3_a_live_export_that_is_not_a_plain_file_is_never_copied(tmp_path):
+    rc, out, log, scratch = run_rehearsal(tmp_path, fail="test -f")
+    assert rc != 0 and "REHEARSAL FAILED at: the read-only export" in out, out
+    assert "docker cp" not in log and "docker run" not in log and not scratch.exists()
+
+
+def test_issue179_round3_the_copy_goes_into_a_new_private_directory_not_a_fixed_name(tmp_path):
+    rc, out, log, scratch = run_rehearsal(tmp_path)
+    assert rc == 0, out
+    cp = next(l for l in log.splitlines() if l.startswith("docker cp"))
+    assert re.search(r"/n8n-rehearsal/work/in\.[A-Za-z0-9]{6}/$", cp), cp
+    assert "work/live.json" not in cp
+    assert 'mktemp -d "$SCRATCH_DIR/work/in.XXXXXX"' in REHEARSE and "install -m 600" in REHEARSE
+    assert '[ ! -L "$F" ]' in REHEARSE and "5242880" in REHEARSE and "%u %h" in REHEARSE
+    assert "symlink as a symlink" in " ".join(REHEARSAL_SECTION.split())
+
+
+def test_issue179_round3_mutation_without_the_live_folder_name_check_a_bad_name_is_used(tmp_path):
+    check = '[[ "$LD" =~ ^/tmp/router-rehearsal\\.[A-Za-z0-9]{6}$ ]] || { R=1; LD=""; }'
+    assert check in REHEARSE
+    rc, out, log, _ = run_rehearsal(tmp_path / "a", mk_out="/tmp/evil")
+    assert rc != 0 and "/tmp/evil" not in log  # the real block refuses the name and never touches it
+    mutated = REHEARSE.replace(check, "true")
+    rc2, out2, log2, _ = run_rehearsal(tmp_path / "b", mk_out="/tmp/evil", block=mutated)
+    assert "rm -rf -- /tmp/evil" in log2 or "--output=/tmp/evil/router.json" in log2  # so the pin bites
+
+
+def test_issue179_round3_mutation_without_the_removal_status_the_trap_reports_a_clean_teardown(tmp_path):
+    leftover = 'remove it with: docker exec n8n rm -rf -- $L"; S=1; }'
+    assert leftover in REHEARSE
+    rc, out, log, _ = run_rehearsal(tmp_path / "a", fail="n8n rm -rf", sig="INT")
+    assert "teardown INCOMPLETE" in out and rc != 0
+    mutated = REHEARSE.replace(leftover, 'remove it with: docker exec n8n rm -rf -- $L"; }')
+    rc2, out2, log2, _ = run_rehearsal(tmp_path / "b", fail="n8n rm -rf", sig="INT", block=mutated)
+    assert "teardown INCOMPLETE" not in out2  # the failure flag is what carried the message
+
+
+def test_issue179_round3_mutation_without_the_host_file_checks_a_symlink_is_parsed(tmp_path):
+    check = '[ -f "$F" ] && [ ! -L "$F" ] && '
+    assert check in REHEARSE
+    rc, out, log, _ = run_rehearsal(tmp_path / "a", dest="symlink")
+    assert rc != 0 and "docker run" not in log
+    mutated = REHEARSE.replace(check, "")
+    rc2, out2, log2, _ = run_rehearsal(tmp_path / "b", dest="symlink", block=mutated)
+    assert "docker run" in log2  # without the check the link was followed and the run went on

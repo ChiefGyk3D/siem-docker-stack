@@ -58,7 +58,7 @@ older shell cannot be replaced; the blocks detect that and print `STALE FUNCTION
 and the answer is always a fresh shell:
 
 ```
-OWNER_FRESH=1; for F in owner_chk_vars owner_recreate_n8n owner_router_chain owner_router_rollback owner_prune_releases; do unset -f "$F" 2> /dev/null; if declare -f "$F" > /dev/null 2>&1; then OWNER_FRESH=0; echo "STALE FUNCTION: $F cannot be removed (read-only or inherited): open a fresh bash shell"; fi; done
+OWNER_FRESH=1; for F in owner_chk_vars owner_recreate_n8n owner_router_chain owner_router_rollback owner_prune_releases owner_rehearse_down owner_rehearse_router; do unset -f "$F" 2> /dev/null; if declare -f "$F" > /dev/null 2>&1; then OWNER_FRESH=0; echo "STALE FUNCTION: $F cannot be removed (read-only or inherited): open a fresh bash shell"; fi; done
 REPO_DIR=/opt/siem-repo
 N8N_COMPOSE_DIR=/opt/n8n
 SIEM_NETWORK=siem_siem-net
@@ -275,9 +275,9 @@ give it, and the newest N other releases, and lists as candidates only folders u
 `YYYYMMDDTHHMMSSZ-8hex` (so `legacy` and anything else are never touched), that are
 real directories (not symlinks), and that are neither the live nor the previous
 release. The default is a dry run that only lists; `apply` removes the candidates,
-re-checking each one against the live link right before its removal. OWNER DECISION:
-the value of N (suggested 3, so at most live + previous + 3 releases stay; the size of
-one release is a few MB, so this is about safety margin, not disk). In a session (the
+re-checking each one against the live link right before its removal. DECIDED
+2026-11-20 (owner: "3 others"): N is 3, so at most live + previous + 3 releases stay;
+the size of one release is a few MB, so this is about safety margin, not disk. In a session (the
 session variables block has been pasted, and `OWNER_FRESH` is `1`):
 
 ```
@@ -924,10 +924,11 @@ in the config first:
 ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo install -d -m 700 -o root -g root /var/backups/siem-state && ls -ld /var/backups/siem-state'
 ```
 
-OWNER DECISION (with Q9a): the scheduled runs as `SERVICE_ACCOUNT` need
-`destination_dir` owned by that account (`/var/lib/SERVICE_ACCOUNT/backups`,
-step 0c), so the config's `destination_dir` changes again when step 2e is done.
-Until Q9a is answered, only the by-hand root run exists.
+DECIDED 2026-11-20 (owner: "Service-account-owned folder"): the scheduled runs as
+`SERVICE_ACCOUNT` write to `/var/lib/SERVICE_ACCOUNT/backups` (step 0c), owned by that
+account, so the config's `destination_dir` changes again when step 2e is done. The
+by-hand root run keeps `/var/backups/siem-state`. The Docker access of the scheduled
+account is still Q9a; until it is answered, only the by-hand root run exists.
 
 ```
 ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && sudo python3 scripts/backup-state.py --config /etc/siem-state-backup.toml; echo "exit code: $?"'
@@ -1561,6 +1562,214 @@ SAFE N8N RECREATE above (never a plain `docker compose up`), and re-check the si
 network and the heartbeat. Nothing
 else changes; the siem network name `n8n` still serves Grafana.
 
+### 6.0a Rehearse the router export and import on a scratch n8n (on LOGGING_BOX)
+
+DECIDED 2026-11-20 (owner: "Rehearse on a scratch n8n first"): do this BEFORE the live
+router import in 6.1 item 3. Nothing here has been run yet; every statement about how
+n8n 2.10.3 behaves below is VERIFIED only where a URL and date are given, and
+INFERRED otherwise.
+
+Target: a throwaway n8n container on `LOGGING_BOX`, started from the same image as the
+live `n8n` container, plus the live n8n's own CLI for one read-only export.
+
+Change: the function below (1) refuses if the scratch folder or container name
+is already in use; (2) reads the live image id with `docker inspect` and the live
+router with `n8n export:workflow --id=ROUTER_ID` into a mode 600 file in a new scratch
+folder (mode 700); (3) starts the scratch container with a different, random encryption key, no
+other environment and no credentials, with NO network (`--network none`) and NO
+published port: every step runs through `docker exec` and the CLI inside it, so the
+editor and API are never reachable by any local user; (4) imports the
+file there with `n8n import:workflow`; (5) compares the node count and the list of
+credential references (type and name only, never a value) between the live export and
+the scratch export; (6) tears the container and the folder down on every path, then
+reads both back. It publishes nothing on the live n8n and changes nothing on it.
+
+Evidence you get:
+
+- VERIFIED (https://docs.n8n.io/hosting/cli-commands/, read 2026-11-20): the CLI has
+  `export:workflow` with `--id` and `--output`, `import:workflow` with `--input`, and
+  `publish:workflow --id`; an imported workflow is deactivated by default
+  (`--activeState` defaults to `false`); n8n exports ids along with the workflow, and
+  an import overwrites a workflow or credential that has the same id.
+- VERIFIED (https://docs.n8n.io/hosting/installation/docker/, read 2026-11-20): the
+  data folder in the image is `/home/node/.n8n`, the default port is 5678, and the
+  `N8N_ENCRYPTION_KEY` variable can be set instead of keeping a key in that folder.
+  That page is marked outdated by n8n.
+- NOT in those docs, so INFERRED: the file format of an export (array or one object),
+  what an import does with a credential id that does not exist in the target, and the
+  exact output of `list:workflow`. The rehearsal prints what actually happens.
+
+What to expect about credentials. A workflow export does not carry credentials, only
+references: each node that uses one holds the credential type, its id and its name.
+The scratch n8n has none of them. INFERRED: the import still succeeds and the node
+keeps its dangling reference (type, id, name), and the n8n interface would show it as
+a missing credential on that node. If the import FAILS on a missing credential, that
+is a finding: stop, do not start the live import, and keep the step 2 archive as the
+only proven restore. The comparison below treats a changed reference list as a failure.
+
+How the scratch container cannot reach the real Discord, Pushover or Healthchecks. It
+gets no credential and no environment variable of the live n8n: its only environment is
+a mode 600 file holding a fresh random `N8N_ENCRYPTION_KEY` (never the live key, which
+the function never reads) and `HOME`. The router reads its Discord, Pushover and
+Healthchecks addresses from environment variables of the live container
+(`HEARTBEAT_PING_URL` and the others in 6.1), which do not exist here, and the
+imported workflow is inactive and is never executed. The container shares no folder,
+volume or Docker network name with `/opt/n8n` or the live data volume: its only two
+mounts are folders under the new scratch folder. Because the container runs with
+`--network none`, it has no network interface beyond loopback inside itself, so n8n's own
+telemetry, version check and template fetches cannot reach any host (this follows from
+Docker's `none` network, INFERRED for n8n 2.10.3; a failed call is expected to be
+silent). As defense in depth the env file also sets `N8N_DIAGNOSTICS_ENABLED=false`,
+`N8N_VERSION_NOTIFICATIONS_ENABLED=false` and `N8N_TEMPLATES_ENABLED=false` (names and
+defaults VERIFIED at
+https://docs.n8n.io/deploy/host-n8n/configure-n8n/basic-configuration/use-environment-variables/deployment.md,
+read 2026-11-20; that they take effect in 2.10.3 is INFERRED). There is no published
+port, so nobody else on the box can reach the fresh, unowned n8n editor.
+
+How the export is copied out. `docker cp` copies a symlink as a symlink, so a link
+inside the live folder, or a link already at the host destination, could pull another
+file out or write through it. The function therefore (1) refuses unless the exported
+file in the live container is a regular file and not a symlink (`test -f` and `! test
+-L` through `docker exec`); (2) copies into a brand new directory made with `mktemp -d`
+under umask 077 inside the mode 700 scratch folder, never to a predictable name; (3)
+before it parses anything, refuses unless the copy is a regular file, not a symlink,
+owned by you with a link count of 1, and between 1 byte and 5 MB; (4) only then installs
+it as mode 600 `live.json` and parses that copy. That `docker cp` makes the host file
+owned by the user who runs it is INFERRED; if your Docker makes it another owner, the
+check stops the rehearsal with a message and nothing is parsed.
+
+Resource limits, so a runaway scratch n8n cannot starve the live stack: `--memory 1g
+--memory-swap 1g` (an idle n8n is well under that, INFERRED; the same value for swap
+means no swap), `--cpus 1`, `--pids-limit 256`, `--security-opt no-new-privileges`,
+`--cap-drop ALL` and `--restart no`. A read-only root file system (`--read-only` with
+tmpfs mounts) is NOT used: whether n8n 2.10.3 starts that way is unverified, so it is
+left out rather than guessed.
+
+Blast radius: one extra container (at most 1 GB and one CPU) and one folder under your
+home for a few minutes; the live n8n gets one `docker exec` export into a new, random,
+mode 700 folder under its `/tmp`, removed as soon as the file is copied out (and
+reported loudly, with a nonzero status, if it cannot be removed).
+
+Interruption. The function sets a trap on INT, TERM and HUP (and EXIT) that runs the
+same idempotent teardown, then returns 130 and prints `REHEARSAL INTERRUPTED`. The
+trap replaces any trap of your own on those signals for the length of the run and is
+cleared when the function returns. It cannot run if the terminal or the machine dies
+without delivering a signal (a `kill -9`, a power loss). What remains then: a container
+named `n8n-rehearsal` and the folder `$HOME/n8n-rehearsal`, which holds the workflow
+export (it contains the router's private path; mode 700 folder, mode 600 file), the
+throwaway key file and the scratch database, plus possibly a folder
+`/tmp/router-rehearsal.` followed by six random characters inside the live `n8n`
+container (made with `mktemp -d`, so it is new, mode 700 and never an existing or
+symlinked path; the old fixed name `/tmp/router-rehearsal.json` is never used). If the
+function itself cannot remove that folder it prints `LIVE LEFTOVER` with the exact path
+and the command, and returns nonzero even when the rehearsal passed. Find and remove
+everything, then read back:
+
+```
+docker ps -a --filter name=n8n-rehearsal --format '{{.Names}} {{.Status}}'
+ls -ld "$HOME/n8n-rehearsal"
+docker rm -f n8n-rehearsal
+[ -d "$HOME/n8n-rehearsal" ] && [ ! -L "$HOME/n8n-rehearsal" ] && rm -rf -- "$HOME/n8n-rehearsal"
+docker exec n8n sh -c 'ls -d /tmp/router-rehearsal.??????'
+docker exec n8n sh -c 'rm -rf -- /tmp/router-rehearsal.??????'
+docker exec n8n sh -c 'ls -d /tmp/router-rehearsal.??????'
+docker ps -a --filter name=n8n-rehearsal -q | wc -l
+ls -ld "$HOME/n8n-rehearsal"
+```
+
+The two `ls -d` lines before the removal show what is there; the one after it must
+print `No such file or directory`, the next line `0`, and the last
+`No such file or directory`. Do the removal only
+when no rehearsal is running in another shell.
+
+Rollback: the function tears down on every path it can control (see above). Nothing on
+the live side needs undoing except the leftover temporary folder named above.
+
+In a session on LOGGING_BOX with the session variables set (`owner_chk_vars` printed
+`variables ok`, `OWNER_FRESH` is `1`):
+
+```
+unset -f owner_rehearse_down owner_rehearse_router 2> /dev/null
+owner_rehearse_down() {
+  : "runbook-block-rehearse-down-v3"
+  local N="$1" D="$2" C="$3" M="$4" L="$5" S=0
+  if [ -n "$L" ]; then docker exec n8n rm -rf -- "$L" > /dev/null 2>&1 || { echo "LIVE LEFTOVER: $L is still inside the live n8n container (it holds the router export); remove it with: docker exec n8n rm -rf -- $L"; S=1; }; fi
+  if [ "$C" = 1 ]; then docker rm -f "$N" > /dev/null 2>&1 || { echo "TEARDOWN FAILED: run docker rm -f $N"; S=1; }; fi
+  if [ "$M" = 1 ] && [ ! -L "$D" ]; then rm -rf -- "$D" || { echo "TEARDOWN FAILED: remove $D by hand"; S=1; }; fi
+  return $S
+}
+owner_rehearse_router() {
+  : "runbook-block-rehearse-v3"
+  local SCRATCH_NAME=n8n-rehearsal SCRATCH_DIR="$HOME/n8n-rehearsal"
+  local IMG R=0 INTR=0 TDFAIL=0 LD="" H="" F SZ K I MADE_DIR=0 MADE_CTR=0 LIVE_NODES SC_NODES LIVE_CREDS SC_CREDS COUNT_PY CRED_PY
+  COUNT_PY='import json,sys; d=json.load(sys.stdin); d=d[0] if isinstance(d,list) else d; print(len(d["nodes"]))'
+  CRED_PY='import json,sys; d=json.load(sys.stdin); d=d[0] if isinstance(d,list) else d; print("\n".join(sorted({"%s:%s" % (t, (c or {}).get("name", "")) for n in d["nodes"] for t, c in (n.get("credentials") or {}).items()})))'
+  owner_chk_vars || return 1
+  [[ "$SCRATCH_DIR" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo "REHEARSAL STOP: the scratch folder path has unsafe characters"; echo "rehearsal exit code: 1"; return 1; }
+  if [ -e "$SCRATCH_DIR" ] || [ -L "$SCRATCH_DIR" ]; then echo "REHEARSAL STOP: $SCRATCH_DIR already exists (an earlier run?); check it and remove it by hand; nothing was touched"; echo "rehearsal exit code: 1"; return 1; fi
+  if [ -n "$(docker ps -a --filter "name=^${SCRATCH_NAME}\$" -q)" ]; then echo "REHEARSAL STOP: a container named $SCRATCH_NAME already exists; nothing was touched"; echo "rehearsal exit code: 1"; return 1; fi
+  IMG="$(docker inspect --format '{{.Image}}' n8n)"
+  [[ "$IMG" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "REHEARSAL STOP: the live image id could not be read (got '${IMG}'); nothing was touched"; echo "rehearsal exit code: 1"; return 1; }
+  trap 'if owner_rehearse_down "$SCRATCH_NAME" "$SCRATCH_DIR" "$MADE_CTR" "$MADE_DIR" "$LD"; then LD=""; echo "REHEARSAL INTERRUPTED: scratch container, folder and live export removed"; else TDFAIL=1; echo "REHEARSAL INTERRUPTED: teardown INCOMPLETE, see the messages above"; fi; INTR=1; MADE_CTR=0; MADE_DIR=0' INT TERM HUP
+  trap 'owner_rehearse_down "$SCRATCH_NAME" "$SCRATCH_DIR" "$MADE_CTR" "$MADE_DIR" "$LD"' EXIT
+  ( umask 077; mkdir -m 700 "$SCRATCH_DIR" ) || { trap - INT TERM HUP EXIT; echo "REHEARSAL STOP: cannot create the scratch folder; nothing was touched"; echo "rehearsal exit code: 1"; return 1; }
+  MADE_DIR=1
+  ( umask 077; mkdir -m 700 "$SCRATCH_DIR/data" "$SCRATCH_DIR/work" ); R=$?; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: scratch folders (exit $R)"
+  if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then K="$(openssl rand -hex 32)"; R=$?; [[ "$K" =~ ^[0-9a-f]{64}$ ]] || R=1; if [ $R -eq 0 ]; then ( umask 077; printf 'HOME=/home/node\nN8N_ENCRYPTION_KEY=%s\nN8N_DIAGNOSTICS_ENABLED=false\nN8N_VERSION_NOTIFICATIONS_ENABLED=false\nN8N_TEMPLATES_ENABLED=false\n' "$K" > "$SCRATCH_DIR/env" ); R=$?; fi; K=""; [ $R -eq 0 ] && [ "$(stat -c %a "$SCRATCH_DIR/env")" = 600 ] && [ "$(wc -c < "$SCRATCH_DIR/env")" -ge 120 ]; R=$?; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: the scratch key file (not written, not mode 600 or too short)"; fi
+  if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then LD="$(docker exec n8n mktemp -d /tmp/router-rehearsal.XXXXXX)"; R=$?; [[ "$LD" =~ ^/tmp/router-rehearsal\.[A-Za-z0-9]{6}$ ]] || { R=1; LD=""; }; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: making a new private folder inside the live container (mktemp -d is INFERRED to exist in the n8n image); nothing was exported"; fi
+  if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then docker exec n8n n8n export:workflow --id="$ROUTER_ID" --output="$LD/router.json" > /dev/null && docker exec n8n sh -c 'test -f "$1" && ! test -L "$1"' sh "$LD/router.json" && H="$(umask 077; mktemp -d "$SCRATCH_DIR/work/in.XXXXXX")" && [[ "$H" =~ ^/[A-Za-z0-9._/-]+/work/in\.[A-Za-z0-9]{6}$ ]] && ( umask 077; docker cp "n8n:$LD/router.json" "$H/" ); R=$?; if docker exec n8n rm -rf -- "$LD" > /dev/null 2>&1; then LD=""; else echo "LIVE LEFTOVER: $LD is still inside the live n8n container (it holds the router export); remove it with: docker exec n8n rm -rf -- $LD"; TDFAIL=1; fi; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: the read-only export of the live router (exit $R)"; fi
+  if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then F="$H/router.json"; [ -f "$F" ] && [ ! -L "$F" ] && [ "$(stat -c '%u %h' "$F")" = "$(id -u) 1" ] && SZ="$(stat -c %s "$F")" && [ "$SZ" -gt 0 ] && [ "$SZ" -le 5242880 ] && install -m 600 "$F" "$SCRATCH_DIR/work/live.json" && LIVE_NODES="$(python3 -c "$COUNT_PY" < "$SCRATCH_DIR/work/live.json")" && LIVE_CREDS="$(python3 -c "$CRED_PY" < "$SCRATCH_DIR/work/live.json")"; R=$?; case "$LIVE_NODES" in ''|*[!0-9]*|0) R=1;; esac; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: reading the live export (not a plain file owned by you with one link and 1 byte to 5 MB, or not a workflow with a positive node count, got '${LIVE_NODES}')"; fi
+  if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then MADE_CTR=1; docker run -d --name "$SCRATCH_NAME" --network none --restart no --memory 1g --memory-swap 1g --cpus 1 --pids-limit 256 --security-opt no-new-privileges --cap-drop ALL --user "$(id -u):$(id -g)" --env-file "$SCRATCH_DIR/env" -v "$SCRATCH_DIR/data:/home/node/.n8n" -v "$SCRATCH_DIR/work:/work" "$IMG" > /dev/null; R=$?; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: starting the scratch container (exit $R)"; fi
+  if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then R=1; for I in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do if docker exec "$SCRATCH_NAME" n8n list:workflow > /dev/null 2>&1; then R=0; break; fi; sleep 3; done; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: the scratch n8n did not answer within 60 seconds (docker logs $SCRATCH_NAME shows why)"; fi
+  if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then docker exec "$SCRATCH_NAME" n8n import:workflow --input=/work/live.json; R=$?; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: the import (exit $R): the export format is NOT accepted by this n8n; do not rely on owner_router_rollback"; fi
+  if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then [ "$(docker exec "$SCRATCH_NAME" n8n list:workflow | grep -c "^$ROUTER_ID")" = 1 ]; R=$?; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: the imported router is not listed exactly once"; fi
+  if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then docker exec "$SCRATCH_NAME" n8n export:workflow --id="$ROUTER_ID" --output=/work/scratch.json > /dev/null && SC_NODES="$(python3 -c "$COUNT_PY" < "$SCRATCH_DIR/work/scratch.json")" && SC_CREDS="$(python3 -c "$CRED_PY" < "$SCRATCH_DIR/work/scratch.json")"; R=$?; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: exporting the imported copy"; fi
+  if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then [ "$SC_NODES" = "$LIVE_NODES" ]; R=$?; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: node count (live $LIVE_NODES, scratch '${SC_NODES}')"; fi
+  if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then [ "$SC_CREDS" = "$LIVE_CREDS" ]; R=$?; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: the credential references differ (live '${LIVE_CREDS}', scratch '${SC_CREDS}')"; fi
+  if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then echo "rehearsal compare ok: $LIVE_NODES nodes in both"; echo "credential references (type:name, names only):"; printf '%s\n' "$LIVE_CREDS"; fi
+  owner_rehearse_down "$SCRATCH_NAME" "$SCRATCH_DIR" "$MADE_CTR" "$MADE_DIR" "$LD" || { R=1; TDFAIL=1; }
+  [ "$TDFAIL" = 0 ] || R=1
+  [ "$INTR" = 0 ] || R=130
+  trap - INT TERM HUP EXIT
+  if [ -e "$SCRATCH_DIR" ] || [ -n "$(docker ps -a --filter "name=^${SCRATCH_NAME}\$" -q)" ]; then echo "TEARDOWN INCOMPLETE: the scratch folder or container is still there"; R=1; else echo "teardown ok: scratch container and folder are gone"; fi
+  echo "rehearsal exit code: $R"
+  return $R
+}
+OWNER_SUM_REHEARSE="$(declare -f owner_rehearse_down owner_rehearse_router | sha256sum | cut -d' ' -f1)"
+if [ "$OWNER_FRESH" = 1 ] && [ "$(declare -f owner_rehearse_down owner_rehearse_router | sha256sum | cut -d' ' -f1)" = "$OWNER_SUM_REHEARSE" ]; then owner_rehearse_router; else echo "STALE FUNCTION: a read-only or older owner_rehearse_router exists; open a fresh bash shell, set the session variables and paste again"; false; fi
+```
+
+`rehearsal exit code: 0` is the only success (the pasted block itself ends with the
+function's status, so `$?` after the paste is that same number); it is preceded by
+`teardown ok`. Record the node count and the credential
+references it printed. A refusal prints `REHEARSAL STOP` and touches nothing. The
+rehearsal does not publish: an imported workflow is inactive by default (VERIFIED, URL
+above), and the function never calls `publish:workflow`.
+
+What this rehearsal does NOT prove:
+
+- The live webhook registration: the scratch n8n never serves the live private path,
+  and the imported copy is inactive, so whether the live n8n registers, replaces or
+  drops a webhook after the live import and publish is still unverified (6.1 item 4
+  finds out).
+- The Grafana path: the scratch n8n is not reachable from Grafana, and the saved
+  `router-path` file is not read, so the contact point's address is not exercised.
+- The real credentials: none exist in the scratch n8n, so it does not show that the
+  live import keeps the live credentials attached, that Discord, Pushover or
+  Healthchecks accept a call, or that a dangling reference behaves the same on the
+  live n8n (INFERRED that it does).
+- The repo router file: it rehearses the export of the CURRENT live router and its
+  import, which is the round trip that `owner_router_rollback` needs. It does not
+  import `n8n/grafana-alert-router.json` or run the import helper script.
+- That the scratch key file and user mapping work for every image tag: the
+  `--user` and `HOME` setup is INFERRED. A failure there stops the function and tears
+  down, and it says nothing about the live n8n.
+
+Until the owner has run it and seen `rehearsal exit code: 0`, the `owner_router_rollback`
+export format stays INFERRED, not VERIFIED; after a pass it is VERIFIED only for the
+export of this n8n version as read by the same version's import, on the date of the
+run, and only for the node count and the credential references.
+
 ### 6.1 The router's own endpoint and secret (on LOGGING_BOX)
 
 Source: `docs/expiry-watch.md`, "The router credential" and its owner steps;
@@ -1717,11 +1926,13 @@ owner_chk_vars && umask 077 && D="$(mktemp -d)" && docker exec n8n n8n export:wo
 ```
 
 Write down the node count it prints: the rollback verification below compares
-against it. OWNER DECISION: the export-to-import round trip of this n8n version has
-never been run here, so the rollback is unproven. Before the first live import,
-rehearse it on a scratch n8n (the step 2d scratch setup): import the saved file there
-with `n8n import:workflow --input=...` and check it lists. If you do not rehearse it,
-the step 2 archive is the only proven restore, and the live import carries that risk.
+against it. DECIDED 2026-11-20 (owner: "Rehearse on a scratch n8n first"): the
+export-to-import round trip of this n8n version has never been run here, so the
+rollback is unproven until the owner runs the rehearsal in 6.0a below, before the
+first live import. Until then the export format that `owner_router_rollback` expects
+(a workflow array or one object, with a `nodes` list) is INFERRED, not VERIFIED: the
+rehearsal is what can verify it. If you skip it, the step 2 archive is the only proven
+restore, and the live import carries that risk.
 
 - The first must list the file as `-rw-------` and print `grafana-alerts-`: that file
   is the live Grafana path. If it is missing, the import makes a NEW Grafana path and
@@ -1995,9 +2206,10 @@ body below has no `phone` label). The window test in item 3 therefore posts abou
 30 messages; the dry run of the watch does not post and cannot stand in for this
 test (it never calls the router).
 
-OWNER DECISION: run item 3 (about 30 Discord messages in a minute), or accept
-items 1 and 2 as the evidence for the 1 second rule and defer the 30-in-10-minutes
-rule to real use.
+DECIDED 2026-11-20 (owner: "Skip it for now"): item 3 (about 30 Discord messages in
+a minute) is skipped for now. Items 1 and 2 are the evidence for the 1 second rule,
+and the 30-in-10-minutes rule waits for real use. Item 3 stays below as an optional
+later step; nothing else depends on it.
 
 The secret never goes on a command line: the commands below pass the header on
 standard input (`curl -H @-`, VERIFIED to read headers from stdin with curl 8.21,
