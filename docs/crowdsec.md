@@ -64,7 +64,7 @@ docker logs wazuh-manager --tail 200
 Use the fixture replay script to validate parser behavior end-to-end:
 
 ```bash
-bash scripts/09-test-crowdsec-pfsense-ingest.sh
+sudo scripts/09-test-crowdsec-pfsense-ingest.sh
 ```
 
 Fixture source:

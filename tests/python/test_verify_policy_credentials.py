@@ -310,7 +310,8 @@ def all_text_files():
     return [p for p in out if p.is_file()]
 
 
-HARDENED = ("04-apply-ism-policy.sh", "05-verify.sh", "08b-init-opensearch-security.sh")
+HARDENED = ("04-apply-ism-policy.sh", "05-verify.sh", "08b-init-opensearch-security.sh",
+            "08-crowdsec-smoketest.sh", "09-test-crowdsec-pfsense-ingest.sh", "10-snapshot-setup.sh")
 
 
 def test_no_text_tells_anyone_to_start_a_hardened_script_through_bash():
@@ -347,6 +348,9 @@ def via_interpreter(line):
     "dash -c /opt/siem/scripts/04-apply-ism-policy.sh",
     "SIEM_USER=x bash /path/to/scripts/05-verify.sh 10.0.0.1",
     "echo '  2. Run: bash scripts/08b-init-opensearch-security.sh'",
+    "bash scripts/10-snapshot-setup.sh https://h:9200",
+    "sudo bash scripts/08-crowdsec-smoketest.sh",
+    "echo '  5. Snapshots: bash scripts/09-test-crowdsec-pfsense-ingest.sh'",
 ])
 def test_the_interpreter_scan_catches_every_spelling(line):
     assert via_interpreter(line), line
@@ -368,11 +372,18 @@ CANONICAL = {
     "scripts/05-verify.sh": ["sudo scripts/05-verify.sh"],
     "scripts/08b-init-opensearch-security.sh": ["sudo scripts/08b-init-opensearch-security.sh",
                                                 "sudo scripts/04-apply-ism-policy.sh", "sudo scripts/05-verify.sh"],
+    "scripts/08-crowdsec-smoketest.sh": ["sudo scripts/08-crowdsec-smoketest.sh"],
+    "scripts/09-test-crowdsec-pfsense-ingest.sh": ["sudo scripts/09-test-crowdsec-pfsense-ingest.sh"],
+    "scripts/10-snapshot-setup.sh": ["sudo scripts/10-snapshot-setup.sh"],
     "scripts/03-deploy.sh": ["sudo scripts/08b-init-opensearch-security.sh", "sudo scripts/04-apply-ism-policy.sh",
-                             "sudo scripts/05-verify.sh"],
-    "README.md": ["sudo scripts/04-apply-ism-policy.sh", "sudo scripts/05-verify.sh"],
+                             "sudo scripts/05-verify.sh", "sudo scripts/10-snapshot-setup.sh"],
+    "README.md": ["sudo scripts/04-apply-ism-policy.sh", "sudo scripts/05-verify.sh",
+                  "sudo scripts/08-crowdsec-smoketest.sh"],
     "docs/phase-f-testing.md": ["sudo scripts/08b-init-opensearch-security.sh", "sudo scripts/04-apply-ism-policy.sh",
-                                "sudo scripts/05-verify.sh"],
+                                "sudo scripts/05-verify.sh", "sudo scripts/08-crowdsec-smoketest.sh",
+                                "sudo scripts/09-test-crowdsec-pfsense-ingest.sh", "sudo scripts/10-snapshot-setup.sh"],
+    "docs/backup-restore.md": ["sudo scripts/10-snapshot-setup.sh"],
+    "docs/crowdsec.md": ["sudo scripts/09-test-crowdsec-pfsense-ingest.sh"],
     "docs/maintenance.md": ["sudo /path/to/scripts/05-verify.sh"],
     "docs/container-engine.md": ["sudo scripts/05-verify.sh"],
 }
