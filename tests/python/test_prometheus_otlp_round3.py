@@ -219,9 +219,9 @@ def test_firewall_refuses_unusable_docker_port_output(fw, out):
     assert proc.returncode != 0 and not any(c.startswith(("-N", "-I")) for c in proc.calls)
 
 
-def test_firewall_ignores_an_ipv6_line_when_one_ipv4_line_exists(fw):
+def test_firewall_refuses_an_ipv6_line_next_to_an_ipv4_line(fw):
     proc = fw(*GOOD, docker_out="[::]:9091\n127.0.0.1:9091\n")
-    assert proc.returncode == 0, proc.stderr
+    assert proc.returncode != 0 and not any(c.startswith(("-N", "-I")) for c in proc.calls)
 
 
 def test_firewall_remove_derives_everything_from_the_live_rules(fw):
@@ -283,45 +283,57 @@ def test_a_failed_rule_listing_changes_nothing(fw):
 
 @pytest.fixture()
 def fw_root(fw, tmp_path):
-    """The firewall script as a simulated root (stub id and stat), env overrides set."""
+    """The firewall script as real uid 0 inside a user namespace (`unshare -r`, no real
+    privilege: the caller's own files appear root-owned), with hostile stubs for id,
+    stat, iptables and docker first in PATH and the test overrides set. The calls
+    that reach the stubs are logged in fw.log; a hostile `id` or `stat` also touches
+    a marker file."""
+    probe = subprocess.run(["unshare", "-r", "true"], capture_output=True, timeout=30)
+    if probe.returncode != 0:
+        pytest.skip("unprivileged user namespaces are not available")
     stubs = tmp_path / "fw-root-stubs"
     stubs.mkdir()
-    write_stub(stubs, "id", "#!/bin/sh\necho 0\n")
+    marker = tmp_path / "hostile-program-ran"
+    for name in ("id", "stat", "dirname"):
+        write_stub(stubs, name, f"#!/bin/sh\ntouch {marker}\nprintf 1000\n")
+    copy_dir = tmp_path / "root-copy"
+    copy_dir.mkdir()
+    copy_dir.chmod(0o755)
 
-    def run(owner, mode="755", *args):
-        write_stub(stubs, "stat", textwrap.dedent(f"""\
-            #!/bin/sh
-            case "$2" in
-              %u) echo {owner} ;;
-              %a) echo {mode} ;;
-              *) exec /usr/bin/stat "$@" ;;
-            esac
-            """))
+    def run(mode="755", *args):
+        script = copy_dir / "prometheus-otlp-firewall.sh"
+        script.write_bytes(FIREWALL.read_bytes())
+        script.chmod(int(mode, 8))
         env = {"PATH": f"{stubs}:{fw.stubs}:/usr/bin:/bin", "IPT_LOG": str(fw.log),
-               "IPT_STATE": str(tmp_path / "ipt.state"),
+               "IPT_STATE": str(tmp_path / "ipt.state"), "PROM_FW_NO_SUDO": "1",
                "IPTABLES": str(fw.stubs / "iptables"), "DOCKER": str(fw.stubs / "docker")}
         fw.log.write_text("", encoding="utf-8")
-        proc = subprocess.run([BASH, str(FIREWALL), *(args or GOOD)], env=env, text=True,
-                              capture_output=True, stdin=subprocess.DEVNULL, timeout=30)
+        proc = subprocess.run(["unshare", "-r", BASH, str(script), *(args or GOOD)], env=env,
+                              text=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=30)
         proc.calls = [x for x in fw.log.read_text(encoding="utf-8").splitlines() if x]
+        proc.marker = marker
         return proc
     return run
 
 
-def test_firewall_root_refuses_a_script_that_is_not_root_owned(fw_root):
-    proc = fw_root(1234)
-    assert proc.returncode != 0 and "root-owned" in proc.stderr
-
-
 def test_firewall_root_refuses_a_group_writable_script(fw_root):
-    proc = fw_root(0, "775")
+    proc = fw_root("775")
     assert proc.returncode != 0 and "root-owned" in proc.stderr
+
+
+def test_firewall_root_runs_no_program_from_the_callers_path(fw_root):
+    # A bad bind address stops the script after the root checks and before any
+    # iptables or docker call, so nothing real is touched.
+    proc = fw_root("755", "apply", "0.0.0.0", "192.0.2.10")
+    assert "0.0.0.0" in proc.stderr and "root-owned" not in proc.stderr
+    assert not proc.marker.exists(), "a program from the caller's PATH ran as root"
 
 
 def test_firewall_root_ignores_the_iptables_and_docker_overrides(fw_root):
-    proc = fw_root(0)  # trusted script: it must still not call the override programs
+    proc = fw_root("755", "remove")  # trusted script: it must not call the override programs
     assert "run as root" not in proc.stderr and "root-owned" not in proc.stderr
     assert proc.calls == [], "the override stubs must not be used as root"
+    assert not proc.marker.exists()
 
 
 def test_firewall_resets_path_for_real_root():

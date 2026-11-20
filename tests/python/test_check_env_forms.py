@@ -8,6 +8,7 @@ prefix, indentation, spaces before the equals sign, a carriage return, a
 duplicate in any of those forms, or an assignment inside a multi-line quoted
 value). No test needs root, a network or a container runtime.
 """
+import re
 import shutil
 import subprocess
 
@@ -21,6 +22,7 @@ SH = shutil.which("sh")
 VAR = "GRAFANA_WEBHOOK_SECRET"
 GOOD = "a" * 40
 CR = chr(13)
+NUL = chr(0)
 
 
 def _body():
@@ -80,6 +82,33 @@ REFUSED = {
     "quoted-then-garbage": [f'{VAR}="{GOOD}"junk'],
     "short-after-trailing-spaces": [f"{VAR}=x{' ' * 40}"],
     "dollar": [f"{VAR}={GOOD[:20]}$X{GOOD[:20]}"],
+    # Daybreak round 1, finding 3: a shell reads these differently from a plain value.
+    "space-after-equals": [f"{VAR}= {GOOD}"],
+    "tab-after-equals": [f"{VAR}=\t{GOOD}"],
+    "heredoc": [f"{VAR}=<<EOF{GOOD}"],
+    "heredoc-after-value": [f"{VAR}={GOOD}<<EOF"],
+    "redirect-out": [f"{VAR}={GOOD[:20]}>{GOOD[:20]}"],
+    "backtick": [f"{VAR}={GOOD[:20]}`x`{GOOD[:20]}"],
+    "command-substitution": [f"{VAR}={GOOD[:20]}$(x){GOOD[:20]}"],
+    "command-substitution-quoted": [f'{VAR}="{GOOD[:20]}$(x){GOOD[:20]}"'],
+    "dollar-single-quoted": [f"{VAR}='{GOOD[:20]}$X{GOOD[:20]}'"],
+    "semicolon": [f"{VAR}={GOOD[:20]};{GOOD[:20]}"],
+    "ampersand": [f"{VAR}={GOOD[:20]}&{GOOD[:20]}"],
+    "pipe": [f"{VAR}={GOOD[:20]}|{GOOD[:20]}"],
+    "parenthesis": [f"{VAR}=({GOOD})"],
+    "glob": [f"{VAR}={GOOD[:20]}*{GOOD[:20]}"],
+    "tilde-brace-bang": [f"{VAR}={GOOD[:20]}!{GOOD[:20]}"],
+    "space-inside-unquoted": [f"{VAR}={GOOD[:20]} {GOOD[:20]}"],
+    "space-inside-quoted": [f'{VAR}="{GOOD[:20]} {GOOD[:20]}"'],
+    "quote-in-the-middle": [f'{VAR}={GOOD[:20]}"{GOOD[:20]}'],
+    "escaped-quote-multiline": ['OTHER="first \\"', f"{VAR}={GOOD}", 'last"'],
+    "multiline-value-anywhere": ['OTHER="first', "second", 'last"', f"{VAR}={GOOD}"],
+    "nul-in-name": [f"GRAFANA{NUL}_WEBHOOK_SECRET={GOOD}"],
+    "nul-in-value": [f"{VAR}={GOOD}{NUL}"],
+    "escape-char": [f"{VAR}={GOOD}{chr(27)}"],
+    "bell": [f"{VAR}={GOOD[:20]}{chr(7)}{GOOD[:20]}"],
+    "control-on-another-line": [f"OTHER=a{chr(1)}b", f"{VAR}={GOOD}"],
+    "carriage-return-on-another-line": [f"OTHER=a{CR}", f"{VAR}={GOOD}"],
 }
 
 
@@ -127,6 +156,36 @@ def test_file_without_a_final_newline(tmp_path):
     proc = subprocess.run([BASH, str(CHECK_ENV), str(env)], capture_output=True, text=True,
                           stdin=subprocess.DEVNULL, timeout=60, check=False)
     assert proc.returncode == 1, proc.stderr
+
+
+def test_a_symlinked_env_file_is_refused(tmp_path):
+    real = tmp_path / "real.env"
+    real.write_bytes((_body() + f"{VAR}={GOOD}\n").encode())
+    link = tmp_path / "link.env"
+    link.symlink_to(real)
+    for shell_target in (link,):
+        proc = subprocess.run([BASH, str(CHECK_ENV), str(shell_target)], capture_output=True,
+                              text=True, stdin=subprocess.DEVNULL, timeout=60, check=False)
+        assert proc.returncode == 2, proc.stderr
+        assert "symlink" in proc.stderr
+    ok = subprocess.run([BASH, str(CHECK_ENV), str(real)], capture_output=True, text=True,
+                        stdin=subprocess.DEVNULL, timeout=60, check=False)
+    assert ok.returncode == 0, ok.stderr
+
+
+def test_a_directory_or_missing_file_is_still_exit_2(tmp_path):
+    for target in (tmp_path, tmp_path / "missing.env"):
+        proc = subprocess.run([BASH, str(CHECK_ENV), str(target)], capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL, timeout=60, check=False)
+        assert proc.returncode == 2, proc.stderr
+
+
+def test_the_file_is_read_once_into_memory():
+    text = CHECK_ENV.read_text(encoding="utf-8")
+    code = "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
+    assert not re.search(r'grep[^\n]*"\$ENV_FILE"', code), "a check rereads the file"
+    assert 'done < "$ENV_FILE"' not in code, "the webhook scan rereads the file"
+    assert code.count('exec 3< "$ENV_FILE"') == 1
 
 
 def test_messages_explain_the_form_rule(tmp_path):

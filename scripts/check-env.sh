@@ -15,6 +15,27 @@ set -euo pipefail
 
 ENV_FILE="${1:-.env}"
 [ -f "$ENV_FILE" ] || { echo "check-env: $ENV_FILE not found (cp .env.example .env)" >&2; exit 2; }
+[ ! -L "$ENV_FILE" ] || { echo "check-env: $ENV_FILE is a symlink; point the check at the real file" >&2; exit 2; }
+
+# Open the file once, confirm the opened file is the one at the path (so a symlink
+# or a replacement swapped in meanwhile is caught), and read it once into memory as
+# base64 so every byte is kept. Every later check reads this snapshot, never the
+# path again, so all checks see the same bytes.
+exec 3< "$ENV_FILE"
+[ "$(stat -L -c '%d:%i' /dev/fd/3)" = "$(stat -c '%d:%i' -- "$ENV_FILE")" ] ||
+    { echo "check-env: $ENV_FILE changed while it was being opened" >&2; exit 2; }
+b64="$(base64 -w0 <&3)"
+exec 3<&-
+# Control bytes (NUL, carriage return, escape, bell and the rest, except tab and
+# newline) make different parsers see different names and values: refuse them
+# before anything is parsed. Bytes of 128 and above are allowed (UTF-8 passwords).
+ctrl="$(printf '%s' "$b64" | base64 -d | LC_ALL=C tr -d '\011\012\040-\176\200-\377' | wc -c)"
+if [ "$ctrl" -ne 0 ]; then
+    echo "check-env: ${ENV_FILE} contains control characters (NUL, carriage return, escape or similar), so GRAFANA_WEBHOOK_SECRET and the other values cannot be validated; remove them (convert CRLF to LF)" >&2
+    exit 1
+fi
+content="$(printf '%s' "$b64" | base64 -d; printf x)"
+content="${content%x}"
 
 REQUIRED=(
     OPENSEARCH_ADMIN_PASSWORD OPENSEARCH_LOGSTASH_PASSWORD
@@ -35,7 +56,7 @@ is_placeholder() { secret_is_placeholder "$1"; }
 
 bad=0
 for var in "${REQUIRED[@]}"; do
-    line="$(grep -E "^${var}=" "$ENV_FILE" | tail -1 || true)"
+    line="$(grep -E "^${var}=" <<<"$content" | tail -1 || true)"
     value="${line#*=}"
     value="${value%\"}"; value="${value#\"}"; value="${value%\'}"; value="${value#\'}"
     if [ -z "$line" ] || [ -z "$value" ]; then
@@ -69,27 +90,25 @@ cr=$'\r'
 count=0
 line=""
 odd_form=0
-in_quote=""
+multiline=0
 while IFS= read -r raw || [ -n "$raw" ]; do
-    if [ -n "$in_quote" ]; then
-        # Inside another variable's multi-line quoted value: an assignment to the
-        # webhook variable here is read differently by different parsers.
-        if [[ "$raw" =~ $re_any ]]; then count=$((count + 1)); odd_form=1; line="$raw"; fi
-        stripped="${raw//[^$in_quote]/}"
-        if [ $(( ${#stripped} % 2 )) -eq 1 ]; then in_quote=""; fi
-        continue
-    fi
     if [[ "$raw" =~ $re_any ]]; then
         count=$((count + 1))
         line="$raw"
-        case "$raw" in "${var}="*) ;; *) odd_form=1 ;; esac
+        case "$raw" in "${var}="[![:space:]]* | "${var}=") ;; *) odd_form=1 ;; esac
         case "$raw" in *"$cr"*) odd_form=1 ;; esac
     elif [[ "$raw" =~ $re_open ]]; then
+        # Another variable's value opens a quote it does not close on the same line,
+        # or hides a quote behind a backslash. Quote counting cannot be trusted
+        # there, so the webhook line cannot be told apart from the value's text:
+        # refuse the whole file for this variable.
         q="${BASH_REMATCH[2]}"
-        stripped="${BASH_REMATCH[3]//[^$q]/}"
-        if [ $(( ${#stripped} % 2 )) -eq 0 ]; then in_quote="$q"; fi
+        tail_text="${BASH_REMATCH[3]}"
+        stripped="${tail_text//[^$q]/}"
+        if [ $(( ${#stripped} % 2 )) -eq 0 ]; then multiline=1; fi
+        case "$tail_text" in *\\\"* | *\\\'*) multiline=1 ;; esac
     fi
-done < "$ENV_FILE"
+done <<<"$content"
 rest="${line#*=}"
 rest="${rest#"${rest%%[![:space:]]*}"}"
 re_dq='^"([^"\\]*)"([[:space:]]+#.*)?[[:space:]]*$'
@@ -120,14 +139,20 @@ if [ -z "$line" ] || { [ "$parse_ok" -eq 1 ] && [ -z "$trimmed" ]; }; then
 elif [ "$count" -gt 1 ]; then
     echo "check-env: ${var} is assigned more than once (or inside a multi-line quoted value); keep exactly one plain NAME=value assignment" >&2
     bad=1
+elif [ "$multiline" -eq 1 ]; then
+    echo "check-env: the file has a multi-line or backslash-escaped quoted value, so ${var} cannot be told apart from its text; keep every value on one line" >&2
+    bad=1
 elif [ "$odd_form" -eq 1 ]; then
-    echo "check-env: ${var} must be one plain NAME=value line: no export prefix, no space around the name or before the equals sign, no carriage return (convert CRLF to LF)" >&2
+    echo "check-env: ${var} must be one plain NAME=value line: no export prefix, no space around the name or on either side of the equals sign, no carriage return (convert CRLF to LF)" >&2
     bad=1
 elif [ "$parse_ok" -eq 0 ]; then
     echo "check-env: ${var} has an unmatched quote or a quote inside an unquoted value" >&2
     bad=1
 elif [ "$unsafe" -eq 1 ]; then
     echo "check-env: ${var} must not contain a backslash, carriage return or an unquoted dollar sign" >&2
+    bad=1
+elif ! [[ "$parsed" =~ ^[A-Za-z0-9+/=_.,:@%^-]*$ ]]; then
+    echo "check-env: ${var} may use only letters, digits and + / = _ . , : @ % ^ - (no space, quote, backtick, redirect, semicolon or other shell character); generate it with: openssl rand -base64 32" >&2
     bad=1
 elif is_placeholder "$trimmed"; then
     echo "check-env: ${var} still has a placeholder or known default value" >&2
@@ -145,7 +170,7 @@ echo "check-env: all required secrets are set and none is a known default"
 
 # Not an error: loopback ingest is the safe default. But on an upgraded stack it
 # silently stops log intake from firewalls, sensors and agents on other hosts.
-ingest="$(grep -E '^INGEST_BIND_ADDR=' "$ENV_FILE" | tail -1 | cut -d= -f2- || true)"
+ingest="$(grep -E '^INGEST_BIND_ADDR=' <<<"$content" | tail -1 | cut -d= -f2- || true)"
 ingest="${ingest%\"}"; ingest="${ingest#\"}"; ingest="${ingest%\'}"; ingest="${ingest#\'}"
 case "$ingest" in
     "" | 127.* | localhost | ::1)

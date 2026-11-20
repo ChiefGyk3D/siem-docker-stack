@@ -205,7 +205,10 @@ IPv4-mapped addresses (`::ffff:a.b.c.d`), this-network (`0.x`), loopback,
 multicast, reserved and broadcast addresses, a prefix length, a name, and any
 text with whitespace, a newline, shell characters or a leading dash. Senders get
 the same treatment and repeated senders produce one rule. The published address
-reported by `docker port` must be loopback (the receiver before you widen the
+reported by `docker port` must be one IPv4 line and nothing else: any IPv6
+mapping (`[::]:port`, `[::1]:port`, a global address) or other output is refused
+even next to a valid IPv4 line, because the IPv4 rule would not guard it. That one
+address must be loopback (the receiver before you widen the
 bind) or the bind address itself; the script refuses a wildcard publish (every
 address) or any other address the rule would not guard. Rules are always passed
 to `iptables` as argument lists, never as shell strings. If a live

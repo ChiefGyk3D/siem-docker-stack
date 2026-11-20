@@ -31,17 +31,17 @@ CHAIN_B=PROM-OTLP-B
 
 die() { echo "prometheus-otlp-firewall: $*" >&2; exit 1; }
 
-if [ "$(id -u)" -eq 0 ]; then
-    # As root: fixed PATH, fixed program names (no IPTABLES/DOCKER overrides), and
-    # only code nobody else can edit. Run the root-owned copy (docs).
-    if [ "$EUID" -eq 0 ]; then
-        PATH=/usr/sbin:/usr/bin:/sbin:/bin
-        export PATH
-    fi
+if [ "$EUID" -eq 0 ]; then
+    # As root: the fixed PATH comes first, before any external program runs, and the
+    # root test uses bash's own numeric id, never a program found on PATH. Fixed
+    # program names (no IPTABLES/DOCKER overrides, PROM_FW_NO_SUDO ignored), and only
+    # code nobody else can edit. Run the root-owned copy (docs).
+    PATH=/usr/sbin:/usr/bin:/sbin:/bin
+    export PATH
     IPT=iptables
     DOCKER_BIN=docker
     SELF="${BASH_SOURCE[0]}"
-    for f in "$(dirname "$SELF")" "$SELF"; do
+    for f in "${SELF%/*}" "$SELF"; do
         [ "$(stat -c '%u' "$f")" -eq 0 ] && [ $((8#$(stat -c '%a' "$f") & 8#022)) -eq 0 ] ||
             die "${f} is not root-owned (or is group or world writable); run the root-owned copy of the script (docs/prometheus-otlp.md)"
     done
@@ -74,10 +74,14 @@ discover_port() { # prints "<address> <port>" of the receiver's single published
     local out line addr="" port="" n=0
     out="$("$DOCKER_BIN" port prometheus-otlp 9090/tcp)" || die "docker port failed: is the prometheus-otlp container running?"
     while IFS= read -r line; do
+        [ -n "$line" ] || continue
         if [[ "$line" =~ ^([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+)$ ]]; then
             addr="${BASH_REMATCH[1]}"
             port="${BASH_REMATCH[2]}"
             n=$((n + 1))
+        else
+            # An IPv6 mapping (or anything else) would be reachable past an IPv4-only rule.
+            die "prometheus-otlp has a published mapping that this IPv4 rule does not guard (an IPv6 mapping or unexpected docker port output); publish on one IPv4 address only"
         fi
     done <<<"$out"
     [ "$n" -eq 1 ] || die "expected exactly one IPv4 published port for prometheus-otlp, found ${n} (an IPv6-only publish is not covered by this IPv4 rule)"

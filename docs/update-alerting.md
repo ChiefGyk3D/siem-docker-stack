@@ -223,7 +223,14 @@ removed, and a duplicate assignment, unmatched quote, backslash or unquoted
 with an `export` prefix, indentation, whitespace before the equals sign or a
 carriage return (a CRLF file; convert it to LF) is rejected, so is an
 assignment inside another variable's multi-line quoted value, and a duplicate
-counts in any of those forms. Trailing whitespace after an unquoted or quoted
+counts in any of those forms. The value itself may use only letters, digits
+and `+ / = _ . , : @ % ^ -` (what `openssl rand -base64 32` produces), with no
+space after the `=`; any shell character (backtick, `$`, `<`, `>`, `;`, `&`,
+`|`, parentheses, quotes inside the value) is rejected. A file with a control
+byte (NUL, carriage return, escape), or with a multi-line or backslash-escaped
+quoted value anywhere, is rejected for this check, because parsers disagree on
+where the line is. The check refuses a symlinked `.env`, opens the file once and
+validates that one in-memory copy, so every check sees the same bytes. Trailing whitespace after an unquoted or quoted
 value is ignored, and a commented-out line is not an assignment. Neither check can see what you typed into n8n: an n8n credential whose value is just `Bearer`
 would accept an empty-secret call, so follow step 2 exactly and run the
 checklist below.

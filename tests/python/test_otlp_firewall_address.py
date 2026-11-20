@@ -183,15 +183,29 @@ def test_a_publish_address_the_rule_would_not_cover_is_refused(fw, out, word):
     _refused(proc, word)
 
 
-@pytest.mark.parametrize("out", ["127.0.0.1:9091\n", "192.0.2.1:9091\n", "[::]:9091\n127.0.0.1:9091\n"],
-                         ids=["loopback-before-widening", "already-on-the-bind-address", "ipv6-line-ignored"])
+@pytest.mark.parametrize("out", ["127.0.0.1:9091\n", "192.0.2.1:9091\n", "127.0.0.1:9091\n\n"],
+                         ids=["loopback-before-widening", "already-on-the-bind-address", "trailing-blank-line"])
 def test_a_publish_address_that_the_rule_covers_is_accepted(fw, out):
     proc = fw(*GOOD, docker_out=out)
     assert proc.returncode == 0, proc.stderr
 
 
-def test_ipv6_only_publish_is_refused_with_a_message(fw):
-    _refused(fw(*GOOD, docker_out="[::]:9091\n"), "IPv4")
+@pytest.mark.parametrize("out", [
+    "[::]:9091\n",
+    "[::1]:9091\n",
+    "[2001:db8::1]:9091\n",
+    "[::]:9091\n127.0.0.1:9091\n",
+    "127.0.0.1:9091\n[::]:9091\n",
+    "127.0.0.1:9091\n[::1]:9091\n",
+    "127.0.0.1:9091\n[2001:db8::1]:9091\n",
+    "127.0.0.1:9091\nWARNING something\n",
+    "127.0.0.1:9091\n192.0.2.1:abc\n",
+    "127.0.0.1:9091 \n",
+], ids=["v6-wildcard", "v6-loopback", "v6-global", "v6-then-v4", "v4-then-v6-wildcard",
+        "v4-then-v6-loopback", "v4-then-v6-global", "v4-then-noise", "v4-then-bad-port",
+        "trailing-space"])
+def test_any_published_mapping_the_ipv4_rule_would_not_guard_is_refused(fw, out):
+    _refused(fw(*GOOD, docker_out=out), "IPv4")
 
 
 # --- argument lists, never shell strings -----------------------------------------------
