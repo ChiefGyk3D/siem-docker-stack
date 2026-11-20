@@ -522,11 +522,52 @@ n8n recreate requires every name its compose file takes; the step 4 restarts
 require `GRAFANA_WEBHOOK_SECRET` and `DISCORD_FAILURE_WEBHOOK_URL` (stored in 0b and
 4a); the step 5 restart also requires the seven values of 5a.
 
-Accepted limit: the table stops a secret from becoming a process-control variable,
-but not a wrong VALUE for a name that is meant to be injected. Whoever can edit
-`dev_network` in Doppler can change `GF_SMTP_HOST` (where Grafana sends the SMTP
-password), `BIND_ADDR`, `SIEM_HOST` or a webhook URL. That is the same trust as
-editing the compose file; keep write access to `dev_network` to you.
+What the wrapper does and does not protect. It does protect: the command and its
+children do not inherit the token (the Doppler service token; the wrapper's first step inside
+`doppler run` drops it, because `doppler run` copies its own environment into the
+child; VERIFIED by the Daybreak review of the CLI source, not by a live run), and
+they receive only the named secrets. It does NOT protect against hostile code
+running as your user on the box: the `doppler` process, the parent of the
+command, still holds the token, and the token file is readable by your user by
+design. It is not a sandbox. (The alternative of storing the token in the CLI's own
+config does not help: `doppler configure set token=...` takes the token on the
+command line, and the installed CLI v3.77.1, run 2026-11-20 on a throwaway
+folder, stored a `secret-...` reference rather than the token in the file, which
+points at the system secret store, not at the private folder.)
+
+Routing and destination values. The table only stops a name from becoming a
+process-control variable. A WRONG VALUE of a name that is meant to be injected
+still takes effect at the next restart, so these 11 names, which decide where
+something connects or what runs, matter beyond being secrets:
+
+| Name | A wrong value does this |
+|------|-------------------------|
+| `BIND_ADDR` | Grafana is published on another interface (default `127.0.0.1`), possibly reachable from the network |
+| `GRAFANA_PORT` | Grafana moves to another host port; links and probes miss it |
+| `GRAFANA_VERSION` | selects the Grafana image tag: an unwanted version, including a downgrade |
+| `SIEM_HOST` | the root URL Grafana puts in alert links and mail points at another host |
+| `GF_SMTP_HOST` | Grafana presents `GF_SMTP_USER` and `GF_SMTP_PASSWORD` to that SMTP server and sends mail through it |
+| `DISCORD_FAILURE_WEBHOOK_URL` | the failure alerts, and their text, go to another destination |
+| `HEARTBEAT_PING_URL` | the heartbeat ping goes elsewhere (the observer reports down), or the ping URL leaks to another party |
+| `PROMETHEUS_GRAFANA_PASSWORD`, `PROMETHEUS_OTLP_GRAFANA_PASSWORD` | datasource logins; a wrong value breaks the datasource, and with a changed destination they are the credentials presented to it |
+| `GRAFANA_INFLUX_USER`, `WAZUH_GRAFANA_RO_USER` | the account name Grafana uses for those datasources; a wrong name fails or uses a different account |
+
+Who can change these is whoever has write access to `dev_network` in project
+`homelab`: Doppler members with write access to that config. This document does not
+claim that equals access to the compose file on the box; the two are different sets
+of people. Check it, then restrict it to you: read the membership and role of
+project `homelab` in the Doppler dashboard (send a screenshot if unsure; the screen
+is not described here), and review who changed values with `doppler activity`
+(the command exists in the installed CLI, VERIFIED `doppler --help`, 2026-11-20; what
+its log shows per change is NOT verified here). Doppler's own record of who has
+access is the source; nothing in this repository proves it.
+
+OWNER DECISION: keep these routing values in `dev_network` (current), where a
+Doppler editor can change them and the next restart applies the change; or keep them
+in the root-owned `.env` next to the compose file, so only a root-capable user of the
+box can change them (then they leave the table, the `--optional` lists and 4b/5b, and
+`docker compose` reads them from `.env`). Nothing has been moved: decide, and the
+change is made in a follow-up.
 
 You need, on your own machine (where the Doppler CLI is logged in as you), the
 right to create service tokens on that config. Creating the token is the

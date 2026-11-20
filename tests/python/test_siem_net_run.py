@@ -5,7 +5,10 @@ config folder and hands it to `doppler run` through `exec`. Each test runs a cop
 box where doppler is a recording fake and stat and id are recording wrappers (argument list and
 environment read from /proc). A sentinel token must reach the fake doppler as the DOPPLER_TOKEN
 variable only: never in an argument list, never in the environment of another command, never in the
-wrapper's own output, and never in a shell trace.
+wrapper's own output, and never in a shell trace. The fake doppler copies its environment into its
+child as the real one does, so the child lacking the token proves the wrapper's checker removed it.
+Not claimed: the doppler process (the child's parent) still holds the token, and code running as the
+same user can read the token file, so this is not a sandbox for hostile code.
 
 What is NOT verified here: the real Doppler CLI (no network, no real token is used) and the owner
 and mode of a token file on a real box; the owner check is exercised with a fake `id`.
@@ -383,6 +386,7 @@ def test_an_optional_name_missing_from_the_config_is_absent_not_the_callers_copy
     assert code == 0, err
     env = _env_map(box.rec / "child-environ")
     assert env["GOOD_ONE"] == "one" and "GOOD_TWO" not in env
+    assert "DOPPLER_TOKEN" not in env
 
 
 def test_a_required_name_that_doppler_returns_is_passed_and_the_callers_copy_is_replaced(box):
@@ -410,6 +414,32 @@ def test_hostile_secrets_in_the_config_are_not_passed_to_the_command(box):
     for bad in ("LD_PRELOAD", "BASH_ENV", "ENV", "DOCKER_HOST", "PYTHONPATH", "NOT_ASKED"):
         assert bad not in env, bad
     assert env["PATH"] != "/evil" and "/evil" not in env["PATH"]
+    assert "DOPPLER_TOKEN" not in env and SENTINEL not in (box.rec / "child-environ").read_text(errors="replace")
+
+
+def test_the_fake_doppler_leaks_the_token_to_its_child_like_the_real_one_and_the_wrapper_scrubs_it(box):
+    # Real doppler (v3.77.1) copies its own environment, DOPPLER_TOKEN included, into the child. The fake does
+    # too (proved here by running the child WITHOUT the wrapper's checker), so only the scrub keeps it out.
+    fake = box.bindir / "doppler"
+    probe = box.tmp / "leak.sh"
+    _exe(probe, "#!/bin/sh\n/usr/bin/cat /proc/$$/environ > '" + str(box.rec) + "/leak-environ'\n")
+    env = {"PATH": "/usr/bin:/bin", "DOPPLER_TOKEN": SENTINEL}
+    subprocess.run([str(fake), "run", "--only-secrets=GOOD_ONE", "--", str(probe)], env=env, check=True)
+    assert _env_map(box.rec / "leak-environ")["DOPPLER_TOKEN"] == SENTINEL  # the model leaks
+    code, _, err = box.finish(box.run(args=("sh", "-c", 'test -z "${DOPPLER_TOKEN+x}" && echo scrubbed')))
+    assert code == 0, err
+
+
+def test_the_command_never_sees_the_token_even_when_a_required_check_fails(box):
+    code, out, err = box.finish(box.run(args=("echo", "hi"), extra_env={"FAKE_OMIT": "GOOD_TWO"}))
+    assert code == 3 and SENTINEL not in out + err
+
+
+def test_the_checker_removes_the_token_before_it_starts_any_other_program():
+    text = SCRIPT.read_text(encoding="utf-8")
+    check = next(l for l in text.splitlines() if l.startswith("CHECK="))
+    assert check.startswith("CHECK='unset DOPPLER_TOKEN; ")  # a shell builtin, ahead of printenv and the command
+    assert check.index("unset DOPPLER_TOKEN") < check.index("printenv") < check.index('exec "$@"')
 
 
 def test_other_doppler_variables_of_the_caller_are_removed_not_passed_on(box):

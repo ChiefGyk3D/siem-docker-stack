@@ -985,7 +985,18 @@ def test_issue177_the_token_is_replaced_atomically_and_the_old_one_is_revoked_af
     assert "--no-fallback" in flat and "fails closed" in flat.lower() and "Doppler outage" in flat
     assert "--require" in flat and "--optional" in flat and "LD_PRELOAD" in flat and "ZDOTDIR" in flat
     assert "fixed table" in flat and "exit 3" in flat
-    assert "GF_SMTP_HOST" in flat and "whoever can edit" in flat.lower()  # the accepted residual risk is named
+    assert "GF_SMTP_HOST" in flat
+    # round 3: no equivalence claim, a table of routing values with consequences, and an owner decision
+    assert "same trust as editing" not in flat and "equivalent" not in flat.lower()
+    routing = " ".join(section("Routing and destination values", "You need, on your own machine").split())
+    for name in ("BIND_ADDR", "SIEM_HOST", "GF_SMTP_HOST", "GRAFANA_VERSION", "GRAFANA_PORT",
+                 "PROMETHEUS_GRAFANA_PASSWORD", "PROMETHEUS_OTLP_GRAFANA_PASSWORD", "GRAFANA_INFLUX_USER",
+                 "WAZUH_GRAFANA_RO_USER", "DISCORD_FAILURE_WEBHOOK_URL", "HEARTBEAT_PING_URL"):
+        assert name in routing, name
+    assert "OWNER DECISION" in routing and ".env" in routing and "dev_network" in routing
+    assert "doppler activity" in routing and "NOT verified" in routing  # how to check, and what is unverified
+    assert "does not inherit the token" in flat or "do not inherit the token" in flat
+    assert "not a sandbox" in flat
     item4 = [l for l in text.splitlines() if "SIEM_NET_CONFIG_DIR=" in l]
     assert item4 and "--require GRAFANA_WEBHOOK_SECRET --" in item4[0]
 

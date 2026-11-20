@@ -4,9 +4,10 @@
 # The box reads the Doppler config dev_network (project homelab) through a
 # read-only service token kept in a mode 600 file inside a private config
 # folder. This wrapper checks that file, then hands the token to `doppler run`
-# through exec, so it exists only in the environment of that one process. It is
-# never printed, never put on a command line and never exported to any other
-# command. A service token is already scoped to one project and config, so no
+# through exec, so it is in the environment of that one process (and of a tiny
+# checker shell that drops it before anything else runs, see CHECK below). It is
+# never printed and never put on a command line, and the wrapped command does not
+# inherit it. A service token is already scoped to one project and config, so no
 # project or config flag is passed.
 #
 # Only the secrets NAMED on the command line are injected (--only-secrets), and
@@ -185,9 +186,19 @@ for NAME in "${ALL_NAMES[@]}"; do
     unset "$NAME"
 done
 
-# Runs inside doppler, after the secrets are injected, before the command: every
-# required name must be non-empty. (Doppler warns but does not fail for a name
+# Runs inside doppler, after the secrets are injected, before the command. The
+# first thing it does is drop the service token: `doppler run` copies its own
+# environment into the child, so without this the token would reach the command
+# (VERIFIED against the CLI source by the Daybreak review; `doppler configure
+# set token=...` is no way around it: it takes the token on the command line and
+# the installed CLI stores a keychain reference, not a file in the private
+# folder). `unset` is a shell builtin, so no other program starts first. What
+# this cannot do: the doppler process itself, the parent of the command, still
+# holds the token, and anything running as this same user can read the token
+# file anyway. The guarantee is that the wrapped command and its children do not
+# inherit the token and get only the named secrets; it is not a sandbox for
+# hostile code. Then every required name must be non-empty. (Doppler warns but does not fail for a name
 # the config lacks, because of --no-exit-on-missing-only-secrets.)
-CHECK='req=$1; shift; IFS=,; for v in $req; do if [ -z "$(printenv "$v")" ]; then echo "siem-net-run: required secret $v is missing or empty in the config" >&2; exit 3; fi; done; unset IFS; exec "$@"'
+CHECK='unset DOPPLER_TOKEN; req=$1; shift; IFS=,; for v in $req; do if [ -z "$(printenv "$v")" ]; then echo "siem-net-run: required secret $v is missing or empty in the config" >&2; exit 3; fi; done; unset IFS; exec "$@"'
 
 DOPPLER_TOKEN="$TOK" exec doppler run --config-dir "$CFG" --no-check-version --no-fallback --no-exit-on-missing-only-secrets --only-secrets="$ONLY" -- sh -c "$CHECK" siem-net-run "$REQUIRE" "$@"
