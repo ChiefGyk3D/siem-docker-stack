@@ -15,6 +15,8 @@ from test_prometheus_otlp import (  # noqa: F401  (fixtures are used by name)
     BASH, DOC, REPO_ROOT, RENDER, _doc, own, ready, render,
 )
 
+from conftest import skip_or_fail  # noqa: E402
+
 FIREWALL = REPO_ROOT / "scripts" / "prometheus-otlp-firewall.sh"
 CLOSED = ("secrets", "tls", "otlp-ca", "web.yml", "self-scrape-password",
           "otlp-scrape-password", "server.key", "server.crt", "otlp-ca.crt")
@@ -290,7 +292,7 @@ def fw_root(fw, tmp_path):
     a marker file."""
     probe = subprocess.run(["unshare", "-r", "true"], capture_output=True, timeout=30)
     if probe.returncode != 0:
-        pytest.skip("unprivileged user namespaces are not available")
+        skip_or_fail("unprivileged user namespaces are not available (unshare -r failed)")
     stubs = tmp_path / "fw-root-stubs"
     stubs.mkdir()
     marker = tmp_path / "hostile-program-ran"
@@ -300,7 +302,7 @@ def fw_root(fw, tmp_path):
     copy_dir.mkdir()
     copy_dir.chmod(0o755)
 
-    def run(mode="755", *args, env_extra=None):
+    def run(mode="755", *args, env_extra=None, via_bash=False):
         script = copy_dir / "prometheus-otlp-firewall.sh"
         script.write_bytes(FIREWALL.read_bytes())
         script.chmod(int(mode, 8))
@@ -309,7 +311,8 @@ def fw_root(fw, tmp_path):
                "IPTABLES": str(fw.stubs / "iptables"), "DOCKER": str(fw.stubs / "docker"),
                **(env_extra or {})}
         fw.log.write_text("", encoding="utf-8")
-        proc = subprocess.run(["unshare", "-r", BASH, str(script), *(args or GOOD)], env=env,
+        launcher = [BASH, str(script)] if via_bash else [str(script)]
+        proc = subprocess.run(["unshare", "-r", *launcher, *(args or GOOD)], env=env,
                               text=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=30)
         proc.calls = [x for x in fw.log.read_text(encoding="utf-8").splitlines() if x]
         proc.marker = marker
@@ -361,6 +364,63 @@ def test_firewall_decides_root_from_the_kernel_after_resetting_path():
     first = next(i for i, ln in enumerate(code) if ln.startswith("PATH="))
     assert "EUID" not in "\n".join(code), "the root decision must not read EUID"
     assert first < next(i for i, ln in enumerate(code) if '"$ID_BIN" -u' in ln)
+
+
+def _bash_env_file(tmp_path, marker):
+    path = tmp_path / "bash-env"
+    path.write_text(f"touch {marker}\n", encoding="utf-8")
+    return str(path)
+
+
+def test_bash_env_does_not_run_when_the_script_is_started_by_path_as_root(fw_root, tmp_path):
+    marker = tmp_path / "bash-env-ran"
+    proc = fw_root("755", "remove", env_extra={"BASH_ENV": _bash_env_file(tmp_path, marker),
+                                               "ENV": _bash_env_file(tmp_path, marker)})
+    assert not marker.exists(), "BASH_ENV ran as root before the first line"
+    assert proc.calls == []
+
+
+@pytest.mark.parametrize("name", ["stat", "echo", "[", "grep", "printf", "read", "id"])
+def test_exported_functions_are_not_imported_when_started_by_path_as_root(fw_root, tmp_path, name):
+    marker = tmp_path / "function-ran"
+    body = f"() {{ touch {marker}; command {name} \"$@\"; }}"
+    proc = fw_root("775", env_extra={f"BASH_FUNC_{name}%%": body})
+    assert not marker.exists(), f"an exported {name} function ran as root"
+    assert proc.returncode != 0 and "root-owned" in proc.stderr, "the ownership check was bypassed"
+
+
+def test_root_started_through_an_explicit_interpreter_is_refused(fw_root, tmp_path):
+    marker = tmp_path / "function-ran"
+    proc = fw_root("755", "remove", via_bash=True,
+                   env_extra={"BASH_FUNC_stat%%": f"() {{ touch {marker}; }}"})
+    assert proc.returncode != 0 and "by its path" in proc.stderr
+    assert proc.calls == [] and not marker.exists()
+
+
+def test_the_script_runs_in_privileged_bash_and_clears_the_startup_variables():
+    text = FIREWALL.read_text(encoding="utf-8")
+    assert text.splitlines()[0] == "#!/bin/bash -p"
+    code = "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
+    assert "unset BASH_ENV ENV CDPATH GLOBIGNORE PS4" in code
+    assert "set +x" in code
+    assert "sudo bash" not in text, "an explicit interpreter bypasses the privileged shebang"
+
+
+def test_doc_says_root_runs_the_script_by_its_path():
+    assert "by its path" in _doc()
+
+
+# --- a security test that cannot run must not pass silently -------------------------------
+
+def test_skip_or_fail_fails_when_ci_is_set():
+    with pytest.raises(pytest.fail.Exception):
+        skip_or_fail("no user namespaces", env={"CI": "true"})
+
+
+def test_skip_or_fail_skips_loudly_outside_ci():
+    with pytest.raises(pytest.skip.Exception) as info:
+        skip_or_fail("no user namespaces", env={})
+    assert "SECURITY TEST NOT RUN" in str(info.value) and "no user namespaces" in str(info.value)
 
 
 def test_firewall_resets_path_for_real_root():

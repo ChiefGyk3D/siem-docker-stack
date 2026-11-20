@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -p
 # =============================================================================
 # prometheus-otlp-firewall.sh - Allow-list for the Prometheus OTLP receiver
 # =============================================================================
@@ -6,9 +6,12 @@
 # DOCKER-USER chain: only the approved senders may open a connection to the
 # receiver's published address and port; everything else is dropped.
 #
-# Usage (as root):
-#   sudo bash scripts/prometheus-otlp-firewall.sh apply <bind-ipv4> <sender> [<sender>...]
-#   sudo bash scripts/prometheus-otlp-firewall.sh remove
+# Usage (as root; run the script by its path, never as `bash script`: the
+# privileged-mode shebang is what stops BASH_ENV and exported shell functions
+# from running as root before the first line, and an explicit interpreter
+# bypasses it, so root refuses to continue that way):
+#   sudo scripts/prometheus-otlp-firewall.sh apply <bind-ipv4> <sender> [<sender>...]
+#   sudo scripts/prometheus-otlp-firewall.sh remove
 #
 #   <bind-ipv4>  the address the receiver will be published on
 #                (PROMETHEUS_OTLP_BIND_ADDR). Not 0.0.0.0: the rule matches the
@@ -24,6 +27,9 @@
 # between PROM-OTLP-A and PROM-OTLP-B. IPv4 and iptables only (docs).
 # =============================================================================
 
+set +x
+# SHELLOPTS and BASHOPTS are readonly in bash and are ignored in privileged mode.
+unset BASH_ENV ENV CDPATH GLOBIGNORE PS4
 set -euo pipefail
 
 CHAIN_A=PROM-OTLP-A
@@ -42,6 +48,10 @@ real_uid="$("$ID_BIN" -u)" || die "could not determine the user id"
 [[ "$real_uid" =~ ^[0-9]+$ ]] || die "could not determine the user id"
 
 if [ "$real_uid" -eq 0 ]; then
+    # The privileged-mode shebang (-p) is what keeps BASH_ENV and exported functions
+    # out. `bash script` skips it, so root refuses that form (it cannot undo what
+    # BASH_ENV already ran, which is why root must start the script by its path).
+    [[ "$-" == *p* ]] || die "as root, run this script by its path (sudo scripts/prometheus-otlp-firewall.sh ...), not as 'bash script': the privileged shebang is bypassed"
     # As root: fixed program names (no IPTABLES/DOCKER overrides, PROM_FW_NO_SUDO
     # ignored), and only code nobody else can edit. Run the root-owned copy (docs).
     IPT=iptables

@@ -198,6 +198,16 @@ to approved senders are not matched, and cannot be dropped, by the chain. Sender
 with a prefix length of 0 (which would allow everyone) are refused, and if the
 current rules cannot be read the script stops without changing anything.
 
+Root must start the script by its path (as in the commands above), never as
+`bash prometheus-otlp-firewall.sh`. The script's `#!/bin/bash -p` line puts Bash in
+privileged mode, which ignores `BASH_ENV` and `ENV` and does not import exported
+shell functions; an explicit interpreter bypasses that line, and a script cannot
+undo code that `BASH_ENV` already ran, so as root the script refuses to continue
+when it was not started in privileged mode. It also clears `BASH_ENV`, `ENV`,
+`CDPATH`, `GLOBIGNORE` and `PS4` (privileged mode already ignores `SHELLOPTS` and
+`BASHOPTS`), turns tracing off, and
+sets a fixed `PATH` before it decides whether it is root.
+
 The address arguments are checked before anything is changed, and a refusal names
 the problem and changes nothing. The bind address must be one plain IPv4 interface
 address: the script refuses an empty value, `0.0.0.0`, any IPv6 form including
