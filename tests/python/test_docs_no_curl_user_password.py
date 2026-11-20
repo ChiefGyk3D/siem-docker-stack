@@ -174,7 +174,7 @@ def fence(line):
     "@C@ http://admin@S@$PW@host/",
     "@C@ http://$USER@S@$PW@host/",
     "@C@ http://${U}@S@${P}@host:9200/",
-    "@C@ http://$(id -un)@S@$(cat /x)@host/",
+    "@C@ http://$(whoami)@S@$(cat /x)@host/",
     '@C@ http://"adm"in@S@pw@host/',
     # empty user or empty password
     "@C@ http://admin@S@@host/",
