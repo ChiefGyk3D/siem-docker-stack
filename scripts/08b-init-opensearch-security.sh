@@ -107,12 +107,38 @@ for candidate in "${DEPLOY_DIR}/.env" "${REPO_DIR}/.env" "${REPO_DIR}/docker/.en
     fi
 done
 
-# The .env is loaded with "noexport": its values stay in this shell and no child process (grep, tail,
-# python3, ...) inherits them. No process is started to take an inventory of the environment.
+# The .env is shell code, so loading it cannot be made to ignore an `export`, `declare -x` or `set -a`
+# written inside it. What is guaranteed, using shell builtins only (no process is started, so the
+# inventory itself exposes nothing): "noexport" keeps a plain assignment from being exported; then,
+# whatever the file did, allexport is switched off again, every variable NAME the file created is
+# stripped of its export attribute, and so are the four passwords. NOT guaranteed: a variable that
+# already existed before the file ran keeps whatever export attribute the file gave it (these are
+# the script's own variables, never secrets), and a hostile file can run any shell code at all, so the
+# file must be trusted (as root it must be root-owned in a root-owned tree, already enforced above).
+# ce_names fills the array _NAMES with every variable name in the shell (the ${!x@} expansions list the
+# names starting with one character; eval only ever sees the fixed characters of the loop).
+ce_names() {
+    local _c
+    _NAMES=()
+    for _c in {a..z} {A..Z} _; do
+        eval '_NAMES+=(${!'"$_c"'@})'
+    done
+}
+declare -A PRE_NAMES=()
+ce_names
+for _n in ${_NAMES[@]+"${_NAMES[@]}"}; do PRE_NAMES[$_n]=1; done
 if [ -n "$ENV_FILE" ]; then
     echo "Loading passwords from ${ENV_FILE}"
     ce_source_env "$ENV_FILE" noexport || exit 1  # root: only a root-owned file in a root-owned tree, via one descriptor
 fi
+set +a
+ce_names
+for _n in ${_NAMES[@]+"${_NAMES[@]}"}; do
+    [ -n "${PRE_NAMES[$_n]:-}" ] || export -n "$_n"
+done
+export -n OPENSEARCH_ADMIN_PASSWORD OPENSEARCH_LOGSTASH_PASSWORD \
+          OPENSEARCH_READONLY_PASSWORD OPENSEARCH_DASHBOARDS_PASSWORD
+unset _n _NAMES PRE_NAMES
 
 # CONTAINER_ENGINE (docker by default, or podman) may come from the environment or that .env.
 ce_init || exit 1

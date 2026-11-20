@@ -203,7 +203,7 @@ class Box:
         path.write_text(text, encoding="utf-8")
         path.chmod(0o755)
 
-    def run(self, passwords=None, via="env", extra_env=None, umask=0o022, bash_args=()):
+    def run(self, passwords=None, via="env", extra_env=None, umask=0o022, bash_args=(), env_style=None):
         """via='env': passwords in the launching environment; via='file': in the deploy dir .env."""
         pw = {v: (passwords or {}).get(v, SENTINEL) for v in PASS_VARS}
         env = {"PATH": "/usr/bin:/bin", "SIEM_DEPLOY_DIR": str(self.deploy), "HOME": str(self.rec.parent)}
@@ -211,7 +211,10 @@ class Box:
             env.update(pw)
         else:
             lines = [f"{k}='{v}'" for k, v in pw.items()] + [f"OTHER_SECRET='{OTHER_SECRET}'"]
-            (self.deploy / ".env").write_text("\n".join(lines) + "\n", encoding="utf-8")
+            text = "\n".join(lines) + "\n"
+            if env_style is not None:
+                text = env_style(pw)
+            (self.deploy / ".env").write_text(text, encoding="utf-8")
             (self.deploy / ".env").chmod(0o600)
         env.update(extra_env or {})
         return subprocess.run(["bash", *bash_args, str(self.scripts / SCRIPT)], env=env, text=True, capture_output=True,
@@ -273,6 +276,44 @@ def assert_children_clean(box, tools):
             assert OTHER_SECRET not in data, f"another .env secret in {p.name}"
             for v in PASS_VARS:
                 assert f"{v}=" not in data, f"{v} inherited by {p.name}"
+
+
+ENV_STYLES = {
+    "export_assign": lambda pw: "".join(f"export {k}='{v}'\n" for k, v in pw.items())
+                                + f"export OTHER_SECRET='{OTHER_SECRET}'\n",
+    "declare_gx": lambda pw: "".join(f"declare -gx {k}='{v}'\n" for k, v in pw.items())
+                             + f"declare -gx OTHER_SECRET='{OTHER_SECRET}'\n",
+    "set_a_then_plain": lambda pw: "set -a\n" + "".join(f"{k}='{v}'\n" for k, v in pw.items())
+                                   + f"OTHER_SECRET='{OTHER_SECRET}'\n",
+    "other_secret_only": lambda pw: "".join(f"{k}='{v}'\n" for k, v in pw.items())
+                                    + f"export OTHER_SECRET='{OTHER_SECRET}'\n",
+    "export_after_plain": lambda pw: "".join(f"{k}='{v}'\nexport {k}\n" for k, v in pw.items())
+                                     + f"OTHER_SECRET='{OTHER_SECRET}'\nexport OTHER_SECRET\n",
+}
+
+
+@pytest.mark.parametrize("style", sorted(ENV_STYLES))
+def test_an_env_file_that_exports_cannot_reach_children(tmp_path, style):
+    """The .env is shell code. Whatever export form it uses (export NAME=v, declare -x, set -a, export
+    after assignment), no host child may inherit a password or another secret it defined, and allexport
+    is off again afterwards."""
+    box = make(tmp_path)
+    proc = box.run(via="file", env_style=ENV_STYLES[style])
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert_children_clean(box, EVERY_TOOL)
+    for c in box.engine_calls():
+        assert SENTINEL not in c["env"] and OTHER_SECRET not in c["env"]
+
+
+def test_declare_x_in_an_env_file_is_local_to_the_loader_and_leaks_nothing(tmp_path):
+    """Plain `declare -x` inside the sourcing function is function-local: the passwords are then unset
+    and the script refuses to run, still without any secret reaching a child."""
+    box = make(tmp_path)
+    proc = box.run(via="file", env_style=lambda pw: "".join(f"declare -x {k}='{v}'\n" for k, v in pw.items()))
+    assert proc.returncode != 0
+    for p in box.probes.iterdir():
+        assert SENTINEL not in p.read_bytes().decode("utf-8", errors="replace"), p.name
+    assert SENTINEL not in proc.stdout + proc.stderr
 
 
 @pytest.mark.parametrize("how", ["bash_a", "shellopts", "both"])
