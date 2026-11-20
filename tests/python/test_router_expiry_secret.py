@@ -14,7 +14,6 @@ import copy
 import importlib.util
 import json
 import re
-import subprocess
 
 import pytest
 
@@ -521,10 +520,24 @@ def test_no_secret_value_is_in_the_workflow_file():
 
 # --- the shared downstream is not weakened -------------------------------------------------
 
+BASELINE = REPO_ROOT / "tests" / "python" / "fixtures" / "router-baseline-pre-127.json"
+# sha256 of the canonical JSON of the baseline's nodes, connections and settings (no git history needed)
+BASELINE_SHA256 = "d57c5340eff09d7d5bfca05c56bfb937a863111661901bc88b1d65fa90298208"
+
+
 def _master_workflow():
-    out = subprocess.run(["git", "show", "origin/master:n8n/grafana-alert-router.json"], cwd=REPO_ROOT,
-                         capture_output=True, text=True, check=True).stdout
-    return json.loads(out)
+    return json.loads(BASELINE.read_text(encoding="utf-8"))
+
+
+def test_the_baseline_fixture_is_the_unedited_pre_change_router():
+    """The fixture was generated once from the router as on master before this change; its hash is pinned
+    so the comparison below cannot be loosened by editing the fixture."""
+    import hashlib
+    d = _master_workflow()
+    canon = json.dumps({k: d[k] for k in ("nodes", "connections", "settings")}, sort_keys=True,
+                       separators=(",", ":"), ensure_ascii=False)
+    assert hashlib.sha256(canon.encode()).hexdigest() == BASELINE_SHA256
+    assert len(d["nodes"]) == 21 and d["nodes"][0] == GRAFANA_HOOK_PINNED
 
 
 def test_every_existing_node_and_connection_is_kept_and_only_four_nodes_are_added():

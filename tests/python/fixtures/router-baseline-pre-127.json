@@ -1,0 +1,999 @@
+{
+  "_note": "Router workflow as on master before issue 127 (nodes, connections, settings). Used by test_router_expiry_secret.py to prove every pre-existing node and connection is unchanged. Do not edit; the test pins its hash.",
+  "connections": {
+    "Alert Status": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Discord — Firing",
+            "type": "main"
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "node": "Discord — Resolved",
+            "type": "main"
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "node": "Discord — Malformed",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Build Heartbeat Ping": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Heartbeat Send?",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Build Pushover Payload": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Pushover Enabled?",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Discord Failed?": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Respond Error",
+            "type": "main"
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "node": "Respond OK",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Discord — Firing": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Build Pushover Payload",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Discord — Malformed": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Build Pushover Payload",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Discord — Phone Failed (cancel)": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Pushover Notify",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Discord — Phone Failed (send)": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Discord Failed?",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Discord — Resolved": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Build Pushover Payload",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Grafana Webhook": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Normalize Alert",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Heartbeat Ping": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Respond OK",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Heartbeat Send?": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Heartbeat Ping",
+            "type": "main"
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "node": "Respond OK",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Heartbeat?": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Build Heartbeat Ping",
+            "type": "main"
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "node": "Alert Status",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Normalize Alert": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Heartbeat?",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Pushover Cancel Repeats": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Pushover Notify",
+            "type": "main"
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "node": "Discord — Phone Failed (cancel)",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Pushover Cancel?": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Pushover Cancel Repeats",
+            "type": "main"
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "node": "Pushover Notify",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Pushover Enabled?": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Pushover Cancel?",
+            "type": "main"
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "node": "Discord Failed?",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Pushover Notify": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Discord Failed?",
+            "type": "main"
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "node": "Discord — Phone Failed (send)",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Respond Error": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Fail Run",
+            "type": "main"
+          }
+        ]
+      ]
+    }
+  },
+  "nodes": [
+    {
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "grafana-webhook-auth"
+        }
+      },
+      "id": "grafana-webhook",
+      "name": "Grafana Webhook",
+      "parameters": {
+        "authentication": "headerAuth",
+        "httpMethod": "POST",
+        "options": {},
+        "path": "grafana-alerts",
+        "responseMode": "responseNode"
+      },
+      "position": [
+        0,
+        300
+      ],
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "webhookId": "grafana-alerts"
+    },
+    {
+      "id": "alert-status",
+      "name": "Alert Status",
+      "parameters": {
+        "options": {
+          "fallbackOutput": "extra"
+        },
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "firing",
+                    "leftValue": "={{ $json.body.status }}",
+                    "operator": {
+                      "operation": "equals",
+                      "type": "string"
+                    },
+                    "rightValue": "firing"
+                  }
+                ],
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                }
+              },
+              "outputKey": "Firing",
+              "renameOutput": true
+            },
+            {
+              "conditions": {
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "id": "resolved",
+                    "leftValue": "={{ $json.body.status }}",
+                    "operator": {
+                      "operation": "equals",
+                      "type": "string"
+                    },
+                    "rightValue": "resolved"
+                  }
+                ],
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                }
+              },
+              "outputKey": "Resolved",
+              "renameOutput": true
+            }
+          ]
+        }
+      },
+      "position": [
+        450,
+        300
+      ],
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2
+    },
+    {
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Discord Webhook Alerts"
+        }
+      },
+      "id": "discord---firing",
+      "name": "Discord — Firing",
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "authentication": "webhook",
+        "content": "",
+        "embeds": {
+          "values": [
+            {
+              "color": 15158332,
+              "description": "={{ ($json.body.alerts || [{}])[0].annotations?.summary || 'Alert condition is true' }}",
+              "fields": [
+                {
+                  "inline": true,
+                  "name": "🏷️ Alert Name",
+                  "value": "=`{{ ($json.body.alerts || [{}])[0].labels?.alertname || 'N/A' }}`"
+                },
+                {
+                  "inline": true,
+                  "name": "⚠️ Severity",
+                  "value": "={{ ($json.body.alerts || [{}])[0].labels?.severity || 'unknown' }}"
+                },
+                {
+                  "inline": true,
+                  "name": "🖥️ Instance",
+                  "value": "={{ ($json.body.alerts || [{}])[0].labels?.instance || ($json.body.alerts || [{}])[0].labels?.agent || 'N/A' }}"
+                },
+                {
+                  "inline": false,
+                  "name": "📊 Observed Value",
+                  "value": "=```{{ (($json.body.alerts || [{}])[0].valueString || 'N/A').slice(0, 200) }}```"
+                },
+                {
+                  "inline": false,
+                  "name": "🔍 Why It Fired",
+                  "value": "={{ ($json.body.alerts || [{}])[0].annotations?.trigger_logic || ($json.body.alerts || [{}])[0].annotations?.description || 'N/A' }}"
+                },
+                {
+                  "inline": true,
+                  "name": "📐 Query",
+                  "value": "=`{{ ($json.body.alerts || [{}])[0].annotations?.trigger_query || 'N/A' }}`"
+                },
+                {
+                  "inline": true,
+                  "name": "📏 Threshold",
+                  "value": "=`{{ ($json.body.alerts || [{}])[0].annotations?.threshold || 'N/A' }}`"
+                },
+                {
+                  "inline": true,
+                  "name": "⏱️ Window",
+                  "value": "={{ ($json.body.alerts || [{}])[0].annotations?.window || 'N/A' }}"
+                },
+                {
+                  "inline": true,
+                  "name": "🌐 Source IP",
+                  "value": "={{ ($json.body.alerts || [{}])[0].labels?.srcip || 'N/A' }}"
+                },
+                {
+                  "inline": true,
+                  "name": "👤 Job / Exporter",
+                  "value": "={{ ($json.body.alerts || [{}])[0].labels?.job || 'N/A' }}"
+                },
+                {
+                  "inline": false,
+                  "name": "🕐 Started At",
+                  "value": "={{ ($json.body.alerts || [{}])[0].startsAt || 'N/A' }}"
+                },
+                {
+                  "inline": false,
+                  "name": "📋 Description",
+                  "value": "={{ (($json.body.alerts || [{}])[0].annotations?.description || 'No description provided').slice(0, 800) }}"
+                },
+                {
+                  "inline": false,
+                  "name": "🔗 Dashboard",
+                  "value": "={{ ($json.body.alerts || [{}])[0].dashboardURL || 'N/A' }}"
+                },
+                {
+                  "inline": false,
+                  "name": "🔗 Panel",
+                  "value": "={{ ($json.body.alerts || [{}])[0].panelURL || ($json.body.alerts || [{}])[0].generatorURL || 'N/A' }}"
+                },
+                {
+                  "inline": true,
+                  "name": "🔖 Fingerprint",
+                  "value": "=`{{ ($json.body.alerts || [{}])[0].fingerprint || 'N/A' }}`"
+                },
+                {
+                  "inline": false,
+                  "name": "📎 All Labels",
+                  "value": "={{ Object.entries(($json.body.alerts || [{}])[0].labels || {}).map(([k,v]) => k + '=' + v).join(', ').slice(0, 500) || 'N/A' }}"
+                }
+              ],
+              "timestamp": "={{ ($json.body.alerts || [{}])[0].startsAt || new Date().toISOString() }}",
+              "title": "=🔥 FIRING — {{ ($json.body.alerts || [{}])[0].labels?.alertname || 'Unknown Alert' }}"
+            }
+          ]
+        },
+        "operation": "sendLegacy"
+      },
+      "position": [
+        600,
+        200
+      ],
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2
+    },
+    {
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Discord Webhook Alerts"
+        }
+      },
+      "id": "discord---resolved",
+      "name": "Discord — Resolved",
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "authentication": "webhook",
+        "content": "",
+        "embeds": {
+          "values": [
+            {
+              "color": 3066993,
+              "description": "={{ ($json.body.alerts || [{}])[0].annotations?.summary || 'Alert condition cleared' }}",
+              "fields": [
+                {
+                  "inline": true,
+                  "name": "🏷️ Alert Name",
+                  "value": "=`{{ ($json.body.alerts || [{}])[0].labels?.alertname || 'N/A' }}`"
+                },
+                {
+                  "inline": true,
+                  "name": "⚠️ Severity",
+                  "value": "={{ ($json.body.alerts || [{}])[0].labels?.severity || 'unknown' }}"
+                },
+                {
+                  "inline": true,
+                  "name": "🖥️ Instance",
+                  "value": "={{ ($json.body.alerts || [{}])[0].labels?.instance || ($json.body.alerts || [{}])[0].labels?.agent || 'N/A' }}"
+                },
+                {
+                  "inline": false,
+                  "name": "📊 Last Value",
+                  "value": "=```{{ (($json.body.alerts || [{}])[0].valueString || 'N/A').slice(0, 200) }}```"
+                },
+                {
+                  "inline": false,
+                  "name": "📐 Query / Threshold",
+                  "value": "=Query: `{{ ($json.body.alerts || [{}])[0].annotations?.trigger_query || 'N/A' }}` Threshold: `{{ ($json.body.alerts || [{}])[0].annotations?.threshold || 'N/A' }}`"
+                },
+                {
+                  "inline": true,
+                  "name": "⏱️ Duration",
+                  "value": "={{ (() => { const a = ($json.body.alerts || [{}])[0]; if (!a.startsAt || !a.endsAt) return 'N/A'; const ms = new Date(a.endsAt) - new Date(a.startsAt); const m = Math.floor(ms/60000); const s = Math.floor((ms%60000)/1000); return (m > 0 ? m + 'm ' : '') + s + 's'; })() }}"
+                },
+                {
+                  "inline": true,
+                  "name": "🕐 Fired At",
+                  "value": "={{ ($json.body.alerts || [{}])[0].startsAt || 'N/A' }}"
+                },
+                {
+                  "inline": true,
+                  "name": "🕐 Resolved At",
+                  "value": "={{ ($json.body.alerts || [{}])[0].endsAt || 'N/A' }}"
+                },
+                {
+                  "inline": false,
+                  "name": "📋 Description",
+                  "value": "={{ (($json.body.alerts || [{}])[0].annotations?.description || 'No description').slice(0, 600) }}"
+                },
+                {
+                  "inline": false,
+                  "name": "🔗 Dashboard",
+                  "value": "={{ ($json.body.alerts || [{}])[0].dashboardURL || 'N/A' }}"
+                },
+                {
+                  "inline": true,
+                  "name": "🔖 Fingerprint",
+                  "value": "=`{{ ($json.body.alerts || [{}])[0].fingerprint || 'N/A' }}`"
+                }
+              ],
+              "timestamp": "={{ ($json.body.alerts || [{}])[0].endsAt || new Date().toISOString() }}",
+              "title": "=✅ RESOLVED — {{ ($json.body.alerts || [{}])[0].labels?.alertname || 'Unknown Alert' }}"
+            }
+          ]
+        },
+        "operation": "sendLegacy"
+      },
+      "position": [
+        600,
+        400
+      ],
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2
+    },
+    {
+      "id": "pushover-build",
+      "name": "Build Pushover Payload",
+      "parameters": {
+        "jsCode": "const PUSHOVER_ENABLED = false;\nconst PUSHOVER_RETRY = 300;\nconst PUSHOVER_EXPIRE = 10800;\nconst ALLOWED_DASHBOARD_ORIGIN = '';\nconst ALLOWED_ALERTNAMES = [\n  'UniFi update pending over 24h',\n  'UniFi update pending over 7 days',\n  'pfSense update pending over 24h',\n  'pfSense update pending over 7 days',\n  'pfSense SECURITY update pending',\n  'pfSense update check failing or stale',\n  'UniFi poller data stale'\n];\n// PUSHOVER_ENABLED: set to true to send to Pushover. Retry is the seconds\n// between repeats of an emergency message (minimum 30). Expire is when repeats\n// stop (maximum 10800). ALLOWED_DASHBOARD_ORIGIN: only an https link on exactly\n// this origin is forwarded; the empty default drops every link. Example:\n// 'https://grafana.example.com'. ALLOWED_ALERTNAMES: only these alert names can\n// page at emergency priority or cancel repeats; keep it equal to the titles in\n// docker/grafana/provisioning/alerting/update-alert-rules-*.yml.\n// No Pushover credential is handled here: the HTTP Request nodes add them from\n// the n8n credential pushover-api.\n\nconst isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);\nconst str = (v, max) => {\n  if (typeof v === 'string') { return v.slice(0, max); }\n  if (typeof v === 'number' && isFinite(v)) { return String(v).slice(0, max); }\n  return '';\n};\n\nfunction sha256hex(s) {\n  const rotr = (x, n) => (x >>> n) | (x << (32 - n));\n  const primes = [];\n  for (let n = 2; primes.length < 64; n++) {\n    let ok = true;\n    for (let d = 2; d * d <= n; d++) { if (n % d === 0) { ok = false; break; } }\n    if (ok) { primes.push(n); }\n  }\n  const K = primes.map((p) => Math.floor((Math.cbrt(p) % 1) * 4294967296));\n  let H = primes.slice(0, 8).map((p) => Math.floor((Math.sqrt(p) % 1) * 4294967296));\n  const m = [];\n  for (let i = 0; i < s.length; i++) { m.push(s.charCodeAt(i) & 255); }\n  const bits = m.length * 8;\n  m.push(0x80);\n  while (m.length % 64 !== 56) { m.push(0); }\n  m.push(0, 0, 0, 0, (bits >>> 24) & 255, (bits >>> 16) & 255, (bits >>> 8) & 255, bits & 255);\n  for (let o = 0; o < m.length; o += 64) {\n    const w = new Array(64);\n    for (let t = 0; t < 16; t++) {\n      w[t] = (m[o + 4 * t] << 24) | (m[o + 4 * t + 1] << 16) | (m[o + 4 * t + 2] << 8) | m[o + 4 * t + 3];\n    }\n    for (let t = 16; t < 64; t++) {\n      const s0 = rotr(w[t - 15], 7) ^ rotr(w[t - 15], 18) ^ (w[t - 15] >>> 3);\n      const s1 = rotr(w[t - 2], 17) ^ rotr(w[t - 2], 19) ^ (w[t - 2] >>> 10);\n      w[t] = (w[t - 16] + s0 + w[t - 7] + s1) | 0;\n    }\n    let [a, b, c, d, e, f, g, h] = H;\n    for (let t = 0; t < 64; t++) {\n      const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);\n      const ch = (e & f) ^ (~e & g);\n      const t1 = (h + S1 + ch + K[t] + w[t]) | 0;\n      const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);\n      const maj = (a & b) ^ (a & c) ^ (b & c);\n      const t2 = (S0 + maj) | 0;\n      h = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0;\n    }\n    const v = [a, b, c, d, e, f, g, h];\n    H = H.map((x, i) => (x + v[i]) | 0);\n  }\n  return H.map((x) => ('00000000' + (x >>> 0).toString(16)).slice(-8)).join('');\n}\n\nfunction safeDashboardUrl(u) {\n  if (!ALLOWED_DASHBOARD_ORIGIN || typeof u !== 'string' || u.length > 512) { return ''; }\n  if (/[\\\\\\u0000-\\u001f\\u007f]/.test(u)) { return ''; }\n  let allowed;\n  let p;\n  try { allowed = new URL(ALLOWED_DASHBOARD_ORIGIN); p = new URL(u); } catch (e) { return ''; }\n  if (allowed.protocol !== 'https:') { return ''; }\n  if (p.protocol !== 'https:' || p.username || p.password) { return ''; }\n  if (p.origin !== allowed.origin) { return ''; }\n  return p.href.length > 512 ? '' : p.href;\n}\n\nfunction build() {\n  const raw = $('Normalize Alert').first().json.body;\n  if (!isObj(raw)) { throw new Error('body'); }\n  if (raw.status !== 'firing' && raw.status !== 'resolved') { throw new Error('status'); }\n  if (!Array.isArray(raw.alerts) || raw.alerts.length < 1) { throw new Error('alerts'); }\n  const a = raw.alerts[0];\n  if (!isObj(a)) { throw new Error('alert'); }\n  const l = a.labels === undefined ? {} : a.labels;\n  const an = a.annotations === undefined ? {} : a.annotations;\n  if (!isObj(l) || !isObj(an)) { throw new Error('maps'); }\n  const resolved = raw.status === 'resolved';\n  // The phone label is the only way an alert reaches Pushover (everything else\n  // stays on Discord). The malformed-alert notice in the catch below is exempt.\n  const phone = str(l.phone, 10) === 'true';\n  const alertname = str(l.alertname, 200);\n  const known = ALLOWED_ALERTNAMES.indexOf(alertname) !== -1;\n  const severity = str(l.severity, 20);\n  const urgent = severity === 'critical' || str(l.update_security, 10) === 'true';\n  let prio = 0;\n  if (!resolved) {\n    if (known && urgent) { prio = 2; } else if (urgent || severity === 'warning') { prio = 1; }\n  }\n  const title = ((resolved ? 'RESOLVED: ' : '') + (alertname || 'Grafana alert')).slice(0, 250);\n  const summary = str(an.summary, 300) || ('Alert condition ' + (resolved ? 'cleared' : 'is true'));\n  const description = str(an.description, 600);\n  const msg = (summary + (description ? '\\n' + description : '')\n    + (raw.alerts.length > 1 ? '\\n(+' + (raw.alerts.length - 1) + ' more alerts)' : '')).slice(0, 1024);\n  const fingerprint = str(a.fingerprint, 64);\n  const tag = (known && /^[0-9a-fA-F]{1,64}$/.test(fingerprint))\n    ? 'upd-' + sha256hex(alertname + '|' + fingerprint).slice(0, 32) : '';\n  const o = { title: title, message: msg, priority: prio };\n  if (prio === 2) {\n    o.retry = Math.max(30, Math.floor(Number(PUSHOVER_RETRY)) || 300);\n    o.expire = Math.min(10800, Math.floor(Number(PUSHOVER_EXPIRE)) || 10800);\n    if (tag) { o.tags = tag; }\n  }\n  const url = safeDashboardUrl(a.dashboardURL);\n  if (url) { o.url = url; }\n  return { enabled: PUSHOVER_ENABLED === true && phone, pushover: o, cancelTag: resolved ? tag : '' };\n}\n\nlet out;\ntry {\n  out = build();\n} catch (e) {\n  out = {\n    enabled: PUSHOVER_ENABLED === true,\n    pushover: {\n      title: 'Alert router: malformed alert',\n      message: 'The router received a malformed alert from the webhook. Check the sender and the n8n execution log.',\n      priority: 1,\n    },\n    cancelTag: '',\n  };\n}\nreturn [{ json: out }];\n"
+      },
+      "position": [
+        600,
+        600
+      ],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "id": "pushover-enabled",
+      "name": "Pushover Enabled?",
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "pushover-enabled",
+              "leftValue": "={{ $json.enabled === true }}",
+              "operator": {
+                "operation": "true",
+                "singleValue": true,
+                "type": "boolean"
+              },
+              "rightValue": ""
+            }
+          ],
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          }
+        },
+        "options": {}
+      },
+      "position": [
+        850,
+        600
+      ],
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2
+    },
+    {
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "pushover-api"
+        }
+      },
+      "id": "pushover-notify",
+      "name": "Pushover Notify",
+      "onError": "continueErrorOutput",
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "jsonBody": "={{ JSON.stringify($('Build Pushover Payload').first().json.pushover) }}",
+        "method": "POST",
+        "options": {
+          "timeout": 10000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "url": "https://api.pushover.net/1/messages.json"
+      },
+      "position": [
+        1100,
+        540
+      ],
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2
+    },
+    {
+      "id": "pushover-cancel-check",
+      "name": "Pushover Cancel?",
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "pushover-cancel-check",
+              "leftValue": "={{ /^upd-[0-9a-f]{32}$/.test(String($json.cancelTag || '')) }}",
+              "operator": {
+                "operation": "true",
+                "singleValue": true,
+                "type": "boolean"
+              },
+              "rightValue": ""
+            }
+          ],
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          }
+        },
+        "options": {}
+      },
+      "position": [
+        1100,
+        700
+      ],
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2
+    },
+    {
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "pushover-api"
+        }
+      },
+      "id": "pushover-cancel",
+      "name": "Pushover Cancel Repeats",
+      "onError": "continueErrorOutput",
+      "parameters": {
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "jsonBody": "{}",
+        "method": "POST",
+        "options": {
+          "timeout": 10000
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "url": "={{ 'https://api.pushover.net/1/receipts/cancel_by_tag/' + encodeURIComponent($json.cancelTag) + '.json' }}"
+      },
+      "position": [
+        1350,
+        700
+      ],
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2
+    },
+    {
+      "id": "normalize-alert",
+      "name": "Normalize Alert",
+      "parameters": {
+        "jsCode": "// Runs directly behind the webhook. It builds a NEW body that is safe for every\n// downstream expression: scalars are coerced to capped strings, objects and\n// arrays in scalar positions are dropped, and labels and annotations are fresh\n// plain objects. A body the router cannot route safely becomes\n// {status: 'malformed'}, which the Alert Status switch sends to the\n// malformed-alert notifications. This node never throws, so an authenticated\n// call cannot end in silence. The Discord and Pushover nodes read only the\n// fields built here (a test scans their expressions to keep it that way).\nconst isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);\nconst s = (v, max) => {\n  if (typeof v === 'string') { return v.slice(0, max); }\n  if (typeof v === 'number' && isFinite(v)) { return String(v).slice(0, max); }\n  if (typeof v === 'boolean') { return String(v); }\n  return '';\n};\nconst ts = (v) => {\n  const t = s(v, 64);\n  return t && !isNaN(Date.parse(t)) ? t : '';\n};\nconst ANNOTATIONS = { summary: 300, description: 1000, trigger_logic: 300, trigger_query: 300, threshold: 100, window: 100 };\n\nfunction clean(a) {\n  const l = isObj(a.labels) ? a.labels : {};\n  const an = isObj(a.annotations) ? a.annotations : {};\n  const labels = {};\n  Object.keys(l).slice(0, 50).forEach((k) => {\n    if (k !== '__proto__') { labels[k.slice(0, 100)] = s(l[k], 200); }\n  });\n  const annotations = {};\n  Object.keys(ANNOTATIONS).forEach((k) => { annotations[k] = s(an[k], ANNOTATIONS[k]); });\n  return {\n    labels: labels,\n    annotations: annotations,\n    valueString: s(a.valueString, 300),\n    startsAt: ts(a.startsAt),\n    endsAt: ts(a.endsAt),\n    dashboardURL: s(a.dashboardURL, 512),\n    panelURL: s(a.panelURL, 512),\n    generatorURL: s(a.generatorURL, 512),\n    fingerprint: s(a.fingerprint, 64),\n  };\n}\n\nlet out = { body: { status: 'malformed', alerts: [] } };\ntry {\n  const item = $input.first().json;\n  const b = isObj(item) ? item.body : undefined;\n  const ok = isObj(b)\n    && (b.status === 'firing' || b.status === 'resolved')\n    && Array.isArray(b.alerts) && b.alerts.length >= 1 && isObj(b.alerts[0])\n    && (b.alerts[0].labels === undefined || isObj(b.alerts[0].labels))\n    && (b.alerts[0].annotations === undefined || isObj(b.alerts[0].annotations));\n  if (ok) {\n    const alerts = [clean(b.alerts[0])];\n    for (let i = 1; i < Math.min(b.alerts.length, 1000); i++) { alerts.push({}); }\n    out = { body: { status: b.status, alerts: alerts } };\n  }\n} catch (e) {\n  out = { body: { status: 'malformed', alerts: [] } };\n}\nreturn [{ json: out }];\n"
+      },
+      "position": [
+        150,
+        300
+      ],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Discord Webhook Alerts"
+        }
+      },
+      "id": "discord---malformed",
+      "name": "Discord — Malformed",
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "authentication": "webhook",
+        "content": "",
+        "embeds": {
+          "values": [
+            {
+              "color": 15158332,
+              "description": "The alert router received a webhook call it could not parse. Check the sender and the n8n execution log.",
+              "title": "MALFORMED ALERT RECEIVED"
+            }
+          ]
+        },
+        "operation": "sendLegacy"
+      },
+      "position": [
+        600,
+        0
+      ],
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2
+    },
+    {
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Discord Webhook Alerts"
+        }
+      },
+      "id": "discord-phone-failed-send",
+      "name": "Discord — Phone Failed (send)",
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "authentication": "webhook",
+        "content": "",
+        "embeds": {
+          "values": [
+            {
+              "color": 15105570,
+              "description": "={{ 'phone delivery failed: Pushover Notify ' + String(($json.error && $json.error.message) || 'unknown error').replace(/\\s+/g, ' ').replace(/Bearer\\s+\\S+/gi, '[removed]').slice(0, 120) }}",
+              "title": "PHONE DELIVERY FAILED"
+            }
+          ]
+        },
+        "operation": "sendLegacy"
+      },
+      "position": [
+        1400,
+        800
+      ],
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2
+    },
+    {
+      "credentials": {
+        "discordWebhookApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Discord Webhook Alerts"
+        }
+      },
+      "id": "discord-phone-failed-cancel",
+      "name": "Discord — Phone Failed (cancel)",
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "authentication": "webhook",
+        "content": "",
+        "embeds": {
+          "values": [
+            {
+              "color": 15105570,
+              "description": "={{ 'phone delivery failed: Pushover Cancel Repeats ' + String(($json.error && $json.error.message) || 'unknown error').replace(/\\s+/g, ' ').replace(/Bearer\\s+\\S+/gi, '[removed]').slice(0, 120) }}",
+              "title": "PHONE DELIVERY FAILED"
+            }
+          ]
+        },
+        "operation": "sendLegacy"
+      },
+      "position": [
+        1400,
+        900
+      ],
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2
+    },
+    {
+      "id": "discord-failed-check",
+      "name": "Discord Failed?",
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "discord-failed-check",
+              "leftValue": "={{ (() => { const names = ['Discord — Firing', 'Discord — Resolved', 'Discord — Malformed']; for (const n of names) { try { if (!$(n).isExecuted) { continue; } const e = $(n).first().json.error; const text = typeof e === 'string' ? e : (e && typeof e.message === 'string' ? e.message : (e ? 'error' : '')); if (text) { return { node: n, text: text.replace(/\\s+/g, ' ').replace(/Bearer\\s+\\S+/gi, '[removed]').slice(0, 120) }; } } catch (x) { } } return null; })() !== null }}",
+              "operator": {
+                "operation": "true",
+                "singleValue": true,
+                "type": "boolean"
+              },
+              "rightValue": ""
+            }
+          ],
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          }
+        },
+        "options": {}
+      },
+      "position": [
+        1700,
+        600
+      ],
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2
+    },
+    {
+      "id": "fail-run",
+      "name": "Fail Run",
+      "parameters": {
+        "errorMessage": "={{ (() => { const f = (() => { const names = ['Discord — Firing', 'Discord — Resolved', 'Discord — Malformed']; for (const n of names) { try { if (!$(n).isExecuted) { continue; } const e = $(n).first().json.error; const text = typeof e === 'string' ? e : (e && typeof e.message === 'string' ? e.message : (e ? 'error' : '')); if (text) { return { node: n, text: text.replace(/\\s+/g, ' ').replace(/Bearer\\s+\\S+/gi, '[removed]').slice(0, 120) }; } } catch (x) { } } return null; })(); return 'Discord delivery failed: ' + (f ? f.node + ' ' + f.text : 'unknown node'); })() }}"
+      },
+      "position": [
+        2200,
+        520
+      ],
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1
+    },
+    {
+      "id": "respond-ok",
+      "name": "Respond OK",
+      "parameters": {
+        "options": {
+          "responseCode": 200
+        },
+        "respondWith": "json",
+        "responseBody": "{\"status\": \"delivered\"}"
+      },
+      "position": [
+        1950,
+        700
+      ],
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1
+    },
+    {
+      "id": "respond-error",
+      "name": "Respond Error",
+      "parameters": {
+        "options": {
+          "responseCode": 502
+        },
+        "respondWith": "json",
+        "responseBody": "{\"status\": \"delivery failed\"}"
+      },
+      "position": [
+        1950,
+        520
+      ],
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1
+    },
+    {
+      "id": "heartbeat-check",
+      "name": "Heartbeat?",
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "heartbeat-label",
+              "leftValue": "={{ (() => { const a = (($json.body && $json.body.alerts) || [])[0]; const l = (a && a.labels) || {}; return l.heartbeat === 'true'; })() }}",
+              "operator": {
+                "operation": "true",
+                "singleValue": true,
+                "type": "boolean"
+              },
+              "rightValue": ""
+            }
+          ],
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          }
+        },
+        "options": {}
+      },
+      "position": [
+        300,
+        1000
+      ],
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2
+    },
+    {
+      "id": "heartbeat-build",
+      "name": "Build Heartbeat Ping",
+      "parameters": {
+        "jsCode": "// Builds the heartbeat ping for the alert-path dead-man's switch (issue #80).\n// The sink is a setting, read from the n8n container environment: HEARTBEAT_PING_URL\n// (the observer's ping URL, treated as a secret) and optional HEARTBEAT_KIND\n// ('healthchecks' by default, or 'uptimekuma'). With no valid URL the feature is\n// off: no ping and no error. n8n must allow env access in nodes\n// (N8N_BLOCK_ENV_ACCESS_IN_NODE=false); when it blocks it, the feature stays off.\n// This node never throws, never logs, and never copies alert content into the\n// request: the output is only {send, url}. A ping that fails is handled by the\n// HTTP Request node (continue on error), so it cannot fail a real alert.\n//   healthchecks: GET <base>        = all is well\n//                 GET <base>/fail   = the heartbeat broke its contract\n//   uptimekuma:   GET <push>?status=up&msg=OK\n//                 GET <push>?status=down&msg=...\n// Contract: status firing, label heartbeat=true and label phone=false. A resolved\n// heartbeat (the rule was paused or removed) sends nothing, so the observer's own\n// timeout does the alerting.\nconst MAX_URL = 512;\nlet out = { send: false };\ntry {\n  let rawUrl = '';\n  let rawKind = '';\n  try {\n    rawUrl = $env.HEARTBEAT_PING_URL;\n    rawKind = $env.HEARTBEAT_KIND;\n  } catch (e) {\n    rawUrl = '';\n  }\n  const kind = (typeof rawKind === 'string' && rawKind.trim() !== '') ? rawKind.trim().toLowerCase() : 'healthchecks';\n  const url = typeof rawUrl === 'string' ? rawUrl.trim() : '';\n  const shapeOk = url.length > 0 && url.length <= MAX_URL\n    && /^https?:\\/\\/[^\\s\\/?#@]+(?:[\\/?#]\\S*)?$/.test(url)\n    && !/[\\u0000-\\u001f\\u007f]/.test(url);\n  if (shapeOk && (kind === 'healthchecks' || kind === 'uptimekuma')) {\n    const item = $input.first().json;\n    const body = item && typeof item === 'object' ? item.body : null;\n    const alerts = body && Array.isArray(body.alerts) ? body.alerts : [];\n    const first = alerts[0] && typeof alerts[0] === 'object' ? alerts[0] : {};\n    const labels = first.labels && typeof first.labels === 'object' ? first.labels : {};\n    const status = body && typeof body.status === 'string' ? body.status : '';\n    if (status === 'firing') {\n      const good = labels.heartbeat === 'true' && labels.phone === 'false';\n      const noFragment = url.split('#')[0];\n      const base = noFragment.split('?')[0].replace(/\\/+$/, '');\n      if (kind === 'healthchecks') {\n        out = { send: true, url: good ? base : base + '/fail' };\n      } else {\n        out = { send: true, url: base + (good ? '?status=up&msg=OK' : '?status=down&msg=heartbeat%20contract%20failed') };\n      }\n    }\n  }\n} catch (e) {\n  out = { send: false };\n}\nreturn [{ json: out }];\n"
+      },
+      "position": [
+        600,
+        1000
+      ],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "id": "heartbeat-send-check",
+      "name": "Heartbeat Send?",
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "heartbeat-send",
+              "leftValue": "={{ $json.send === true }}",
+              "operator": {
+                "operation": "true",
+                "singleValue": true,
+                "type": "boolean"
+              },
+              "rightValue": ""
+            }
+          ],
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          }
+        },
+        "options": {}
+      },
+      "position": [
+        850,
+        1000
+      ],
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2
+    },
+    {
+      "id": "heartbeat-ping",
+      "name": "Heartbeat Ping",
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "method": "GET",
+        "options": {
+          "timeout": 10000
+        },
+        "url": "={{ $json.url }}"
+      },
+      "position": [
+        1100,
+        960
+      ],
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2
+    }
+  ],
+  "settings": {
+    "errorWorkflow": "ERROR_WORKFLOW_ID",
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "none",
+    "saveDataSuccessExecution": "none",
+    "saveExecutionProgress": false,
+    "saveManualExecutions": false
+  }
+}
