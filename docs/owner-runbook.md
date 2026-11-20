@@ -1139,9 +1139,9 @@ the old counter, that the counter persists across executions, and that the
 `content-length` header reaches it).
 A denied call still starts one workflow execution, and anyone who can reach n8n's
 webhook address on the siem network or LAN can still cause that. n8n's own body
-limit is `N8N_PAYLOAD_SIZE_MAX`, default 16 (MiB per the cited n8n docs, read
-2026-11-19 by that doc); check its unit and minimum in the n8n docs before
-lowering it, since this runbook does not set it (INFERRED that it can go lower).
+limit is `N8N_PAYLOAD_SIZE_MAX`, default 16 (MiB per the n8n docs, read
+2026-11-20). Section 6.2 below sets it; the router's Code node cannot see the raw
+body, so that setting is the real body cap.
 
 **Rotate.** Generate a new value, store it with the command in item 1 (it
 replaces the old one), then restart the n8n container so it reads the new
@@ -1158,6 +1158,75 @@ unaffected (VERIFIED). A full rollback of this section: restore the backed-up
 n8n compose file, recreate n8n, and re-import the previous workflow from the step
 2 backup archive or deactivate the `Expiry Watch Webhook` node in the n8n
 interface.
+
+### 6.2 Cap request bodies at n8n: N8N_PAYLOAD_SIZE_MAX (LIVE, restarts n8n)
+
+Target: the n8n container on LOGGING_BOX, compose file
+`/opt/n8n/docker-compose.yml` (VERIFIED by the lead 2026-11-20: n8n runs from
+that file and its environment list has no `N8N_PAYLOAD_SIZE_MAX`, so n8n uses
+its default of 16 MiB).
+
+Change: add `N8N_PAYLOAD_SIZE_MAX=1` (MiB) after the
+`N8N_BLOCK_ENV_ACCESS_IN_NODE=false` line and recreate the container. The n8n
+docs (https://docs.n8n.io/hosting/configuration/environment-variables/endpoints/,
+read 2026-11-20) give the unit as MiB, default 16, and say a restart is
+required. They say nothing about fractional values or which request types the
+setting limits (UNVERIFIED both). This is the real cap on the raw request,
+because the router's Code node runs after n8n has parsed the body and cannot see
+the raw bytes. The owner applied this value live on 2026-11-20 with the command
+below; the section is the record and the command to repeat it on another host.
+
+Run it from a real terminal. `sudo` needs a tty, so do not run it with a `!`
+prefix or over a no-tty ssh. One line, as the whole command:
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo cp -p /opt/n8n/docker-compose.yml /opt/n8n/docker-compose.yml.bak-payload && sudo sed -i "/- N8N_BLOCK_ENV_ACCESS_IN_NODE=false/a\      - N8N_PAYLOAD_SIZE_MAX=1" /opt/n8n/docker-compose.yml && cd /opt/n8n && sudo docker compose config -q && sudo docker compose up -d n8n && sleep 15 && docker inspect n8n --format "{{range .Config.Env}}{{println .}}{{end}}" | grep N8N_PAYLOAD; docker ps --filter name=n8n --format "{{.Status}}"'
+```
+
+Evidence (VERIFIED by the lead 2026-11-20 after the owner ran it): the read-back
+printed `N8N_PAYLOAD_SIZE_MAX=1` and `docker ps` showed a healthy container. On
+a new run, expect the same two lines; no `N8N_PAYLOAD_SIZE_MAX` line means the
+`sed` found no anchor line, so restore the backup (below) and edit by hand.
+
+Blast radius: recreating n8n interrupts every webhook receiver for about 15
+seconds (Grafana, Wazuh and CrowdSec notices that arrive in that window are not
+received). The limit is instance-wide, so a Wazuh or CrowdSec payload over 1 MiB
+would be refused. How large real payloads get is UNVERIFIED; if a sender starts
+failing with 413 after this change, raise the value.
+
+Rollback: copy the backup over the file and recreate:
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo cp -p /opt/n8n/docker-compose.yml.bak-payload /opt/n8n/docker-compose.yml && cd /opt/n8n && sudo docker compose up -d n8n'
+```
+
+### 6.3 Test the router limits after the import (LIVE, UNVERIFIED)
+
+Run this after the router is imported and active (6.1). Nothing here is
+confirmed against a live n8n: the live rate-limit counter (the workflow static
+data read in the `Check Expiry Secret` node) has not been exercised, and a
+denied call is answered 403 by design (VERIFIED: `docs/expiry-watch.md`).
+
+Target: the `Expiry Watch Webhook` endpoint on LOGGING_BOX. Change: none to the
+system, it sends test notices. Blast radius: each call starts one workflow
+execution; accepted notices post to the alert channels, so use the dry-run notice
+form the watch documents or accept one test message.
+
+1. Send one authenticated, valid notice (the watch's own `--dry-run` does not
+   post, so use a single real run of the watch, 6d, or one `curl` with the
+   secret and a body built as `docs/expiry-watch.md` describes). Expect it
+   accepted and one message.
+2. Send a burst: repeat the same call more than once within one second, and then
+   more than 30 times within 10 minutes. Expect 403 for a call under 1 second
+   after the last accepted one, and 403 beyond 30 accepted calls in 10 minutes.
+3. Open the n8n executions list for the workflow and read the 403 results: one
+   execution per denied call, with the denial reason in the check node's output.
+4. Evidence to record: the count of accepted versus denied calls and the 403
+   status for each denied one. If every call is denied, the Code node cannot
+   read the static data (see the UNVERIFIED list in 6.1, item 6); if a fast burst
+   is not denied, two overlapping executions read the old counter.
+
+Rollback: nothing to undo; wait 10 minutes for the counter window to clear.
 
 ### 6a. Private config folder and copies (on LOGGING_BOX)
 

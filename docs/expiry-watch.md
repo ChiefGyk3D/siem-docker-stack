@@ -407,8 +407,13 @@ and in the router, not at a proxy:
 - What these limits cannot do: a denied call still starts one workflow
   execution, and n8n's own body limit is `N8N_PAYLOAD_SIZE_MAX`, default 16 MiB
   (n8n docs, endpoints environment variables, read 2026-11-19). Lower it for the
-  n8n container if your n8n allows (an expiry notice is under 8 KB; check the
-  unit and minimum in the n8n docs first). Request and header timeouts and a
+  n8n container (an expiry notice is under 8 KB). The owner set it to 1 (MiB)
+  on 2026-11-20; the owner runbook, section 6.2, has the command, the blast
+  radius and the rollback. The n8n docs (read 2026-11-20) give the unit as MiB,
+  default 16, restart required, and say nothing about fractional values or which
+  request types it limits (UNVERIFIED). The setting is instance-wide, so a Wazuh
+  or CrowdSec payload over 1 MiB would be refused (UNVERIFIED how large real
+  payloads get). Request and header timeouts and a
   concurrency limit are n8n's and the host's, not the workflow's. The endpoint has
   a private path so it cannot be found by guessing, but the path is not a
   credential: treat it as an address, and keep n8n's port off networks that
@@ -447,7 +452,9 @@ Owner steps (nothing here runs from the repo; each is a live change):
    `<n8n base>/webhook/<contents of expiry-path>` (never commit it), and keep the
    watch's variable `EXPIRY_WATCH_ROUTER_TOKEN` equal to the router's.
 4. The body and rate limits above are in the watch and the imported router and
-   need no step. Optionally lower `N8N_PAYLOAD_SIZE_MAX` for the n8n container.
+   need no step. Set `N8N_PAYLOAD_SIZE_MAX` for the n8n container (the real cap
+   on the raw body; owner runbook, section 6.2) and test the limits after the
+   import (owner runbook, section 6.3).
 5. Rotate by changing both values together, then restart the n8n container so it
    reads the new environment. To revoke the watch only, unset or empty the
    router's variable: the endpoint then denies every call.
