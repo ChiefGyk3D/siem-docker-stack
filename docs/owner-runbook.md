@@ -1634,8 +1634,9 @@ tmpfs mounts) is NOT used: whether n8n 2.10.3 starts that way is unverified, so 
 left out rather than guessed.
 
 Blast radius: one extra container (at most 1 GB and one CPU) and one folder under your
-home for a few minutes; the live n8n gets one `docker exec` export and a temporary file
-in its `/tmp`, removed at once.
+home for a few minutes; the live n8n gets one `docker exec` export into a new, random,
+mode 700 folder under its `/tmp`, removed as soon as the file is copied out (and
+reported loudly, with a nonzero status, if it cannot be removed).
 
 Interruption. The function sets a trap on INT, TERM and HUP (and EXIT) that runs the
 same idempotent teardown, then returns 130 and prints `REHEARSAL INTERRUPTED`. The
@@ -1644,24 +1645,33 @@ cleared when the function returns. It cannot run if the terminal or the machine 
 without delivering a signal (a `kill -9`, a power loss). What remains then: a container
 named `n8n-rehearsal` and the folder `$HOME/n8n-rehearsal`, which holds the workflow
 export (it contains the router's private path; mode 700 folder, mode 600 file), the
-throwaway key file and the scratch database, plus possibly `/tmp/router-rehearsal.json`
-inside the live `n8n` container. Find and remove them, then read back:
+throwaway key file and the scratch database, plus possibly a folder
+`/tmp/router-rehearsal.` followed by six random characters inside the live `n8n`
+container (made with `mktemp -d`, so it is new, mode 700 and never an existing or
+symlinked path; the old fixed name `/tmp/router-rehearsal.json` is never used). If the
+function itself cannot remove that folder it prints `LIVE LEFTOVER` with the exact path
+and the command, and returns nonzero even when the rehearsal passed. Find and remove
+everything, then read back:
 
 ```
 docker ps -a --filter name=n8n-rehearsal --format '{{.Names}} {{.Status}}'
 ls -ld "$HOME/n8n-rehearsal"
 docker rm -f n8n-rehearsal
 [ -d "$HOME/n8n-rehearsal" ] && [ ! -L "$HOME/n8n-rehearsal" ] && rm -rf -- "$HOME/n8n-rehearsal"
-docker exec n8n rm -f /tmp/router-rehearsal.json
+docker exec n8n sh -c 'ls -d /tmp/router-rehearsal.??????'
+docker exec n8n sh -c 'rm -rf -- /tmp/router-rehearsal.??????'
+docker exec n8n sh -c 'ls -d /tmp/router-rehearsal.??????'
 docker ps -a --filter name=n8n-rehearsal -q | wc -l
 ls -ld "$HOME/n8n-rehearsal"
 ```
 
-The last two lines must print `0` and `No such file or directory`. Do the removal only
+The two `ls -d` lines before the removal show what is there; the one after it must
+print `No such file or directory`, the next line `0`, and the last
+`No such file or directory`. Do the removal only
 when no rehearsal is running in another shell.
 
 Rollback: the function tears down on every path it can control (see above). Nothing on
-the live side needs undoing except the leftover temporary file named above.
+the live side needs undoing except the leftover temporary folder named above.
 
 In a session on LOGGING_BOX with the session variables set (`owner_chk_vars` printed
 `variables ok`, `OWNER_FRESH` is `1`):
@@ -1670,7 +1680,8 @@ In a session on LOGGING_BOX with the session variables set (`owner_chk_vars` pri
 unset -f owner_rehearse_down owner_rehearse_router 2> /dev/null
 owner_rehearse_down() {
   : "runbook-block-rehearse-down-v3"
-  local N="$1" D="$2" C="$3" M="$4" S=0
+  local N="$1" D="$2" C="$3" M="$4" L="$5" S=0
+  if [ -n "$L" ]; then docker exec n8n rm -rf -- "$L" > /dev/null 2>&1 || { echo "LIVE LEFTOVER: $L is still inside the live n8n container (it holds the router export); remove it with: docker exec n8n rm -rf -- $L"; S=1; }; fi
   if [ "$C" = 1 ]; then docker rm -f "$N" > /dev/null 2>&1 || { echo "TEARDOWN FAILED: run docker rm -f $N"; S=1; }; fi
   if [ "$M" = 1 ] && [ ! -L "$D" ]; then rm -rf -- "$D" || { echo "TEARDOWN FAILED: remove $D by hand"; S=1; }; fi
   return $S
@@ -1678,7 +1689,7 @@ owner_rehearse_down() {
 owner_rehearse_router() {
   : "runbook-block-rehearse-v3"
   local SCRATCH_NAME=n8n-rehearsal SCRATCH_DIR="$HOME/n8n-rehearsal"
-  local IMG R=0 INTR=0 I MADE_DIR=0 MADE_CTR=0 LIVE_NODES SC_NODES LIVE_CREDS SC_CREDS COUNT_PY CRED_PY
+  local IMG R=0 INTR=0 TDFAIL=0 LD="" K I MADE_DIR=0 MADE_CTR=0 LIVE_NODES SC_NODES LIVE_CREDS SC_CREDS COUNT_PY CRED_PY
   COUNT_PY='import json,sys; d=json.load(sys.stdin); d=d[0] if isinstance(d,list) else d; print(len(d["nodes"]))'
   CRED_PY='import json,sys; d=json.load(sys.stdin); d=d[0] if isinstance(d,list) else d; print("\n".join(sorted({"%s:%s" % (t, (c or {}).get("name", "")) for n in d["nodes"] for t, c in (n.get("credentials") or {}).items()})))'
   owner_chk_vars || return 1
@@ -1687,13 +1698,14 @@ owner_rehearse_router() {
   if [ -n "$(docker ps -a --filter "name=^${SCRATCH_NAME}\$" -q)" ]; then echo "REHEARSAL STOP: a container named $SCRATCH_NAME already exists; nothing was touched"; echo "rehearsal exit code: 1"; return 1; fi
   IMG="$(docker inspect --format '{{.Image}}' n8n)"
   [[ "$IMG" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "REHEARSAL STOP: the live image id could not be read (got '${IMG}'); nothing was touched"; echo "rehearsal exit code: 1"; return 1; }
-  trap 'owner_rehearse_down "$SCRATCH_NAME" "$SCRATCH_DIR" "$MADE_CTR" "$MADE_DIR"; INTR=1; MADE_CTR=0; MADE_DIR=0; echo "REHEARSAL INTERRUPTED: scratch container and folder removed"' INT TERM HUP
-  trap 'owner_rehearse_down "$SCRATCH_NAME" "$SCRATCH_DIR" "$MADE_CTR" "$MADE_DIR" > /dev/null 2>&1' EXIT
+  trap 'if owner_rehearse_down "$SCRATCH_NAME" "$SCRATCH_DIR" "$MADE_CTR" "$MADE_DIR" "$LD"; then LD=""; echo "REHEARSAL INTERRUPTED: scratch container, folder and live export removed"; else TDFAIL=1; echo "REHEARSAL INTERRUPTED: teardown INCOMPLETE, see the messages above"; fi; INTR=1; MADE_CTR=0; MADE_DIR=0' INT TERM HUP
+  trap 'owner_rehearse_down "$SCRATCH_NAME" "$SCRATCH_DIR" "$MADE_CTR" "$MADE_DIR" "$LD"' EXIT
   ( umask 077; mkdir -m 700 "$SCRATCH_DIR" ) || { trap - INT TERM HUP EXIT; echo "REHEARSAL STOP: cannot create the scratch folder; nothing was touched"; echo "rehearsal exit code: 1"; return 1; }
   MADE_DIR=1
   ( umask 077; mkdir -m 700 "$SCRATCH_DIR/data" "$SCRATCH_DIR/work" ); R=$?; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: scratch folders (exit $R)"
-  if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then ( umask 077; printf 'HOME=/home/node\nN8N_ENCRYPTION_KEY=%s\nN8N_DIAGNOSTICS_ENABLED=false\nN8N_VERSION_NOTIFICATIONS_ENABLED=false\nN8N_TEMPLATES_ENABLED=false\n' "$(openssl rand -hex 32)" > "$SCRATCH_DIR/env" ); R=$?; [ $R -eq 0 ] && [ "$(stat -c %a "$SCRATCH_DIR/env")" = 600 ] && [ "$(wc -c < "$SCRATCH_DIR/env")" -ge 120 ]; R=$?; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: the scratch key file (not written, not mode 600 or too short)"; fi
-  if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then docker exec n8n n8n export:workflow --id="$ROUTER_ID" --output=/tmp/router-rehearsal.json > /dev/null && ( umask 077; docker cp n8n:/tmp/router-rehearsal.json "$SCRATCH_DIR/work/live.json" ); R=$?; docker exec n8n rm -f /tmp/router-rehearsal.json > /dev/null 2>&1; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: the read-only export of the live router (exit $R)"; fi
+  if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then K="$(openssl rand -hex 32)"; R=$?; [[ "$K" =~ ^[0-9a-f]{64}$ ]] || R=1; if [ $R -eq 0 ]; then ( umask 077; printf 'HOME=/home/node\nN8N_ENCRYPTION_KEY=%s\nN8N_DIAGNOSTICS_ENABLED=false\nN8N_VERSION_NOTIFICATIONS_ENABLED=false\nN8N_TEMPLATES_ENABLED=false\n' "$K" > "$SCRATCH_DIR/env" ); R=$?; fi; K=""; [ $R -eq 0 ] && [ "$(stat -c %a "$SCRATCH_DIR/env")" = 600 ] && [ "$(wc -c < "$SCRATCH_DIR/env")" -ge 120 ]; R=$?; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: the scratch key file (not written, not mode 600 or too short)"; fi
+  if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then LD="$(docker exec n8n mktemp -d /tmp/router-rehearsal.XXXXXX)"; R=$?; [[ "$LD" =~ ^/tmp/router-rehearsal\.[A-Za-z0-9]{6}$ ]] || { R=1; LD=""; }; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: making a new private folder inside the live container (mktemp -d is INFERRED to exist in the n8n image); nothing was exported"; fi
+  if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then docker exec n8n n8n export:workflow --id="$ROUTER_ID" --output="$LD/router.json" > /dev/null && ( umask 077; docker cp "n8n:$LD/router.json" "$SCRATCH_DIR/work/live.json" ); R=$?; if docker exec n8n rm -rf -- "$LD" > /dev/null 2>&1; then LD=""; else echo "LIVE LEFTOVER: $LD is still inside the live n8n container (it holds the router export); remove it with: docker exec n8n rm -rf -- $LD"; TDFAIL=1; fi; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: the read-only export of the live router (exit $R)"; fi
   if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then chmod 600 "$SCRATCH_DIR/work/live.json" && LIVE_NODES="$(python3 -c "$COUNT_PY" < "$SCRATCH_DIR/work/live.json")" && LIVE_CREDS="$(python3 -c "$CRED_PY" < "$SCRATCH_DIR/work/live.json")"; R=$?; case "$LIVE_NODES" in ''|*[!0-9]*|0) R=1;; esac; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: reading the live export (not a workflow with a positive node count, got '${LIVE_NODES}')"; fi
   if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then MADE_CTR=1; docker run -d --name "$SCRATCH_NAME" --network none --restart no --memory 1g --memory-swap 1g --cpus 1 --pids-limit 256 --security-opt no-new-privileges --cap-drop ALL --user "$(id -u):$(id -g)" --env-file "$SCRATCH_DIR/env" -v "$SCRATCH_DIR/data:/home/node/.n8n" -v "$SCRATCH_DIR/work:/work" "$IMG" > /dev/null; R=$?; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: starting the scratch container (exit $R)"; fi
   if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then R=1; for I in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do if docker exec "$SCRATCH_NAME" n8n list:workflow > /dev/null 2>&1; then R=0; break; fi; sleep 3; done; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: the scratch n8n did not answer within 60 seconds (docker logs $SCRATCH_NAME shows why)"; fi
@@ -1703,7 +1715,8 @@ owner_rehearse_router() {
   if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then [ "$SC_NODES" = "$LIVE_NODES" ]; R=$?; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: node count (live $LIVE_NODES, scratch '${SC_NODES}')"; fi
   if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then [ "$SC_CREDS" = "$LIVE_CREDS" ]; R=$?; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: the credential references differ (live '${LIVE_CREDS}', scratch '${SC_CREDS}')"; fi
   if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then echo "rehearsal compare ok: $LIVE_NODES nodes in both"; echo "credential references (type:name, names only):"; printf '%s\n' "$LIVE_CREDS"; fi
-  owner_rehearse_down "$SCRATCH_NAME" "$SCRATCH_DIR" "$MADE_CTR" "$MADE_DIR" || R=1
+  owner_rehearse_down "$SCRATCH_NAME" "$SCRATCH_DIR" "$MADE_CTR" "$MADE_DIR" "$LD" || { R=1; TDFAIL=1; }
+  [ "$TDFAIL" = 0 ] || R=1
   [ "$INTR" = 0 ] || R=130
   trap - INT TERM HUP EXIT
   if [ -e "$SCRATCH_DIR" ] || [ -n "$(docker ps -a --filter "name=^${SCRATCH_NAME}\$" -q)" ]; then echo "TEARDOWN INCOMPLETE: the scratch folder or container is still there"; R=1; else echo "teardown ok: scratch container and folder are gone"; fi

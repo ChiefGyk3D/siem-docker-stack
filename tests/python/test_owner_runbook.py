@@ -974,6 +974,7 @@ docker() {
     cp) case "$2" in n8n:*) printf '%s' "$STUBJSON" > "$3";; esac ;;
     exec)
       case "$*" in
+        "exec n8n mktemp -d "*) echo "/tmp/router-rehearsal.AbC123" ;;
         *"export:workflow"*"/work/scratch.json"*) printf '%s' "$SCJSON" > "$HOME/n8n-rehearsal/work/scratch.json" ;;
         *"n8n-rehearsal n8n list:workflow"*) echo "aaaaaaaaaaaaaaaa|Router" ;;
       esac ;;
@@ -981,12 +982,13 @@ docker() {
   return 0
 }
 sleep() { :; }
+openssl() { case "$OSSL" in fail) return 1;; short) echo abcd;; *) command openssl "$@";; esac; }
 OWNER_FRESH=1
 '''
 CRED_JSON = '{"nodes":[{"credentials":{"discordWebhookApi":{"id":"1","name":"Discord"}}},{}]}'
 
 
-def run_rehearsal(tmp_path, fail="", ctr_exists="", pre_dir=False, scjson=CRED_JSON, sig="", bad_id=False):
+def run_rehearsal(tmp_path, fail="", ctr_exists="", pre_dir=False, scjson=CRED_JSON, sig="", bad_id=False, ossl=""):
     """Run the COMPLETE documented fence once and return the real process status, the output, the stub log."""
     home = tmp_path / "home"
     home.mkdir(parents=True, exist_ok=True)
@@ -999,7 +1001,7 @@ def run_rehearsal(tmp_path, fail="", ctr_exists="", pre_dir=False, scjson=CRED_J
     overrides = "\n".join("%s=%s" % kv for kv in values.items())
     script = "\n".join([R_STUBS, CHK, overrides, REHEARSE])  # nothing after the fence: its own status is the process status
     env = dict(os.environ, HOME=str(home), LOG=str(log), FAIL=fail, STUBJSON=CRED_JSON, SCJSON=scjson,
-               CTR_EXISTS=ctr_exists, SIG=sig)
+               CTR_EXISTS=ctr_exists, SIG=sig, OSSL=ossl)
     out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, timeout=60)
     return out.returncode, out.stdout + out.stderr, log.read_text(), home / "n8n-rehearsal"
 
@@ -1017,7 +1019,51 @@ def test_issue179_rehearsal_success_tears_down_and_has_no_network_or_published_p
     assert "0.0.0.0" not in log and "/opt/n8n" not in log and "N8N_ENCRYPTION_KEY" not in log
     assert "publish:workflow" not in log and run.count(" -v ") == 2 and str(scratch) in run
     assert "docker rm -f n8n-rehearsal" in log
-    assert "docker exec n8n rm -f /tmp/router-rehearsal.json" in log  # the live side is cleaned too
+    assert "docker exec n8n rm -rf -- /tmp/router-rehearsal.AbC123" in log  # the live side is cleaned too
+    assert "docker exec n8n mktemp -d /tmp/router-rehearsal.XXXXXX" in log
+    assert "/tmp/router-rehearsal.json" not in log  # the old predictable path is never named
+    assert "--output=/tmp/router-rehearsal.AbC123/router.json" in log
+    assert "docker cp n8n:/tmp/router-rehearsal.AbC123/router.json" in log
+
+
+def test_issue179_round2_the_live_export_never_uses_a_predictable_path():
+    assert "/tmp/router-rehearsal.json" not in REHEARSE
+    assert "mktemp -d /tmp/router-rehearsal.XXXXXX" in REHEARSE
+    assert "INFERRED to exist in the n8n image" in REHEARSE  # said at the point of failure too
+    flat = " ".join(REHEARSAL_SECTION.split())
+    assert "never an existing or symlinked path" in flat and "LIVE LEFTOVER" in flat
+
+
+def test_issue179_round2_an_unusable_live_folder_name_stops_before_any_export(tmp_path):
+    rc, out, log, scratch = run_rehearsal(tmp_path, fail="mktemp")
+    assert rc != 0 and "making a new private folder inside the live container" in out, out
+    assert "export:workflow" not in log and "docker run" not in log and "rm -rf" not in log
+    assert not scratch.exists()
+
+
+def test_issue179_round2_a_failed_removal_of_the_live_export_returns_nonzero_and_names_the_path(tmp_path):
+    rc, out, log, scratch = run_rehearsal(tmp_path, fail="n8n rm -rf")
+    assert rc != 0, out  # even though every rehearsal stage itself passed
+    assert "LIVE LEFTOVER: /tmp/router-rehearsal.AbC123" in out
+    assert "docker exec n8n rm -rf -- /tmp/router-rehearsal.AbC123" in out
+    assert "rehearsal exit code: 0" not in out
+    assert log.count("docker exec n8n rm -rf -- /tmp/router-rehearsal.AbC123") >= 2  # retried by the final teardown
+    assert not scratch.exists()
+
+
+@pytest.mark.parametrize("sig", ["INT", "TERM", "HUP"])
+def test_issue179_round2_a_failed_removal_on_the_trap_path_is_reported_and_nonzero(tmp_path, sig):
+    rc, out, log, scratch = run_rehearsal(tmp_path, fail="n8n rm -rf", sig=sig)
+    assert rc != 0 and "LIVE LEFTOVER: /tmp/router-rehearsal.AbC123" in out and "teardown INCOMPLETE" in out, out
+    assert not scratch.exists()
+
+
+@pytest.mark.parametrize("ossl", ["fail", "short"])
+def test_issue179_round2_a_failed_or_short_key_stops_before_docker_run(tmp_path, ossl):
+    rc, out, log, scratch = run_rehearsal(tmp_path, ossl=ossl)
+    assert rc != 0 and "REHEARSAL FAILED at: the scratch key file" in out, out
+    assert "docker run" not in log and "export:workflow" not in log
+    assert not scratch.exists()
 
 
 @pytest.mark.parametrize("kw,msg", [
