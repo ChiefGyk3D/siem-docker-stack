@@ -16,7 +16,8 @@ CONTACT_FILE = ALERTING / "notification-failure-contact-point.yml.example"
 DOC = REPO_ROOT / "docs" / "notification-failure-alerts.md"
 PROM = REPO_ROOT / "docker" / "prometheus" / "prometheus.yml"
 
-FORBIDDEN = {"update_alert", "heartbeat", "phone"}
+# phone is not forbidden: docs/alert-taxonomy.md requires it, and it must be "false".
+FORBIDDEN = {"update_alert", "heartbeat"}
 ROUTE_LABEL = ("delivery_failure", "true")
 
 
@@ -61,6 +62,7 @@ def test_labels_route_away_and_carry_no_forbidden_label():
     assert labels["severity"] == "warning"
     assert labels[ROUTE_LABEL[0]] == ROUTE_LABEL[1]
     assert not FORBIDDEN & set(labels)
+    assert labels["phone"] == "false"
 
 
 def test_states_are_the_documented_choice():
@@ -101,6 +103,6 @@ def test_doc_states_unverified_name_and_confirmation():
 
 
 def test_guard_bites_on_forbidden_label():
-    bad = {"severity": "warning", "delivery_failure": "true", "phone": "true"}
+    bad = {"severity": "warning", "delivery_failure": "true", "update_alert": "true"}
     assert FORBIDDEN & set(bad)
-    assert not FORBIDDEN & {"severity", "delivery_failure"}
+    assert not FORBIDDEN & {"severity", "delivery_failure", "phone"}

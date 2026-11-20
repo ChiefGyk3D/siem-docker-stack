@@ -52,6 +52,7 @@ groups:
           description: "Always firing on purpose. The n8n router turns it into a ping to the heartbeat observer and sends no message. If the observer reports missed pings, the alert path (Grafana, the contact point, n8n or the network to the observer) is broken. See docs/heartbeat.md."
         labels:
           severity: "info"
+          tier: "none"
           alert_group: "heartbeat"
           heartbeat: "true"
           phone: "false"
