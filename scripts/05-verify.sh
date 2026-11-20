@@ -19,9 +19,10 @@ set -uo pipefail
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; export PATH  # fixed PATH before any command runs
 # Still before any external command runs: take the export attribute off the passwords (a caller may have
 # exported them) and switch allexport off (an inherited `bash -a` would export every later assignment).
-# Both are builtins. From here on no child of this script inherits a password. What no script can
-# change: the environment this process itself was started with still holds whatever the launcher
-# exported; pass the passwords in a .env file rather than the launch environment to avoid even that.
+# Both are builtins. From here on no child inherits these named passwords through the launch environment
+# (the .env loader below handles what the file exports). What no script can change: the environment this
+# process itself was started with still holds whatever the launcher exported; pass the passwords in a
+# .env file rather than the launch environment to avoid even that.
 export -n OPENSEARCH_ADMIN_PASSWORD WAZUH_INDEXER_PASSWORD INFLUXDB_ADMIN_PASSWORD
 set +a
 
@@ -69,16 +70,40 @@ REPO_DIR="${SCRIPT_DIR}/.."
 
 # Load credentials from .env when present (OPENSEARCH_ADMIN_PASSWORD,
 # INFLUXDB_ADMIN_USER/PASSWORD) — Phase F1 secured the cluster and InfluxDB.
+# The .env is shell code, so loading it cannot be made to ignore an `export`, `declare -x` or `set -a`
+# written inside it. Guaranteed, using shell builtins only (no process is started): "noexport" keeps a
+# plain assignment from being exported; then allexport is switched off, tracing is switched off, every
+# variable NAME the file created is stripped of its export attribute, and so are the named passwords.
+# NOT guaranteed: a variable that already existed before the file ran keeps whatever export attribute
+# the file gave it (PATH, CE_TRUSTED_DIRS, this script's own variables), so write plain NAME=value lines
+# only (docs/container-engine.md). A hostile file can run any shell code, so it must be trusted (as
+# root it must be root-owned in a root-owned tree, enforced above). The environment this process was
+# started with still holds whatever its launcher exported.
+# ce_names fills the array _NAMES with every variable name in the shell (the ${!x@} expansions list the
+# names starting with one character; eval only ever sees the fixed characters of the loop).
+ce_names() {
+    local _c
+    _NAMES=()
+    for _c in {a..z} {A..Z} _; do
+        eval '_NAMES+=(${!'"$_c"'@})'
+    done
+}
+declare -A PRE_NAMES=()
+ce_names
+for _n in ${_NAMES[@]+"${_NAMES[@]}"}; do PRE_NAMES[$_n]=1; done
 for envf in /opt/siem/.env "${REPO_DIR}/.env" "${REPO_DIR}/docker/.env"; do
     if [ -f "$envf" ]; then
         ce_source_env "$envf" noexport || exit 1  # root: only a root-owned file in a root-owned tree, via one descriptor
         break
     fi
 done
-# "noexport" keeps plain assignments in this shell only; the file may still say `export`, so take the
-# attribute off the passwords again.
-set +a
+set +x +a
+ce_names
+for _n in ${_NAMES[@]+"${_NAMES[@]}"}; do
+    [ -n "${PRE_NAMES[$_n]:-}" ] || export -n "$_n"
+done
 export -n OPENSEARCH_ADMIN_PASSWORD WAZUH_INDEXER_PASSWORD INFLUXDB_ADMIN_PASSWORD
+unset _n _NAMES PRE_NAMES
 # A line break in a password would end the one-line curl config record (and start a new directive), so
 # refuse it before any request. The variable name is printed, never the value.
 for var in OPENSEARCH_ADMIN_PASSWORD WAZUH_INDEXER_PASSWORD INFLUXDB_ADMIN_PASSWORD INFLUXDB_ADMIN_USER; do

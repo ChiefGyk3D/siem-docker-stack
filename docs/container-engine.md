@@ -87,7 +87,7 @@ answer is not a number.
 
 The root decision, the privileged-mode check and the trusted script and helper tree
 are the first things each script does, before it reads `SIEM_DEPLOY_DIR`, locates a
-file or sources anything. `05-verify.sh` and `08b-init-opensearch-security.sh` load a
+file or sources anything. `04-apply-ism-policy.sh`, `05-verify.sh` and `08b-init-opensearch-security.sh` load a
 `.env`, which is shell code: they do it through `ce_source_env`, which as root accepts
 only a regular file (not a link) that is root-owned, with every directory above it
 root-owned and not group or world writable, opens it once and sources that open

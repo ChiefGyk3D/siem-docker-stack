@@ -223,8 +223,12 @@ ce_source_env() {
         echo "refusing to source ${_ce_ef}: it must be owned by root or by you and not world writable (and not group writable when run as root)" >&2
         return 1
     fi
-    if [ "${2-}" = noexport ]; then  # keep every value in this shell only, so no child process inherits it
-        . /proc/self/fd/8
+    if [ "${2-}" = noexport ]; then  # a plain assignment stays in this shell and is not exported
+        # The file is shell code and may turn tracing on itself (`set -x`), which would print every later
+        # assignment, passwords included. Standard error is discarded while it runs, and tracing is
+        # switched off again right after (this also hides the file's own error messages).
+        { . /proc/self/fd/8; } 2> /dev/null
+        set +x
     else
         set -a
         . /proc/self/fd/8

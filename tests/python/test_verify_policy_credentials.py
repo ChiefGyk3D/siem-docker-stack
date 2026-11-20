@@ -1,9 +1,15 @@
-"""The verify and ISM policy scripts never expose a password in an argument or an environment.
+"""The verify and ISM policy scripts keep a password out of every child's argument list and environment.
 
 Each script runs in a box where every external command is a recording wrapper (argument list and
 environment read from /proc) and curl is a fake that records its standard input too. A sentinel
-password must reach curl on standard input only (as a curl config), and no child of the script may
-carry it in its argument list or its environment.
+password must reach curl on standard input only (as a curl config); no child may carry it in its
+argument list or environment, and no shell trace may print it.
+
+What is verified: the named password variables, and any variable the .env file creates (plain, exported,
+declared with -x, set -a, or an exported alias), are not in a child's environment. What is NOT
+guaranteed: a name that already existed before the file ran keeps an export the file gives it (the
+documented limit in docs/container-engine.md), and the environment the script was itself started with
+holds whatever its launcher exported. The .env is trusted shell code.
 """
 import os
 import re
@@ -121,9 +127,9 @@ class Box:
         return re.sub(r"(?<![A-Za-z0-9_])/(?:usr/)?bin/(" + "|".join(ABS_TOOLS) + r")\b",
                       lambda m: f"{self.bindir}/{m.group(1)}", text)
 
-    def run(self, passwords=None, via="env", env_text=None, bash_args=(), umask=0o022):
+    def run(self, passwords=None, via="env", env_text=None, bash_args=(), umask=0o022, extra_env=None):
         pw = {v: (passwords or {}).get(v, SENTINEL) for v in self.spec["vars"]}
-        env = {"PATH": f"{self.bindir}:/usr/bin:/bin", "HOME": str(self.rec.parent)}
+        env = {"PATH": f"{self.bindir}:/usr/bin:/bin", "HOME": str(self.rec.parent), **(extra_env or {})}
         if via == "env":
             env.update(pw)
         else:
@@ -192,14 +198,21 @@ def test_sentinel_reaches_curl_on_stdin_as_a_config(tmp_path, spec):
 
 
 @SPECS
-@pytest.mark.parametrize("style", ["export_assign", "declare_gx", "set_a"])
+@pytest.mark.parametrize("style", ["export_assign", "declare_gx", "set_a", "export_alias", "set_a_alias"])
 def test_an_env_file_that_exports_cannot_reach_children(tmp_path, spec, style):
+    first = spec["vars"][0]
+
     def text(pw):
+        plain = "".join(f"{k}='{v}'\n" for k, v in pw.items())
         if style == "export_assign":
-            return "".join(f"export {k}='{v}'\n" for k, v in pw.items()) + f"OTHER_SECRET='{OTHER_SECRET}'\n"
+            return "".join(f"export {k}='{v}'\n" for k, v in pw.items()) + f"export OTHER_SECRET='{OTHER_SECRET}'\n"
         if style == "declare_gx":
-            return "".join(f"declare -gx {k}='{v}'\n" for k, v in pw.items()) + f"OTHER_SECRET='{OTHER_SECRET}'\n"
-        return "set -a\n" + "".join(f"{k}='{v}'\n" for k, v in pw.items()) + f"OTHER_SECRET='{OTHER_SECRET}'\n"
+            return "".join(f"declare -gx {k}='{v}'\n" for k, v in pw.items()) + f"declare -gx OTHER_SECRET='{OTHER_SECRET}'\n"
+        if style == "set_a":
+            return "set -a\n" + plain + f"OTHER_SECRET='{OTHER_SECRET}'\n"
+        if style == "export_alias":  # a new exported name that holds a password value
+            return plain + f'export BACKUP_PASSWORD="${first}"\nexport OTHER_SECRET=\'{OTHER_SECRET}\'\n'
+        return "set -a\n" + plain + f'BACKUP_PASSWORD="${first}"\nOTHER_SECRET=\'{OTHER_SECRET}\'\n'
 
     box = Box(tmp_path, spec)
     proc = box.run(via="file", env_text=text)
@@ -207,8 +220,70 @@ def test_an_env_file_that_exports_cannot_reach_children(tmp_path, spec, style):
     for suffix in ("-argv", "-environ"):
         for name, data in box.recorded(suffix).items():
             assert SENTINEL not in data, f"secret in {name}"
+            assert OTHER_SECRET not in data, f"another .env secret in {name}"
+            assert "BACKUP_PASSWORD=" not in data, f"alias inherited by {name}"
             for v in spec["vars"]:
                 assert f"{v}=" not in data, f"{v} inherited by {name}"
+
+
+@SPECS
+@pytest.mark.parametrize("how", ["bash_x", "shellopts", "env_file_set_x", "env_file_set_x_after"])
+@pytest.mark.parametrize("via", ["env", "file"])
+def test_no_trace_ever_prints_a_password(tmp_path, spec, how, via):
+    if how.startswith("env_file") and via == "env":
+        pytest.skip("needs the file route")
+    box = Box(tmp_path, spec)
+    kw = {"via": via}
+    if how == "bash_x":
+        kw["bash_args"] = ("-x",)
+    elif how == "shellopts":
+        kw["extra_env"] = {"SHELLOPTS": "xtrace"}
+    elif how == "env_file_set_x":  # the file turns tracing on before it assigns
+        kw["env_text"] = lambda pw: "set -x\n" + "".join(f"{k}='{v}'\n" for k, v in pw.items())
+    else:  # the file turns tracing on after it assigns and leaves it on
+        kw["env_text"] = lambda pw: "".join(f"{k}='{v}'\n" for k, v in pw.items()) + "set -x\n"
+    proc = box.run(**kw)
+    ran(proc, spec)
+    assert SENTINEL not in proc.stdout + proc.stderr, "a password in the shell trace"
+
+
+@SPECS
+def test_stdin_config_is_what_authenticates_every_credentialed_call(tmp_path, spec):
+    """Replacing `-K -` by `-u` (or dropping it) must fail here: every credentialed call has the config on
+    stdin and `-K -` in its argument list, and no call has -u."""
+    box = Box(tmp_path, spec)
+    ran(box.run(), spec)
+    argvs = {n: a.split("\n") for n, a in box.recorded("-argv").items() if n.startswith("curl-")}
+    with_cfg = [n for n, a in argvs.items() if "-K" in a and a[a.index("-K") + 1] == "-"]
+    assert len(with_cfg) == len(box.curl_stdins())
+    expected = 6 if spec is VERIFY else len(argvs)  # verify: 3 credentialed checks plus 3 reads
+    assert len(with_cfg) == expected, sorted(argvs.values())
+    assert all("-u" not in a for a in argvs.values())
+
+
+def test_policy_script_refuses_an_untrusted_env_file(tmp_path):
+    """The ISM script loads .env through the same trusted loader as the others: a link or a world writable
+    file is refused before anything in it runs, and before any request."""
+    for kind in ("symlink", "world_writable"):
+        sub = tmp_path / kind
+        sub.mkdir()
+        box = Box(sub, POLICY)
+        marker = sub / "ran"
+        body = f"OPENSEARCH_ADMIN_PASSWORD='{SENTINEL}'\ntouch '{marker}'\n"
+        if kind == "symlink":
+            real = sub / "real.env"
+            real.write_text(body, encoding="utf-8")
+            real.chmod(0o600)
+            (box.root / ".env").symlink_to(real)
+        else:
+            (box.root / ".env").write_text(body, encoding="utf-8")
+            (box.root / ".env").chmod(0o666)
+        env = {"PATH": f"{box.bindir}:/usr/bin:/bin", "HOME": str(sub)}
+        proc = subprocess.run(["bash", str(box.scripts / box.script), "https://localhost:9200"], env=env, text=True,
+                              capture_output=True, timeout=60, stdin=subprocess.DEVNULL)
+        assert proc.returncode != 0, kind
+        assert not marker.exists(), f"{kind}: the file was sourced"
+        assert not box.curl_calls(), kind
 
 
 @SPECS
