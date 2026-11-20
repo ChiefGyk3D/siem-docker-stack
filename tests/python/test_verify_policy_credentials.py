@@ -53,6 +53,7 @@ for a in "$@"; do
     case "$a" in http*) url=$a ;; esac
     prev=$a
 done
+printf '%s' "$url" > "$REC/curl-$id-url"
 if [ "$cfg" = 1 ]; then cat > "$REC/curl-$id-stdin"; fi
 if [ "$want_code" = 1 ]; then
     case "$url" in
@@ -247,18 +248,99 @@ def test_no_trace_ever_prints_a_password(tmp_path, spec, how, via):
     assert SENTINEL not in proc.stdout + proc.stderr, "a password in the shell trace"
 
 
+def escaped(cred):
+    return cred.replace("\\", "\\\\").replace('"', '\\"')
+
+
 @SPECS
-def test_stdin_config_is_what_authenticates_every_credentialed_call(tmp_path, spec):
-    """Replacing `-K -` by `-u` (or dropping it) must fail here: every credentialed call has the config on
-    stdin and `-K -` in its argument list, and no call has -u."""
+@pytest.mark.parametrize("pw_text", ["plain", "hostile"])
+def test_every_credentialed_call_gets_its_own_credential(tmp_path, spec, pw_text):
+    """Per call: the URL and the stdin config recorded together. Each service gets its own password (all
+    different), so a swap, an empty config or a missing config on any one call fails here. Replacing
+    `-K -` by `-u` leaves no stdin at all and fails too."""
+    suffix = "" if pw_text == "plain" else 'q"b\\s'
+    pws = {v: f"{SENTINEL}-{i}{suffix}" for i, v in enumerate(spec["vars"])}
     box = Box(tmp_path, spec)
-    ran(box.run(), spec)
-    argvs = {n: a.split("\n") for n, a in box.recorded("-argv").items() if n.startswith("curl-")}
-    with_cfg = [n for n, a in argvs.items() if "-K" in a and a[a.index("-K") + 1] == "-"]
-    assert len(with_cfg) == len(box.curl_stdins())
-    expected = 6 if spec is VERIFY else len(argvs)  # verify: 3 credentialed checks plus 3 reads
-    assert len(with_cfg) == expected, sorted(argvs.values())
-    assert all("-u" not in a for a in argvs.values())
+    ran(box.run(passwords=pws), spec)
+    calls = {}
+    for name in box.recorded("-url"):
+        cid = name[:-len("-url")]
+        argv = (box.rec / f"{cid}-argv").read_text().split("\n")
+        stdin_file = box.rec / f"{cid}-stdin"
+        calls[cid] = {"url": (box.rec / name).read_text(), "argv": argv,
+                      "stdin": stdin_file.read_text() if stdin_file.exists() else None}
+    assert calls
+    os_cfg = f'user = "admin:{escaped(pws["OPENSEARCH_ADMIN_PASSWORD"])}"\n'
+    anonymous = 0
+    for c in calls.values():
+        assert "-u" not in c["argv"], c
+        if ":9202" in c["url"]:
+            assert c["stdin"] == f'user = "admin:{escaped(pws["WAZUH_INDEXER_PASSWORD"])}"\n', c
+        elif ":8086/query" in c["url"]:
+            assert c["stdin"] == f'user = "admin:{escaped(pws["INFLUXDB_ADMIN_PASSWORD"])}"\n', c
+        elif ":9200" in c["url"] and c["stdin"] is None:
+            anonymous += 1  # the one deliberate 401 check
+        elif ":9200" in c["url"]:
+            assert c["stdin"] == os_cfg, c
+            assert "-K" in c["argv"] and c["argv"][c["argv"].index("-K") + 1] == "-"
+        else:
+            assert c["stdin"] is None, c  # services that take no credential get none
+    assert anonymous == (1 if spec is VERIFY else 0)
+    if spec is VERIFY:
+        assert sum(1 for c in calls.values() if c["stdin"]) == 6
+
+
+@SPECS
+@pytest.mark.parametrize("bad", ["false\n", "if then\n", "return 1\n"])
+def test_a_failing_env_file_stops_the_script_before_any_request(tmp_path, spec, bad):
+    box = Box(tmp_path, spec)
+    proc = box.run(via="file", env_text=lambda pw: "".join(f"{k}='{v}'\n" for k, v in pw.items()) + bad)
+    assert proc.returncode != 0, proc.stdout
+    assert "Passed:" not in proc.stdout
+    assert not box.curl_calls(), "a request was made after a failed .env load"
+    out = proc.stdout + proc.stderr
+    assert "failed to load" in out and ".env" in out, out
+    assert SENTINEL not in out
+
+
+def all_text_files():
+    out = [REPO_ROOT / "README.md", REPO_ROOT / "change-passwords.sh"]
+    for pattern in ("scripts/*.sh", "docs/**/*.md"):
+        out += sorted(REPO_ROOT.glob(pattern))
+    return [p for p in out if p.is_file()]
+
+
+HARDENED = ("04-apply-ism-policy.sh", "05-verify.sh", "08b-init-opensearch-security.sh")
+
+
+def test_no_text_tells_anyone_to_start_a_hardened_script_through_bash():
+    """Run as root, `bash script` runs BASH_ENV, imported functions, SHELLOPTS and BASHOPTS before line 1 and
+    bypasses the privileged shebang. Usage lines, emitted next-step commands and the docs say to run
+    these scripts by their path (sudo scripts/...)."""
+    pattern = re.compile(r"\bbash\s+(?:-\S+\s+)*(?:\S*/)?(?:" + "|".join(re.escape(h) for h in HARDENED) + ")")
+    hits = []
+    for path in all_text_files():
+        for n, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            if pattern.search(line):
+                hits.append(f"{path.relative_to(REPO_ROOT)}:{n}: {line.strip()}")
+    assert not hits, "\n".join(hits)
+
+
+@pytest.mark.parametrize("spec", [VERIFY, POLICY], ids=["verify", "policy"])
+def test_started_by_path_the_privileged_shebang_ignores_a_startup_file(tmp_path, spec):
+    """The script started by its path runs under `#!/bin/bash -p`: BASH_ENV is not processed. (This does not
+    fake root: it checks the shebang option the root launch depends on.)"""
+    box = Box(tmp_path, spec)
+    startup = tmp_path / "startup.sh"
+    marker = tmp_path / "startup-ran"
+    startup.write_text(f'printf x > {marker}\nprintf "%s" "$OPENSEARCH_ADMIN_PASSWORD" >&2\n', encoding="utf-8")
+    pw = {v: SENTINEL for v in spec["vars"]}
+    env = {"PATH": f"{box.bindir}:/usr/bin:/bin", "HOME": str(tmp_path), "BASH_ENV": str(startup), **pw}
+    args = [] if spec is VERIFY else ["https://localhost:9200"]
+    proc = subprocess.run([str(box.scripts / box.script), *args], env=env, text=True, capture_output=True,
+                          timeout=60, stdin=subprocess.DEVNULL)
+    assert not marker.exists(), "the startup file ran"
+    assert SENTINEL not in proc.stdout + proc.stderr
 
 
 def test_policy_script_refuses_an_untrusted_env_file(tmp_path):

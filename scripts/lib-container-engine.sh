@@ -226,9 +226,18 @@ ce_source_env() {
     if [ "${2-}" = noexport ]; then  # a plain assignment stays in this shell and is not exported
         # The file is shell code and may turn tracing on itself (`set -x`), which would print every later
         # assignment, passwords included. Standard error is discarded while it runs, and tracing is
-        # switched off again right after (this also hides the file's own error messages).
-        { . /proc/self/fd/8; } 2> /dev/null
+        # switched off again right after. That also hides the file's own error messages, so a failed load
+        # (a nonzero status from the file: a failing command, a syntax error, a `return 1`) is reported
+        # here by a value-free line naming the file, and returned to the caller, which must stop.
+        _ce_rc=0
+        { . /proc/self/fd/8; } 2> /dev/null || _ce_rc=$?
         set +x
+        exec 8<&-
+        if [ "$_ce_rc" -ne 0 ]; then
+            echo "failed to load ${_ce_ef} (it exited with status ${_ce_rc}); fix the file and run again" >&2
+            return "$_ce_rc"
+        fi
+        return 0
     else
         set -a
         . /proc/self/fd/8

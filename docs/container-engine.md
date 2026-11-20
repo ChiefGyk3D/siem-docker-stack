@@ -34,6 +34,7 @@ The variable is validated by the same rule everywhere (exactly `docker` or
 | `scripts/live-deploy/n8n-setup-alert-router.py` | environment |
 | `scripts/deploy-n8n-soar.sh` | environment; the validated name is sent to the SIEM host for the address lookup |
 | `scripts/03-deploy.sh`, `06-generate-wazuh-certs.sh`, `11-wazuh-grafana-readonly.sh`, `prometheus-otlp-firewall.sh` | environment |
+| `scripts/04-apply-ism-policy.sh` | the `.env` file is consulted only when `OPENSEARCH_ADMIN_PASSWORD` is empty in the environment; the exported environment wins, then the first existing `.env` |
 | `scripts/05-verify.sh`, `scripts/08b-init-opensearch-security.sh` | the `.env` file these scripts already load takes precedence over the exported environment, because it is sourced first |
 
 `scripts/live-deploy/grafana-deploy.py` starts no process and is unchanged.
@@ -86,13 +87,21 @@ absolute `/usr/bin/id` (or `/bin/id`), never from `EUID` or `UID`, and stops if 
 answer is not a number.
 
 The root decision, the privileged-mode check and the trusted script and helper tree
-are the first things each script does, before it reads `SIEM_DEPLOY_DIR`, locates a
+are done early in each script, before it reads `SIEM_DEPLOY_DIR`, locates a
 file or sources anything. `04-apply-ism-policy.sh`, `05-verify.sh` and `08b-init-opensearch-security.sh` load a
 `.env`, which is shell code: they do it through `ce_source_env`, which as root accepts
 only a regular file (not a link) that is root-owned, with every directory above it
 root-owned and not group or world writable, opens it once and sources that open
 descriptor. For an ordinary user the file must be owned by root or by you and not world
-writable.
+writable. If the file's load fails (a failing command or a syntax error in it), the loader
+prints a one-line message naming the file (never a value) and the script stops before
+any request.
+
+Start these scripts by their path (`sudo scripts/05-verify.sh`), never through an
+explicit `bash` interpreter: as root an explicit interpreter reads `BASH_ENV`, imported
+functions, `SHELLOPTS` and `BASHOPTS` before line 1 and bypasses the privileged shebang.
+The privileged-mode check inside the script is a diagnostic only and cannot repair such
+a launch.
 
 Signals (kept deliberately small): `ce_run` runs the engine in the foreground of a
 subshell that has its own traps, so your script's traps are never read or changed. The

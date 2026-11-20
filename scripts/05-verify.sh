@@ -6,10 +6,14 @@
 # Can run locally on the SIEM server or remotely against it.
 #
 # Usage:
-#   bash scripts/05-verify.sh                        # defaults to localhost
-#   bash scripts/05-verify.sh 10.0.0.100              # check remote server
-#   bash scripts/05-verify.sh 10.0.0.100 myuser       # remote with custom SSH user
-#   SIEM_USER=myuser bash scripts/05-verify.sh 10.0.0.100
+#   sudo scripts/05-verify.sh                        # defaults to localhost
+#   sudo scripts/05-verify.sh 10.0.0.100              # check remote server
+#   sudo scripts/05-verify.sh 10.0.0.100 myuser       # remote with custom SSH user
+#   sudo SIEM_USER=myuser scripts/05-verify.sh 10.0.0.100
+#
+# Start it by its path, never through an explicit `bash` interpreter: run as root, an explicit interpreter
+# reads BASH_ENV, imported functions, SHELLOPTS and BASHOPTS before line 1 and bypasses the privileged
+# shebang. The privileged-mode check below is a diagnostic only: it cannot repair such a launch.
 # =============================================================================
 
 set +x
@@ -26,8 +30,11 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; export PATH  
 export -n OPENSEARCH_ADMIN_PASSWORD WAZUH_INDEXER_PASSWORD INFLUXDB_ADMIN_PASSWORD
 set +a
 
-# Root decision, privileged-mode check and the trusted script and helper tree come FIRST,
-# before anything is read, located or sourced.
+# Root decision, privileged-mode check and the trusted script and helper tree come before anything is
+# read, located or sourced (readlink, dirname and id run first, to find the script's own directory).
+# The privileged-mode check is a DIAGNOSTIC only: when the script was started as `bash script`, bash has
+# already run BASH_ENV, imported functions, SHELLOPTS and BASHOPTS, and nothing inside the script can
+# repair that. Start it by its path.
 SCRIPT_DIR="$(/usr/bin/dirname -- "$(/usr/bin/readlink -f -- "${BASH_SOURCE[0]}")")"  # the real directory, symlinks resolved
 CE_LIB="${SCRIPT_DIR}/lib-container-engine.sh"
 ce_boot_fail() { echo "refusing to source ${CE_LIB}: $1" >&2; exit 1; }

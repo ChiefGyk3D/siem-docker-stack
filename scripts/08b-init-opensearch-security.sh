@@ -16,8 +16,12 @@
 #     OPENSEARCH_READONLY_PASSWORD / OPENSEARCH_DASHBOARDS_PASSWORD in .env
 #
 # Usage:
-#   bash scripts/08b-init-opensearch-security.sh
-#   SIEM_DEPLOY_DIR=/opt/siem bash scripts/08b-init-opensearch-security.sh
+#   sudo scripts/08b-init-opensearch-security.sh
+#   sudo SIEM_DEPLOY_DIR=/opt/siem scripts/08b-init-opensearch-security.sh
+#
+# Start it by its path, never through an explicit `bash` interpreter: run as root, an explicit interpreter reads
+# BASH_ENV, imported functions, SHELLOPTS and BASHOPTS before line 1 and bypasses the privileged
+# shebang. The privileged-mode check below is a diagnostic only: it cannot repair such a launch.
 #
 # Target dir: the directory docker compose actually runs from. Defaults to
 # /opt/siem when it exists (03-deploy.sh layout), otherwise the repo's
@@ -39,8 +43,11 @@ export -n OPENSEARCH_ADMIN_PASSWORD OPENSEARCH_LOGSTASH_PASSWORD \
           OPENSEARCH_READONLY_PASSWORD OPENSEARCH_DASHBOARDS_PASSWORD
 set +a
 
-# Root decision, privileged-mode check and the trusted script and helper tree come FIRST,
-# before anything is read, located or sourced.
+# Root decision, privileged-mode check and the trusted script and helper tree come before anything is
+# read, located or sourced (readlink, dirname and id run first, to find the script's own directory).
+# The privileged-mode check is a DIAGNOSTIC only: when the script was started as `bash script`, bash has
+# already run BASH_ENV, imported functions, SHELLOPTS and BASHOPTS, and nothing inside the script can
+# repair that. Start it by its path.
 SCRIPT_DIR="$(/usr/bin/dirname -- "$(/usr/bin/readlink -f -- "${BASH_SOURCE[0]}")")"  # the real directory, symlinks resolved
 CE_LIB="${SCRIPT_DIR}/lib-container-engine.sh"
 ce_boot_fail() { echo "refusing to source ${CE_LIB}: $1" >&2; exit 1; }
@@ -328,5 +335,5 @@ echo ""
 echo "Next:"
 echo "  1. (Re)start the consumers so they pick up credentials:"
 echo "       docker compose up -d logstash grafana opensearch-dashboards"
-echo "  2. Apply ISM policy/templates: bash scripts/04-apply-ism-policy.sh"
-echo "  3. Verify: bash scripts/05-verify.sh"
+echo "  2. Apply ISM policy/templates: sudo scripts/04-apply-ism-policy.sh"
+echo "  3. Verify: sudo scripts/05-verify.sh"

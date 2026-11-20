@@ -496,3 +496,16 @@ def test_internal_users_file_is_never_created_wider_than_final_mode(tmp_path):
     final = box.sec / "internal_users.yml"
     assert final.stat().st_mode & 0o777 == 0o640
     assert sorted(p.name for p in box.sec.iterdir() if "tmp" in p.name) == []  # no leftover temporary file
+
+
+@pytest.mark.parametrize("bad", ["false\n", "if then\n", "return 1\n"])
+def test_a_failing_env_file_is_reported_and_stops_before_any_engine_call(tmp_path, bad):
+    """A .env whose load fails (a failing command, a syntax error) must not look like success: the script
+    exits non-zero with a value-free diagnostic naming the load, and calls the engine zero times."""
+    box = make(tmp_path)
+    proc = box.run(via="file", env_style=lambda pw: "".join(f"{k}='{v}'\n" for k, v in pw.items()) + bad)
+    assert proc.returncode != 0, proc.stdout
+    out = proc.stdout + proc.stderr
+    assert "failed to load" in out and ".env" in out, out
+    assert SENTINEL not in out
+    assert box.engine_calls() == []
