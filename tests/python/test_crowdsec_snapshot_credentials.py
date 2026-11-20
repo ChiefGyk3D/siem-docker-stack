@@ -481,19 +481,21 @@ PASTE_BEGIN = "# --- paste begin"
 PASTE_END = "# --- paste end"
 
 
-def printed_hint(tmp_path):
-    box = Box(tmp_path, SNAPSHOT)
-    out = ran(box.run(), SNAPSHOT).stdout
+def printed_hint(tmp_path, url="https://localhost:9200"):
+    spec = dict(SNAPSHOT, args=[url])
+    box = Box(tmp_path, spec)
+    out = ran(box.run(), spec).stdout
     assert PASTE_BEGIN in out and PASTE_END in out, out
     return out.split(PASTE_BEGIN, 1)[1].split(PASTE_END, 1)[0]
 
 
-def run_hint(tmp_path, hint, password):
-    """Run the printed hint in a fresh shell, with the fake curl first on PATH and the password in the
-    shell variable the hint names (the owner's own shell, not exported)."""
+def run_hint(tmp_path, hint, password, prefix="", bash_args=(), extra_env=None):
+    """Run the printed hint in a fresh shell, with the fake curl first on PATH. The password reaches that
+    shell through its launch environment only so a trace of the test's own setup prints nothing."""
     box = Box(tmp_path / "hint-run", SNAPSHOT)
-    proc = subprocess.run(["bash", "-c", "OPENSEARCH_ADMIN_PASSWORD=$PW\n" + hint],
-                          env={"PATH": f"{box.bindir}:/usr/bin:/bin", "HOME": str(tmp_path), "PW": password},
+    proc = subprocess.run(["bash", *bash_args, "-c", prefix + hint],
+                          env={"PATH": f"{box.bindir}:/usr/bin:/bin", "HOME": str(tmp_path),
+                               "OPENSEARCH_ADMIN_PASSWORD": password, **(extra_env or {})},
                           text=True, capture_output=True, timeout=60, stdin=subprocess.DEVNULL)
     return box, proc
 
@@ -524,3 +526,63 @@ def test_the_printed_manual_snapshot_hint_refuses_a_line_break(tmp_path, pw):
     assert proc.returncode != 0
     assert not box.curl_calls(), "curl ran with a refused credential"
     assert "evil" not in proc.stdout + proc.stderr
+
+
+@pytest.mark.parametrize("how", ["bash_x", "set_x_before_call", "shellopts", "ps4_from_password"])
+def test_the_printed_manual_snapshot_hint_never_traces_the_password(tmp_path, how):
+    hint = printed_hint(tmp_path / "p")
+    kw = {}
+    if how == "bash_x":
+        kw["bash_args"] = ("-x",)
+    elif how == "set_x_before_call":
+        kw["prefix"] = "set -x\n"
+    elif how == "shellopts":
+        kw["extra_env"] = {"SHELLOPTS": "xtrace"}
+    else:
+        kw["prefix"] = "PS4='+ ${OPENSEARCH_ADMIN_PASSWORD} '\nset -x\n"
+    box, proc = run_hint(tmp_path, hint, SENTINEL, **kw)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert box.curl_stdins() == [f'user = "admin:{SENTINEL}"\n']
+    assert SENTINEL not in proc.stdout + proc.stderr, "the password in a trace"
+
+
+@pytest.mark.parametrize("arg_kind", ["quote_and_commands", "newline"])
+def test_the_printed_manual_snapshot_call_line_cannot_inject_a_command(tmp_path, arg_kind):
+    marker = tmp_path / "marker"
+    if arg_kind == "quote_and_commands":
+        url = f"https://h';touch {marker}1;echo '$(touch {marker}2) a b `touch {marker}3` \"q\" \\"
+    else:
+        url = f"https://h\ntouch {marker}4\n"
+    hint = printed_hint(tmp_path / "p", url=url)
+    box, proc = run_hint(tmp_path, hint, SENTINEL)
+    assert not list(tmp_path.glob("marker*")), "a command from the URL ran"
+    if arg_kind == "newline":
+        assert proc.returncode != 0
+        assert not box.curl_calls(), "curl ran with a control character in an argument"
+    else:
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        argv = next(v for k, v in box.recorded("-argv").items() if k.startswith("curl-"))
+        assert url in argv
+
+
+@pytest.mark.parametrize("shadow", ["empty", "garbage"])
+def test_the_printed_manual_snapshot_hint_refuses_a_failed_timestamp(tmp_path, shadow):
+    """A date conversion that fails or returns something other than eight digits must never reach curl (the
+    snapshot would be named `manual-`)."""
+    hint = printed_hint(tmp_path / "p")
+    value = "" if shadow == "empty" else "abc"
+    prefix = ("printf() { if [ \"$1\" = -v ] && [ \"$3\" = '%(%Y%m%d)T' ]; then builtin printf -v \"$2\" '%s' '"
+              + value + "'; else builtin printf \"$@\"; fi; }\n")
+    box, proc = run_hint(tmp_path, hint, SENTINEL, prefix=prefix)
+    assert proc.returncode != 0
+    assert not box.curl_calls(), "curl ran without a valid timestamp"
+    assert SENTINEL not in proc.stdout + proc.stderr
+
+
+def test_the_printed_hint_and_the_docs_say_bash_4_2(tmp_path):
+    out = printed_hint(tmp_path / "p")
+    top = Box(tmp_path / "t", SNAPSHOT)
+    full = ran(top.run(), SNAPSHOT).stdout
+    assert "bash 4.2" in full
+    assert "bash 4.2" in (REPO_ROOT / "docs" / "backup-restore.md").read_text(encoding="utf-8")
+    assert out

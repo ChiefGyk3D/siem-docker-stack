@@ -56,6 +56,12 @@ osc "$OS/_cat/snapshots/siem-snapshots?v&h=id,status,start_time,duration,indices
 
 ## Manual snapshot
 
+`sudo scripts/10-snapshot-setup.sh` ends by printing a ready-to-paste `manual_snapshot` function and its call
+line (between `# --- paste begin` and `# --- paste end`). Paste it into bash 4.2 or newer, in a shell where
+`OPENSEARCH_ADMIN_PASSWORD` is set and not exported. It sends the credentials to curl on stdin, refuses a
+control character or an unreadable date, and prints nothing from a shell trace. The `osc` form below is the
+manual equivalent.
+
 ```bash
 osc -X PUT "$OS/_snapshot/siem-snapshots/manual-$(date +%Y%m%d-%H%M)?wait_for_completion=false" \
   -H 'Content-Type: application/json' -d '{

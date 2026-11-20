@@ -268,23 +268,43 @@ echo ""
 # The hint is a function, printed by declare -f so the text shown is the text tested: it refuses a
 # control character (CR or LF would start a new curl config directive), escapes backslash and double
 # quote, and sends the credentials to curl on stdin as a config, never on the command line.
+# The whole body runs with standard error sent to /dev/null, so a caller's `set -x` (or SHELLOPTS=xtrace,
+# or a PS4 built from the password) cannot print the password; messages and curl's own errors go to
+# descriptor 3, which the printed call line opens as a copy of the real standard error. The call line is
+# built with printf %q, so no argument (the URL comes from the command line) can inject shell when pasted.
 manual_snapshot() {
-    local cred="admin:${OPENSEARCH_ADMIN_PASSWORD}"
-    if [[ "$cred" == *[[:cntrl:]]* ]]; then
-        echo "OPENSEARCH_ADMIN_PASSWORD contains a control character, refused" >&2
-        return 1
-    fi
-    cred="${cred//\\/\\\\}"
-    cred="${cred//\"/\\\"}"
-    printf 'user = "%s"\n' "$cred" | curl -sk -K - -X PUT \
-        "${1}/_snapshot/${2}/manual-$(printf '%(%Y%m%d)T' -1)?wait_for_completion=false" \
-        -H 'Content-Type: application/json' \
-        -d "{\"indices\":\"${3}\",\"include_global_state\":false}"
+    {
+        local cred ts rc=0
+        if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 2))); then
+            echo "manual_snapshot needs bash 4.2 or newer, refused" >&3
+            return 1
+        fi
+        cred="admin:${OPENSEARCH_ADMIN_PASSWORD}"
+        if [[ "${cred}${1}${2}${3}" == *[[:cntrl:]]* ]]; then
+            cred=
+            echo "OPENSEARCH_ADMIN_PASSWORD or an argument contains a control character, refused" >&3
+            return 1
+        fi
+        printf -v ts '%(%Y%m%d)T' -1
+        if [[ ! "$ts" =~ ^[0-9]{8}$ ]]; then
+            cred=
+            echo "cannot read the date, refused" >&3
+            return 1
+        fi
+        cred="${cred//\\/\\\\}"
+        cred="${cred//\"/\\\"}"
+        printf 'user = "%s"\n' "$cred" | curl -sk -K - -X PUT \
+            "${1}/_snapshot/${2}/manual-${ts}?wait_for_completion=false" \
+            -H 'Content-Type: application/json' \
+            -d "{\"indices\":\"${3}\",\"include_global_state\":false}" 2>&3 || rc=$?
+        cred=
+        return "$rc"
+    } 2>/dev/null
 }
-echo "Manual snapshot now (paste into a shell where OPENSEARCH_ADMIN_PASSWORD is set, not exported):"
+echo "Manual snapshot now (paste into bash 4.2 or newer, in a shell where OPENSEARCH_ADMIN_PASSWORD is set and not exported):"
 echo "# --- paste begin"
 declare -f manual_snapshot
-echo "manual_snapshot '${OPENSEARCH_URL}' '${REPO_NAME}' '${SNAPSHOT_INDICES}'"
+printf '{ manual_snapshot %q %q %q; } 3>&2 2>/dev/null\n' "${OPENSEARCH_URL}" "${REPO_NAME}" "${SNAPSHOT_INDICES}"
 echo "# --- paste end"
 echo ""
 echo "Restore drill + offsite copy guidance: docs/backup-restore.md"
