@@ -32,7 +32,15 @@ TRUSTED_ROOT = "/"  # ownership is checked on every directory from here down to 
 # variables, is dropped, so a trusted binary cannot be pointed at another daemon, a per-user
 # config file, a plugin, a credential helper or a loader hook through the caller's environment.
 ENV_KEEP = ("LANG", "LC_ALL", "TERM", "TZ")
-ENV_VALUE_RE = re.compile(r"[A-Za-z0-9_.@:/+-]{1,64}")  # a kept value must match fully, else it is dropped
+# Each kept variable has its own pattern; a value that does not match in full is dropped. LANG and
+# LC_ALL: C, POSIX, C.UTF-8 or ll_CC[.charset]. TERM: terminal-name characters only. TZ: a zone name
+# like UTC or America/New_York (no leading colon or slash, no dots, so never a file path).
+ENV_PATTERNS = {
+    "LANG": re.compile(r"C|POSIX|C\.UTF-8|[a-z]{2}_[A-Z]{2}(\.[A-Za-z0-9-]{1,16})?"),
+    "LC_ALL": re.compile(r"C|POSIX|C\.UTF-8|[a-z]{2}_[A-Z]{2}(\.[A-Za-z0-9-]{1,16})?"),
+    "TERM": re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,31}"),
+    "TZ": re.compile(r"(?=.{1,40}$)[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+)*"),
+}
 # Where private homes are made. TMPDIR is never consulted. A base must be owned by HOME_BASE_UID and
 # either not writable by others or sticky (so nobody else can rename our entry); the first usable one wins.
 HOME_BASES = ("/run", "/var/tmp", "/tmp")
@@ -144,21 +152,34 @@ def _make_home():
 @contextlib.contextmanager
 def private_home():
     """A fresh private (mode 0700, checked after creation) empty directory under a validated fixed base,
-    removed afterwards, to serve as the engine's HOME. SIGTERM and SIGHUP raise SystemExit while it
-    exists so the cleanup still runs (SIGKILL cannot be handled)."""
+    removed afterwards, to serve as the engine's HOME.
+
+    Signal cleanup works only in the main thread (Python allows signal handlers nowhere else): there
+    SIGTERM and SIGHUP raise SystemExit while the directory exists, so the cleanup still runs. A signal
+    whose current disposition is SIG_IGN is left ignored (nohup keeps working), and a previous handler
+    Python cannot report (None) is restored as SIG_DFL. In a worker thread no handler is installed; the
+    directory is still removed on every normal or exceptional exit, and the caller owns signal policy.
+    The directory is removed first and the handlers are restored after, so no signal can arrive between
+    the two with the default action in force. SIGKILL cannot be handled."""
     d = _make_home()
     old = {}
     if threading.current_thread() is threading.main_thread():
         def _stop(signum, frame):
             raise SystemExit(128 + signum)
         for sig in (signal.SIGTERM, signal.SIGHUP):
-            old[sig] = signal.signal(sig, _stop)
+            prev = signal.getsignal(sig)
+            if prev is signal.SIG_IGN:
+                continue
+            old[sig] = signal.SIG_DFL if prev is None else prev
+            signal.signal(sig, _stop)
     try:
         yield d
     finally:
-        for sig, handler in old.items():
-            signal.signal(sig, handler)
-        shutil.rmtree(d, ignore_errors=True)
+        try:
+            shutil.rmtree(d, ignore_errors=True)
+        finally:
+            for sig, handler in old.items():
+                signal.signal(sig, handler)
 
 
 def engine_env(home, path=None, environ=None):
@@ -169,7 +190,7 @@ def engine_env(home, path=None, environ=None):
     if path is None:
         good = [d for d in TRUSTED_DIRS if os.path.isdir(d) and _dirs_ok(os.path.realpath(d), TRUSTED_UID, TRUSTED_ROOT)]
         path = ":".join(good) or "/usr/bin:/bin"
-    env = {k: environ[k] for k in ENV_KEEP if k in environ and ENV_VALUE_RE.fullmatch(environ[k])}
+    env = {k: environ[k] for k in ENV_KEEP if k in environ and ENV_PATTERNS[k].fullmatch(environ[k])}
     env["PATH"] = path
     env["HOME"] = home
     env["DOCKER_CONFIG"] = os.path.join(home, "docker")

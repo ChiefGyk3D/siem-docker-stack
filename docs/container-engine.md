@@ -85,6 +85,27 @@ as its first command, and learns whether it is root from the kernel through the
 absolute `/usr/bin/id` (or `/bin/id`), never from `EUID` or `UID`, and stops if the
 answer is not a number.
 
+The root decision, the privileged-mode check and the trusted script and helper tree
+are the first things each script does, before it reads `SIEM_DEPLOY_DIR`, locates a
+file or sources anything. `05-verify.sh` and `08b-init-opensearch-security.sh` load a
+`.env`, which is shell code: they do it through `ce_source_env`, which as root accepts
+only a regular file (not a link) that is root-owned, with every directory above it
+root-owned and not group or world writable, opens it once and sources that open
+descriptor. For an ordinary user the file must be owned by root or by you and not world
+writable.
+
+Signals: `ce_run` runs the engine as a tracked child and waits for it, so HUP, INT and
+TERM sent to the `ce_run` subshell stop the engine at once (TERM, then KILL after 5
+seconds), remove the private home, and give status 129, 130 and 143. A signal sent only
+to the calling script's own process is not forwarded; send it to the process group, which
+is what a terminal or a service manager does. In Python, signal cleanup works only in the
+main thread; a signal that is ignored stays ignored; in a worker thread the directory is
+still removed on every normal or exceptional exit.
+
+Each kept variable has its own pattern: `LANG` and `LC_ALL` are `C`, `POSIX`, `C.UTF-8` or
+`ll_CC[.charset]`; `TERM` is terminal-name characters only; `TZ` is a zone name such as
+`UTC` or `America/New_York` (no leading colon or slash, no dots).
+
 ## Sourcing the helper
 
 Each script sets a fixed `PATH` as its first command (root or not), calls

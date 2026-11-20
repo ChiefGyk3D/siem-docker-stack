@@ -33,24 +33,9 @@ set -euo pipefail
 
 PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH  # fixed PATH before any command runs
 
-CHAIN_A=PROM-OTLP-A
-CHAIN_B=PROM-OTLP-B
-
+# Root decision, privileged-mode check and the trusted script and helper tree come FIRST.
 die() { echo "prometheus-otlp-firewall: $*" >&2; exit 1; }
-
 LIB_NAME=lib-container-engine.sh
-
-chain_ok() { # <path>: root-owned and not group or world writable, the path and every ancestor up to /
-    local p="$1" owner mode
-    while :; do
-        owner="$(/usr/bin/stat -c %u -- "$p")" || return 1
-        mode="$(/usr/bin/stat -c %a -- "$p")" || return 1
-        [ "$owner" -eq 0 ] && [ $((8#$mode & 8#022)) -eq 0 ] || return 1
-        [ "$p" = / ] && return 0
-        p="$(/usr/bin/dirname -- "$p")"
-    done
-}
-
 # Resolve every symlink first: the helper is the one next to the REAL script, never one next to a
 # link someone else placed.
 SELF="$(/usr/bin/readlink -f -- "${BASH_SOURCE[0]}")" || die "cannot resolve this script's real path"
@@ -89,6 +74,23 @@ fi
 # shellcheck source=scripts/lib-container-engine.sh
 source /proc/self/fd/9
 exec 9<&-
+
+CHAIN_A=PROM-OTLP-A
+CHAIN_B=PROM-OTLP-B
+
+
+
+chain_ok() { # <path>: root-owned and not group or world writable, the path and every ancestor up to /
+    local p="$1" owner mode
+    while :; do
+        owner="$(/usr/bin/stat -c %u -- "$p")" || return 1
+        mode="$(/usr/bin/stat -c %a -- "$p")" || return 1
+        [ "$owner" -eq 0 ] && [ $((8#$mode & 8#022)) -eq 0 ] || return 1
+        [ "$p" = / ] && return 0
+        p="$(/usr/bin/dirname -- "$p")"
+    done
+}
+
 if [ "$CE_STRICT" = 1 ]; then
     # As root: no IPTABLES/DOCKER overrides, and only code nobody else can edit (the script, its
     # helper and every directory above them are checked). Run the root-owned copy (docs).

@@ -87,7 +87,9 @@ def test_simulated_root_never_runs_a_path_program(name, tmp_path):
 
 def test_the_hostile_path_control_the_fake_utilities_do_get_called_without_the_reset(tmp_path):
     # control: with the reset removed from a copy, the same hostile PATH does reach a fake utility
-    d = sandbox(tmp_path, "05-verify.sh")
+    stubs = tmp_path / "stubs"
+    write_stat_stub(stubs, 0, "755")  # the chain checks pass, so the script runs on to its own commands
+    d = sandbox(tmp_path, "05-verify.sh", stubs)
     text = (d / "05-verify.sh").read_text()
     text = re.sub(r'(?m)^PATH=.*export PATH.*\n', "", text)
     (d / "05-verify.sh").write_text(text)

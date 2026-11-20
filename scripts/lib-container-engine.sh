@@ -87,8 +87,8 @@ ce_resolve() {
 # per-user engine configuration (docker config.json and contexts, CLI plugins, credential helpers,
 # podman containers.conf and connections) and no caller runtime directory is ever read. The home is
 # made under a validated fixed base (CE_HOME_BASES); TMPDIR is never consulted. PATH is fixed; only
-# LANG LC_ALL TERM TZ are passed through, and only when the value is 1 to 64 characters from
-# A-Z a-z 0-9 _ . @ : / + - (anything else is dropped). The environment is built as separate
+# LANG LC_ALL TERM TZ are passed through, each only when its value matches that variable's own strict
+# pattern (see ce_ok_locale, ce_ok_term, ce_ok_tz; anything else is dropped). The environment is built as separate
 # arguments, never by splitting a string. Everything else (DOCKER_HOST, CONTAINER_HOST, LD_*,
 # BASH_ENV, proxies, ...) is dropped. Same rules as engine_env in container_engine.py. Standard
 # input and output pass through. Consequence: rootless podman (its storage lives under HOME) is
@@ -97,11 +97,31 @@ CE_SAFE_PATH="/usr/bin:/usr/local/bin:/bin:/snap/bin"
 CE_HOME_BASES="/run /var/tmp /tmp"  # assigned, never read from the environment
 CE_HOME_BASE_UID=0
 
-ce_ok_val() { # 1 to 64 characters from a fixed set, nothing else (no space, newline, glob or "=" tricks)
+# Per-variable value checks (same rules as ENV_PATTERNS in container_engine.py).
+ce_ok_locale() { # C, POSIX, C.UTF-8, ll_CC or ll_CC.charset
     case "$1" in
-        "" | *[!A-Za-z0-9_.@:/+-]*) return 1 ;;
+        C | POSIX | C.UTF-8 | [a-z][a-z]_[A-Z][A-Z]) return 0 ;;
+        [a-z][a-z]_[A-Z][A-Z].?*)
+            _ce_s=${1#??_??.}
+            case "$_ce_s" in *[!A-Za-z0-9-]*) return 1 ;; esac
+            [ "${#_ce_s}" -le 16 ]
+            ;;
+        *) return 1 ;;
     esac
-    [ "${#1}" -le 64 ]
+}
+
+ce_ok_term() { # terminal-name characters only
+    case "$1" in
+        "" | [!A-Za-z0-9]* | *[!A-Za-z0-9._+-]*) return 1 ;;
+    esac
+    [ "${#1}" -le 32 ]
+}
+
+ce_ok_tz() { # a zone name: no leading colon or slash, no dots, no empty component
+    case "$1" in
+        "" | [!A-Za-z]* | *[!A-Za-z0-9_+/-]* | */ | *//*) return 1 ;;
+    esac
+    [ "${#1}" -le 40 ]
 }
 
 ce_mkhome() { # print a fresh private home; fail closed when no safe base exists
@@ -124,29 +144,90 @@ ce_mkhome() { # print a fresh private home; fail closed when no safe base exists
     return 1
 }
 
+ce_stop() { # N: stop the engine child promptly (TERM, then KILL after 5 s), then leave with status N
+    if [ -n "${_ce_child-}" ]; then
+        kill -TERM "$_ce_child" 2>/dev/null
+        ( /bin/sleep 5; kill -KILL "$_ce_child" 2>/dev/null ) >/dev/null 2>&1 </dev/null &  # holds no pipe of ours
+        _ce_dog=$!
+        wait "$_ce_child" 2>/dev/null
+        kill "$_ce_dog" 2>/dev/null
+    fi
+    exit "$1"  # the EXIT trap removes the private home
+}
+
 ce_run() {
     [ -n "${CE_BIN-}" ] || { echo "ce_run: no engine resolved (call ce_init first)" >&2; return 1; }
     _ce_n=$#
     (
         _ce_home=$(ce_mkhome) || exit 1
         trap '/usr/bin/rm -rf -- "$_ce_home"' EXIT
-        trap 'exit 143' HUP INT TERM
+        _ce_child=
+        # the engine runs as a tracked child and the shell waits for it, so a signal is handled at once
+        # (a trap does not run while a foreground command is executing); the status is 128 + signal
+        trap 'ce_stop 129' HUP
+        trap 'ce_stop 130' INT
+        trap 'ce_stop 143' TERM
         # engine arguments are "$@"; append the env command after them, then rotate them to the end
         set -- "$@" /usr/bin/env -i "PATH=$CE_SAFE_PATH" "HOME=$_ce_home" "DOCKER_CONFIG=$_ce_home/docker" \
             "XDG_CONFIG_HOME=$_ce_home/config" "XDG_DATA_HOME=$_ce_home/data" "XDG_CACHE_HOME=$_ce_home/cache" \
             "XDG_STATE_HOME=$_ce_home/state"
-        if [ -n "${LANG-}" ] && ce_ok_val "$LANG"; then set -- "$@" "LANG=$LANG"; fi
-        if [ -n "${LC_ALL-}" ] && ce_ok_val "$LC_ALL"; then set -- "$@" "LC_ALL=$LC_ALL"; fi
-        if [ -n "${TERM-}" ] && ce_ok_val "$TERM"; then set -- "$@" "TERM=$TERM"; fi
-        if [ -n "${TZ-}" ] && ce_ok_val "$TZ"; then set -- "$@" "TZ=$TZ"; fi
+        if [ -n "${LANG-}" ] && ce_ok_locale "$LANG"; then set -- "$@" "LANG=$LANG"; fi
+        if [ -n "${LC_ALL-}" ] && ce_ok_locale "$LC_ALL"; then set -- "$@" "LC_ALL=$LC_ALL"; fi
+        if [ -n "${TERM-}" ] && ce_ok_term "$TERM"; then set -- "$@" "TERM=$TERM"; fi
+        if [ -n "${TZ-}" ] && ce_ok_tz "$TZ"; then set -- "$@" "TZ=$TZ"; fi
         set -- "$@" "$CE_BIN"
         while [ "$_ce_n" -gt 0 ]; do
             set -- "$@" "$1"
             shift
             _ce_n=$((_ce_n - 1))
         done
-        "$@"
+        exec 3<&0  # an async command gets /dev/null as stdin unless it is redirected from another descriptor
+        "$@" <&3 3<&- &
+        exec 3<&-
+        _ce_child=$!
+        _ce_rc=0
+        wait "$_ce_child" || _ce_rc=$?
+        exit "$_ce_rc"
     )
+}
+
+# ce_source_env FILE: source a shell-syntax .env safely. The file must be a regular file, not a link;
+# as root it and every directory above it must be root-owned and not group or world writable; for
+# anyone it must be owned by root or by the running user and not world writable. The file is opened
+# once, the OPEN file is checked, and that same descriptor is sourced, so replacing the path after the
+# check changes nothing. Needs the bootstrap's CE_STRICT and CE_UID. Variables are exported.
+ce_source_env() {
+    _ce_ef=$1
+    if [ ! -f "$_ce_ef" ] || [ -L "$_ce_ef" ]; then
+        echo "refusing to source ${_ce_ef}: it must be a regular file and not a link" >&2
+        return 1
+    fi
+    if [ "${CE_STRICT-0}" = 1 ]; then
+        _ce_ep=$(/usr/bin/readlink -f -- "$_ce_ef") || return 1
+        while :; do
+            if [ "$(/usr/bin/stat -c %u -- "$_ce_ep")" != 0 ] || [ $((0$(/usr/bin/stat -c %a -- "$_ce_ep") & 022)) -ne 0 ]; then
+                echo "refusing to source ${_ce_ef}: ${_ce_ep} (or a directory above it) is not root-owned or is group or world writable" >&2
+                return 1
+            fi
+            [ "$_ce_ep" = / ] && break
+            _ce_ep=$(/usr/bin/dirname -- "$_ce_ep")
+        done
+    fi
+    exec 8<"$_ce_ef" || return 1
+    _ce_eo=$(/usr/bin/stat -L -c %u -- /proc/self/fd/8)
+    _ce_em=$(/usr/bin/stat -L -c %a -- /proc/self/fd/8)
+    _ce_mask=002
+    [ "${CE_STRICT-0}" != 1 ] || _ce_mask=022
+    if [ ! -f /proc/self/fd/8 ] || { [ "$_ce_eo" != 0 ] && [ "$_ce_eo" != "${CE_UID-}" ]; } ||
+        [ $((0$_ce_em & _ce_mask)) -ne 0 ]; then
+        exec 8<&-
+        echo "refusing to source ${_ce_ef}: it must be owned by root or by you and not world writable (and not group writable when run as root)" >&2
+        return 1
+    fi
+    set -a
+    . /proc/self/fd/8
+    set +a
+    exec 8<&-
 }
 
 ce_init_name() {

@@ -30,46 +30,9 @@ unset BASH_ENV ENV CDPATH GLOBIGNORE PS4
 set -euo pipefail
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; export PATH  # fixed PATH before any command runs
 
+# Root decision, privileged-mode check and the trusted script and helper tree come FIRST,
+# before anything is read, located or sourced.
 SCRIPT_DIR="$(/usr/bin/dirname -- "$(/usr/bin/readlink -f -- "${BASH_SOURCE[0]}")")"  # the real directory, symlinks resolved
-REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
-
-echo -e "${YELLOW}╔══════════════════════════════════════════╗${NC}"
-echo -e "${YELLOW}║  Initialize OpenSearch Security          ║${NC}"
-echo -e "${YELLOW}╚══════════════════════════════════════════╝${NC}"
-echo ""
-
-# ── Locate deploy dir + .env ─────────────────────────────────────────────────
-if [ -n "${SIEM_DEPLOY_DIR:-}" ]; then
-    DEPLOY_DIR="${SIEM_DEPLOY_DIR}"
-elif [ -f /opt/siem/docker-compose.yml ]; then
-    DEPLOY_DIR="/opt/siem"
-else
-    DEPLOY_DIR="${REPO_DIR}/docker"
-fi
-echo "Target compose dir: ${DEPLOY_DIR}"
-
-ENV_FILE=""
-for candidate in "${DEPLOY_DIR}/.env" "${REPO_DIR}/.env" "${REPO_DIR}/docker/.env"; do
-    if [ -f "$candidate" ]; then
-        ENV_FILE="$candidate"
-        break
-    fi
-done
-
-if [ -n "$ENV_FILE" ]; then
-    echo "Loading passwords from ${ENV_FILE}"
-    set -a
-    # shellcheck disable=SC1090
-    source "$ENV_FILE"
-    set +a
-fi
-
-# CONTAINER_ENGINE (docker by default, or podman) may come from the environment or that .env.
 CE_LIB="${SCRIPT_DIR}/lib-container-engine.sh"
 ce_boot_fail() { echo "refusing to source ${CE_LIB}: $1" >&2; exit 1; }
 CE_UID="$(/usr/bin/id -u 2>/dev/null || /bin/id -u 2>/dev/null)" || CE_UID=
@@ -104,6 +67,43 @@ fi
 # shellcheck source=scripts/lib-container-engine.sh
 source /proc/self/fd/9
 exec 9<&-
+
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+echo -e "${YELLOW}╔══════════════════════════════════════════╗${NC}"
+echo -e "${YELLOW}║  Initialize OpenSearch Security          ║${NC}"
+echo -e "${YELLOW}╚══════════════════════════════════════════╝${NC}"
+echo ""
+
+# ── Locate deploy dir + .env ─────────────────────────────────────────────────
+if [ -n "${SIEM_DEPLOY_DIR:-}" ]; then
+    DEPLOY_DIR="${SIEM_DEPLOY_DIR}"
+elif [ -f /opt/siem/docker-compose.yml ]; then
+    DEPLOY_DIR="/opt/siem"
+else
+    DEPLOY_DIR="${REPO_DIR}/docker"
+fi
+echo "Target compose dir: ${DEPLOY_DIR}"
+
+ENV_FILE=""
+for candidate in "${DEPLOY_DIR}/.env" "${REPO_DIR}/.env" "${REPO_DIR}/docker/.env"; do
+    if [ -f "$candidate" ]; then
+        ENV_FILE="$candidate"
+        break
+    fi
+done
+
+if [ -n "$ENV_FILE" ]; then
+    echo "Loading passwords from ${ENV_FILE}"
+    ce_source_env "$ENV_FILE" || exit 1  # root: only a root-owned file in a root-owned tree, via one descriptor
+fi
+
+# CONTAINER_ENGINE (docker by default, or podman) may come from the environment or that .env.
 ce_init || exit 1
 
 MISSING=0

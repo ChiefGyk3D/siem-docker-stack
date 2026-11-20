@@ -15,36 +15,10 @@ unset BASH_ENV ENV CDPATH GLOBIGNORE PS4
 set -euo pipefail
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; export PATH  # fixed PATH before any command runs
 
-# ---------------------------------------------------------------------------
-# Configuration — change these as needed
-# ---------------------------------------------------------------------------
-SIEM_SERVER="${1:-10.0.0.100}"
-# N8N_BASE is resolved after the secret checks below: the container address on
-# the siem network is not fixed (scripts/n8n_address.py asks the container runtime;
-# set N8N_BASE yourself to skip the lookup).
-GRAFANA_URL="${GRAFANA_URL:-http://localhost:3000}"
-GRAFANA_USER="${GRAFANA_USER:-admin}"
-GRAFANA_PASS="${GRAFANA_PASS:-}"
-SSH_USER="${SIEM_USER:-$(whoami)}"
+# Root decision, privileged-mode check and the trusted script and helper tree come FIRST,
+# before anything is read, located or sourced.
 SCRIPT_BIN_DIR="$(/usr/bin/dirname -- "$(/usr/bin/readlink -f -- "$0")")"  # the real scripts directory, symlinks resolved
 SCRIPT_DIR="$(/usr/bin/dirname -- "$SCRIPT_BIN_DIR")"
-N8N_DIR="${SCRIPT_DIR}/n8n"
-
-# Secrets: no defaults. A missing, empty or placeholder value stops the script
-# before anything is sent. The messages name the variable, never its value.
-# shellcheck source=scripts/lib-secrets.sh
-source "${SCRIPT_BIN_DIR}/lib-secrets.sh"
-require_secret N8N_API_KEY "${N8N_API_KEY:-}" || {
-  echo "Usage: N8N_API_KEY=<your n8n API key> GRAFANA_PASS=<grafana admin password> $0 [siem-server-ip]" >&2
-  exit 1
-}
-require_secret GRAFANA_PASS "$GRAFANA_PASS" || exit 1
-
-# The curl calls run on the SIEM server, so the lookup runs there too: the helper
-# is streamed over ssh to the remote python3 (nothing is copied or left behind).
-# The stream is container_engine.py (the shared CONTAINER_ENGINE setting and the
-# trusted-binary resolver) followed by n8n_address.py. Only the validated engine
-# name (docker or podman) is sent to the host.
 CE_LIB="${SCRIPT_BIN_DIR}/lib-container-engine.sh"
 ce_boot_fail() { echo "refusing to source ${CE_LIB}: $1" >&2; exit 1; }
 CE_UID="$(/usr/bin/id -u 2>/dev/null || /bin/id -u 2>/dev/null)" || CE_UID=
@@ -79,6 +53,35 @@ fi
 # shellcheck source=scripts/lib-container-engine.sh
 source /proc/self/fd/9
 exec 9<&-
+
+# ---------------------------------------------------------------------------
+# Configuration — change these as needed
+# ---------------------------------------------------------------------------
+SIEM_SERVER="${1:-10.0.0.100}"
+# N8N_BASE is resolved after the secret checks below: the container address on
+# the siem network is not fixed (scripts/n8n_address.py asks the container runtime;
+# set N8N_BASE yourself to skip the lookup).
+GRAFANA_URL="${GRAFANA_URL:-http://localhost:3000}"
+GRAFANA_USER="${GRAFANA_USER:-admin}"
+GRAFANA_PASS="${GRAFANA_PASS:-}"
+SSH_USER="${SIEM_USER:-$(whoami)}"
+N8N_DIR="${SCRIPT_DIR}/n8n"
+
+# Secrets: no defaults. A missing, empty or placeholder value stops the script
+# before anything is sent. The messages name the variable, never its value.
+# shellcheck source=scripts/lib-secrets.sh
+source "${SCRIPT_BIN_DIR}/lib-secrets.sh"
+require_secret N8N_API_KEY "${N8N_API_KEY:-}" || {
+  echo "Usage: N8N_API_KEY=<your n8n API key> GRAFANA_PASS=<grafana admin password> $0 [siem-server-ip]" >&2
+  exit 1
+}
+require_secret GRAFANA_PASS "$GRAFANA_PASS" || exit 1
+
+# The curl calls run on the SIEM server, so the lookup runs there too: the helper
+# is streamed over ssh to the remote python3 (nothing is copied or left behind).
+# The stream is container_engine.py (the shared CONTAINER_ENGINE setting and the
+# trusted-binary resolver) followed by n8n_address.py. Only the validated engine
+# name (docker or podman) is sent to the host.
 ce_init_name || exit 1
 if [[ -z "${N8N_BASE:-}" ]]; then
   LOOKUP_SRC="$(cat "${SCRIPT_BIN_DIR}/container_engine.py" "${SCRIPT_BIN_DIR}/n8n_address.py")" || exit 1

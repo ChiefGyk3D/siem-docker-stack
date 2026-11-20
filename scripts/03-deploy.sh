@@ -20,14 +20,9 @@ unset BASH_ENV ENV CDPATH GLOBIGNORE PS4
 set -euo pipefail
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; export PATH  # fixed PATH before any command runs
 
-SIEM_HOST="${1:-${SIEM_HOST:-localhost}}"
-SIEM_USER="${2:-${SIEM_USER:-$(whoami)}}"
+# Root decision, privileged-mode check and the trusted script and helper tree come FIRST,
+# before anything is read, located or sourced.
 SCRIPT_DIR="$(/usr/bin/dirname -- "$(/usr/bin/readlink -f -- "${BASH_SOURCE[0]}")")"  # the real directory, symlinks resolved
-REPO_DIR="${SCRIPT_DIR}/.."
-DEPLOY_DIR="/opt/siem"
-
-# CONTAINER_ENGINE (docker by default, or podman): the validated name is one of two
-# fixed words, so it is safe inside the command strings run on the target host.
 CE_LIB="${SCRIPT_DIR}/lib-container-engine.sh"
 ce_boot_fail() { echo "refusing to source ${CE_LIB}: $1" >&2; exit 1; }
 CE_UID="$(/usr/bin/id -u 2>/dev/null || /bin/id -u 2>/dev/null)" || CE_UID=
@@ -62,6 +57,14 @@ fi
 # shellcheck source=scripts/lib-container-engine.sh
 source /proc/self/fd/9
 exec 9<&-
+
+SIEM_HOST="${1:-${SIEM_HOST:-localhost}}"
+SIEM_USER="${2:-${SIEM_USER:-$(whoami)}}"
+REPO_DIR="${SCRIPT_DIR}/.."
+DEPLOY_DIR="/opt/siem"
+
+# CONTAINER_ENGINE (docker by default, or podman): the validated name is one of two
+# fixed words, so it is safe inside the command strings run on the target host.
 ce_init_name || exit 1
 
 RED='\033[0;31m'

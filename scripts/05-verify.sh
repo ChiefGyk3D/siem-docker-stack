@@ -18,22 +18,9 @@ unset BASH_ENV ENV CDPATH GLOBIGNORE PS4
 set -uo pipefail
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; export PATH  # fixed PATH before any command runs
 
-SIEM_HOST="${1:-${SIEM_HOST:-localhost}}"
-SIEM_USER="${2:-${SIEM_USER:-$(whoami)}}"
+# Root decision, privileged-mode check and the trusted script and helper tree come FIRST,
+# before anything is read, located or sourced.
 SCRIPT_DIR="$(/usr/bin/dirname -- "$(/usr/bin/readlink -f -- "${BASH_SOURCE[0]}")")"  # the real directory, symlinks resolved
-REPO_DIR="${SCRIPT_DIR}/.."
-
-# Load credentials from .env when present (OPENSEARCH_ADMIN_PASSWORD,
-# INFLUXDB_ADMIN_USER/PASSWORD) — Phase F1 secured the cluster and InfluxDB.
-for envf in /opt/siem/.env "${REPO_DIR}/.env" "${REPO_DIR}/docker/.env"; do
-    if [ -f "$envf" ]; then
-        # shellcheck disable=SC1090
-        set -a; source "$envf"; set +a
-        break
-    fi
-done
-
-# CONTAINER_ENGINE (docker by default, or podman) may come from the environment or that .env.
 CE_LIB="${SCRIPT_DIR}/lib-container-engine.sh"
 ce_boot_fail() { echo "refusing to source ${CE_LIB}: $1" >&2; exit 1; }
 CE_UID="$(/usr/bin/id -u 2>/dev/null || /bin/id -u 2>/dev/null)" || CE_UID=
@@ -68,6 +55,21 @@ fi
 # shellcheck source=scripts/lib-container-engine.sh
 source /proc/self/fd/9
 exec 9<&-
+
+SIEM_HOST="${1:-${SIEM_HOST:-localhost}}"
+SIEM_USER="${2:-${SIEM_USER:-$(whoami)}}"
+REPO_DIR="${SCRIPT_DIR}/.."
+
+# Load credentials from .env when present (OPENSEARCH_ADMIN_PASSWORD,
+# INFLUXDB_ADMIN_USER/PASSWORD) — Phase F1 secured the cluster and InfluxDB.
+for envf in /opt/siem/.env "${REPO_DIR}/.env" "${REPO_DIR}/docker/.env"; do
+    if [ -f "$envf" ]; then
+        ce_source_env "$envf" || exit 1  # root: only a root-owned file in a root-owned tree, via one descriptor
+        break
+    fi
+done
+
+# CONTAINER_ENGINE (docker by default, or podman) may come from the environment or that .env.
 ce_init_name || exit 1
 OPENSEARCH_ADMIN_PASSWORD="${OPENSEARCH_ADMIN_PASSWORD:-}"
 OS_AUTH="admin:${OPENSEARCH_ADMIN_PASSWORD}"
