@@ -156,22 +156,31 @@ made from, so you can record it):
 git fetch origin && git rev-parse --short origin/master
 git archive --format=tar.gz --prefix=siem-docker-stack/ -o "$HOME/siem-repo.tar.gz" origin/master scripts n8n docs docker/grafana/provisioning/alerting
 gzip -dc "$HOME/siem-repo.tar.gz" | git get-tar-commit-id
-scp -i KEY_FILE -o IdentitiesOnly=yes "$HOME/siem-repo.tar.gz" LOGGING_BOX:siem-repo.tar.gz
-rm -f "$HOME/siem-repo.tar.gz"
+( cd "$HOME" && sha256sum siem-repo.tar.gz > siem-repo.sha256 )
+scp -i KEY_FILE -o IdentitiesOnly=yes "$HOME/siem-repo.tar.gz" "$HOME/siem-repo.sha256" LOGGING_BOX:
+rm -f "$HOME/siem-repo.tar.gz" "$HOME/siem-repo.sha256"
 ```
 
-Then unpack it on LOGGING_BOX. `--strip-components=1` drops the
+Then unpack it on LOGGING_BOX into a fresh staging folder, never over the live
+copy. The checksum travels with the archive over the same ssh channel, so it proves
+the copy is intact, not who made it: the commit id printed above is the record of
+what it should be. `git archive` records group-writable modes (directories 775,
+files 664) and `tar` keeps them, so the steps below remove group and other write
+permission explicitly, refuse any symlink and any remaining writable entry, and only
+then swap the staging folder into place. `--strip-components=1` drops the
 `siem-docker-stack/` prefix, so the folders land directly in `REPO_DIR`:
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo mkdir -p /opt/siem-repo && sudo tar -xzf "$HOME/siem-repo.tar.gz" -C /opt/siem-repo --strip-components=1 --no-same-owner && rm -f "$HOME/siem-repo.tar.gz" && ls /opt/siem-repo/scripts/live-deploy /opt/siem-repo/n8n && ls -ld /opt/siem-repo'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd "$HOME" && sha256sum -c siem-repo.sha256 && sudo rm -rf /opt/siem-repo.new && sudo install -d -m 755 -o root -g root /opt/siem-repo.new && sudo tar -xzf siem-repo.tar.gz -C /opt/siem-repo.new --strip-components=1 --no-same-owner --no-same-permissions && sudo chmod -R go-w /opt/siem-repo.new && test -z "$(sudo find /opt/siem-repo.new -perm /022 -o -type l)" && sudo rm -rf /opt/siem-repo && sudo mv /opt/siem-repo.new /opt/siem-repo && rm -f siem-repo.tar.gz siem-repo.sha256 && ls /opt/siem-repo/scripts/live-deploy /opt/siem-repo/n8n && ls -ld /opt/siem-repo && sudo find /opt/siem-repo -perm /022 | wc -l'
 ```
 
-Expected: the `live-deploy` scripts (including `siem-run`), `grafana-alert-router.json`
-in the `n8n` listing, and `drwxr-xr-x ... root root` for the folder. Here
+Expected: `OK` from the checksum, the `live-deploy` scripts (including `siem-run`),
+`grafana-alert-router.json` in the `n8n` listing, `drwxr-xr-x ... root root` for the
+folder, and `0` as the last line (no entry is writable by group or others). Any
+other output stops the chain before the live copy is touched. Here
 `REPO_DIR` is `/opt/siem-repo`; substitute it in every command below. To update
-later, repeat both blocks (files removed from the repo stay behind; to reset
-first, `sudo rm -rf /opt/siem-repo`, since it holds nothing else).
+later, repeat both blocks (the old copy is replaced as a whole, so no stale file
+stays behind).
 
 Rollback: `sudo rm -rf /opt/siem-repo`. Nothing else changed. The archive holds
 only repository files, no secret value and no live address.
@@ -293,18 +302,30 @@ Rollback below) until it is resolved.
    shell) is not in a repo doc (OPEN QUESTION). Compose reads `/opt/siem/.env` in
    addition to the shell, and a `doppler run` value wins over `.env`, so an `.env`
    that already holds them is enough (INFERRED from Compose's precedence rules).
-   Read-only checks, names and a file listing only, never a value:
+   Read-only checks, names only, never a value. The `.env` file may be readable
+   by root only, so it is read with `sudo`; the `sed` prints a key only when a
+   line is an assignment, and replaces the whole line with that key, so no value
+   is ever printed. The three lists are: every name the compose file
+   interpolates, the names `.env` supplies, and the names Doppler holds:
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'grep -oE "[$][{][A-Za-z0-9_]+" /opt/siem/docker-compose.yml | sort -u; ls -l /opt/siem/.env'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'grep -oE "[$][{][A-Za-z0-9_]+" /opt/siem/docker-compose.yml | cut -c3- | sort -u'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'ls -l /opt/siem/.env; sudo sed -n -E "s/^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=.*/\2/p" /opt/siem/.env | sort -u'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'comm -23 <(grep -oE "[$][{][A-Za-z0-9_]+" /opt/siem/docker-compose.yml | cut -c3- | sort -u) <(sudo sed -n -E "s/^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=.*/\2/p" /opt/siem/.env | sort -u)'
 doppler secrets --only-names --project homelab --config dev_network
 ```
 
-   Every name from the first list that is neither in `/opt/siem/.env` nor in the
-   second list must be added to `dev_network` (copy it from `prd_network` the way
-   item 2 does, one at a time, with the item 3 check) before any Grafana restart.
-   If the restart fails with a `set NAME` message, the container is unchanged:
-   add that name and retry.
+   The third command prints the names the compose file uses that `.env` does NOT
+   supply (it needs `bash` as the remote login shell, INFERRED). Every name in
+   that output must appear in the fourth command's list (the Doppler output format
+   is NOT verified here, so compare by eye); any name missing from both must be
+   added to `dev_network` (copy it from `prd_network` the way item 2 does, one at
+   a time, with the item 3 check) before any Grafana restart. If the second command
+   shows no `.env` (`No such file`), every name in the first list must be in
+   Doppler. If you cannot establish this, do not restart Grafana: OWNER DECISION,
+   check each name by hand with the commands above and record the result in your ops
+   notes. If the restart fails with a `set NAME` message, the container is
+   unchanged: add that name and retry.
 
 Watch: the output of item 2 is empty, and no secret value appears anywhere in
 the terminal or scrollback.
@@ -738,16 +759,14 @@ to the grafana service"). In a session, back up and add one line after the
 `GRAFANA_WEBHOOK_SECRET` line:
 
 ```
-cd /opt/siem
-( umask 077 && cp --no-clobber docker-compose.yml "docker-compose.yml.bak-$(date -u +%Y%m%dT%H%M%SZ)" )
-ls -l docker-compose.yml.bak-*
-grep -c 'DISCORD_FAILURE_WEBHOOK_URL' docker-compose.yml
-sed -i '/- GRAFANA_WEBHOOK_SECRET=/a\      - DISCORD_FAILURE_WEBHOOK_URL=${DISCORD_FAILURE_WEBHOOK_URL:-}' docker-compose.yml
-grep -n -B1 'DISCORD_FAILURE_WEBHOOK_URL' docker-compose.yml
+cd /opt/siem && B="docker-compose.yml.bak-$(date -u +%Y%m%dT%H%M%SZ)" && [ ! -e "$B" ] && ( umask 077 && cp docker-compose.yml "$B" ) && cmp docker-compose.yml "$B" && [ "$(stat -c %a "$B")" = 600 ] && echo "backup $B ok" && ! grep -q 'DISCORD_FAILURE_WEBHOOK_URL' docker-compose.yml && sed -i '/- GRAFANA_WEBHOOK_SECRET=/a\      - DISCORD_FAILURE_WEBHOOK_URL=${DISCORD_FAILURE_WEBHOOK_URL:-}' docker-compose.yml && grep -n -B1 'DISCORD_FAILURE_WEBHOOK_URL' docker-compose.yml
 ```
 
-The first `grep -c` must print `0` before the `sed` (else the line already
-exists; skip the `sed`). The last command shows the new line directly under
+The edit is gated in the same `&&` chain on a backup made by THIS run: the chain
+refuses if the backup name already exists, if the copy differs from the live file
+or if its mode is not 600, and it prints `backup ... ok` before it touches the
+file. It also refuses (and stops) if the line is already present; then skip the
+`sed`. The last command shows the new line directly under
 `GRAFANA_WEBHOOK_SECRET`. The path `/opt/siem` is the documented default
 (`SIEM_DIR`). The backup is mode 600 and never replaces an earlier one (the same
 form as `docs/live-deploy-runbook.md`, section 5, step 4); its `ls` line must start
@@ -968,18 +987,12 @@ Same pattern as 4b, seven lines. The compose file does not carry them (VERIFIED:
 the doc says "the repo does not do this for you"). In a session:
 
 ```
-cd /opt/siem
-( umask 077 && cp --no-clobber docker-compose.yml "docker-compose.yml.bak-$(date -u +%Y%m%dT%H%M%SZ)-email" )
-ls -l docker-compose.yml.bak-*
-grep -c 'GF_SMTP_' docker-compose.yml
-for V in GF_SMTP_ENABLED GF_SMTP_HOST GF_SMTP_USER GF_SMTP_PASSWORD GF_SMTP_FROM_ADDRESS GF_SMTP_STARTTLS_POLICY P1_EMAIL_TO; do
-  sed -i "/- GRAFANA_WEBHOOK_SECRET=/a\\      - ${V}=\${${V}:-}" docker-compose.yml
-done
-grep -n -E 'GF_SMTP_|P1_EMAIL_TO' docker-compose.yml
+cd /opt/siem && B="docker-compose.yml.bak-$(date -u +%Y%m%dT%H%M%SZ)-email" && [ ! -e "$B" ] && ( umask 077 && cp docker-compose.yml "$B" ) && cmp docker-compose.yml "$B" && [ "$(stat -c %a "$B")" = 600 ] && echo "backup $B ok" && ! grep -q 'GF_SMTP_' docker-compose.yml && for V in GF_SMTP_ENABLED GF_SMTP_HOST GF_SMTP_USER GF_SMTP_PASSWORD GF_SMTP_FROM_ADDRESS GF_SMTP_STARTTLS_POLICY P1_EMAIL_TO; do sed -i "/- GRAFANA_WEBHOOK_SECRET=/a\\      - ${V}=\${${V}:-}" docker-compose.yml; done && grep -n -E 'GF_SMTP_|P1_EMAIL_TO' docker-compose.yml
 ```
 
-The first `grep -c` must print `0`. The last command lists seven lines. Empty
-defaults (`:-`) keep Compose from refusing to start when a value is unset.
+As in 4b, the edit is gated on a fresh, verified, mode 600 backup of this run and
+on the variables not being present already. The last command lists seven lines.
+Empty defaults (`:-`) keep Compose from refusing to start when a value is unset.
 
 ### 5c. Copy the contact point
 
@@ -1096,9 +1109,12 @@ that you choose (INFERRED: the `127.0.0.1:HOST:CONTAINER` form is standard
 Compose syntax, not in a repo doc, and publishing on a container attached to
 a bridge network is assumed to work alongside the macvlan one):
 
+The edit is gated in the same `&&` chain on a backup made by this run: the name must
+not exist yet, the copy must match the live file byte for byte, and only then does
+`sudoedit` open the file:
+
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo cp -p N8N_COMPOSE_FILE "N8N_COMPOSE_FILE.bak-$(date -u +%Y%m%dT%H%M%SZ)" && ls -l N8N_COMPOSE_FILE.bak-*'
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudoedit N8N_COMPOSE_FILE'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'B="N8N_COMPOSE_FILE.bak-$(date -u +%Y%m%dT%H%M%SZ)" && sudo test ! -e "$B" && sudo cp -p N8N_COMPOSE_FILE "$B" && sudo cmp N8N_COMPOSE_FILE "$B" && echo "backup $B ok" && sudoedit N8N_COMPOSE_FILE'
 ```
 
 ```
@@ -1108,19 +1124,36 @@ ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudoedit N8N_COMPOSE_FILE'
 
 Apply it by recreating only n8n, then immediately re-check the siem network,
 because a recreate can drop it (VERIFIED: runbook, "Keep n8n on the siem
-network"):
+network").
+
+SAFE N8N RECREATE. This is the only n8n recreate command in this runbook: 6.0, 6.1
+and 6.2 and every rollback below use it. A plain `sudo docker compose up -d n8n`
+writes empty values for any variable the compose file takes from the environment
+(the heartbeat URL, and after 6.1 the expiry secret), and the outage would only show
+afterwards (INFERRED hazard; see the OWNER DECISION in 6.1, item 2, which this form
+implements as option (a)). So the form below (1) records which variables the RUNNING
+container holds, names only; (2) refuses to recreate unless every required variable
+is non-empty in the compose command's own environment, before anything is touched;
+(3) checks the new container and prints the exact recovery when a value is blank.
+`N8N_COMPOSE_DIR` is the folder of the compose file and `SIEM_NETWORK` the real
+network name from `docker network ls` (VERIFIED: runbook). `HEARTBEAT_PING_URL`
+(and `HEARTBEAT_KIND`) must exist in `dev_network`: copy them from where they live
+today the way step 0b item 2 copies a secret, with the item 3 check, before the
+first recreate. Until 6.1 item 1 has created `EXPIRY_WATCH_ROUTER_TOKEN`, leave
+that name out of the required list and of `--preserve-env`, and leave out
+`EXPIRY_WATCH_ROUTER_SECRET` in the first command. In a session on LOGGING_BOX:
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd N8N_COMPOSE_DIR && sudo docker compose up -d n8n && docker port n8n && docker network inspect SIEM_NETWORK --format "{{range .Containers}}{{.Name}} {{end}}"'
+docker exec n8n sh -c 'for V in HEARTBEAT_PING_URL HEARTBEAT_KIND EXPIRY_WATCH_ROUTER_SECRET; do if [ -n "$(printenv $V)" ]; then echo "$V set"; else echo "$V unset"; fi; done' | tee "$HOME/n8n-env-before.txt"
+cd N8N_COMPOSE_DIR && doppler run --project homelab --config dev_network -- sh -c 'for V in HEARTBEAT_PING_URL EXPIRY_WATCH_ROUTER_TOKEN; do if [ -z "$(printenv $V)" ]; then echo "REFUSING: $V is empty in the compose environment; n8n was NOT recreated"; exit 1; fi; done; sudo --preserve-env=HEARTBEAT_PING_URL,HEARTBEAT_KIND,EXPIRY_WATCH_ROUTER_TOKEN docker compose up -d n8n' && docker port n8n && docker network inspect SIEM_NETWORK --format "{{range .Containers}}{{.Name}} {{end}}" && docker exec n8n sh -c 'test -n "$(printenv HEARTBEAT_PING_URL)"' && echo "n8n recreated, heartbeat variable set" || echo "RECOVERY: the recreate failed or HEARTBEAT_PING_URL is blank in the new container. n8n data is on its volume and is unaffected. Put the value in dev_network (step 0b item 2 form), run the recreate command above again, then the step 1 presence check. Until then the heartbeat is off and the observer alerts after about 20 minutes."
 ```
 
-`N8N_COMPOSE_DIR` is the folder of that file and `SIEM_NETWORK` the real network
-name from `docker network ls` (VERIFIED: runbook). Expect the new
-`127.0.0.1:HOST_PORT` line and `n8n` in the container list. A recreate can also
-blank variables that the compose file takes from the environment (the heartbeat
-URL, and later the expiry secret) if the command runs without them (INFERRED; see
-the OWNER DECISION in 6.1, item 2). So read them back at once with the presence
-check of step 1 (`HEARTBEAT_PING_URL set` must still print), then send the
+Compare the `$HOME/n8n-env-before.txt` lines with the step 1 presence check after
+the recreate: every variable that said `set` before must say `set` after. Delete the
+file when done (it holds names only). `--preserve-env=LIST` needs a sudoers rule that
+allows it and refuses with a clear message if not (INFERRED); then the refusal
+leaves the old container running and nothing is lost. Expect the new
+`127.0.0.1:HOST_PORT` line and `n8n` in the container list. Then send the
 baseline test alert and confirm the next heartbeat ping arrives within 6 minutes
 (step 1):
 
@@ -1150,7 +1183,8 @@ that `router-path` file.)
 
 Rollback: restore `N8N_COMPOSE_FILE.bak-<UTC timestamp>` over the compose file with
 `sudo cp -p`, run the
-same recreate command, and re-check the siem network and the heartbeat. Nothing
+SAFE N8N RECREATE above (never a plain `docker compose up`), and re-check the siem
+network and the heartbeat. Nothing
 else changes; the siem network name `n8n` still serves Grafana.
 
 ### 6.1 The router's own endpoint and secret (on LOGGING_BOX)
@@ -1216,9 +1250,10 @@ INFERRED choice that avoids storing the secret twice in Doppler (a second Dopple
 key with the `_SECRET` name is the alternative):
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo cp -p N8N_COMPOSE_FILE "N8N_COMPOSE_FILE.bak-$(date -u +%Y%m%dT%H%M%SZ)-expiry" && ls -l N8N_COMPOSE_FILE.bak-*'
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudoedit N8N_COMPOSE_FILE'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'B="N8N_COMPOSE_FILE.bak-$(date -u +%Y%m%dT%H%M%SZ)-expiry" && sudo test ! -e "$B" && sudo cp -p N8N_COMPOSE_FILE "$B" && sudo cmp N8N_COMPOSE_FILE "$B" && echo "backup $B ok" && sudoedit N8N_COMPOSE_FILE'
 ```
+
+(The edit opens only after the backup of this run exists and matches the live file.)
 
 ```
       - EXPIRY_WATCH_ROUTER_SECRET=${EXPIRY_WATCH_ROUTER_TOKEN:-}
@@ -1228,26 +1263,25 @@ ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudoedit N8N_COMPOSE_FILE'
 (Only add the second line if the file does not already carry it. Step 6.2 below
 adds `N8N_PAYLOAD_SIZE_MAX=1` after that line, so do 6.2 in this same edit and one
 recreate if you have not applied it yet: its `sed` needs the
-`N8N_BLOCK_ENV_ACCESS_IN_NODE=false` line to exist.) Recreate n8n with the
-dev_network values in the environment of the compose command, and re-check the siem
-network as in 6.0.
+`N8N_BLOCK_ENV_ACCESS_IN_NODE=false` line to exist.) Recreate n8n with the SAFE N8N
+RECREATE of 6.0, now with `EXPIRY_WATCH_ROUTER_TOKEN` in its required list (it
+refuses, before touching n8n, when the value is empty), and re-check the siem network
+as that block does.
 
 OWNER DECISION: how n8n's variables reach `docker compose` on EVERY recreate. The
 entries above take their values from the environment of the compose command. A
-recreate run without them (the plain `sudo docker compose up -d n8n` of 6.0 and
-6.2) writes empty values: `HEARTBEAT_PING_URL` and `HEARTBEAT_KIND` go blank (the
+recreate run without them (a plain `sudo docker compose up -d n8n`, as the
+2026-11-20 run of 6.2 was) writes empty values: `HEARTBEAT_PING_URL` and `HEARTBEAT_KIND` go blank (the
 heartbeat turns off, the observer reports down after about 20 minutes) and
 `EXPIRY_WATCH_ROUTER_SECRET` goes blank (the watch gets 403). INFERRED, because no
 repo doc says how the heartbeat variables reach the compose run today. Choose one:
 (a) always run n8n's compose through `doppler run` as below, and keep the heartbeat
 values in `dev_network` too; (b) an env file next to the compose file, root owned,
 mode 600, which writes secrets to disk and so conflicts with the Doppler-only rule.
-Recommended: (a). The form below is INFERRED (`sudo --preserve-env=LIST` needs the
-sudoers rule to allow it, and refuses with a clear message if not):
-
-```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd N8N_COMPOSE_DIR && doppler run --project homelab --config dev_network -- sudo --preserve-env=EXPIRY_WATCH_ROUTER_TOKEN,HEARTBEAT_PING_URL,HEARTBEAT_KIND docker compose up -d n8n; echo "exit code: $?"'
-```
+Recommended: (a). The SAFE N8N RECREATE block in 6.0 is option (a) written out and is
+the form used everywhere below; it is INFERRED (`sudo --preserve-env=LIST` needs the
+sudoers rule to allow it, and refuses with a clear message if not). If you choose
+(b) instead, replace that block's command consistently in 6.0, 6.1 and 6.2.
 
 Check presence only, never the value:
 
@@ -1278,17 +1312,34 @@ router receives nothing. That is the alert gap: Grafana's webhook calls fail (40
 or a refused connection), the heartbeat pings stop, and a real alert that fires
 inside the gap is delayed until Grafana retries or repeats it (INFERRED; the repeat
 interval is up to 4 hours for warnings). The gap is the restart time, about a minute.
-Keep it short: run import, publish and restart as ONE command in a quiet moment,
+Keep it short: run import, publish and restart as ONE sequence in a quiet moment,
 right after a heartbeat ping arrived (step 1), and not while any game-day or test
 scenario runs. The observer tolerates about 20 minutes of silence, so one or two
-missed pings do not alert.
+missed pings do not alert. MAXIMUM GAP: if the router is not active again 5
+minutes after the import started, stop troubleshooting and run the rollback below;
+that bounds the outage well inside the observer's 20 minutes.
 
-Before the import, read three things (all read only):
+The sequence is not atomic. If the import succeeds and the publish fails, the live
+router stays overwritten and inactive; if the publish succeeds and the restart
+fails, n8n may be stopped. So the sequence below runs each stage on its own, stops
+at the first failure, prints which stage failed and what to run, and its exit status
+is real (it is run in a session, not in a one-line ssh with a trailing `echo` that
+would turn a failure into success).
+
+Before the import, read and save three things:
 
 ```
 ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'ls -l "$HOME/.config/doppler-siem/router-path" && cut -c1-15 "$HOME/.config/doppler-siem/router-path"; echo'
 ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'docker exec n8n n8n --help | grep -E "publish|update:workflow"'
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'umask 077 && docker exec n8n n8n export:workflow --id=ROUTER_ID --output=/tmp/router-before.json && docker cp n8n:/tmp/router-before.json "$HOME/router-before.json" && docker exec n8n rm -f /tmp/router-before.json && ls -l "$HOME/router-before.json"'
+```
+
+The saved copy is written to a private directory first, then installed with an
+explicit mode 600, and the chain refuses to go on unless the mode and the content
+check out (the container-side mode of the export is not under your control, so
+`umask` alone is not enough). In a session on LOGGING_BOX:
+
+```
+umask 077 && D="$(mktemp -d)" && docker exec n8n n8n export:workflow --id=ROUTER_ID --output=/tmp/router-before.json && docker cp n8n:/tmp/router-before.json "$D/r.json" && docker exec n8n rm -f /tmp/router-before.json && [ ! -L "$HOME/router-before.json" ] && install -m 600 "$D/r.json" "$HOME/router-before.json" && rm -rf "$D" && [ "$(stat -c %a "$HOME/router-before.json")" = 600 ] && test -s "$HOME/router-before.json" && grep -q ROUTER_ID "$HOME/router-before.json" && echo "saved copy ok: $HOME/router-before.json"
 ```
 
 - The first must list the file as `-rw-------` and print `grafana-alerts-`: that file
@@ -1300,22 +1351,30 @@ ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'umask 077 && docker exec n
 - The second must show `publish:workflow`. On an older n8n only `update:workflow`
   exists: use `update:workflow --id=ROUTER_ID --active=true` in the command below
   (VERIFIED: `docs/game-day.md` says the name differs between versions).
-- The third saves a copy of the live router before it is overwritten (the
-  `export:workflow` flags are INFERRED; check `n8n export:workflow --help`). The file
-  holds the private webhook path, so it is mode 600 and stays on the box; delete it
-  after step 4 passes. The step 2 archive is the older fallback.
+- The saved copy (the `export:workflow` flags are INFERRED; check `n8n export:workflow
+  --help`) lives at `$HOME/router-before.json`, mode 600, because it holds the
+  private webhook path. It stays on the box; delete it with `rm -f
+  "$HOME/router-before.json"` after step 4 passes. The step 2 archive is the older
+  fallback.
 
-Now the import, publish and restart, stopping at the first failure:
+Now the import, publish and restart, in a session on LOGGING_BOX. Each stage runs
+only if the one before it succeeded, and a failure prints the stage, the recovery
+and the limit:
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && "$HOME/bin/siem-run" python3 -I scripts/live-deploy/n8n-setup-alert-router.py --workflow n8n/grafana-alert-router.json ROUTER_ID --error-workflow-id HANDLER_ID && docker exec n8n n8n publish:workflow --id=ROUTER_ID && docker restart n8n; echo "exit code: $?"'
+cd REPO_DIR
+"$HOME/bin/siem-run" python3 -I scripts/live-deploy/n8n-setup-alert-router.py --workflow n8n/grafana-alert-router.json ROUTER_ID --error-workflow-id HANDLER_ID; R=$?; [ $R -eq 0 ] || echo "FAILED stage 1 of 3 (import), exit $R: the live router may be unchanged or half written; run n8n list:workflow, and if it is not active use the ROLLBACK below within 5 minutes"
+[ $R -ne 0 ] || { docker exec n8n n8n publish:workflow --id=ROUTER_ID; R=$?; [ $R -eq 0 ] || echo "FAILED stage 2 of 3 (publish), exit $R: the router is overwritten and INACTIVE. Retry this publish once, then docker restart n8n; if it fails again run the ROLLBACK below within 5 minutes"; }
+[ $R -ne 0 ] || { docker restart n8n; R=$?; [ $R -eq 0 ] || echo "FAILED stage 3 of 3 (restart), exit $R: the router is published but n8n may be stopped. Run docker start n8n, then docker ps --filter name=n8n; if it does not come up healthy within 5 minutes run the ROLLBACK below"; }
+echo "chain exit code: $R"
 ```
 
-Expected output lines (VERIFIED: the script and runbook section 3):
+`chain exit code: 0` is the only success. Expected output lines (VERIFIED: the
+script and runbook section 3):
 `workflow import exit code: 0`, `new webhook path saved (mode 600): ...`,
 `expiry watch webhook path saved (mode 600): ...` and `error workflow set: True`,
-then the publish output, the container name from `docker restart`, and
-`exit code: 0`. The helper reuses the saved
+then the publish output and the container name from `docker restart`. The helper
+reuses the saved
 Grafana path (`router-path`) when it looks right and makes the expiry path
 (`expiry-watch-alerts-` plus 24 URL-safe characters) the first time, writing it mode
 600 to `expiry-path` in the same config directory (VERIFIED: script). The
@@ -1328,11 +1387,20 @@ by a wrong id) and the heartbeat resumes (step 1):
 ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'docker exec n8n n8n list:workflow'
 ```
 
-Rollback of this item: import the saved copy back
-(`docker cp "$HOME/router-before.json" n8n:/tmp/router-before.json`, then
-`docker exec n8n n8n import:workflow --input=/tmp/router-before.json`, then publish
-and restart as above). The saved file is a workflow array or one object depending
-on the n8n version; if the import rejects it, restore from the step 2 archive.
+ROLLBACK of this item (re-import the exported live router, publish it, restart,
+verify). Check the saved copy BEFORE the sequence above touches anything: the file
+exists, is mode 600 and names `ROUTER_ID` (the "saved copy ok" line). The saved file
+is a workflow array or one object depending on the n8n version; the first import
+format is NOT verified, so if the import below rejects it, restore from the step 2
+archive. Same session, same stop-at-the-first-failure shape:
+
+```
+docker cp "$HOME/router-before.json" n8n:/tmp/router-before.json && docker exec n8n n8n import:workflow --input=/tmp/router-before.json && docker exec n8n rm -f /tmp/router-before.json && docker exec n8n n8n publish:workflow --id=ROUTER_ID && docker restart n8n && docker exec n8n n8n list:workflow && echo "rollback done: now run the step 1 presence check and wait for the next heartbeat ping" || echo "ROLLBACK FAILED at the last command that ran: restore from the step 2 archive (docs/backup-restore.md) and do not leave n8n stopped: docker start n8n"
+```
+
+The rollback restores the workflow as it was exported (active state included only
+after the publish and restart in the same line). It does not undo the files
+`router-path` and `expiry-path` (they only hold paths).
 
 **4. Post-import checks.** First the placeholder path must serve nothing (the
 point is that the committed node is disabled). That n8n registers no webhook for
@@ -1422,7 +1490,23 @@ the raw bytes. The owner applied this value live on 2026-11-20 with the command
 below; the section is the record and the command to repeat it on another host.
 
 Run it from a real terminal. `sudo` needs a tty, so do not run it with a `!`
-prefix or over a no-tty ssh. One line, as the whole command:
+prefix or over a no-tty ssh.
+
+To repeat it (a new host, or after a restore), do NOT reuse the one-line command
+below: it overwrites `.bak-payload` without looking and recreates n8n without
+`doppler run`. Use two steps instead. First the edit, which refuses unless this run's
+backup exists and matches (a name that already exists stops the chain):
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'B="/opt/n8n/docker-compose.yml.bak-payload-$(date -u +%Y%m%dT%H%M%SZ)" && sudo test ! -e "$B" && sudo cp -p /opt/n8n/docker-compose.yml "$B" && sudo cmp /opt/n8n/docker-compose.yml "$B" && echo "backup $B ok" && sudo grep -q "N8N_BLOCK_ENV_ACCESS_IN_NODE=false" /opt/n8n/docker-compose.yml && ! sudo grep -q "N8N_PAYLOAD_SIZE_MAX" /opt/n8n/docker-compose.yml && sudo sed -i "/- N8N_BLOCK_ENV_ACCESS_IN_NODE=false/a\      - N8N_PAYLOAD_SIZE_MAX=1" /opt/n8n/docker-compose.yml && cd /opt/n8n && sudo docker compose config -q && sudo grep -n N8N_PAYLOAD_SIZE_MAX /opt/n8n/docker-compose.yml'
+```
+
+Then recreate with the SAFE N8N RECREATE of 6.0 and read back
+`N8N_PAYLOAD_SIZE_MAX=1` with `docker inspect n8n --format "{{range .Config.Env}}{{println .}}{{end}}" | grep N8N_PAYLOAD`
+and the healthy status with `docker ps --filter name=n8n --format "{{.Status}}"`.
+The command as it was actually run on 2026-11-20, kept as the record (note its `;`
+before the last command hides a failure of the chain, which is another reason not to
+reuse it):
 
 ```
 ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo cp -p /opt/n8n/docker-compose.yml /opt/n8n/docker-compose.yml.bak-payload && sudo sed -i "/- N8N_BLOCK_ENV_ACCESS_IN_NODE=false/a\      - N8N_PAYLOAD_SIZE_MAX=1" /opt/n8n/docker-compose.yml && cd /opt/n8n && sudo docker compose config -q && sudo docker compose up -d n8n && sleep 15 && docker inspect n8n --format "{{range .Config.Env}}{{println .}}{{end}}" | grep N8N_PAYLOAD; docker ps --filter name=n8n --format "{{.Status}}"'
@@ -1458,10 +1542,12 @@ received). The limit is instance-wide, so a Wazuh or CrowdSec payload over 1 MiB
 would be refused. How large real payloads get is UNVERIFIED; if a sender starts
 failing with 413 after this change, raise the value.
 
-Rollback: copy the backup over the file and recreate:
+Rollback: copy the backup over the file (the 2026-11-20 backup is
+`.bak-payload`; a repeat run's is the `$B` it printed), then recreate with the SAFE
+N8N RECREATE of 6.0, never a plain `docker compose up`:
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo cp -p /opt/n8n/docker-compose.yml.bak-payload /opt/n8n/docker-compose.yml && cd /opt/n8n && sudo docker compose up -d n8n'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo cp -p /opt/n8n/docker-compose.yml.bak-payload /opt/n8n/docker-compose.yml && sudo cmp /opt/n8n/docker-compose.yml.bak-payload /opt/n8n/docker-compose.yml && echo "compose file restored"'
 ```
 
 ### 6.3 Test the router limits after the import (LIVE, UNVERIFIED)

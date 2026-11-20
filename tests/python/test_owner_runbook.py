@@ -248,3 +248,72 @@ def test_stale_pr_126_wording_is_gone():
 
 def test_no_em_dash():
     assert chr(0x2014) not in RUNBOOK
+
+
+# ---- Daybreak round 1 on PR #176: one pin per finding, so none can be silently removed ----
+
+def test_round1_f1_every_n8n_recreate_goes_through_the_safe_wrapper():
+    # (1) no plain `docker compose up -d n8n` anywhere except the recorded 2026-11-20 command
+    plain = [l for l in CODE_LINES if "compose up -d n8n" in l]
+    assert plain, "the safe recreate block must exist"
+    safe = [l for l in plain if "doppler run" in l and "REFUSING" in l and "--preserve-env" in l]
+    assert len(safe) == 1, plain
+    recorded = [l for l in plain if l not in safe]
+    assert all("bak-payload" in l or "sleep 15" in l for l in recorded), recorded
+    block = section("SAFE N8N RECREATE", "Compare the `$HOME/n8n-env-before.txt`")
+    assert "n8n-env-before.txt" in block  # names-only capture before the recreate
+    assert "NOT recreated" in block and "RECOVERY:" in block  # fails closed, prints the recovery
+    assert "HEARTBEAT_PING_URL" in block and "EXPIRY_WATCH_ROUTER_TOKEN" in block
+    assert "OWNER DECISION" in RUNBOOK
+    for name in ("### 6.0", "### 6.1", "### 6.2"):
+        pass
+    assert FLAT.count("SAFE N8N RECREATE") >= 4  # 6.0 rollback, 6.1, 6.2 repeat and 6.2 rollback
+
+
+def test_round1_f2_router_chain_has_a_failure_branch_per_stage_and_a_rollback():
+    text = item3()
+    flat = " ".join(text.split())
+    for stage in ("FAILED stage 1 of 3 (import)", "FAILED stage 2 of 3 (publish)", "FAILED stage 3 of 3 (restart)"):
+        assert stage in flat, stage
+    assert "chain exit code" in flat and "MAXIMUM GAP" in flat and "5 minutes" in flat
+    assert "ROLLBACK" in flat and "import:workflow --input=/tmp/router-before.json" in flat
+    assert "publish:workflow --id=ROUTER_ID && docker restart n8n" in flat  # the rollback publishes and restarts
+    # the old one-line ssh with a trailing echo (which turned a failure into exit 0) is gone
+    assert not any("n8n-setup-alert-router.py --workflow" in l and l.lstrip().startswith("ssh") for l in CODE_LINES)
+
+
+def test_round1_f3_grafana_prerequisites_have_names_only_commands():
+    text = section("4. Find out which other variables", "Watch: the output of item 2")
+    assert "sudo sed -n -E" in text and "comm -23" in text and "doppler secrets --only-names" in text
+    assert "OWNER DECISION" in text
+    # the `.env` reader never prints a value: every line is replaced by its key
+    assert r"\2/p" in text
+
+
+def test_round1_f4_the_extracted_repo_is_made_non_writable_and_checked():
+    step = section("## Step 0a.", "## Step 0b.")
+    assert "sha256sum" in step and "chmod -R go-w" in step
+    assert "-perm /022" in step and "-type l" in step
+    assert "/opt/siem-repo.new" in step and "mv /opt/siem-repo.new /opt/siem-repo" in step
+    assert "--no-same-permissions" in step
+
+
+def test_round1_f5_the_router_export_gets_an_explicit_private_mode():
+    text = " ".join(item3().split())
+    assert "mktemp -d" in text and "install -m 600" in text
+    assert 'stat -c %a "$HOME/router-before.json")" = 600' in text
+    assert '[ ! -L "$HOME/router-before.json" ]' in text
+    assert 'rm -f "$HOME/router-before.json"' in text  # says to delete it afterwards
+
+
+def test_round1_f6_every_compose_edit_is_gated_on_this_runs_backup():
+    for line in CODE_LINES:
+        if "sed -i" in line and "compose" in line.lower() and "docker-compose.yml" in line:
+            if line.count("bak-payload ") and "sleep 15" in line:
+                continue  # the command as run on 2026-11-20, kept as the record and marked do-not-reuse
+            assert "cmp " in line and "ok" in line, line
+            assert "! -e" in line or "test ! -e" in line, line
+    assert "cp --no-clobber" not in CODE
+    sudoedits = [l for l in CODE_LINES if "sudoedit N8N_COMPOSE_FILE" in l]
+    assert sudoedits and all("cmp N8N_COMPOSE_FILE" in l for l in sudoedits), sudoedits
+    assert "bak-payload-$(date" in CODE  # the repeat form no longer overwrites a fixed name
