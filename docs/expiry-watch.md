@@ -384,7 +384,7 @@ and in the router, not at a proxy:
 
 - The watch refuses to send a body over 16 KB (16384 bytes): it sends nothing,
   names the size in the error and exits 1. It also waits at least 2 seconds
-  between router posts and posts at most 15 times per run (so two runs inside the router's 10 minute window fit under its 30); a notice that was
+  between router posts and posts at most 15 times per run (so two runs inside the router's 10 minute window total exactly its 30, when the window held no other accepted call); a notice that was
   not posted stays due for the next run.
 - The router's `Check Expiry Secret` node denies (403) a body over 16 KB (the
   parsed body re-serialized, and the `content-length` header when n8n passes it

@@ -236,6 +236,27 @@ def test_the_size_function_counts_utf8_bytes_not_characters():
     assert _size_fn({"pad": "\U0001F600" * 3000}) is True
 
 
+def test_the_size_function_boundary_and_surrogates_are_exact():
+    overhead = len('{"pad":""}')  # JSON.stringify writes no spaces
+    assert _size_fn({"pad": "x" * (MAX_BODY - overhead)}) is True, "exactly 16384 bytes is allowed"
+    assert _size_fn({"pad": "x" * (MAX_BODY - overhead + 1)}) is False, "16385 bytes is not"
+    # 4094 astral characters plus the 14 byte wrapper = 16390 bytes, but 12282+14 if counted as 3 bytes each
+    assert _size_fn({"pad": "\U0001F600" * ((MAX_BODY - overhead) // 4 + 1)}) is False
+    assert _size_fn({"pad": "\U0001F600" * ((MAX_BODY - overhead) // 4)}) is True
+    assert _size_fn({"pad": "\ud800"}) is True and _size_fn({"pad": "\udc00"}) is True
+
+
+def test_the_size_function_denies_an_unserializable_body():
+    code = _by_name()[CHECK]["parameters"]["jsCode"]
+    m = re.search(r"const MAX_BODY = \d+;", code)
+    f = re.search(r"function withinSize\(item\) \{.*?\n\}\n", code, re.S)
+    harness = ("const isStr=(v)=>typeof v==='string';" + m.group(0) + f.group(0)
+               + "console.log(JSON.stringify(withinSize({headers:{},body:undefined})));")
+    r = subprocess.run([_node_bin(), "-"], input=harness, capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr[-300:]
+    assert json.loads(r.stdout) is False
+
+
 def test_the_size_function_checks_the_content_length_header():
     assert _size_fn({}, {"content-length": str(MAX_BODY + 1)}) is False
     assert _size_fn({}, {"content-length": str(MAX_BODY)}) is True

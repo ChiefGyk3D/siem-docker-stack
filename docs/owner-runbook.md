@@ -1134,7 +1134,9 @@ under 1 second after the last accepted one and more than 30 accepted calls in 10
 minutes. No owner step is needed for these once the router is re-imported. After
 the first import, check the items that doc marks UNVERIFIED (that the Code node
 can read the workflow static data in a production execution, which the check
-needs or it denies every call, and that the `content-length` header reaches it).
+needs or it denies every call, that two overlapping executions do not both read
+the old counter, that the counter persists across executions, and that the
+`content-length` header reaches it).
 A denied call still starts one workflow execution, and anyone who can reach n8n's
 webhook address on the siem network or LAN can still cause that. n8n's own body
 limit is `N8N_PAYLOAD_SIZE_MAX`, default 16 (MiB per the cited n8n docs, read
