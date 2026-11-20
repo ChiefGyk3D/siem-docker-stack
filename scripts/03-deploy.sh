@@ -155,7 +155,7 @@ fi
 # directories are closed (0500, owned by the container user), so check with sudo.
 run_on_server "sudo test -f ${DEPLOY_DIR}/prometheus/web.yml && sudo test -f ${DEPLOY_DIR}/prometheus-otlp/web.yml && sudo test -f ${DEPLOY_DIR}/prometheus/secrets/self-scrape-password && sudo test -f ${DEPLOY_DIR}/prometheus/secrets/otlp-scrape-password && sudo test -f ${DEPLOY_DIR}/prometheus-otlp/tls/server.key && sudo test -f ${DEPLOY_DIR}/prometheus/otlp-ca/otlp-ca.crt && echo 'PROM_AUTH_OK'" | grep -q PROM_AUTH_OK || {
     echo -e "${RED}Prometheus auth files are missing in ${DEPLOY_DIR}.${NC}"
-    echo "  On the server run: sudo -E bash scripts/render-prometheus-web-config.sh ${DEPLOY_DIR}"
+    echo "  On the server run: sudo -E scripts/render-prometheus-web-config.sh ${DEPLOY_DIR}"
     echo "  (needs the TLS files in prometheus-otlp/tls/; see docs/prometheus-otlp.md)"
     exit 1
 }

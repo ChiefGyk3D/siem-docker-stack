@@ -76,7 +76,8 @@ streamed Python helper.
 
 ## Running the scripts as root
 
-The seven scripts use the shebang `#!/bin/bash -p`. Privileged mode makes bash ignore
+The seven scripts above, and also `01-disk-setup.sh`, `02-bootstrap.sh` and
+`render-prometheus-web-config.sh`, use the shebang `#!/bin/bash -p`. Privileged mode makes bash ignore
 `BASH_ENV` and `ENV`, skip exported shell functions, and ignore `SHELLOPTS` and
 `BASHOPTS`, so none of them can run as root before the first line. As root, run a
 script by its path (`sudo scripts/06-generate-wazuh-certs.sh`), never as

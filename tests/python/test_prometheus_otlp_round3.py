@@ -65,6 +65,21 @@ def sim(ready, tmp_path):
         """))
     stage_base = tmp_path / "stage-base"
     stage_base.mkdir()
+    # The script asks the kernel through the absolute /usr/bin/id and fixes PATH as root, so the
+    # simulated-root copy points that at the stub id and puts the stubs in the fixed PATH; the real
+    # script text is otherwise unchanged. It is started by its path so the privileged shebang applies.
+    copy_dir = tmp_path / "sim-root" / "scripts"
+    copy_dir.mkdir(parents=True)
+    fixed = "PATH=/usr/sbin:/usr/bin:/sbin:/bin\n"
+    for name in ("render-prometheus-web-config.sh", "lib-secrets.sh"):
+        text = (RENDER.parent / name).read_text(encoding="utf-8")
+        text = text.replace("/usr/bin/id", str(stubs / "id")).replace("/bin/id", str(stubs / "id"))
+        text = text.replace(fixed, f"PATH={stubs}:{ready.stub_dir}:/usr/bin:/bin\n")
+        # a simulated root never honors the unprivileged stage override; /run is not writable here
+        text = text.replace("STAGE_BASE=/run\n", f"STAGE_BASE={stage_base}\n")
+        (copy_dir / name).write_text(text, encoding="utf-8")
+        (copy_dir / name).chmod(0o755)
+    sim_script = copy_dir / "render-prometheus-web-config.sh"
 
     def run(uids=None, **extra):
         table = {name: 65534 for name in CLOSED}
@@ -75,7 +90,7 @@ def sim(ready, tmp_path):
                "SUDO_UID": str(os.getuid()), "PROMETHEUS_STAGE_BASE": str(stage_base),
                **{k: v for k, v in __import__("test_prometheus_otlp").PASSWORDS.items()}}
         env.update(extra)
-        return subprocess.run([BASH, str(RENDER), str(ready.main.parent)], env=env, text=True,
+        return subprocess.run([str(sim_script), str(ready.main.parent)], env=env, text=True,
                               capture_output=True, stdin=subprocess.DEVNULL, timeout=30)
     run.stage_base = stage_base
     run.ready = ready
