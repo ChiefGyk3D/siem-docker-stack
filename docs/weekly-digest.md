@@ -39,11 +39,15 @@ The lock is the open, locked file descriptor of the run, not a pathname: the ker
 
 `last-sent` must hold a real ISO week written exactly as `YYYY-Www` (week 53 only in a year that has one; for example 2025 has no week 53, 2026 does). Anything else is a damaged marker.
 
-A missing `last-sent` is the only state that allows the first send. A marker that exists but is empty, garbled, unreadable, a link or not a regular file fails closed: the run is refused (exit 4) and names the file; repair or remove it, or use `--force`.
+A missing `last-sent` is the only state that allows the first send. A marker that exists but is empty, garbled or unreadable fails closed: the run is refused (exit 4) and names the file; repair or remove it, or use `--force`.
+
+`last-sent` holds the greatest ISO week ever sent, still one `YYYY-Www` line (a marker written by an earlier version loads unchanged). A send is allowed only when the current week is strictly after it, so a clock that moves backward into an earlier week is refused (exit 4, naming `last-sent`) instead of sending a duplicate. `--force` sends anyway, but never lowers the stored week.
+
+`last-sent` and `pending` must each be absent or a plain file. If either is a directory, a link or a special file (a FIFO, a device), the run is refused before any SMTP connection with exit 4, even with `--force`. `--force` only skips the same-week, later-week, damaged-marker and unresolved-`pending` checks and replaces plain files; it does not remove a directory or any other entry. Remove the offending entry yourself (for example `rmdir` for an empty directory, or `rm` for a link), then re-run.
 
 `max_message_bytes` counts exactly what the DATA command transmits: headers, MIME framing, transfer encoding, SMTP dot-stuffing and the final terminator line. Lone Unicode surrogates (category Cs) are also replaced in provider text, so a hostile record cannot stop the digest from rendering.
 
-Exit codes: 0 done; 1 done but a source failed (or the sent marker could not be written); 2 config error; 3 delivery failed, or its outcome is uncertain (an uncertain outcome retains `pending`); 4 not sent on purpose (lock held, already sent this week, a damaged `last-sent` marker, or an unresolved `pending` from an earlier send that was uncertain or not recorded).
+Exit codes: 0 done; 1 done but a source failed (or the sent marker could not be written); 2 config error; 3 delivery failed, or its outcome is uncertain (an uncertain outcome retains `pending`); 4 not sent on purpose (lock held, already sent this week or a later one, a damaged `last-sent` marker, a non-regular `last-sent` or `pending`, or an unresolved `pending` from an earlier send that was uncertain or not recorded).
 
 ## Setup
 
