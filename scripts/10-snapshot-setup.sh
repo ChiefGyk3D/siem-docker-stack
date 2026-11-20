@@ -265,9 +265,27 @@ echo -e "${GREEN}╔════════════════════
 echo -e "${GREEN}║  Snapshot Setup Complete                 ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════╝${NC}"
 echo ""
-echo "Manual snapshot now (the credentials go to curl on stdin as a config, never on the command line):"
-echo "  printf 'user = \"admin:%s\"\\n' \"\$OPENSEARCH_ADMIN_PASSWORD\" | curl -sk -K - -X PUT '${OPENSEARCH_URL}/_snapshot/${REPO_NAME}/manual-\$(date +%Y%m%d)?wait_for_completion=false' \\"
-echo "    -H 'Content-Type: application/json' -d '{\"indices\":\"${SNAPSHOT_INDICES}\",\"include_global_state\":false}'"
+# The hint is a function, printed by declare -f so the text shown is the text tested: it refuses a
+# control character (CR or LF would start a new curl config directive), escapes backslash and double
+# quote, and sends the credentials to curl on stdin as a config, never on the command line.
+manual_snapshot() {
+    local cred="admin:${OPENSEARCH_ADMIN_PASSWORD}"
+    if [[ "$cred" == *[[:cntrl:]]* ]]; then
+        echo "OPENSEARCH_ADMIN_PASSWORD contains a control character, refused" >&2
+        return 1
+    fi
+    cred="${cred//\\/\\\\}"
+    cred="${cred//\"/\\\"}"
+    printf 'user = "%s"\n' "$cred" | curl -sk -K - -X PUT \
+        "${1}/_snapshot/${2}/manual-$(printf '%(%Y%m%d)T' -1)?wait_for_completion=false" \
+        -H 'Content-Type: application/json' \
+        -d "{\"indices\":\"${3}\",\"include_global_state\":false}"
+}
+echo "Manual snapshot now (paste into a shell where OPENSEARCH_ADMIN_PASSWORD is set, not exported):"
+echo "# --- paste begin"
+declare -f manual_snapshot
+echo "manual_snapshot '${OPENSEARCH_URL}' '${REPO_NAME}' '${SNAPSHOT_INDICES}'"
+echo "# --- paste end"
 echo ""
 echo "Restore drill + offsite copy guidance: docs/backup-restore.md"
 echo "NOTE: the Wazuh indexer (wazuh-alerts-*) is a separate cluster and is"

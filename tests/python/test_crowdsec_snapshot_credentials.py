@@ -58,7 +58,9 @@ case "$url" in
     *alert-rules*) printf '[{"title":"CrowdSec Ban Decision Surge"}]' ;;
     *api/search*) printf '[{"uid":"crowdsec-overview"}]' ;;
     *_cluster/health*) printf '{"status":"green"}' ;;
-    *_plugins/_sm/policies*) printf '{"_seq_no":1,"_primary_term":1,"sm_policy":{"creation":{"schedule":{"cron":{"expression":"0 3 * * *"}}},"deletion":{"condition":{"max_age":"14d"}}}}' ;;
+    *_plugins/_sm/policies*)
+        if [ "$method" = GET ] && [ -e "$REC/no-policy" ]; then printf '{"error":"not found"}'; exit 0; fi
+        printf '{"_seq_no":1,"_primary_term":1,"sm_policy":{"creation":{"schedule":{"cron":{"expression":"0 3 * * *"}}},"deletion":{"condition":{"max_age":"14d"}}}}' ;;
     *_verify*) printf '{"nodes":{"n1":{}}}' ;;
     *_cat/snapshots*) printf 'id status\n' ;;
     *) printf '{"acknowledged":true}' ;;
@@ -440,3 +442,85 @@ def test_inherited_exported_passwords_are_unexported_before_the_first_command(tm
     for name, data in first.items():
         for v in spec["vars"]:
             assert f"{v}=" not in data, f"{v} inherited by {name}"
+
+
+def policy_calls(box):
+    return [c for c in box.calls() if "_plugins/_sm/policies" in c["url"] and c["method"] != "GET"]
+
+
+def test_snapshot_policy_update_path_is_a_put_with_the_sequence_guard(tmp_path):
+    box = Box(tmp_path, SNAPSHOT)
+    ran(box.run(), SNAPSHOT)
+    writes = policy_calls(box)
+    assert len(writes) == 1, writes
+    c = writes[0]
+    assert c["method"] == "PUT"
+    assert c["url"] == "https://localhost:9200/_plugins/_sm/policies/siem-daily?if_seq_no=1&if_primary_term=1"
+    assert c["stdin"] == f'user = "admin:{SENTINEL}"\n'
+    assert "-K" in c["argv"] and c["argv"][c["argv"].index("-K") + 1] == "-" and "-u" not in c["argv"]
+
+
+def test_snapshot_policy_create_path_is_a_post_with_its_own_credential(tmp_path):
+    box = Box(tmp_path, SNAPSHOT)
+    (box.rec / "no-policy").write_text("x", encoding="utf-8")
+    pw = 'q"b\\s' + SENTINEL
+    ran(box.run(passwords={"OPENSEARCH_ADMIN_PASSWORD": pw}), SNAPSHOT)
+    writes = policy_calls(box)
+    assert len(writes) == 1, writes
+    c = writes[0]
+    assert c["method"] == "POST"
+    assert c["url"] == "https://localhost:9200/_plugins/_sm/policies/siem-daily"
+    assert c["stdin"] == f'user = "admin:{escaped(pw)}"\n'
+    assert "-K" in c["argv"] and c["argv"][c["argv"].index("-K") + 1] == "-" and "-u" not in c["argv"]
+    for suffix in ("-argv", "-environ"):
+        for name, data in box.recorded(suffix).items():
+            assert SENTINEL not in data, f"secret in {name}"
+
+
+PASTE_BEGIN = "# --- paste begin"
+PASTE_END = "# --- paste end"
+
+
+def printed_hint(tmp_path):
+    box = Box(tmp_path, SNAPSHOT)
+    out = ran(box.run(), SNAPSHOT).stdout
+    assert PASTE_BEGIN in out and PASTE_END in out, out
+    return out.split(PASTE_BEGIN, 1)[1].split(PASTE_END, 1)[0]
+
+
+def run_hint(tmp_path, hint, password):
+    """Run the printed hint in a fresh shell, with the fake curl first on PATH and the password in the
+    shell variable the hint names (the owner's own shell, not exported)."""
+    box = Box(tmp_path / "hint-run", SNAPSHOT)
+    proc = subprocess.run(["bash", "-c", "OPENSEARCH_ADMIN_PASSWORD=$PW\n" + hint],
+                          env={"PATH": f"{box.bindir}:/usr/bin:/bin", "HOME": str(tmp_path), "PW": password},
+                          text=True, capture_output=True, timeout=60, stdin=subprocess.DEVNULL)
+    return box, proc
+
+
+def test_the_printed_manual_snapshot_hint_has_no_dash_u_and_no_raw_credential_printf(tmp_path):
+    hint = printed_hint(tmp_path)
+    assert "-u admin" not in hint and "-u " not in hint
+    assert "-K -" in hint
+
+
+@pytest.mark.parametrize("pw", ['plain-pw', 'q"b\\s', 'a"b\\c;d e$f', '\\"', 'tail\\'])
+def test_the_printed_manual_snapshot_hint_sends_one_correct_escaped_config_line(tmp_path, pw):
+    hint = printed_hint(tmp_path / "p")
+    box, proc = run_hint(tmp_path, hint, pw)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    stdins = box.curl_stdins()
+    assert stdins == [f'user = "admin:{escaped(pw)}"\n']
+    argv = next(v for k, v in box.recorded("-argv").items() if k.startswith("curl-"))
+    assert pw not in argv
+    assert "-X\nPUT" in argv and "/_snapshot/siem-snapshots/manual-" in argv
+    assert re.search(r"/manual-\d{8}\?wait_for_completion=false", argv)
+
+
+@pytest.mark.parametrize("pw", ["a\nb", "a\rb", 'x"\nuser = "evil'])
+def test_the_printed_manual_snapshot_hint_refuses_a_line_break(tmp_path, pw):
+    hint = printed_hint(tmp_path / "p")
+    box, proc = run_hint(tmp_path, hint, pw)
+    assert proc.returncode != 0
+    assert not box.curl_calls(), "curl ran with a refused credential"
+    assert "evil" not in proc.stdout + proc.stderr
