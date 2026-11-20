@@ -8,10 +8,12 @@
 #
 # Usage:
 #   # Remote deployment (from workstation):
-#   bash scripts/03-deploy.sh 10.0.0.100 myuser
+#   sudo scripts/03-deploy.sh 10.0.0.100 myuser
 #
 #   # Local deployment (on the SIEM server):
-#   bash scripts/03-deploy.sh local
+#   sudo scripts/03-deploy.sh local
+#
+# Start it by its path, never through an explicit `bash` (that bypasses the privileged shebang).
 # =============================================================================
 
 set +x

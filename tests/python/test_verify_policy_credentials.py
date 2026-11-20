@@ -310,7 +310,7 @@ def all_text_files():
     return [p for p in out if p.is_file()]
 
 
-HARDENED = ("04-apply-ism-policy.sh", "05-verify.sh", "08b-init-opensearch-security.sh")
+HARDENED = ("03-deploy.sh", "04-apply-ism-policy.sh", "05-verify.sh", "08b-init-opensearch-security.sh")
 
 
 def test_no_text_tells_anyone_to_start_a_hardened_script_through_bash():
@@ -328,7 +328,7 @@ def test_no_text_tells_anyone_to_start_a_hardened_script_through_bash():
 # any shell interpreter, then anything (options, options with operands such as `-o pipefail`, `-c '`),
 # then a relative or absolute path to one of the scripts; sudo options and variables before it are
 # covered because only the interpreter token has to match
-INTERPRETER_PATTERN = re.compile(r"\b(?:ba|da|z|k|a)?sh\b(?:\s+\S+)*?\s+[\"']?(?:\S*/)?(?:"
+INTERPRETER_PATTERN = re.compile(r"(?<![\w./-])(?:ba|da|z|k|a)?sh\b(?:\s+\S+)*?\s+[\"']?(?:\S*/)?(?:"
                                  + "|".join(re.escape(h) for h in HARDENED) + r")\b")
 
 
@@ -347,6 +347,8 @@ def via_interpreter(line):
     "dash -c /opt/siem/scripts/04-apply-ism-policy.sh",
     "SIEM_USER=x bash /path/to/scripts/05-verify.sh 10.0.0.1",
     "echo '  2. Run: bash scripts/08b-init-opensearch-security.sh'",
+    "bash scripts/03-deploy.sh local",
+    "sudo bash scripts/03-deploy.sh <SIEM_IP> <user>",
 ])
 def test_the_interpreter_scan_catches_every_spelling(line):
     assert via_interpreter(line), line
@@ -357,7 +359,7 @@ def test_the_interpreter_scan_catches_every_spelling(line):
     "sudo -u root scripts/04-apply-ism-policy.sh https://h:9200",
     "sudo SIEM_DEPLOY_DIR=/opt/siem scripts/08b-init-opensearch-security.sh",
     "`05-verify.sh` needs WAZUH_INDEXER_PASSWORD in the .env",
-    "bash scripts/03-deploy.sh local",
+    "sudo scripts/03-deploy.sh local",
 ])
 def test_the_interpreter_scan_leaves_direct_execution_alone(line):
     assert not via_interpreter(line), line

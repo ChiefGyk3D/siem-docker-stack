@@ -8,11 +8,19 @@ retention**, stored on the warm-tier disk and (recommended) rsync'd offsite.
 All commands below assume the secured cluster (Phase F1):
 
 ```bash
-# Convenience: load credentials, define an authenticated curl
-set -a; source /opt/siem/.env; set +a
-osc() { curl -sk -u "admin:${OPENSEARCH_ADMIN_PASSWORD}" "$@"; }
+# Convenience: an authenticated curl (run from the repository root; it asks for the admin password each time)
+osc() { scripts/secure-curl.sh admin -sk "$@"; }
 OS=https://localhost:9200
 ```
+
+`scripts/secure-curl.sh` reads the password without echo and hands it to curl
+on stdin, never as an argument, so it stays out of the process list, shell
+history and shell traces. It needs bash 4.2 or newer, and curl arguments must not
+read stdin (use `-d 'text'` or `-d @file`, not `-d @-`). It accepts only a short
+list of curl options (`-s -S -k -f -I -L -X -H -d -o -w --max-time
+--connect-timeout --cacert --resolve --data-binary`) and refuses the rest,
+such as `-v`, `--trace*`, `--libcurl` and `-K`, because those can print the
+credential.
 
 ---
 

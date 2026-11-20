@@ -186,7 +186,7 @@ nano .env    # Set YOUR IPs, passwords, and heap sizes
 bash scripts/06-generate-wazuh-certs.sh
 
 # 6. Deploy the stack (local mode)
-bash scripts/03-deploy.sh local
+sudo scripts/03-deploy.sh local
 
 # 7. Wait ~2 minutes, then apply index templates and ISM policy
 sudo scripts/04-apply-ism-policy.sh http://localhost:9200
@@ -243,8 +243,8 @@ in `.env.example`, and a missing, empty or placeholder value stops the stack or
 script that needs it. Values are never printed in an error message; the
 message names the variable. Use strong, unique values and avoid `$`.
 
-Before `docker compose up`, run `bash scripts/check-env.sh .env`; `scripts/03-deploy.sh`
-runs it for you. It rejects an empty value or a placeholder (the old well-known
+Before `docker compose up`, run `bash scripts/check-env.sh .env`. The deploy script
+(`sudo scripts/03-deploy.sh`) runs it for you. It rejects an empty value or a placeholder (the old well-known
 defaults and obvious fill-ins such as `your_*`, `<...>`, `example*`,
 `placeholder*`, `xxx*`, `admin` and `password`), compared case-insensitively. The
 exact rule lives in `scripts/lib-secrets.sh`, and each `scripts/deploy-*.py`
@@ -458,13 +458,16 @@ python3 scripts/deploy-dashboards.py
 Or manually via the Grafana API:
 
 ```bash
-# Via Grafana API
-for f in dashboards/*.json; do
-    curl -X POST "http://admin:${GRAFANA_ADMIN_PASS}@localhost:3000/api/dashboards/db" \
-        -H 'Content-Type: application/json' \
-        -d "{\"dashboard\": $(cat "$f"), \"overwrite\": true}"
-done
+# Via Grafana API (asks for the Grafana admin password without echo; repeat for each file)
+f=dashboards/example.json
+scripts/secure-curl.sh admin -X POST "http://localhost:3000/api/dashboards/db" \
+    -H 'Content-Type: application/json' \
+    -d "{\"dashboard\": $(cat "$f"), \"overwrite\": true}"
 ```
+
+`scripts/secure-curl.sh` hands the password to curl on stdin, never in the URL
+or an argument, so it stays out of the process list, shell history and shell traces.
+It needs bash 4.2 or newer. Start it by its path, not through `bash`.
 
 Or import via the Grafana UI: **Dashboards → New → Import → Upload JSON file**.
 
