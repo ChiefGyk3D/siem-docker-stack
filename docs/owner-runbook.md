@@ -5,8 +5,10 @@ platform (epic #62). Nothing in this repository does these steps for you. Each
 step names the doc it comes from, what must be true first, the exact commands,
 what to watch, and how to undo it.
 
-Written 2026-11-19 against `origin/master` at commit `a503203`. Every fact is
-marked:
+Written 2026-11-19 against `origin/master` at commit `a503203`. Steps 0 to 6.3
+were audited again on 2026-11-20 against `origin/master` at commit `a4cdb72`
+(issue #174); `tests/python/test_owner_runbook.py` keeps the machine-checkable
+parts true. Every fact is marked:
 
 - VERIFIED: stated in a repo doc or file, and the doc is cited. VERIFIED means
   "a repo doc says so", not "seen on the live system". Most live behavior is
@@ -23,10 +25,21 @@ marked:
 |-------------|---------|
 | `LOGGING_BOX` | The SIEM host that runs the stack |
 | `KEY_FILE` | Path to the SSH private key for LOGGING_BOX |
-| `REPO_DIR` | Where this repository is checked out on LOGGING_BOX |
+| `REPO_DIR` | Absolute path of a copy of this repository's `scripts`, `n8n`, `docs` and alerting files on LOGGING_BOX, made by step 0a (for example `/home/YOU/siem-docker-stack`). It is NOT `/opt/siem`: that is the deployed stack and has no `n8n` folder and no `live-deploy` scripts |
 | `SIEM_DIR` | Live stack directory, default `/opt/siem` (`docs/live-deploy-runbook.md`, variable table) |
-| `dev_network` | The Doppler branch config under the `dev` environment of project `homelab` that holds every new alerting value (created in step 0b) |
-| `ROUTER_ID`, `HANDLER_ID` | The n8n workflow ids printed by the router import (`docs/live-deploy-runbook.md`, section 3) |
+| `dev_network`, `DEV_CONFIG` | The Doppler branch config under the `dev` environment of project `homelab` that holds every new alerting value (created in step 0b). `DEV_CONFIG` is the placeholder name the live deploy runbook uses for the same config; its value is `dev_network` |
+| `ROUTER_ID` | The n8n id (16 hex characters) of the LIVE router workflow "Grafana SOAR - Alert Router (authenticated)". The router import does NOT print it: read it with `docker exec n8n n8n list:workflow` or from the workflow's address in the n8n interface (the id is in the URL). Passing it makes the import overwrite that workflow; leaving it out makes a second copy with a new id |
+| `HANDLER_ID` | The n8n id of the live error handler workflow "Alert Router Error Handler". Printed as `error workflow id:` by the handler import (`docs/live-deploy-runbook.md`, section 3); on a live box read it the same way as `ROUTER_ID` |
+| `OLD_ROUTER_ID` | The n8n id of the old router that step 9 deactivates (Q5); read it the same way |
+| `SERVICE_ACCOUNT` | The dedicated non-login account of step 0c (suggested name `siem-ops`) |
+| `N8N_COMPOSE_FILE`, `N8N_COMPOSE_DIR` | The compose file that runs n8n and its folder. The live values are `/opt/n8n/docker-compose.yml` and `/opt/n8n` (VERIFIED by the lead 2026-11-20). INFERRED root owned, because the step 6.2 run used `sudo` for every touch of it; so copies, edits and `docker compose` runs against it below use `sudo` too |
+| `HOST_PORT`, `CONTAINER_PORT` | The loopback port you publish for n8n on the host and the port n8n listens on inside its container (section 6.0) |
+| `SIEM_NETWORK` | The real name of the Docker network the stack's containers share, from `docker network ls` (usually the compose project name plus `_siem-net`) |
+| `PRIVATE_WEBHOOK_PATH` | The Grafana router's private path, the content of the `router-path` file in the helper's config directory. An address, not a credential, but keep it out of git and chat |
+| `EXPIRY_WATCH_PRIVATE_PATH` | The expiry watch's private path, the content of the `expiry-path` file in the same directory |
+| `ARCHIVE_FILE` | The `.tar.gz.age` archive a backup run wrote (step 2d) |
+| `OBSERVER_HOSTNAME` | The host name inside the heartbeat observer's ping URL (step 7) |
+| `VARIABLE_NAME` | A variable name from the table in 6b |
 
 Rules every step follows:
 
@@ -50,9 +63,10 @@ Rules every step follows:
 
 | # | Question | Where it bites |
 |---|----------|----------------|
-| Q4 | The names `FAILTEST` (workflow and credential) appear in no repo doc. The closest text is the failure-path test copy in `docs/live-deploy-runbook.md`, section 4, items 1 to 6 ("the copy", "a wrong credential in the copy"). Read the exact names in the n8n UI. | Step 3 |
-| Q5 | What is the live name of the old router workflow? The repo workflow is named "Grafana SOAR - Alert Router" and the runbook calls the new one "Grafana SOAR - Alert Router (authenticated)". Which one is live and old is not in a doc. | Step 9 |
-| Q7 | RESOLVED by the deploy script change (PR #126, issue #125). `scripts/live-deploy/grafana-deploy.py` now deploys the notification failure rule and, only when you name them with `--include-example`, the P1 email contact point and policy examples. It defaults to a dry run, needs `--apply`, and backs up every file it replaces. It never starts docker and never reads the compose file, so the compose line and the restart stay manual (step 4b and 4d, and 4g below). Until the PR is merged and the script is on the host, copy by hand as written in steps 4 and 5. | Steps 4, 5 |
+| Q1 | RESOLVED (2026-11-20). `docs/live-deploy-runbook.md` points here for `DEV_CONFIG`: it is the Doppler config `dev_network` (step 0b). | Steps 4g, 5 |
+| Q4 | The names `FAILTEST` (workflow and credential) appear in no repo doc. The closest text is the failure-path test copy in `docs/live-deploy-runbook.md`, section 4, items 1 to 6 ("the copy", "a wrong credential in the copy"). Read the exact names in the n8n UI and the ids with `docker exec n8n n8n list:workflow` (INFERRED command; check `n8n list:workflow --help`). | Step 3 |
+| Q5 | What is the live name of the old router workflow? The repo workflow is named "Grafana SOAR - Alert Router" and the runbook calls the new one "Grafana SOAR - Alert Router (authenticated)". Which one is live and old is not in a doc; tell them apart by id (`ROUTER_ID` versus `OLD_ROUTER_ID`), not by name. | Step 9 |
+| Q7 | RESOLVED by the deploy script change (PR #126, issue #125, merged: commit `862b687`). `scripts/live-deploy/grafana-deploy.py` deploys the notification failure rule and, only when you name them with `--include-example`, the P1 email contact point and policy examples. It does NOT deploy `notification-failure-contact-point.yml.example` (`discord-direct`): that one is always copied by hand (4c). It defaults to a dry run, needs `--apply`, and backs up every file it replaces. It never starts docker and never reads the compose file, so the compose line and the restart stay manual (step 4b and 4d, and 4g below). | Steps 4, 5 |
 | Q8 | The Grafana group id for `grafana_uid`/`grafana_gid` in the backup config is not stated. The compose file sets `user: "472"` (VERIFIED) and the example says `grafana_gid = 0`. Read it with `docker exec grafana id`. | Step 2 |
 | Q9a | How does the dedicated service account get Docker access for `docker cp` and `docker exec`? Docker group membership is root-equivalent; the safer option is a root-owned wrapper allowed by one exact `sudoers` rule. This doc does not choose. | Steps 0c, 2 |
 | Q10 | How is a P1 produced on demand to test the email route end to end? No doc says. | Step 5 |
@@ -66,7 +80,7 @@ item numbers are in the last column.
 
 | Step | What | Risk | Depends on | Request item |
 |------|------|------|-----------|--------------|
-| 0 | Preflight, then 0b: one dev config for every new Grafana value | low | nothing | |
+| 0 | Preflight, 0a: put the repo on the box, 0b: one dev config for every new Grafana value, 0c: the service account | low | nothing | |
 | 1 | Read the heartbeat ping log | none, read only | heartbeat deployed | 1 |
 | 2 | First live backup and restore rehearsal | low | step 0 | 4 |
 | 3 | Delete the FAILTEST workflow and credential | low, irreversible | step 2 (a backup exists) | 2 |
@@ -97,7 +111,9 @@ Why this order:
 Source: `docs/live-deploy-runbook.md`, sections 1 and 2.
 
 Prerequisites: the stack is running; `siem-run` and its token file exist
-(runbook section 2); this repo is checked out at `REPO_DIR` on LOGGING_BOX.
+(runbook section 2); a copy of this repo exists at `REPO_DIR` on LOGGING_BOX
+(step 0a, which you do first; every command below that says `cd REPO_DIR` fails
+without it).
 
 ```
 ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'docker ps --format "{{.Names}}" | sort'
@@ -117,6 +133,48 @@ runbook is incomplete.
 Then do step 0b before steps 4 and 5.
 
 Rollback: nothing changed.
+
+## Step 0a. Put the repo on the box (LIVE, do this first)
+
+Why: `/opt/siem` on LOGGING_BOX is the deployed stack. It has no `n8n` folder and
+no `scripts/live-deploy` folder, so the router import, the test script, the
+backup, the expiry watch and the example files named below do not exist there.
+`REPO_DIR` must be created. `scripts/live-deploy/*.py` import
+`scripts/container_engine.py` from the folder above them, so copying only
+`live-deploy` breaks them: copy the whole `scripts` folder.
+
+Pick `REPO_DIR`. The suggestion is `/opt/siem-repo`: root owned and readable by
+everyone, so the jobs of step 0c (which run as `SERVICE_ACCOUNT`) can read it and
+cannot change the code they run. A path under a home directory fails for that
+account when the home directory is mode 700. It holds no state and no secret.
+
+On your workstation, in a clone of this repository (the fetch makes sure
+`origin/master` is current; the last command prints the commit the archive was
+made from, so you can record it):
+
+```
+git fetch origin && git rev-parse --short origin/master
+git archive --format=tar.gz --prefix=siem-docker-stack/ -o "$HOME/siem-repo.tar.gz" origin/master scripts n8n docs docker/grafana/provisioning/alerting
+gzip -dc "$HOME/siem-repo.tar.gz" | git get-tar-commit-id
+scp -i KEY_FILE -o IdentitiesOnly=yes "$HOME/siem-repo.tar.gz" LOGGING_BOX:siem-repo.tar.gz
+rm -f "$HOME/siem-repo.tar.gz"
+```
+
+Then unpack it on LOGGING_BOX. `--strip-components=1` drops the
+`siem-docker-stack/` prefix, so the folders land directly in `REPO_DIR`:
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo mkdir -p /opt/siem-repo && sudo tar -xzf "$HOME/siem-repo.tar.gz" -C /opt/siem-repo --strip-components=1 --no-same-owner && rm -f "$HOME/siem-repo.tar.gz" && ls /opt/siem-repo/scripts/live-deploy /opt/siem-repo/n8n && ls -ld /opt/siem-repo'
+```
+
+Expected: the `live-deploy` scripts (including `siem-run`), `grafana-alert-router.json`
+in the `n8n` listing, and `drwxr-xr-x ... root root` for the folder. Here
+`REPO_DIR` is `/opt/siem-repo`; substitute it in every command below. To update
+later, repeat both blocks (files removed from the repo stay behind; to reset
+first, `sudo rm -rf /opt/siem-repo`, since it holds nothing else).
+
+Rollback: `sudo rm -rf /opt/siem-repo`. Nothing else changed. The archive holds
+only repository files, no secret value and no live address.
 
 ## Step 0b. One dev config for every new Grafana value (LIVE)
 
@@ -152,7 +210,7 @@ doppler configs --project homelab
    five existing ones, and nothing existing changes. It holds no secrets yet.
 
    Rollback for this item: delete it only while it is empty. First confirm it is
-   empty (INFERRED flag; check `doppler secrets --help`):
+   empty (`--only-names` is VERIFIED from `doppler secrets --help`, 2026-11-20):
 
 ```
 doppler secrets --only-names --project homelab --config dev_network
@@ -192,13 +250,15 @@ doppler secrets get GRAFANA_WEBHOOK_SECRET --plain --project homelab --config pr
      authentication, step 1).
    - VERIFIED: `set` echoes the value by default and `--silent` suppresses it
      (setting-secrets). Every `doppler secrets set` in this runbook carries
-     `--silent` and ends in `> /dev/null`.
-   - INFERRED: `--project`/`-p` and `--config`/`-c` are documented as general
-     flags but the docs show them only on `doppler run`; their use on
-     `secrets get` and `secrets set` is not shown. The docs site has no
-     per-command reference page for these, so the authority is the CLI itself:
-     confirm with `doppler secrets get --help` and `doppler secrets set --help`
-     before running the commands.
+     `--silent` and ends in `> /dev/null`. The CLI's own help describes
+     `--silent` only as "disable output of info messages" (read from
+     `doppler secrets set --help` 2026-11-20), so the `> /dev/null` is the part
+     you rely on; keep both.
+   - VERIFIED (CLI help, run 2026-11-20): `doppler secrets get` and `doppler
+     secrets set` both take `--project/-p` and `--config/-c`; `get` has
+     `--plain`; `doppler secrets` has `--only-names`; `doppler configs create`
+     and `delete` take the flags used in item 1. Confirm again with `--help` if
+     your CLI version differs.
    - NOT DOCUMENTED: whether `--plain` prints a trailing newline, and how `set`
      treats a trailing newline on stdin. That is why the check in item 3 is
      required, not optional.
@@ -207,7 +267,7 @@ doppler secrets get GRAFANA_WEBHOOK_SECRET --plain --project homelab --config pr
    value.
 
 3. Required check of the copy, printing only `same` or `differs`, never a value
-   (flags are INFERRED per item 2, so confirm with `--help` first):
+   (flags are VERIFIED per item 2):
 
 ```
 test "$(doppler secrets get GRAFANA_WEBHOOK_SECRET --plain --project homelab --config prd_network | sha256sum | cut -d' ' -f1)" = "$(doppler secrets get GRAFANA_WEBHOOK_SECRET --plain --project homelab --config dev_network | sha256sum | cut -d' ' -f1)" && echo same || echo differs
@@ -219,7 +279,34 @@ copy, do not start the Grafana restart in steps 4 and 5 with it, and do not
 try to fix it by typing or printing the value. Delete the dev copy (see
 Rollback below) until it is resolved.
 
-Watch: the output of step 2 is empty, and no secret value appears anywhere in
+4. Find out which other variables the Grafana restart needs, BEFORE steps 4 and
+   5 restart it from this one config. `docker compose up -d grafana` reads the
+   whole compose file, and `docker/docker-compose.yml` requires, with no default,
+   `GRAFANA_ADMIN_PASS`, `WAZUH_GRAFANA_RO_PASSWORD`, `OPENSEARCH_READONLY_PASSWORD`,
+   `GRAFANA_INFLUX_PASSWORD`, `PROMETHEUS_GRAFANA_PASSWORD`,
+   `PROMETHEUS_OTLP_GRAFANA_PASSWORD`, `INFLUXDB_ADMIN_PASSWORD` and more (list them
+   all with the first command below, which prints names only). Variables that have a
+   default, such as `SIEM_HOST` (it sets `GF_SERVER_ROOT_URL`), `GRAFANA_ADMIN_USER`
+   and `BIND_ADDR`, silently fall back to the default when they are missing: a
+   restart that lacks `SIEM_HOST` changes Grafana's root URL. Where these values come
+   from today (an `.env` file in `/opt/siem` that Compose reads on its own, or the
+   shell) is not in a repo doc (OPEN QUESTION). Compose reads `/opt/siem/.env` in
+   addition to the shell, and a `doppler run` value wins over `.env`, so an `.env`
+   that already holds them is enough (INFERRED from Compose's precedence rules).
+   Read-only checks, names and a file listing only, never a value:
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'grep -oE "[$][{][A-Za-z0-9_]+" /opt/siem/docker-compose.yml | sort -u; ls -l /opt/siem/.env'
+doppler secrets --only-names --project homelab --config dev_network
+```
+
+   Every name from the first list that is neither in `/opt/siem/.env` nor in the
+   second list must be added to `dev_network` (copy it from `prd_network` the way
+   item 2 does, one at a time, with the item 3 check) before any Grafana restart.
+   If the restart fails with a `set NAME` message, the container is unchanged:
+   add that name and retry.
+
+Watch: the output of item 2 is empty, and no secret value appears anywhere in
 the terminal or scrollback.
 
 Note that the copy now holds a shared secret in two configs. `docs/update-alerting.md`
@@ -281,7 +368,11 @@ sudo chmod 0640 /etc/siem-state-backup.toml
 ```
 
 (Run the `chgrp` after step 2b creates the config, and set `destination_dir` to
-`/var/lib/SERVICE_ACCOUNT/backups`; both are INFERRED layout choices.)
+`/var/lib/SERVICE_ACCOUNT/backups` for the SCHEDULED run; both are INFERRED layout
+choices.) The backup refuses a `destination_dir` that is not owned by the user
+running it (VERIFIED: `scripts/state_backup_lib.py`, "destination_dir is not owned
+by the user running the backup"), so the by-hand `sudo` run of step 2c, which runs
+as root, cannot use this directory; step 2c says what to do.
 `ProtectSystem=strict` in the example unit also needs `ReadWritePaths` to name the
 archive directory; edit the unit in step 2e.
 
@@ -380,9 +471,12 @@ Watch:
 
 - Pings arrive every 5 to 6 minutes (VERIFIED: `docs/heartbeat.md`, "How it
   works"; Grafana repeats only at a `group_interval` tick). Over 30 minutes
-  expect 5 to 6 pings.
-- A gap over 6 minutes or two pings closer than 5 minutes is not expected; note
-  the times.
+  expect 5 to 6 pings. A failed ping is now retried up to 3 times, so one ping
+  can arrive up to 19 seconds late (VERIFIED: `docs/heartbeat.md`, "Failure
+  behavior"); that is not a fault.
+- A gap over about 6.5 minutes or two pings closer than 5 minutes is not
+  expected; note the times. The observer goes down only after about 20 minutes
+  of silence (period 5 plus grace 15), which tolerates about three missed pings.
 - No `/fail` pings: those mean a heartbeat with a wrong `phone` label (VERIFIED:
   "Contract failure sends /fail").
 
@@ -462,13 +556,28 @@ works; check the package source.) In the editor set:
 
 ### 2c. First run, by hand
 
+`sudo` runs the backup as root because it needs the container runtime, and the
+backup refuses a `destination_dir` that is not owned by the user running it
+(VERIFIED: `scripts/state_backup_lib.py`). So for this by-hand run `destination_dir`
+must be a root-owned folder, not the `SERVICE_ACCOUNT` folder of step 0c. Create
+it and set `destination_dir = "/var/backups/siem-state"` (the example's default)
+in the config first:
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo install -d -m 700 -o root -g root /var/backups/siem-state && ls -ld /var/backups/siem-state'
+```
+
+OWNER DECISION (with Q9a): the scheduled runs as `SERVICE_ACCOUNT` need
+`destination_dir` owned by that account (`/var/lib/SERVICE_ACCOUNT/backups`,
+step 0c), so the config's `destination_dir` changes again when step 2e is done.
+Until Q9a is answered, only the by-hand root run exists.
+
 ```
 ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && sudo python3 scripts/backup-state.py --config /etc/siem-state-backup.toml; echo "exit code: $?"'
 ```
 
-(`sudo` because the run needs the container runtime. The scheduled runs use the
-dedicated account from step 0c; its Docker access is Q9a. INFERRED.) Then look
-at the output directory:
+(The scheduled runs use the dedicated account from step 0c; its Docker access is
+Q9a. INFERRED.) Then look at the output directory:
 
 ```
 ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo ls -l /var/backups/siem-state'
@@ -506,13 +615,18 @@ prove it also decrypts. Record the date and result in your ops notes
 
 ### 2e. Schedule it
 
-Only after 2c and 2d pass. Install the example unit and timer (they carry
-placeholder paths and a placeholder user; edit them first: set `User=` to
-`SERVICE_ACCOUNT` and `ReadWritePaths` to the archive directory, per step 0c, and
-wait for the Docker access answer in 0c.5 before enabling the timer):
+Only after 2c and 2d pass, and after the Docker access answer in 0c.5 (do not
+enable the timer before it). The example unit carries placeholder paths and a
+placeholder user. Copy both files, then edit the unit with `sudoedit`: set
+`User=` to `SERVICE_ACCOUNT`, `ExecStart=` to
+`/usr/bin/python3 REPO_DIR/scripts/backup-state.py --config /etc/siem-state-backup.toml`
+(the example's `/opt/siem/scripts/backup-state.py` does not exist on the box),
+and `ReadWritePaths=` to the archive directory; set `destination_dir` in the
+config to `/var/lib/SERVICE_ACCOUNT/backups`. Then enable the timer:
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo cp REPO_DIR/docs/examples/siem-state-backup.service REPO_DIR/docs/examples/siem-state-backup.timer /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now siem-state-backup.timer && systemctl list-timers siem-state-backup.timer'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo cp REPO_DIR/docs/examples/siem-state-backup.service REPO_DIR/docs/examples/siem-state-backup.timer /etc/systemd/system/ && sudoedit /etc/systemd/system/siem-state-backup.service'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo systemctl daemon-reload && sudo systemctl enable --now siem-state-backup.timer && systemctl list-timers siem-state-backup.timer'
 ```
 
 Expect the timer listed with a next run near 02:30 (VERIFIED: the example timer).
@@ -545,15 +659,27 @@ Steps, in the n8n web interface (the docs name no menu paths; use the workflow
 list and the credentials list as you find them, and send a screenshot if
 unsure):
 
-1. Open the workflow list and find the test copy by its name. Confirm it is
-   inactive and that its webhook path differs from the live one.
-2. Delete the workflow.
+1. List the workflows with their ids (INFERRED command, check
+   `n8n list:workflow --help`) and write down the id of the test copy, of the
+   live router (`ROUTER_ID`) and of the error handler (`HANDLER_ID`). Tell them
+   apart by id, not by name: a duplicate of the router has a similar name.
+   Open the test copy in the interface by its id. Confirm it is inactive and that
+   its webhook path differs from the live one.
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'docker exec n8n n8n list:workflow'
+```
+
+2. Delete the workflow (the copy only).
 3. Open the credentials list and find the credential made for the failing test
    (for example the deliberately wrong Discord or Pushover credential from the
    test, runbook items 2 and 5). Confirm no other workflow uses it, then delete
    it.
 4. Do not touch `grafana-webhook-auth`, `pushover-api`, the Discord webhook
    credential, the router, or the error handler (VERIFIED: runbook section 3).
+
+Read back: run the same `list:workflow` command again. The copy is gone and
+`ROUTER_ID` and `HANDLER_ID` are still listed.
 
 Watch: the next heartbeat ping still arrives within 6 minutes (step 1), and no
 new error appears in `docker logs --since 10m n8n`.
@@ -598,8 +724,8 @@ unset VAL
 doppler secrets --project homelab --config dev_network --only-names | grep -c DISCORD_FAILURE_WEBHOOK_URL
 ```
 
-The last line prints `1` when the name exists (INFERRED: the `--only-names`
-flag; the check prints a count, never the value). The `read -rs` plus stdin
+The last line prints `1` when the name exists (the `--only-names` flag is
+VERIFIED; the check prints a count, never the value). The `read -rs` plus stdin
 approach follows the documented `openssl ... | doppler secrets set ... >
 /dev/null` form (VERIFIED: `docs/update-alerting.md`); reading from a prompt is
 INFERRED.
@@ -613,7 +739,8 @@ to the grafana service"). In a session, back up and add one line after the
 
 ```
 cd /opt/siem
-cp docker-compose.yml "docker-compose.yml.bak-$(date +%Y%m%d)"
+( umask 077 && cp --no-clobber docker-compose.yml "docker-compose.yml.bak-$(date -u +%Y%m%dT%H%M%SZ)" )
+ls -l docker-compose.yml.bak-*
 grep -c 'DISCORD_FAILURE_WEBHOOK_URL' docker-compose.yml
 sed -i '/- GRAFANA_WEBHOOK_SECRET=/a\      - DISCORD_FAILURE_WEBHOOK_URL=${DISCORD_FAILURE_WEBHOOK_URL:-}' docker-compose.yml
 grep -n -B1 'DISCORD_FAILURE_WEBHOOK_URL' docker-compose.yml
@@ -622,7 +749,14 @@ grep -n -B1 'DISCORD_FAILURE_WEBHOOK_URL' docker-compose.yml
 The first `grep -c` must print `0` before the `sed` (else the line already
 exists; skip the `sed`). The last command shows the new line directly under
 `GRAFANA_WEBHOOK_SECRET`. The path `/opt/siem` is the documented default
-(`SIEM_DIR`).
+(`SIEM_DIR`). The backup is mode 600 and never replaces an earlier one (the same
+form as `docs/live-deploy-runbook.md`, section 5, step 4); its `ls` line must start
+with `-rw-------`. If the last `grep` prints nothing, the live file spells the
+line without `=` (the form `      - GRAFANA_WEBHOOK_SECRET` that the live deploy
+runbook gives): the `sed` anchor found nothing, so add the line by hand under that
+one instead. If the `cp` or the `sed` says permission denied, `/opt/siem` is not
+yours to write (INFERRED; step 4c needs `sudo` for the folder below it): repeat
+with `sudo`, and keep the backup mode 600.
 
 ### 4c. Copy the rule and the contact point
 
@@ -654,7 +788,11 @@ ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd /opt/siem && doppler ru
 
 (That the Doppler CLI on LOGGING_BOX is logged in to project `homelab` with
 access to the dev config is INFERRED; the runbook's token file serves `siem-run`
-only.) Compose refusing to start with `GRAFANA_WEBHOOK_SECRET must be set and
+only, and that token is, per the repo's examples, scoped to `prd_network`, not to `dev_network`.
+OWNER DECISION: how the box reads `dev_network` for a Grafana or n8n restart, either
+a login of your own user on the box, or a read-only service token scoped to
+`dev_network` kept in a mode 600 file and used the way `siem-run` uses its token.
+The `SERVICE_ACCOUNT` token of step 0c is for that account's jobs only.) Compose refusing to start with `GRAFANA_WEBHOOK_SECRET must be set and
 non-empty` means the copy in step 0b is missing; the container stays on its old
 definition until it is fixed. Any other variable Grafana needs from the old
 `prd_network` setup, such as the Pushover or datasource values, must also be in
@@ -716,28 +854,41 @@ Firing, and a Discord message arrives in the failure channel (VERIFIED: rule
 
 Rollback (VERIFIED approach, same as `docs/live-deploy-runbook.md` section 5):
 delete the policy route; delete the two files from the live alerting folder;
-restore `docker-compose.yml.bak-<date>` over the compose file; run the restart
+restore `docker-compose.yml.bak-<UTC timestamp>` over the compose file; run the restart
 in 4d. n8n and the heartbeat are untouched by this change.
 
-### 4g. Optional: copy the files with the deploy script instead of 4c
+### 4g. Optional: copy the rule file with the deploy script instead of the first line of 4c
 
-Use this only after PR #126 is merged and the script is on LOGGING_BOX. The script
-copies files and nothing else: it never starts docker and never reads the compose
-file. Stage the repo files into `SIEM_STAGE_DIR`, look at the plan, then apply:
+PR #126 is merged (commit `862b687`), so the script is in the repo; it reaches
+LOGGING_BOX through step 0a. It replaces only the FIRST line of 4c (the rule file):
+the `discord-direct` contact point file in the second line of 4c is not on the
+script's allowlist and is always copied by hand. The script copies files and
+nothing else: it never starts docker and never reads the compose file. It needs
+write access to `/opt/siem/grafana/provisioning` as the user who runs it; 4c uses
+`sudo` for that folder, so check `ls -ld /opt/siem/grafana/provisioning` first
+(INFERRED: if it is root owned, this route does not work as your user, and 4c is
+the way). It also needs the `router-path` file of step 6.1 in the helper's config
+directory, because it writes the private path into `contact-points.yml`.
+
+Stage the repo files into `SIEM_STAGE_DIR` (default `$HOME/bin/alerting`; the folder
+must not be writable by group or others and the files must be mode 644), look at
+the plan, then apply:
 
 ```
-siem-run python3 -I scripts/live-deploy/grafana-deploy.py
-siem-run python3 -I scripts/live-deploy/grafana-deploy.py --apply
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'mkdir -p "$HOME/bin/alerting" && cd REPO_DIR/docker/grafana/provisioning/alerting && install -m 644 contact-points.yml update-alert-rules-unifi.yml update-alert-rules-pfsense.yml heartbeat-alert-rule.yml notification-failure-alert-rule.yml "$HOME/bin/alerting/"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && "$HOME/bin/siem-run" python3 -I scripts/live-deploy/grafana-deploy.py'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && "$HOME/bin/siem-run" python3 -I scripts/live-deploy/grafana-deploy.py --apply'
 ```
 
-The first command is a dry run (the default) and changes nothing. `--apply`
+The second command is a dry run (the default) and changes nothing. `--apply`
 backs up each file it replaces as `NAME.bak-<UTC timestamp>`, replaces the files
 one at a time and prints a `manifest:` line for each. It is not atomic: if it
 stops on an error it lists the files already replaced and the backup for each
 (`cp -p BACKUP FILE` restores one). Details: `docs/live-deploy-runbook.md`,
 section 5.
 
-The compose line stays manual and goes to the grafana service only. If your
+The compose lines stay manual and go to the grafana service only: the
+`DISCORD_FAILURE_WEBHOOK_URL` line of 4b is still needed. If your
 compose file does not already list `GRAFANA_WEBHOOK_SECRET` in the grafana service
 environment, follow `docs/live-deploy-runbook.md`, section 5, step 4: it makes the
 compose backup mode 600 and no-clobber (`umask 077`, `cp --no-clobber`), shows the
@@ -818,7 +969,8 @@ the doc says "the repo does not do this for you"). In a session:
 
 ```
 cd /opt/siem
-cp docker-compose.yml "docker-compose.yml.bak-$(date +%Y%m%d)-email"
+( umask 077 && cp --no-clobber docker-compose.yml "docker-compose.yml.bak-$(date -u +%Y%m%dT%H%M%SZ)-email" )
+ls -l docker-compose.yml.bak-*
 grep -c 'GF_SMTP_' docker-compose.yml
 for V in GF_SMTP_ENABLED GF_SMTP_HOST GF_SMTP_USER GF_SMTP_PASSWORD GF_SMTP_FROM_ADDRESS GF_SMTP_STARTTLS_POLICY P1_EMAIL_TO; do
   sed -i "/- GRAFANA_WEBHOOK_SECRET=/a\\      - ${V}=\${${V}:-}" docker-compose.yml
@@ -932,18 +1084,21 @@ docs use). The docs reach n8n at `http://n8n/webhook/...`, which is port 80
 n8n's own upstream default, so do not assume 5678. Find and note it:
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'grep -n -i -E "N8N_PORT|ports:|container_name: n8n" N8N_COMPOSE_FILE'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo grep -n -i -E "N8N_PORT|ports:|container_name: n8n" N8N_COMPOSE_FILE'
 ```
 
-Replace `N8N_COMPOSE_FILE` with the path of the compose file that defines n8n.
-Back it up first, then edit it to add this under the `n8n` service, with
+`N8N_COMPOSE_FILE` is the compose file that defines n8n (`/opt/n8n/docker-compose.yml`
+live, root owned, so `sudo` is used for every touch of it, as step 6.2 did). Back it
+up first (`cp -p` keeps its mode, and the file may hold values), then edit it with
+`sudoedit` to add this under the `n8n` service, with
 `CONTAINER_PORT` the value you read and `HOST_PORT` any free port above 1024
 that you choose (INFERRED: the `127.0.0.1:HOST:CONTAINER` form is standard
 Compose syntax, not in a repo doc, and publishing on a container attached to
 a bridge network is assumed to work alongside the macvlan one):
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cp N8N_COMPOSE_FILE "N8N_COMPOSE_FILE.bak-$(date +%Y%m%d)"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo cp -p N8N_COMPOSE_FILE "N8N_COMPOSE_FILE.bak-$(date -u +%Y%m%dT%H%M%SZ)" && ls -l N8N_COMPOSE_FILE.bak-*'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudoedit N8N_COMPOSE_FILE'
 ```
 
 ```
@@ -956,32 +1111,45 @@ because a recreate can drop it (VERIFIED: runbook, "Keep n8n on the siem
 network"):
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd N8N_COMPOSE_DIR && docker compose up -d n8n && docker port n8n && docker network inspect SIEM_NETWORK --format "{{range .Containers}}{{.Name}} {{end}}"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd N8N_COMPOSE_DIR && sudo docker compose up -d n8n && docker port n8n && docker network inspect SIEM_NETWORK --format "{{range .Containers}}{{.Name}} {{end}}"'
 ```
 
 `N8N_COMPOSE_DIR` is the folder of that file and `SIEM_NETWORK` the real network
 name from `docker network ls` (VERIFIED: runbook). Expect the new
-`127.0.0.1:HOST_PORT` line and `n8n` in the container list. Then send the
-baseline test alert (`n8n-test-router.py`, runbook section 4) and confirm the
-next heartbeat ping arrives within 6 minutes (step 1). A recreate restarts
-n8n, so do this in a quiet moment; the heartbeat and any firing alert wait for
-the restart.
-
-The URL for the watch config is then
-`http://127.0.0.1:HOST_PORT/webhook/PRIVATE_WEBHOOK_PATH` (plain http is allowed
-for localhost; VERIFIED: `docs/expiry-watch.md`). Prove it reaches the router
-without sending an alert, with a request that carries no secret and expects a
-401 or 403 (VERIFIED: runbook section 4, cases 1 to 3):
+`127.0.0.1:HOST_PORT` line and `n8n` in the container list. A recreate can also
+blank variables that the compose file takes from the environment (the heartbeat
+URL, and later the expiry secret) if the command runs without them (INFERRED; see
+the OWNER DECISION in 6.1, item 2). So read them back at once with the presence
+check of step 1 (`HEARTBEAT_PING_URL set` must still print), then send the
+baseline test alert and confirm the next heartbeat ping arrives within 6 minutes
+(step 1):
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'curl -s -o /dev/null -w "%{http_code}\n" -X POST -H "Content-Type: application/json" -d "{}" http://127.0.0.1:HOST_PORT/webhook/PRIVATE_WEBHOOK_PATH'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && "$HOME/bin/siem-run" python3 -I scripts/live-deploy/n8n-test-router.py; echo "exit code: $?"'
+```
+
+Expected: six lines ending `PASS` and `failed cases: 0` (VERIFIED: runbook section
+4); it posts three visible test messages to Discord. A recreate restarts n8n,
+so do this in a quiet moment; the heartbeat and any firing alert wait for the
+restart.
+
+Prove the loopback port reaches the Grafana router without sending an alert, with a
+request that carries no secret and expects a 401 or 403 (VERIFIED: runbook section
+4, cases 1 to 3). The private path is read on the box, so it never lands in your
+terminal or in the command text. This URL is for the probe only; the expiry watch
+uses its own path (6.1):
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'P=$(cat "$HOME/.config/doppler-siem/router-path") && curl -s -o /dev/null -w "%{http_code}\n" -X POST -H "Content-Type: application/json" -d "{}" "http://127.0.0.1:HOST_PORT/webhook/$P"'
 ```
 
 A `401` or `403` means the localhost URL reaches the authenticated router. A
 `404` means the path or port is wrong; `Connection refused` means no port is
-published.
+published. (`PRIVATE_WEBHOOK_PATH` in the placeholder table is the content of
+that `router-path` file.)
 
-Rollback: restore `N8N_COMPOSE_FILE.bak-<date>` over the compose file, run the
+Rollback: restore `N8N_COMPOSE_FILE.bak-<UTC timestamp>` over the compose file with
+`sudo cp -p`, run the
 same recreate command, and re-check the siem network and the heartbeat. Nothing
 else changes; the siem network name `n8n` still serves Grafana.
 
@@ -1017,14 +1185,22 @@ heartbeat healthy (step 1) so you can tell if the re-import disturbs the router.
 **1. Generate the new secret and store it (watch side).** A new random value, not
 the Grafana secret. It goes in on stdin, with `--silent` and `> /dev/null`, and is
 never printed. The `openssl rand -base64 32` form (44 characters) is the one the
-docs use (VERIFIED: `docs/update-alerting.md`, `docs/expiry-watch.md`):
+docs use (VERIFIED: `docs/update-alerting.md`, `docs/expiry-watch.md`). It prints a
+trailing newline. The watch refuses a token that holds anything but printable
+characters (VERIFIED: `scripts/expiry_watch.py`, the `_TOKEN` pattern allows 0x21 to
+0x7e), and the router compares the value byte for byte, so a stored newline would
+make every real run exit 2. Strip it, then read back only the length:
 
 ```
-openssl rand -base64 32 | doppler secrets set EXPIRY_WATCH_ROUTER_TOKEN --project homelab --config dev_network --silent > /dev/null
+openssl rand -base64 32 | tr -d '\n' | doppler secrets set EXPIRY_WATCH_ROUTER_TOKEN --project homelab --config dev_network --silent > /dev/null
+doppler secrets get EXPIRY_WATCH_ROUTER_TOKEN --plain --project homelab --config dev_network | wc -c
 ```
 
-Do not also run the "Value for EXPIRY_WATCH_ROUTER_TOKEN" prompt in 6b: this
-command is that step. The value is now only in Doppler.
+The second command prints a count, never the value. Expect `44`, or `45` if
+`--plain` adds its own newline (NOT DOCUMENTED, see step 0b item 2). Any other
+number: delete the secret in Doppler and redo this item. Do not also run the "Value
+for EXPIRY_WATCH_ROUTER_TOKEN" prompt in 6b: this command is that step. The value
+is now only in Doppler.
 
 **2. Give the n8n container the same value as `EXPIRY_WATCH_ROUTER_SECRET`.** The
 repo docs say: an environment entry in the n8n compose file with an empty
@@ -1033,14 +1209,15 @@ default, and `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` set there (VERIFIED:
 `- HEARTBEAT_PING_URL=${HEARTBEAT_PING_URL:-}`, and says the blocking setting is
 needed). That setting is already required for the heartbeat (VERIFIED:
 `docs/heartbeat.md`), so it should already be present; confirm it. Back up the
-n8n compose file first (N8N_COMPOSE_FILE and N8N_COMPOSE_DIR as in 6.0), and add
-this entry under the `n8n` service `environment:` list. The value comes from the
-watch-side name; mapping `_TOKEN` to `_SECRET` in the entry is an INFERRED
-choice that avoids storing the secret twice in Doppler (a second Doppler key with
-the `_SECRET` name is the alternative):
+n8n compose file first (N8N_COMPOSE_FILE and N8N_COMPOSE_DIR as in 6.0), then add
+this entry under the `n8n` service `environment:` list with `sudoedit`. The value
+comes from the watch-side name; mapping `_TOKEN` to `_SECRET` in the entry is an
+INFERRED choice that avoids storing the secret twice in Doppler (a second Doppler
+key with the `_SECRET` name is the alternative):
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cp N8N_COMPOSE_FILE "N8N_COMPOSE_FILE.bak-$(date +%Y%m%d)-expiry"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo cp -p N8N_COMPOSE_FILE "N8N_COMPOSE_FILE.bak-$(date -u +%Y%m%dT%H%M%SZ)-expiry" && ls -l N8N_COMPOSE_FILE.bak-*'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudoedit N8N_COMPOSE_FILE'
 ```
 
 ```
@@ -1048,15 +1225,28 @@ ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cp N8N_COMPOSE_FILE "N8N_C
       - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
 ```
 
-(Only add the second line if the file does not already carry it.) Recreate n8n
-with the dev_network values in the environment of the compose command, and
-re-check the siem network as in 6.0. How n8n's own variables, such as the
-heartbeat URL, reach its compose run today is not in a repo doc; run the compose
-command the way you already do and make the Doppler values present for it. The
-`doppler run` form below is INFERRED, by analogy with the Grafana restart:
+(Only add the second line if the file does not already carry it. Step 6.2 below
+adds `N8N_PAYLOAD_SIZE_MAX=1` after that line, so do 6.2 in this same edit and one
+recreate if you have not applied it yet: its `sed` needs the
+`N8N_BLOCK_ENV_ACCESS_IN_NODE=false` line to exist.) Recreate n8n with the
+dev_network values in the environment of the compose command, and re-check the siem
+network as in 6.0.
+
+OWNER DECISION: how n8n's variables reach `docker compose` on EVERY recreate. The
+entries above take their values from the environment of the compose command. A
+recreate run without them (the plain `sudo docker compose up -d n8n` of 6.0 and
+6.2) writes empty values: `HEARTBEAT_PING_URL` and `HEARTBEAT_KIND` go blank (the
+heartbeat turns off, the observer reports down after about 20 minutes) and
+`EXPIRY_WATCH_ROUTER_SECRET` goes blank (the watch gets 403). INFERRED, because no
+repo doc says how the heartbeat variables reach the compose run today. Choose one:
+(a) always run n8n's compose through `doppler run` as below, and keep the heartbeat
+values in `dev_network` too; (b) an env file next to the compose file, root owned,
+mode 600, which writes secrets to disk and so conflicts with the Doppler-only rule.
+Recommended: (a). The form below is INFERRED (`sudo --preserve-env=LIST` needs the
+sudoers rule to allow it, and refuses with a clear message if not):
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd N8N_COMPOSE_DIR && doppler run --project homelab --config dev_network -- docker compose up -d n8n; echo "exit code: $?"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd N8N_COMPOSE_DIR && doppler run --project homelab --config dev_network -- sudo --preserve-env=EXPIRY_WATCH_ROUTER_TOKEN,HEARTBEAT_PING_URL,HEARTBEAT_KIND docker compose up -d n8n; echo "exit code: $?"'
 ```
 
 Check presence only, never the value:
@@ -1072,27 +1262,77 @@ unaffected.
 **3. Re-import the router with the live import helper.** Use the existing router
 and handler ids, so the import overwrites the router in place (VERIFIED:
 `docs/live-deploy-runbook.md` section 3), and run it with the Doppler token the
-helper already uses:
+helper already uses. Order, from the helper's own docstring: the error handler is
+imported FIRST and its id passed to the router import, so the router's
+`errorWorkflow` setting points at a real workflow. The live handler already exists
+(`HANDLER_ID`), so only the router is re-imported here, with `--error-workflow-id
+HANDLER_ID`. On a fresh box, import the handler first (`docs/live-deploy-runbook.md`,
+section 3). Do not leave `--error-workflow-id` out: the router would then lose its
+error workflow setting.
+
+The import is an in-place overwrite of the live, active router, and the helper
+always writes the workflow INACTIVE (`active` is set to false in the script, and the
+live deploy runbook says "Both workflows import inactive"). So from the moment the
+import finishes until the publish and the n8n restart below have finished, the
+router receives nothing. That is the alert gap: Grafana's webhook calls fail (404
+or a refused connection), the heartbeat pings stop, and a real alert that fires
+inside the gap is delayed until Grafana retries or repeats it (INFERRED; the repeat
+interval is up to 4 hours for warnings). The gap is the restart time, about a minute.
+Keep it short: run import, publish and restart as ONE command in a quiet moment,
+right after a heartbeat ping arrived (step 1), and not while any game-day or test
+scenario runs. The observer tolerates about 20 minutes of silence, so one or two
+missed pings do not alert.
+
+Before the import, read three things (all read only):
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && "$HOME/bin/siem-run" python3 -I scripts/live-deploy/n8n-setup-alert-router.py --workflow n8n/grafana-alert-router.json ROUTER_ID --error-workflow-id HANDLER_ID; echo "exit code: $?"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'ls -l "$HOME/.config/doppler-siem/router-path" && cut -c1-15 "$HOME/.config/doppler-siem/router-path"; echo'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'docker exec n8n n8n --help | grep -E "publish|update:workflow"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'umask 077 && docker exec n8n n8n export:workflow --id=ROUTER_ID --output=/tmp/router-before.json && docker cp n8n:/tmp/router-before.json "$HOME/router-before.json" && docker exec n8n rm -f /tmp/router-before.json && ls -l "$HOME/router-before.json"'
+```
+
+- The first must list the file as `-rw-------` and print `grafana-alerts-`: that file
+  is the live Grafana path. If it is missing, the import makes a NEW Grafana path and
+  Grafana's contact point (still on the old one) gets 404 on every alert: stop and
+  find the file (the helper reads it from `SIEM_CONFIG_DIR`, default
+  `$HOME/.config/doppler-siem`; the user running the import must be the user who owns
+  it) before going on.
+- The second must show `publish:workflow`. On an older n8n only `update:workflow`
+  exists: use `update:workflow --id=ROUTER_ID --active=true` in the command below
+  (VERIFIED: `docs/game-day.md` says the name differs between versions).
+- The third saves a copy of the live router before it is overwritten (the
+  `export:workflow` flags are INFERRED; check `n8n export:workflow --help`). The file
+  holds the private webhook path, so it is mode 600 and stays on the box; delete it
+  after step 4 passes. The step 2 archive is the older fallback.
+
+Now the import, publish and restart, stopping at the first failure:
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && "$HOME/bin/siem-run" python3 -I scripts/live-deploy/n8n-setup-alert-router.py --workflow n8n/grafana-alert-router.json ROUTER_ID --error-workflow-id HANDLER_ID && docker exec n8n n8n publish:workflow --id=ROUTER_ID && docker restart n8n; echo "exit code: $?"'
 ```
 
 Expected output lines (VERIFIED: the script and runbook section 3):
-`workflow import exit code: 0`, `new webhook path saved (mode 600): ...` and
-`expiry watch webhook path saved (mode 600): ...`. The helper reuses the saved
+`workflow import exit code: 0`, `new webhook path saved (mode 600): ...`,
+`expiry watch webhook path saved (mode 600): ...` and `error workflow set: True`,
+then the publish output, the container name from `docker restart`, and
+`exit code: 0`. The helper reuses the saved
 Grafana path (`router-path`) when it looks right and makes the expiry path
 (`expiry-watch-alerts-` plus 24 URL-safe characters) the first time, writing it mode
 600 to `expiry-path` in the same config directory (VERIFIED: script). The
 committed `Expiry Watch Webhook` node ships disabled with a placeholder path
 (`PLACEHOLDER-set-by-the-import-helper`); only the helper enables it, with the
-private path. Whether a re-import leaves the workflow active is not documented
-(the runbook says imports arrive inactive; INFERRED). Publish and restart as the
-runbook says, in a quiet moment, then watch the heartbeat (step 1):
+private path. Read back that there is still exactly one router (no duplicate made
+by a wrong id) and the heartbeat resumes (step 1):
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'docker exec n8n n8n publish:workflow --id=ROUTER_ID && docker restart n8n'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'docker exec n8n n8n list:workflow'
 ```
+
+Rollback of this item: import the saved copy back
+(`docker cp "$HOME/router-before.json" n8n:/tmp/router-before.json`, then
+`docker exec n8n n8n import:workflow --input=/tmp/router-before.json`, then publish
+and restart as above). The saved file is a workflow array or one object depending
+on the n8n version; if the import rejects it, restore from the step 2 archive.
 
 **4. Post-import checks.** First the placeholder path must serve nothing (the
 point is that the committed node is disabled). That n8n registers no webhook for
@@ -1104,26 +1344,28 @@ ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'curl -s -o /dev/null -w "%
 ```
 
 Expect `404`. Anything else: stop, deactivate the workflow and report; do not use
-the endpoint. Then read the private path (an address, not a credential, but keep
-it out of git and chat; VERIFIED: `docs/expiry-watch.md`) and confirm the real
-path rejects a call with no secret:
+the endpoint. Then confirm the real path rejects a call with no secret. The private
+path is an address, not a credential, but keep it out of git and chat (VERIFIED:
+`docs/expiry-watch.md`), so it is read on the box and never printed:
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cat "$HOME/.config/doppler-siem/expiry-path"; echo'
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'curl -s -o /dev/null -w "%{http_code}\n" -X POST -H "Content-Type: application/json" -d "{}" http://127.0.0.1:HOST_PORT/webhook/EXPIRY_WATCH_PRIVATE_PATH'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'P=$(cat "$HOME/.config/doppler-siem/expiry-path") && curl -s -o /dev/null -w "%{http_code}\n" -X POST -H "Content-Type: application/json" -d "{}" "http://127.0.0.1:HOST_PORT/webhook/$P"'
 ```
 
 (`$HOME/.config/doppler-siem` is the helper's default config directory, VERIFIED:
 runbook variable table; use yours if you changed it.) Expect `403` (VERIFIED: a
 denied call is answered 403 with a fixed body). A real accepted call comes only
-from the dry-run-then-real-run in 6c and 6d, which uses the real secret.
+from the real run in 6d and the limit test in 6.3, which use the real secret. The
+dry run in 6c never posts and never reads the secret.
 
 **5. Point the watch at it.** In `/etc/expiry-watch/expiry-watch.toml` set
 `[router].url` to `http://127.0.0.1:HOST_PORT/webhook/EXPIRY_WATCH_PRIVATE_PATH`
 (the path from `expiry-path`; plain http is allowed for localhost, VERIFIED) and
 keep `[router].token_env = "EXPIRY_WATCH_ROUTER_TOKEN"`. Never commit the path.
-The file `expiry-path` may belong to the user who ran the helper while the config
-belongs to SERVICE_ACCOUNT; copy the one line by hand.
+The config file is created in 6a, so this edit happens there, after the files exist.
+The file `expiry-path` belongs to the user who ran the helper while the config
+belongs to SERVICE_ACCOUNT; copy the one line by hand (read it with `cat` in a session
+and paste it into the `sudoedit` of 6a; it stays out of command lines you save).
 
 **6. Ingress limits (Q12, ANSWERED 2026-11-20, issue #157).** The watch posts
 to the loopback port in 6.0, which does not pass a reverse proxy, so a proxy
@@ -1148,8 +1390,10 @@ body, so that setting is the real body cap.
 replaces the old one), then restart the n8n container so it reads the new
 environment (VERIFIED: `docs/expiry-watch.md` owner step 5): recreate n8n with the
 same `doppler run` command as item 2. Both sides change together; between the
-n8n restart and the next watch run the watch must already hold the new value (the
-dry run in 6c confirms).
+n8n restart and the next watch run the watch must already hold the new value. The
+dry run in 6c does NOT confirm that: it never reads the secret (VERIFIED:
+`scripts/expiry_watch.py` reads the token only when it posts). The first real run
+or the 6.3 test does.
 
 **Revoke the watch alone.** Empty the router's variable (VERIFIED: `docs/expiry-watch.md`
 owner step 5): set the n8n entry to an empty value, or delete
@@ -1187,7 +1431,26 @@ ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo cp -p /opt/n8n/docker
 Evidence (VERIFIED by the lead 2026-11-20 after the owner ran it): the read-back
 printed `N8N_PAYLOAD_SIZE_MAX=1` and `docker ps` showed a healthy container. On
 a new run, expect the same two lines; no `N8N_PAYLOAD_SIZE_MAX` line means the
-`sed` found no anchor line, so restore the backup (below) and edit by hand.
+`sed` found no anchor line, so restore the backup (below) and edit by hand. The
+backup name `.bak-payload` is fixed: if that file already exists, a second run
+overwrites the pre-change copy, so check with `ls` first and pick another name.
+
+That run recreated n8n WITHOUT `doppler run`, and its read-back did not check the
+two things a recreate can drop. Read them back now, and after any repeat of this
+section (INFERRED hazard, see the OWNER DECISION in 6.1 item 2). The heartbeat and
+(once 6.1 is done) expiry variables must still say `set`, and `n8n` must still be
+on the siem network:
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'docker exec n8n sh -c "if [ -n \"\$HEARTBEAT_PING_URL\" ]; then echo HEARTBEAT_PING_URL set; else echo HEARTBEAT_PING_URL unset; fi; echo HEARTBEAT_KIND=\${HEARTBEAT_KIND:-healthchecks}"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'docker network inspect SIEM_NETWORK --format "{{range .Containers}}{{.Name}} {{end}}"'
+```
+
+`HEARTBEAT_PING_URL unset` means the heartbeat is off: the observer reports down
+after about 20 minutes. Recreate n8n through the form chosen in the 6.1 OWNER
+DECISION and check again. `n8n` missing from the second list means Grafana cannot
+reach it: reattach it as in `docs/live-deploy-runbook.md`, "Keep n8n on the siem
+network". Also confirm the next heartbeat ping arrives (step 1).
 
 Blast radius: recreating n8n interrupts every webhook receiver for about 15
 seconds (Grafana, Wazuh and CrowdSec notices that arrive in that window are not
@@ -1210,22 +1473,72 @@ denied call is answered 403 by design (VERIFIED: `docs/expiry-watch.md`).
 
 Target: the `Expiry Watch Webhook` endpoint on LOGGING_BOX. Change: none to the
 system, it sends test notices. Blast radius: each call starts one workflow
-execution; accepted notices post to the alert channels, so use the dry-run notice
-form the watch documents or accept one test message.
+execution, and every ACCEPTED call posts one message to Discord (no phone: the
+body below has no `phone` label). The window test in item 3 therefore posts about
+30 messages; the dry run of the watch does not post and cannot stand in for this
+test (it never calls the router).
 
-1. Send one authenticated, valid notice (the watch's own `--dry-run` does not
-   post, so use a single real run of the watch, 6d, or one `curl` with the
-   secret and a body built as `docs/expiry-watch.md` describes). Expect it
-   accepted and one message.
-2. Send a burst: repeat the same call more than once within one second, and then
-   more than 30 times within 10 minutes. Expect 403 for a call under 1 second
-   after the last accepted one, and 403 beyond 30 accepted calls in 10 minutes.
-3. Open the n8n executions list for the workflow and read the 403 results: one
-   execution per denied call, with the denial reason in the check node's output.
-4. Evidence to record: the count of accepted versus denied calls and the 403
-   status for each denied one. If every call is denied, the Code node cannot
-   read the static data (see the UNVERIFIED list in 6.1, item 6); if a fast burst
-   is not denied, two overlapping executions read the old counter.
+OWNER DECISION: run item 3 (about 30 Discord messages in a minute), or accept
+items 1 and 2 as the evidence for the 1 second rule and defer the 30-in-10-minutes
+rule to real use.
+
+The secret never goes on a command line: the commands below pass the header on
+standard input (`curl -H @-`, VERIFIED to read headers from stdin with curl 8.21,
+run 2026-11-20) from the `printf` built-in, inside `doppler run`, so the value is only
+in the environment of that one child process. Run them as yourself, in a session on
+LOGGING_BOX where the Doppler CLI is logged in with access to `dev_network` (the
+`SERVICE_ACCOUNT` files are not needed here). The body is exactly the shape the
+watch builds (VERIFIED: `tests/python/test_router_expiry_secret.py`, `_expiry_body`):
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX
+```
+
+In that session:
+
+```
+umask 077
+printf '%s' '{"receiver":"expiry-watch","status":"firing","alerts":[{"status":"firing","labels":{"alertname":"Expiry watch: limit-test","severity":"info","expiry_watch":"true","item":"limit-test","kind":"test","stage":"30"},"annotations":{"summary":"limit test","description":"limit test"},"fingerprint":"0123456789abcdef0123456789abcdef"}]}' > "$HOME/notice.json"
+```
+
+1. One authenticated, valid notice. Expect `200` and one message in Discord:
+
+```
+doppler run --project homelab --config dev_network -- sh -c 'printf "Authorization: Bearer %s\n" "$EXPIRY_WATCH_ROUTER_TOKEN" | curl -s -o /dev/null -w "%{http_code}\n" -X POST -H @- -H "Content-Type: application/json" --data-binary @"$HOME/notice.json" "http://127.0.0.1:HOST_PORT/webhook/$(cat "$HOME/.config/doppler-siem/expiry-path")"'
+```
+
+2. A fast burst: three calls started at the same moment. The router accepts one
+   call and denies a call under 1 second after it, so expect one `200` and two
+   `403` (a second `200` means two overlapping executions read the old counter, a
+   finding):
+
+```
+doppler run --project homelab --config dev_network -- sh -c 'for i in 1 2 3; do printf "Authorization: Bearer %s\n" "$EXPIRY_WATCH_ROUTER_TOKEN" | curl -s -o /dev/null -w "%{http_code}\n" -X POST -H @- -H "Content-Type: application/json" --data-binary @"$HOME/notice.json" "http://127.0.0.1:HOST_PORT/webhook/$(cat "$HOME/.config/doppler-siem/expiry-path")" & done; wait'
+```
+
+3. The window (only if you chose to run it): 32 calls, 2 seconds apart, then the
+   count per status. Calls accepted in items 1 and 2 count toward the 30, so
+   `200` appears 30 minus those times and the rest are `403`:
+
+```
+doppler run --project homelab --config dev_network -- sh -c 'for i in $(seq 1 32); do printf "Authorization: Bearer %s\n" "$EXPIRY_WATCH_ROUTER_TOKEN" | curl -s -o /dev/null -w "%{http_code}\n" -X POST -H @- -H "Content-Type: application/json" --data-binary @"$HOME/notice.json" "http://127.0.0.1:HOST_PORT/webhook/$(cat "$HOME/.config/doppler-siem/expiry-path")"; sleep 2; done | sort | uniq -c'
+```
+
+4. Evidence to record: the status code for every call and the number of messages
+   that reached Discord (it must equal the number of `200` results). n8n lists NO
+   execution for these calls: the router stores neither successful nor failed
+   executions by design (`saveDataSuccessExecution` and `saveDataErrorExecution`
+   are `none`; VERIFIED: `docs/update-alerting.md`), so there is nothing to read in
+   the executions list. If every call is `403`, the Code node cannot read the static
+   data or the secret does not match (compare with the presence check in 6.1 item
+   2, and see the UNVERIFIED list in 6.1, item 6); if the fast burst has more than
+   one `200`, the counter is not safe under overlap.
+
+Clean up the body file when you are done:
+
+```
+rm -f "$HOME/notice.json"
+```
 
 Rollback: nothing to undo; wait 10 minutes for the counter window to clear.
 
@@ -1288,17 +1601,30 @@ unset VAL
 
 ### 6c. Dry run first (changes nothing, posts nothing, saves nothing)
 
+The config folder is mode 700 and owned by `SERVICE_ACCOUNT` (6a), so your own
+user cannot read it: run the watch as that account with `sudo -u`. The account's
+read-only Doppler token (0c.3) goes into the environment of the one `doppler run`
+child process from its file, never onto a command line (the `cat` argument is only
+the file path). `REPO_DIR` must be readable by the account (step 0a makes it so):
+
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && doppler run --project homelab --config dev_network -- python3 scripts/expiry_watch.py --config /etc/expiry-watch/expiry-watch.toml --dry-run; echo "exit code: $?"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo -u SERVICE_ACCOUNT sh -c "cd REPO_DIR && DOPPLER_TOKEN=\$(cat /var/lib/SERVICE_ACCOUNT/doppler-token) doppler run --no-check-version --config-dir /var/lib/SERVICE_ACCOUNT/.doppler -- python3 scripts/expiry_watch.py --config /etc/expiry-watch/expiry-watch.toml --dry-run; echo \"exit code: \$?\""'
 ```
 
-(`doppler run` form VERIFIED in `docs/update-alerting.md`; its use with this
-script is INFERRED.)
+(`doppler run` form VERIFIED in `docs/update-alerting.md`; `--config-dir` and
+`--no-check-version` are VERIFIED in `scripts/live-deploy/siem-run`; the token
+variable and the use with this script are INFERRED, see 0c.3. The token is scoped to
+`dev_network`, so no `--project` or `--config` is needed.)
+
+The dry run never reads the router secret (VERIFIED: `scripts/expiry_watch.py` looks
+the token up only when it posts), so a clean dry run does not prove the secret or
+the router URL. Section 6.3 and the first real run in 6d do.
 
 Watch:
 
 - Exit code `0` ok, `1` a provider or delivery failed (details on stderr), `2` a
-  config or secret problem (VERIFIED).
+  config problem; a missing or malformed secret gives `2` only on a real run
+  (VERIFIED).
 - The output lists the notices that are due and the JSON it would post. Check the
   item names, dates and owner lines are the real ones.
 - A TLS provider error is a real finding, not a date (VERIFIED: "tls").
@@ -1311,8 +1637,14 @@ Only when the dry run is clean and the route is the one you want. A real run
 posts real messages to Discord, and an unwanted message cannot be recalled:
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && doppler run --project homelab --config dev_network -- python3 scripts/expiry_watch.py --config /etc/expiry-watch/expiry-watch.toml; echo "exit code: $?"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo -u SERVICE_ACCOUNT sh -c "cd REPO_DIR && DOPPLER_TOKEN=\$(cat /var/lib/SERVICE_ACCOUNT/doppler-token) doppler run --no-check-version --config-dir /var/lib/SERVICE_ACCOUNT/.doppler -- python3 scripts/expiry_watch.py --config /etc/expiry-watch/expiry-watch.toml; echo \"exit code: \$?\""'
 ```
+
+An exit code `2` with `config error: set the environment variable
+EXPIRY_WATCH_ROUTER_TOKEN` means the token did not reach the process (check 6.1 item
+1 and the account's token file); a `403` from the router in the stderr text means the
+router's `EXPIRY_WATCH_ROUTER_SECRET` and the token differ or env access is blocked
+(6.1 item 2).
 
 Confirm the messages arrive and the state file `/etc/expiry-watch/expiry-watch-state.json`
 exists with mode 0600 (VERIFIED). Then schedule it on LOGGING_BOX with either a
@@ -1320,8 +1652,8 @@ systemd service and timer or a cron entry; both are given in
 `docs/expiry-watch.md`, "Scheduling", and the choice is yours. Whichever you
 pick, the job runs on the box, as the same user that owns the config folder, and
 reads its secrets only from the single dev config by wrapping the command in
-`doppler run --project homelab --config dev_network --` (the secrets are named by
-variable only; no value goes in the unit, the cron line or the config). That
+`doppler run` with the account's `dev_network` token, as in 6c (the secrets are
+named by variable only; no value goes in the unit, the cron line or the config). That
 doc's examples instead read the router secret from an `EnvironmentFile` (mode
 0600, owned by the job user); using `doppler run` in place of it is INFERRED, and
 needs the Doppler CLI logged in for that user (non-interactive login for a
