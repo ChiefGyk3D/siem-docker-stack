@@ -870,7 +870,163 @@ def test_round4_f4_a_bad_count_stops_before_listing_anything(tmp_path, bad):
 
 def test_round4_f4_the_owner_decision_for_n_is_documented():
     flat = " ".join(RUNBOOK.split())
-    assert "OWNER DECISION: the value of N" in flat and "never by hand" in flat
+    assert "OWNER DECISION: the value of N" not in flat  # decided 2026-11-20, see the decision pins below
+    assert 'DECIDED 2026-11-20 (owner: "3 others"): N is 3' in flat and "never by hand" in flat
+    assert all(" 3 " in c for c in PRUNE_CALLS)  # both documented calls use the decided count
+
+
+# ---- issue #179: owner decisions of 2026-11-20 and the scratch rehearsal ----------------
+
+def test_issue179_the_four_owner_decisions_are_pinned():
+    flat = " ".join(RUNBOOK.split())
+    for quote in ('owner: "Rehearse on a scratch n8n first"', 'owner: "Service-account-owned folder"',
+                  'owner: "3 others"', 'owner: "Skip it for now"'):
+        assert quote in flat, quote
+    assert "OWNER DECISION: run item 3" not in flat
+    assert "OWNER DECISION (with Q9a)" not in flat
+    assert "OWNER DECISION: the export-to-import round trip" not in flat
+    s2c = " ".join(section("### 2c. First run, by hand", "### 2d.").split())
+    assert "/var/backups/siem-state" in s2c and "/var/lib/SERVICE_ACCOUNT/backups" in s2c
+    assert "by-hand root run keeps `/var/backups/siem-state`" in s2c
+    assert "/var/lib/SERVICE_ACCOUNT/backups" in " ".join(section("### 2e. Schedule it", "## Step 3.").split())
+    s63 = " ".join(section("### 6.3 Test the router limits", "### 6a.").split())
+    assert "item 3" in s63 and "skipped for now" in s63 and "optional later step" in s63
+    assert "3. The window (only if you chose to run it)" in s63
+
+
+def test_issue179_other_owner_decisions_are_left_alone():
+    assert FLAT.count("OWNER DECISION") >= 3  # the decisions that are not answered stay open
+
+
+REHEARSAL_SECTION = section("### 6.0a ", "### 6.1 ")
+REHEARSE = def_fence("owner_rehearse_router")
+
+
+def test_issue179_the_rehearsal_is_a_step_before_the_import_in_the_documented_format():
+    assert RUNBOOK.index("### 6.0a ") < RUNBOOK.index("**3. Re-import the router")
+    assert_under(REHEARSE, "### 6.0a ", "### 6.1 ")
+    flat = " ".join(REHEARSAL_SECTION.split())
+    for label in ("Target:", "Change:", "Evidence you get:", "Blast radius:", "Rollback:"):
+        assert label in flat, label
+    assert "What this rehearsal does NOT prove" in flat
+    for gap in ("live webhook registration", "Grafana path", "real credentials"):
+        assert gap in flat, gap
+    assert "different, random encryption key" in flat and "never the live key" in flat
+    assert "names only, never a value" in flat or "names only" in flat
+    assert "nothing" in flat.lower() and "INFERRED" in flat and "https://docs.n8n.io/hosting/cli-commands/, read 2026-11-20" in flat
+    assert "Until the owner has run it" in flat and "stays INFERRED, not VERIFIED" in flat
+    # the rollback text no longer calls the export format verified
+    assert "is INFERRED, not VERIFIED" in " ".join(item3().split())
+
+
+def test_issue179_the_rehearsal_block_never_binds_wide_or_touches_the_live_folders():
+    assert "0.0.0.0" not in REHEARSAL_SECTION and "0.0.0.0" not in REHEARSE
+    assert '"127.0.0.1:${SCRATCH_PORT}:5678"' in REHEARSE
+    assert "/opt/n8n" not in REHEARSE and "N8N_COMPOSE_DIR" not in REHEARSE and "n8n_data" not in REHEARSE
+    mounts = re.findall(r'-v "([^"]+)"', REHEARSE)
+    assert len(mounts) == 2 and all(m.startswith("$SCRATCH_DIR/") for m in mounts), mounts
+    assert "--env-file" in REHEARSE and not re.search(r"docker run[^\n]* -e ", REHEARSE)  # the key never goes through argv
+    assert "publish:workflow" not in REHEARSE and "docker compose" not in REHEARSE
+    assert "docker restart" not in REHEARSE and "docker stop" not in REHEARSE
+
+
+R_STUBS = r'''
+docker() {
+  echo "docker $*" >> "$LOG"
+  if [ -n "$FAIL" ] && [[ "$*" == *"$FAIL"* ]]; then return 7; fi
+  case "$1" in
+    inspect) echo "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" ;;
+    ps) [ -n "$CTR_EXISTS" ] && echo abc123 ;;
+    cp) case "$2" in n8n:*) printf '%s' "$STUBJSON" > "$3";; esac ;;
+    exec)
+      case "$*" in
+        *"export:workflow"*"/work/scratch.json"*) printf '%s' "$SCJSON" > "$HOME/n8n-rehearsal/work/scratch.json" ;;
+        *"n8n-rehearsal n8n list:workflow"*) echo "aaaaaaaaaaaaaaaa|Router" ;;
+      esac ;;
+  esac
+  return 0
+}
+ss() { [ "$SS_FAIL" = 1 ] && return 1; echo "State Recv-Q"; [ -n "$PORT_BUSY" ] && echo "LISTEN 0 4096 127.0.0.1:15678"; return 0; }
+sleep() { :; }
+'''
+CRED_JSON = '{"nodes":[{"credentials":{"discordWebhookApi":{"id":"1","name":"Discord"}}},{}]}'
+
+
+def run_rehearsal(tmp_path, fail="", port_busy="", ctr_exists="", pre_dir=False, scjson=CRED_JSON, ss_fail=""):
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    if pre_dir:
+        (home / "n8n-rehearsal").mkdir()
+        (home / "n8n-rehearsal" / "keep.txt").write_text("keep")
+    log = tmp_path / "log"
+    log.write_text("")
+    overrides = "\n".join("%s=%s" % kv for kv in VARS.items())
+    script = "\n".join([R_STUBS, CHK, overrides, REHEARSE, "owner_rehearse_router", 'echo "RC=$?"'])
+    env = dict(os.environ, HOME=str(home), LOG=str(log), FAIL=fail, STUBJSON=CRED_JSON, SCJSON=scjson,
+               PORT_BUSY=port_busy, CTR_EXISTS=ctr_exists, SS_FAIL=ss_fail)
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, timeout=60)
+    rc = int(re.findall(r"RC=(\d+)", out.stdout)[-1])
+    return rc, out.stdout + out.stderr, log.read_text(), home / "n8n-rehearsal"
+
+
+def test_issue179_rehearsal_success_tears_down_and_uses_only_loopback_and_scratch_mounts(tmp_path):
+    rc, out, log, scratch = run_rehearsal(tmp_path)
+    assert rc == 0 and "rehearsal exit code: 0" in out and "teardown ok" in out, out
+    assert "rehearsal compare ok: 2 nodes in both" in out and "discordWebhookApi:Discord" in out
+    assert not scratch.exists()
+    run = next(l for l in log.splitlines() if l.startswith("docker run"))
+    assert "-p 127.0.0.1:15678:5678" in run and "0.0.0.0" not in run
+    assert "/opt/n8n" not in log and "N8N_ENCRYPTION_KEY" not in log and "publish:workflow" not in log
+    assert run.count(" -v ") == 2 and str(scratch) in run
+    assert "docker rm -f n8n-rehearsal" in log
+    assert "docker exec n8n rm -f /tmp/router-rehearsal.json" in log  # the live side is cleaned too
+
+
+@pytest.mark.parametrize("kw,msg", [
+    ({"port_busy": "1"}, "port 15678 is already in use"),
+    ({"ctr_exists": "1"}, "a container named n8n-rehearsal already exists"),
+    ({"ss_fail": "1"}, "cannot be proven free"),
+])
+def test_issue179_rehearsal_refuses_and_touches_nothing(tmp_path, kw, msg):
+    rc, out, log, scratch = run_rehearsal(tmp_path, **kw)
+    assert rc == 1 and "REHEARSAL STOP" in out and msg in out, out
+    assert not scratch.exists()
+    assert "docker run" not in log and "docker rm" not in log and "export:workflow" not in log
+
+
+def test_issue179_rehearsal_refuses_an_existing_folder_and_never_deletes_it(tmp_path):
+    rc, out, log, scratch = run_rehearsal(tmp_path, pre_dir=True)
+    assert rc == 1 and "already exists" in out, out
+    assert (scratch / "keep.txt").read_text() == "keep"  # a refusal never tears down what it did not make
+    assert "docker run" not in log and "docker rm" not in log
+
+
+@pytest.mark.parametrize("fail,started", [
+    ("export:workflow --id", False), ("run -d", True), ("list:workflow", True),
+    ("import:workflow", True), ("/work/scratch.json", True),
+])
+def test_issue179_rehearsal_tears_down_on_every_failure(tmp_path, fail, started):
+    rc, out, log, scratch = run_rehearsal(tmp_path, fail=fail)
+    assert rc != 0 and "REHEARSAL FAILED at" in out and "rehearsal exit code: 0" not in out, out
+    assert not scratch.exists(), "the scratch folder must be removed"
+    assert ("docker rm -f n8n-rehearsal" in log) == started
+    assert "teardown ok" in out
+    assert "publish:workflow" not in log
+
+
+@pytest.mark.parametrize("scjson,what", [
+    ('{"nodes":[{}]}', "node count"),
+    ('{"nodes":[{"credentials":{"discordWebhookApi":{"id":"1","name":"Other"}}},{}]}', "credential references differ"),
+])
+def test_issue179_a_changed_node_count_or_credential_list_fails_and_tears_down(tmp_path, scjson, what):
+    rc, out, log, scratch = run_rehearsal(tmp_path, scjson=scjson)
+    assert rc != 0 and what in out, out
+    assert not scratch.exists() and "docker rm -f n8n-rehearsal" in log
+
+
+def test_issue179_the_rehearsal_key_file_is_private_and_not_the_live_key():
+    assert "umask 077" in REHEARSE and '= 600' in REHEARSE and "openssl rand -hex 32" in REHEARSE
+    assert "docker exec n8n env" not in REHEARSE and "inspect --format '{{.Config.Env" not in REHEARSE
 
 
 # ---- issue #177: the box reads dev_network through the siem-net-run wrapper, never a bare doppler run ----
