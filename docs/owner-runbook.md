@@ -25,7 +25,7 @@ marked:
 | `KEY_FILE` | Path to the SSH private key for LOGGING_BOX |
 | `REPO_DIR` | Where this repository is checked out on LOGGING_BOX |
 | `SIEM_DIR` | Live stack directory, default `/opt/siem` (`docs/live-deploy-runbook.md`, variable table) |
-| `DEV_CONFIG` | The Doppler dev config of project `homelab`. Its exact name is an OPEN QUESTION (Q1) |
+| `dev_network` | The Doppler branch config under the `dev` environment of project `homelab` that holds every new alerting value (created in step 0b) |
 | `ROUTER_ID`, `HANDLER_ID` | The n8n workflow ids printed by the router import (`docs/live-deploy-runbook.md`, section 3) |
 
 Rules every step follows:
@@ -39,7 +39,7 @@ Rules every step follows:
   Doppler's setting-secrets page, read 2026-11-19; `> /dev/null` per
   `docs/update-alerting.md`, webhook authentication, step 1). Secret values go
   in on stdin, never on a command line.
-- New secrets go in project `homelab`, config `DEV_CONFIG`, never `prd_network`
+- New secrets go in project `homelab`, config `dev_network`, never `prd_network`
   or any prd config, until the owner says the stack is live in production.
 - No secret value, host name, real domain or personal detail is written in this
   file. Addresses use `example.com`; the documentation range 192.0.2.x stands
@@ -50,12 +50,11 @@ Rules every step follows:
 
 | # | Question | Where it bites |
 |---|----------|----------------|
-| Q1 | What is the exact name of the `homelab` dev config? `docs/channel-redundancy.md` calls it "a guess". List it with `doppler configs --project homelab` (INFERRED command; check `doppler configs --help`). | Steps 0b, 4, 5, 6 |
 | Q4 | The names `FAILTEST` (workflow and credential) appear in no repo doc. The closest text is the failure-path test copy in `docs/live-deploy-runbook.md`, section 4, items 1 to 6 ("the copy", "a wrong credential in the copy"). Read the exact names in the n8n UI. | Step 3 |
 | Q5 | What is the live name of the old router workflow? The repo workflow is named "Grafana SOAR - Alert Router" and the runbook calls the new one "Grafana SOAR - Alert Router (authenticated)". Which one is live and old is not in a doc. | Step 9 |
-| Q7 | `scripts/live-deploy/grafana-deploy.py` copies only four alert files (`contact-points.yml`, the two update rule files, `heartbeat-alert-rule.yml`; VERIFIED: the `FILES` tuple). It does not copy the notification failure rule or the example contact points, and it rewrites `contact-points.yml` on every run. Steps 4 and 5 therefore copy files by hand into their own files. Should the deploy script take over that job (a code change, not part of this doc)? Issue #126 (an open PR, not merged) is the deploy script change that will later replace the manual file copies in steps 4 and 5; until it merges, copy by hand as written. | Steps 4, 5 |
+| Q7 | RESOLVED by the deploy script change (PR #126, issue #125). `scripts/live-deploy/grafana-deploy.py` now deploys the notification failure rule and, only when you name them with `--include-example`, the P1 email contact point and policy examples. It defaults to a dry run, needs `--apply`, and backs up every file it replaces. It never starts docker and never reads the compose file, so the compose line and the restart stay manual (step 4b and 4d, and 4g below). Until the PR is merged and the script is on the host, copy by hand as written in steps 4 and 5. | Steps 4, 5 |
 | Q8 | The Grafana group id for `grafana_uid`/`grafana_gid` in the backup config is not stated. The compose file sets `user: "472"` (VERIFIED) and the example says `grafana_gid = 0`. Read it with `docker exec grafana id`. | Step 2 |
-| Q9 | Which account runs the scheduled backup? The example unit uses a dedicated user and warns that docker group membership is root-equivalent (VERIFIED: `docs/examples/siem-state-backup.service`). The account and its container access are the owner's decision. | Step 2 |
+| Q9a | How does the dedicated service account get Docker access for `docker cp` and `docker exec`? Docker group membership is root-equivalent; the safer option is a root-owned wrapper allowed by one exact `sudoers` rule. This doc does not choose. | Steps 0c, 2 |
 | Q10 | How is a P1 produced on demand to test the email route end to end? No doc says. | Step 5 |
 | Q11 | Should the expiry watch reuse the router secret from `prd_network` (copied to dev) or get its own router credential? | Step 6 |
 
@@ -115,7 +114,7 @@ Expected: three lines `... : present` and `exit code: 0` (VERIFIED: runbook
 section 2). `siem-run: token file missing or unreadable` means section 2 of that
 runbook is incomplete.
 
-Resolve Q1 here before steps 4 and 5, then do step 0b.
+Then do step 0b before steps 4 and 5.
 
 Rollback: nothing changed.
 
@@ -129,23 +128,47 @@ start Grafana without that variable (VERIFIED: `docker/docker-compose.yml`
 requires it non-empty). `prd_network` is not changed by anything in this step or
 in steps 4 and 5: it is only read, once, to make the copy.
 
-The dev config name is not in any doc (Q1). This file writes it as the
-placeholder `DEV_CONFIG`; replace it with the real name in every command below
-and in steps 4 to 6.
+The config is named `dev_network` (owner decision), a branch config under the
+`dev` environment of project `homelab`. It does not exist yet; item 1 creates
+it. The configs in `homelab` before this step are `dev`, `dev_personal`, `prd`,
+`prd_network` and `stg` (read with `doppler configs --project homelab` on
+2026-11-19). Do not use any prd config.
 
 Prerequisites: Doppler CLI logged in on the machine where you run these
 commands, with access to project `homelab`.
 
-1. Find or confirm the dev config (INFERRED command; check `doppler configs
-   --help`):
+1. Create `dev_network` and confirm it exists. Flags VERIFIED from
+   `doppler configs create --help`, run 2026-11-19: `--environment/-e`,
+   `--project/-p`, and the name as a positional argument or `--name`. INFERRED:
+   the naming rule for branch configs (the name starts with the environment
+   name, here `dev`); if Doppler refuses the name, stop and report the message.
 
 ```
+doppler configs create dev_network --project homelab --environment dev
 doppler configs --project homelab
 ```
 
-Pick the existing dev config, or create one in the Doppler web interface under
-the dev environment (this doc does not describe that screen; send a screenshot
-if unsure). Do not use any prd config.
+   The second command lists the configs; `dev_network` must appear next to the
+   five existing ones, and nothing existing changes. It holds no secrets yet.
+
+   Rollback for this item: delete it only while it is empty. First confirm it is
+   empty (INFERRED flag; check `doppler secrets --help`):
+
+```
+doppler secrets --only-names --project homelab --config dev_network
+```
+
+   Then delete it. Flags VERIFIED from `doppler configs delete --help`, run
+   2026-11-19: the config as a positional argument or `--config/-c`,
+   `--project/-p`, and `--yes/-y` to skip the confirmation (leave `--yes` off to
+   be asked):
+
+```
+doppler configs delete dev_network --project homelab
+```
+
+   Once later steps have put secrets in it, deleting it destroys them; use the
+   per-step rollbacks instead.
 
 2. Copy the webhook secret value from `prd_network` into the dev config without
    ever printing it. Doppler's own output goes straight into the second command
@@ -153,7 +176,7 @@ if unsure). Do not use any prd config.
    command carries `--silent` and also ends in `> /dev/null` (both, on purpose):
 
 ```
-doppler secrets get GRAFANA_WEBHOOK_SECRET --plain --project homelab --config prd_network | doppler secrets set GRAFANA_WEBHOOK_SECRET --project homelab --config DEV_CONFIG --silent > /dev/null
+doppler secrets get GRAFANA_WEBHOOK_SECRET --plain --project homelab --config prd_network | doppler secrets set GRAFANA_WEBHOOK_SECRET --project homelab --config dev_network --silent > /dev/null
 ```
 
    Method status, from Doppler's documentation read 2026-11-19
@@ -187,7 +210,7 @@ doppler secrets get GRAFANA_WEBHOOK_SECRET --plain --project homelab --config pr
    (flags are INFERRED per item 2, so confirm with `--help` first):
 
 ```
-test "$(doppler secrets get GRAFANA_WEBHOOK_SECRET --plain --project homelab --config prd_network | sha256sum | cut -d' ' -f1)" = "$(doppler secrets get GRAFANA_WEBHOOK_SECRET --plain --project homelab --config DEV_CONFIG | sha256sum | cut -d' ' -f1)" && echo same || echo differs
+test "$(doppler secrets get GRAFANA_WEBHOOK_SECRET --plain --project homelab --config prd_network | sha256sum | cut -d' ' -f1)" = "$(doppler secrets get GRAFANA_WEBHOOK_SECRET --plain --project homelab --config dev_network | sha256sum | cut -d' ' -f1)" && echo same || echo differs
 ```
 
 Expected: `same`. If it prints `differs`, the likely cause is a trailing newline
@@ -207,6 +230,124 @@ credential together"; add the dev copy to that list).
 
 Rollback: delete `GRAFANA_WEBHOOK_SECRET` from the dev config in Doppler. Nothing
 in `prd_network` was changed, and the live Grafana is unaffected until step 4d.
+
+## Step 0c. The dedicated service account for scheduled jobs (LIVE)
+
+Owner decision: a dedicated, non-login system account, placeholder
+`SERVICE_ACCOUNT` (suggested name `siem-ops`), runs both scheduled jobs: the state
+backup (step 2) and the expiry watch (step 6). Neither runs as a person or as
+root by default. Do this before step 2.
+
+Source for the shape: `docs/examples/siem-state-backup.service` (a dedicated
+user, `UMask=0077`, and the warning that docker group membership is
+root-equivalent) and `docs/expiry-watch.md` ("Scheduling": the job user owns the
+config, env file and state file, mode 0600).
+
+### 0c.1 Create the account and its state directory
+
+The flags below were checked against the local `useradd --help` on 2026-11-19
+(`--system`, `--no-create-home`, `--shell`, `--home-dir` all exist). That this
+combination suits your distribution is INFERRED. In a session on LOGGING_BOX:
+
+```
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin --home-dir /var/lib/SERVICE_ACCOUNT SERVICE_ACCOUNT
+sudo install -d -m 700 -o SERVICE_ACCOUNT -g SERVICE_ACCOUNT /var/lib/SERVICE_ACCOUNT
+id SERVICE_ACCOUNT
+ls -ld /var/lib/SERVICE_ACCOUNT
+```
+
+Expect a `uid=` line with no extra groups, and `drwx------` owned by the
+account. The nologin shell path may differ on your system (INFERRED; check
+`getent passwd` for what other system accounts use).
+
+### 0c.2 Where files live and who can read them
+
+| What | Where (examples, owner may change) | Who may read | Source |
+|------|------------------------------------|--------------|--------|
+| Backup archives and their `.manifest.json` | `destination_dir`, for example `/var/lib/SERVICE_ACCOUNT/backups` | root and `SERVICE_ACCOUNT` only (mode 700 directory, files written with `UMask=0077`) | example service unit; `docs/backup-restore.md` (directory must be owned by you and not group or world writable, VERIFIED) |
+| Backup config with the age PUBLIC recipients | `/etc/siem-state-backup.toml`, mode 0640 per the example, group `SERVICE_ACCOUNT` so only root and the account read it | root and `SERVICE_ACCOUNT` | example config |
+| Expiry watch config, registry and state file | `/etc/expiry-watch`, owned by `SERVICE_ACCOUNT`, mode 700 | `SERVICE_ACCOUNT` (and root) | `docs/expiry-watch.md` |
+| Doppler read-only token file | `/var/lib/SERVICE_ACCOUNT/doppler-token`, mode 600 | `SERVICE_ACCOUNT` only | this step |
+| The age PRIVATE keys | NOT on LOGGING_BOX | the owner, offline | `docs/backup-restore.md` secret material warning |
+
+The private age key is never on the box and the job never touches it: the backup
+uses public recipients only and cannot decrypt (VERIFIED: `docs/backup-restore.md`).
+Create the backup directory and set the group on the config:
+
+```
+sudo install -d -m 700 -o SERVICE_ACCOUNT -g SERVICE_ACCOUNT /var/lib/SERVICE_ACCOUNT/backups
+sudo chgrp SERVICE_ACCOUNT /etc/siem-state-backup.toml
+sudo chmod 0640 /etc/siem-state-backup.toml
+```
+
+(Run the `chgrp` after step 2b creates the config, and set `destination_dir` to
+`/var/lib/SERVICE_ACCOUNT/backups`; both are INFERRED layout choices.)
+`ProtectSystem=strict` in the example unit also needs `ReadWritePaths` to name the
+archive directory; edit the unit in step 2e.
+
+### 0c.3 How the account gets its secrets
+
+The owner creates a read-only Doppler service token scoped to the `dev_network`
+config only (project `homelab`), in the Doppler dashboard. This doc does not
+describe that screen (no repo doc verifies it; send a screenshot if unsure).
+Never type the token on a command line, never print it. Store it, read from a
+prompt, in a file only the account can read:
+
+```
+read -rs -p "Doppler service token: " TOK; echo
+printf '%s' "$TOK" | sudo install -m 600 -o SERVICE_ACCOUNT -g SERVICE_ACCOUNT /dev/stdin /var/lib/SERVICE_ACCOUNT/doppler-token
+unset TOK
+sudo ls -l /var/lib/SERVICE_ACCOUNT/doppler-token
+```
+
+Expect `-rw-------` owned by the account, and no token in the terminal
+(INFERRED: `install` from `/dev/stdin`; this mirrors the token-file pattern in
+`docs/live-deploy-runbook.md` section 2, which is VERIFIED for `siem-run`). A
+scheduled job then reads it through the Doppler CLI's token variable, for example
+`DOPPLER_TOKEN` set from that file inside the unit or wrapper, never written into
+the unit text (INFERRED: whether your CLI version takes the token that way;
+confirm with `doppler run --help`). A read-only token cannot be used to change
+secrets. Rotate it by creating a new token and replacing the file, then revoking
+the old one in the dashboard.
+
+### 0c.4 The timers run as this account
+
+The backup unit's `User=` is `SERVICE_ACCOUNT` (the example uses a placeholder
+user, VERIFIED). The expiry watch unit or cron entry runs as the same account, so
+the config folder in 6a is owned by it. Use whichever of systemd timers or cron
+you prefer; a cron entry goes in that account's crontab (`sudo crontab -u
+SERVICE_ACCOUNT -e`; INFERRED, a nologin account can still own a crontab).
+
+### 0c.5 Docker access: the owner decides (OPEN QUESTION Q9a)
+
+The backup uses `docker cp` and `docker exec` (VERIFIED: `docs/backup-restore.md`),
+so the account needs access to the Docker socket. Plainly: membership of the
+`docker` group is root-equivalent, since anyone who can start containers can
+mount the host's filesystem (VERIFIED: warning in
+`docs/examples/siem-state-backup.service`). Giving a service account that access
+means a flaw in the job or a leak of its files becomes a root-level problem.
+
+Two options. This doc does not choose:
+
+- Option 1: add `SERVICE_ACCOUNT` to the `docker` group. Simple, and the
+  root-equivalent risk above applies in full. The expiry watch does not need
+  Docker and can run without it only if it runs under a different account, which
+  contradicts the one-account decision.
+- Option 2: keep the account out of the `docker` group and let it run only the
+  exact backup command as root through a small root-owned wrapper script and a
+  `sudoers` entry that allows that one command and nothing else. Safer. Cost: the
+  wrapper and sudoers rule must be written, reviewed and tested (a code and
+  config change outside this doc), and the `restore` side is a separate
+  decision. The archives would then be written by root unless the wrapper
+  drops privileges, which is a design question for that change.
+
+Until the owner answers Q9a, do 0c.1 to 0c.4, and run step 2c by hand with `sudo`
+as written; do not schedule the backup (2e) and do not start the expiry watch
+timer under a docker-capable account.
+
+Rollback: `sudo userdel SERVICE_ACCOUNT` (INFERRED command name), then remove
+`/var/lib/SERVICE_ACCOUNT` once nothing needs the archives, and revoke the
+Doppler token in the dashboard. Archives you still need must be copied out first.
 
 ## Step 1. Read the Healthchecks ping log (LIVE, read only)
 
@@ -269,7 +410,7 @@ Prerequisites:
   offline").
 - A place for the archives on LOGGING_BOX (`destination_dir`, default in the
   example `/var/backups/siem-state`).
-- Q8 and Q9 answered.
+- Step 0c done, and Q8 answered.
 - The documented caveat: no live run of any of this has happened yet, including
   real `age`, `rclone` and the `docker exec` and `docker cp` calls (VERIFIED:
   "Not verified (no live run yet)"). Treat the first run as a test.
@@ -324,8 +465,9 @@ works; check the package source.) In the editor set:
 ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && sudo python3 scripts/backup-state.py --config /etc/siem-state-backup.toml; echo "exit code: $?"'
 ```
 
-(`sudo` because the run needs the container runtime; whether a non-root account
-should do this is Q9. INFERRED.) Then look at the output directory:
+(`sudo` because the run needs the container runtime. The scheduled runs use the
+dedicated account from step 0c; its Docker access is Q9a. INFERRED.) Then look
+at the output directory:
 
 ```
 ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo ls -l /var/backups/siem-state'
@@ -364,7 +506,9 @@ prove it also decrypts. Record the date and result in your ops notes
 ### 2e. Schedule it
 
 Only after 2c and 2d pass. Install the example unit and timer (they carry
-placeholder paths and a placeholder user; edit them first, Q9):
+placeholder paths and a placeholder user; edit them first: set `User=` to
+`SERVICE_ACCOUNT` and `ReadWritePaths` to the archive directory, per step 0c, and
+wait for the Docker access answer in 0c.5 before enabling the timer):
 
 ```
 ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo cp REPO_DIR/docs/examples/siem-state-backup.service REPO_DIR/docs/examples/siem-state-backup.timer /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now siem-state-backup.timer && systemctl list-timers siem-state-backup.timer'
@@ -438,7 +582,7 @@ Prerequisites:
 - A datasource with uid `prometheus` exists in the live Grafana (VERIFIED in
   `docker/grafana/provisioning/datasources/datasources.yml`; INFERRED for the
   live stack, check the datasource list).
-- Step 0b done, and Q1 and Q7 settled.
+- Step 0b done, and Q7 settled.
 
 ### 4a. Store the webhook URL in Doppler dev
 
@@ -448,9 +592,9 @@ echoes values:
 
 ```
 read -rs -p "Discord failure webhook URL: " VAL; echo
-printf '%s' "$VAL" | doppler secrets set DISCORD_FAILURE_WEBHOOK_URL --project homelab --config DEV_CONFIG --silent > /dev/null
+printf '%s' "$VAL" | doppler secrets set DISCORD_FAILURE_WEBHOOK_URL --project homelab --config dev_network --silent > /dev/null
 unset VAL
-doppler secrets --project homelab --config DEV_CONFIG --only-names | grep -c DISCORD_FAILURE_WEBHOOK_URL
+doppler secrets --project homelab --config dev_network --only-names | grep -c DISCORD_FAILURE_WEBHOOK_URL
 ```
 
 The last line prints `1` when the name exists (INFERRED: the `--only-names`
@@ -504,7 +648,7 @@ The restart reads only the one dev config from step 0b (owner decision). The
 `prd_network`:
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd /opt/siem && doppler run --project homelab --config DEV_CONFIG -- docker compose up -d grafana; echo "exit code: $?"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd /opt/siem && doppler run --project homelab --config dev_network -- docker compose up -d grafana; echo "exit code: $?"'
 ```
 
 (That the Doppler CLI on LOGGING_BOX is logged in to project `homelab` with
@@ -574,6 +718,42 @@ delete the policy route; delete the two files from the live alerting folder;
 restore `docker-compose.yml.bak-<date>` over the compose file; run the restart
 in 4d. n8n and the heartbeat are untouched by this change.
 
+### 4g. Optional: copy the files with the deploy script instead of 4c
+
+Use this only after PR #126 is merged and the script is on LOGGING_BOX. The script
+copies files and nothing else: it never starts docker and never reads the compose
+file. Stage the repo files into `SIEM_STAGE_DIR`, look at the plan, then apply:
+
+```
+siem-run python3 -I scripts/live-deploy/grafana-deploy.py
+siem-run python3 -I scripts/live-deploy/grafana-deploy.py --apply
+```
+
+The first command is a dry run (the default) and changes nothing. `--apply`
+backs up each file it replaces as `NAME.bak-<UTC timestamp>`, replaces the files
+one at a time and prints a `manifest:` line for each. It is not atomic: if it
+stops on an error it lists the files already replaced and the backup for each
+(`cp -p BACKUP FILE` restores one). Details: `docs/live-deploy-runbook.md`,
+section 5.
+
+The compose line stays manual and goes to the grafana service only. If your
+compose file does not already list `GRAFANA_WEBHOOK_SECRET` in the grafana service
+environment, follow `docs/live-deploy-runbook.md`, section 5, step 4: it makes the
+compose backup mode 600 and no-clobber (`umask 077`, `cp --no-clobber`), shows the
+item `      - GRAFANA_WEBHOOK_SECRET` to add by hand after the `GF_SERVER_ROOT_URL`
+line, and gives an `awk` check that only `grafana:` mentions the variable (the
+value stays in Doppler; never run `docker compose config` for the check, it
+prints resolved values). Then restart, as in 4d:
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd /opt/siem && doppler run --project homelab --config DEV_CONFIG -- docker compose up -d grafana; echo "exit code: $?"'
+```
+
+Check: `docker compose ls` lists the project as running, the grafana container shows
+`Up` (and `healthy` if it defines a healthcheck), and the checks of 4d pass.
+Rollback: restore the compose backup `docker-compose.yml.bak-<UTC timestamp>`
+and each replaced file from its `.bak-` copy, then run the restart above.
+
 ## Step 5. P1 email contact point (LIVE)
 
 Request item 6. Source: `docs/channel-redundancy.md` (sections "Enable it",
@@ -593,7 +773,7 @@ Prerequisites (VERIFIED: the provider-neutral checklist):
 - An SMTP login for that domain, a From address on the verified domain, and the
   recipient address or addresses for `P1_EMAIL_TO`.
 - Step 4 is finished and checked (one Grafana restart at a time).
-- Step 0b done and Q1 settled.
+- Step 0b done.
 
 Mailgun values (VERIFIED against the page cited in `docs/channel-redundancy.md`,
 read 2026-11-19 by that doc): host `smtp.mailgun.org`, port 587, STARTTLS.
@@ -606,11 +786,11 @@ verified domain, not the sandbox (sandbox sends only to authorized recipients).
 In a terminal where Doppler is logged in. The non-secret values:
 
 ```
-printf '%s' 'true' | doppler secrets set GF_SMTP_ENABLED --project homelab --config DEV_CONFIG --silent > /dev/null
-printf '%s' 'smtp.mailgun.org:587' | doppler secrets set GF_SMTP_HOST --project homelab --config DEV_CONFIG --silent > /dev/null
-printf '%s' 'MandatoryStartTLS' | doppler secrets set GF_SMTP_STARTTLS_POLICY --project homelab --config DEV_CONFIG --silent > /dev/null
-printf '%s' 'alerts@example.com' | doppler secrets set GF_SMTP_FROM_ADDRESS --project homelab --config DEV_CONFIG --silent > /dev/null
-printf '%s' 'oncall@example.com' | doppler secrets set P1_EMAIL_TO --project homelab --config DEV_CONFIG --silent > /dev/null
+printf '%s' 'true' | doppler secrets set GF_SMTP_ENABLED --project homelab --config dev_network --silent > /dev/null
+printf '%s' 'smtp.mailgun.org:587' | doppler secrets set GF_SMTP_HOST --project homelab --config dev_network --silent > /dev/null
+printf '%s' 'MandatoryStartTLS' | doppler secrets set GF_SMTP_STARTTLS_POLICY --project homelab --config dev_network --silent > /dev/null
+printf '%s' 'alerts@example.com' | doppler secrets set GF_SMTP_FROM_ADDRESS --project homelab --config dev_network --silent > /dev/null
+printf '%s' 'oncall@example.com' | doppler secrets set P1_EMAIL_TO --project homelab --config dev_network --silent > /dev/null
 ```
 
 Replace `alerts@example.com` and `oncall@example.com` with your own addresses (the
@@ -619,9 +799,9 @@ echo:
 
 ```
 read -rs -p "SMTP user: " VAL; echo
-printf '%s' "$VAL" | doppler secrets set GF_SMTP_USER --project homelab --config DEV_CONFIG --silent > /dev/null
+printf '%s' "$VAL" | doppler secrets set GF_SMTP_USER --project homelab --config dev_network --silent > /dev/null
 read -rs -p "SMTP password: " VAL; echo
-printf '%s' "$VAL" | doppler secrets set GF_SMTP_PASSWORD --project homelab --config DEV_CONFIG --silent > /dev/null
+printf '%s' "$VAL" | doppler secrets set GF_SMTP_PASSWORD --project homelab --config dev_network --silent > /dev/null
 unset VAL
 ```
 
@@ -657,7 +837,7 @@ sudo install -m 644 REPO_DIR/docker/grafana/provisioning/alerting/email-contact-
 ### 5d. Restart Grafana and check
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd /opt/siem && doppler run --project homelab --config DEV_CONFIG -- docker compose up -d grafana; echo "exit code: $?"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd /opt/siem && doppler run --project homelab --config dev_network -- docker compose up -d grafana; echo "exit code: $?"'
 ```
 
 Check `docker logs --since 5m grafana 2>&1 | tail -40` for SMTP or provisioning
@@ -817,10 +997,10 @@ links"). Keep it outside the repo, since the router URL contains the private
 webhook path.
 
 ```
-sudo install -d -m 700 -o "$USER" /etc/expiry-watch
-cp REPO_DIR/docs/expiry-watch.example.toml /etc/expiry-watch/expiry-watch.toml
-cp REPO_DIR/docs/expiry-watch-registry.example.toml /etc/expiry-watch/expiry-watch-registry.toml
-"${EDITOR:-nano}" /etc/expiry-watch/expiry-watch.toml
+sudo install -d -m 700 -o SERVICE_ACCOUNT -g SERVICE_ACCOUNT /etc/expiry-watch
+sudo install -m 600 -o SERVICE_ACCOUNT -g SERVICE_ACCOUNT REPO_DIR/docs/expiry-watch.example.toml /etc/expiry-watch/expiry-watch.toml
+sudo install -m 600 -o SERVICE_ACCOUNT -g SERVICE_ACCOUNT REPO_DIR/docs/expiry-watch-registry.example.toml /etc/expiry-watch/expiry-watch-registry.toml
+sudoedit /etc/expiry-watch/expiry-watch.toml
 ```
 
 Edit (the example values are placeholders and several will fail until replaced):
@@ -857,7 +1037,7 @@ in `> /dev/null`:
 
 ```
 read -rs -p "Value for EXPIRY_WATCH_ROUTER_TOKEN: " VAL; echo
-printf '%s' "$VAL" | doppler secrets set EXPIRY_WATCH_ROUTER_TOKEN --project homelab --config DEV_CONFIG --silent > /dev/null
+printf '%s' "$VAL" | doppler secrets set EXPIRY_WATCH_ROUTER_TOKEN --project homelab --config dev_network --silent > /dev/null
 unset VAL
 ```
 
@@ -869,7 +1049,7 @@ credential".)
 ### 6c. Dry run first (changes nothing, posts nothing, saves nothing)
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && doppler run --project homelab --config DEV_CONFIG -- python3 scripts/expiry_watch.py --config /etc/expiry-watch/expiry-watch.toml --dry-run; echo "exit code: $?"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && doppler run --project homelab --config dev_network -- python3 scripts/expiry_watch.py --config /etc/expiry-watch/expiry-watch.toml --dry-run; echo "exit code: $?"'
 ```
 
 (`doppler run` form VERIFIED in `docs/update-alerting.md`; its use with this
@@ -891,7 +1071,7 @@ Only when the dry run is clean and the route is the one you want. A real run
 posts real messages to Discord, and an unwanted message cannot be recalled:
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && doppler run --project homelab --config DEV_CONFIG -- python3 scripts/expiry_watch.py --config /etc/expiry-watch/expiry-watch.toml; echo "exit code: $?"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && doppler run --project homelab --config dev_network -- python3 scripts/expiry_watch.py --config /etc/expiry-watch/expiry-watch.toml; echo "exit code: $?"'
 ```
 
 Confirm the messages arrive and the state file `/etc/expiry-watch/expiry-watch-state.json`
@@ -900,7 +1080,7 @@ systemd service and timer or a cron entry; both are given in
 `docs/expiry-watch.md`, "Scheduling", and the choice is yours. Whichever you
 pick, the job runs on the box, as the same user that owns the config folder, and
 reads its secrets only from the single dev config by wrapping the command in
-`doppler run --project homelab --config DEV_CONFIG --` (the secrets are named by
+`doppler run --project homelab --config dev_network --` (the secrets are named by
 variable only; no value goes in the unit, the cron line or the config). That
 doc's examples instead read the router secret from an `EnvironmentFile` (mode
 0600, owned by the job user); using `doppler run` in place of it is INFERRED, and

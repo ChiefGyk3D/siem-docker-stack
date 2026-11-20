@@ -564,7 +564,9 @@ def http_get_json(url, token, timeout):
     the whole call has one deadline: the reader re-arms the socket timeout with the time left, and
     when the deadline passes the socket is shut down so the worker thread ends. A name lookup
     CANNOT be interrupted: its worker stays until the lookup returns, and at most MAX_STUCK_FETCHES
-    such workers exist at once (later requests are refused, not given another thread). The
+    such workers exist at once (later requests are refused, not given another thread). When the
+    deadline passes the caller waits up to one more second for the worker to end, so a call can
+    return up to about one second after the deadline. The
     secret goes only to `url`, and no message made here contains it or the response body."""
     _check_url("url", url)
     if not isinstance(token, str) or not _TOKEN.fullmatch(token):
@@ -610,9 +612,13 @@ def http_get_json(url, token, timeout):
         except Exception as e:  # reported below; process-control exceptions pass through
             box["error"] = e
         finally:
-            if conn is not None:
-                conn.close()
-            _FETCH_SLOTS.release()
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:  # cleanup only: it must neither replace the result nor keep the slot
+                pass
+            finally:
+                _FETCH_SLOTS.release()
 
     worker = threading.Thread(target=work, daemon=True, name=f"expiry-get-{host}")
     try:
@@ -1601,6 +1607,11 @@ def _check_items(path, doc):
     return doc
 
 
+def _valid_state_key(key):
+    """The one rule for a provider's state key, for the writer (_provider_key) and the loader."""
+    return isinstance(key, str) and 0 < len(key) <= 300 and not _CONTROL.search(key)
+
+
 def _check_seen(path, seen):
     """The disappeared-item memory: every name, date and text field is validated as strictly as
     a provider's own data, because a bad entry here would build a notice."""
@@ -1608,7 +1619,7 @@ def _check_seen(path, seen):
         raise ExpiryWatchError(f"state: {path} has an unexpected shape")
     total = 0
     for key, recs in seen.items():
-        if not isinstance(key, str) or not key or len(key) > 300 or _CONTROL.search(key):
+        if not _valid_state_key(key):
             raise ExpiryWatchError(f"state: {path} has a bad provider key")
         if not isinstance(recs, dict) or len(recs) > MAX_ITEMS:
             raise ExpiryWatchError(f"state: {path} has too many remembered items for {key[:60]!r}")
@@ -1758,7 +1769,7 @@ def _provider_key(table, prov, n):
     key = getattr(prov, "state_key", None)
     if key is None:
         key = f"{table['type']}#{n}"  # a plug-in without a key: its position among the providers
-    if not isinstance(key, str) or not key or len(key) > 300 or _CONTROL.search(key):
+    if not _valid_state_key(key):
         raise ExpiryWatchError(f"provider {table['type']}: state_key must be a short text without control characters")
     return key
 
