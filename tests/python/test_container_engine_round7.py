@@ -229,6 +229,30 @@ def test_a_sigterm_with_a_raising_handler_removes_the_python_home(tmp_path):
     assert _gone((tmp_path / "d.txt").read_text())
 
 
+def test_an_interrupt_during_the_deletion_does_not_stop_it_and_is_raised_afterwards(monkeypatch):
+    saved = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, signal.default_int_handler)  # raises KeyboardInterrupt, as in a real run
+    real = ce.shutil.rmtree
+    calls = []
+
+    def spy(path, **kw):
+        calls.append(path)
+        if len(calls) == 1:
+            os.kill(os.getpid(), signal.SIGINT)  # arrives while the first deletion runs
+            time.sleep(0.05)
+        return real(path, **kw)
+
+    monkeypatch.setattr(ce.shutil, "rmtree", spy)
+    made = []
+    try:
+        with pytest.raises(KeyboardInterrupt):  # deletion finishes first, the interrupt is delivered afterwards
+            with ce.private_home() as d:
+                made.append(d)
+    finally:
+        signal.signal(signal.SIGINT, saved)
+    assert made and not os.path.exists(made[0]), "the interrupt cut the deletion short"
+
+
 # ------------------------------------------------------------------ docs
 
 def test_the_docs_state_what_is_not_covered():

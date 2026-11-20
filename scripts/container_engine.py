@@ -162,7 +162,17 @@ def private_home():
     try:
         yield d
     finally:
-        shutil.rmtree(d, ignore_errors=True)
+        # an interrupt (KeyboardInterrupt, a handler that raises) during the deletion does not stop it:
+        # the deletion is repeated until it completes, then the first interrupt is raised
+        pending = None
+        while True:
+            try:
+                shutil.rmtree(d, ignore_errors=True)
+                break
+            except BaseException as err:
+                pending = pending or err
+        if pending is not None:
+            raise pending
 
 
 def engine_env(home, path=None, environ=None):
