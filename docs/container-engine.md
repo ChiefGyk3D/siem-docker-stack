@@ -165,6 +165,16 @@ that guarantee:
 
 - The `.env` file is sourced as shell code and must be trusted. As root it must be root-owned in a
   root-owned tree (enforced). A file that can run arbitrary shell code can do anything the script can.
+  A hostile `.env` is out of scope: keep it owner-only (mode 0600) and, as root, root-owned in a
+  root-owned tree. The loader neutralizes tracing, `PS4`, the `DEBUG`, `RETURN` and `ERR` traps and the
+  export attribute of the named variables, and nothing more. Two things it does NOT stop, because the
+  file runs in the script's own shell with the script's variables (owner decision: documented, not
+  changed): the file can install an `EXIT` or a signal trap, which still runs at exit and can print or
+  send a password; and it can define a function with the name of a command the script later runs
+  (`jq`, `tail`, `printf` and so on), which then runs in place of that command. Both are pinned by tests
+  named `test_known_limit_env_exit_trap_still_fires_and_prints_the_password` and
+  `test_known_limit_env_function_shadowing_a_helper_is_not_blocked`, so a future fix flips them on
+  purpose.
 - Within a trusted file, the script removes the export attribute from the four password variables and
   from every variable name the file newly creates. A `.env` that exports a password through a name
   that already existed before the file ran (for example `PATH`, `CE_TRUSTED_DIRS` or another variable

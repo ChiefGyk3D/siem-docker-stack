@@ -522,6 +522,29 @@ def test_an_env_file_cannot_make_the_trace_or_a_trap_print_a_password(tmp_path, 
     assert_children_clean(box, EVERY_TOOL)
 
 
+def test_known_limit_env_exit_trap_still_fires_and_prints_the_password(tmp_path):
+    """DOCUMENTED LIMIT (docs/container-engine.md): the .env is trusted shell code. The loader clears the
+    DEBUG, RETURN and ERR traps and tracing, but not an EXIT or signal trap: one the file installs runs
+    at exit with the script's variables. This test asserts the limit as it is; when the loader learns to
+    close it, flip this test to assert the sentinel is absent."""
+    box = make(tmp_path)
+    proc = box.run(via="file", env_style=lambda pw: "".join(f"{k}='{v}'\n" for k, v in pw.items())
+                   + "trap 'printf \"%s\\n\" \"$OPENSEARCH_ADMIN_PASSWORD\"' EXIT\n")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert SENTINEL in proc.stdout, "the documented limit no longer holds: close the docs note and flip this test"
+
+
+def test_known_limit_env_function_shadowing_a_helper_is_not_blocked(tmp_path):
+    """DOCUMENTED LIMIT (docs/container-engine.md): a function the .env defines runs in place of the
+    command of the same name, with the script's variables. This test asserts the limit as it is; when the
+    loader learns to close it, flip this test to assert the sentinel is absent."""
+    box = make(tmp_path)
+    proc = box.run(via="file", env_style=lambda pw: "".join(f"{k}='{v}'\n" for k, v in pw.items())
+                   + "tail() { cat > /dev/null; printf '%s\\n' \"$OPENSEARCH_ADMIN_PASSWORD\"; }\n")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert SENTINEL in proc.stdout, "the documented limit no longer holds: close the docs note and flip this test"
+
+
 @pytest.mark.parametrize("bad", ["false\n", "if then\n", "return 1\n"])
 def test_a_failing_env_file_is_reported_and_stops_before_any_engine_call(tmp_path, bad):
     """A .env whose load fails (a failing command, a syntax error) must not look like success: the script

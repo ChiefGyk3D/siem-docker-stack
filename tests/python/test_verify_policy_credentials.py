@@ -317,16 +317,50 @@ def test_no_text_tells_anyone_to_start_a_hardened_script_through_bash():
     """Run as root, `bash script` runs BASH_ENV, imported functions, SHELLOPTS and BASHOPTS before line 1 and
     bypasses the privileged shebang. Usage lines, emitted next-step commands and the docs say to run
     these scripts by their path (sudo scripts/...)."""
-    # any shell interpreter, with options (and sudo options or variables before it), then a relative or
-    # absolute path to one of the scripts
-    pattern = re.compile(r"\b(?:ba|da|z|k|a)?sh\s+(?:-\S+\s+)*(?:\S*/)?(?:"
-                         + "|".join(re.escape(h) for h in HARDENED) + ")")
     hits = []
     for path in all_text_files():
         for n, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
-            if pattern.search(line):
+            if via_interpreter(line):
                 hits.append(f"{path.relative_to(REPO_ROOT)}:{n}: {line.strip()}")
     assert not hits, "\n".join(hits)
+
+
+# any shell interpreter, then anything (options, options with operands such as `-o pipefail`, `-c '`),
+# then a relative or absolute path to one of the scripts; sudo options and variables before it are
+# covered because only the interpreter token has to match
+INTERPRETER_PATTERN = re.compile(r"\b(?:ba|da|z|k|a)?sh\b(?:\s+\S+)*?\s+[\"']?(?:\S*/)?(?:"
+                                 + "|".join(re.escape(h) for h in HARDENED) + r")\b")
+
+
+def via_interpreter(line):
+    return bool(INTERPRETER_PATTERN.search(line))
+
+
+@pytest.mark.parametrize("line", [
+    "bash scripts/05-verify.sh",
+    "sudo bash scripts/05-verify.sh localhost",
+    "bash -o pipefail scripts/05-verify.sh",
+    "bash -x -e scripts/04-apply-ism-policy.sh https://h:9200",
+    "sudo -u root bash -c 'scripts/05-verify.sh'",
+    'sudo -E -u root bash -c "scripts/08b-init-opensearch-security.sh"',
+    "sudo env A=1 sh /opt/siem/scripts/05-verify.sh",
+    "dash -c /opt/siem/scripts/04-apply-ism-policy.sh",
+    "SIEM_USER=x bash /path/to/scripts/05-verify.sh 10.0.0.1",
+    "echo '  2. Run: bash scripts/08b-init-opensearch-security.sh'",
+])
+def test_the_interpreter_scan_catches_every_spelling(line):
+    assert via_interpreter(line), line
+
+
+@pytest.mark.parametrize("line", [
+    "sudo scripts/05-verify.sh",
+    "sudo -u root scripts/04-apply-ism-policy.sh https://h:9200",
+    "sudo SIEM_DEPLOY_DIR=/opt/siem scripts/08b-init-opensearch-security.sh",
+    "`05-verify.sh` needs WAZUH_INDEXER_PASSWORD in the .env",
+    "bash scripts/03-deploy.sh local",
+])
+def test_the_interpreter_scan_leaves_direct_execution_alone(line):
+    assert not via_interpreter(line), line
 
 
 CANONICAL = {
@@ -379,6 +413,33 @@ def test_an_env_file_cannot_make_the_trace_or_a_trap_print_a_password(tmp_path, 
     for suffix in ("-argv", "-environ"):
         for name, data in box.recorded(suffix).items():
             assert SENTINEL not in data, f"secret in {name}"
+
+
+@SPECS
+def test_known_limit_env_exit_trap_still_fires_and_prints_the_password(tmp_path, spec):
+    """DOCUMENTED LIMIT (docs/container-engine.md): the .env is trusted shell code. The loader clears the
+    DEBUG, RETURN and ERR traps and tracing, but not an EXIT or signal trap: one the file installs runs
+    at exit with the script's variables. This test asserts the limit as it is; when the loader learns to
+    close it, flip this test to assert the sentinel is absent."""
+    first = spec["vars"][0]
+    box = Box(tmp_path, spec)
+    proc = box.run(via="file", env_text=lambda pw: "".join(f"{k}='{v}'\n" for k, v in pw.items())
+                   + f"trap 'printf \"%s\\n\" \"${first}\"' EXIT\n")
+    ran(proc, spec)
+    assert SENTINEL in proc.stdout, "the documented limit no longer holds: close the docs note and flip this test"
+
+
+@SPECS
+def test_known_limit_env_function_shadowing_a_helper_is_not_blocked(tmp_path, spec):
+    """DOCUMENTED LIMIT (docs/container-engine.md): a function the .env defines runs in place of the
+    command of the same name, with the script's variables. This test asserts the limit as it is; when the
+    loader learns to close it, flip this test to assert the sentinel is absent."""
+    first = spec["vars"][0]
+    box = Box(tmp_path, spec)
+    proc = box.run(via="file", env_text=lambda pw: "".join(f"{k}='{v}'\n" for k, v in pw.items())
+                   + f"jq() {{ cat > /dev/null; printf '%s\\n' \"${first}\"; }}\n")
+    ran(proc, spec)
+    assert SENTINEL in proc.stdout, "the documented limit no longer holds: close the docs note and flip this test"
 
 
 def test_only_the_final_status_of_the_env_file_decides_the_load(tmp_path):
