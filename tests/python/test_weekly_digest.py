@@ -822,3 +822,49 @@ def test_non_regular_state_is_refused_before_any_smtp_even_with_force(tmp_path, 
                   force=force)
     assert code == 4 and name in "\n".join(err) and not smtp_plain.sessions
     assert _lock_is_free(marker.parent)
+
+
+# --- issue 167: --force never repairs a future marker; state swapped after guard entry -------
+
+def test_force_is_a_one_send_bypass_and_never_repairs_a_far_future_marker(tmp_path, smtp_plain):
+    cfg, marker = _marker(tmp_path, smtp_plain)
+    marker.write_text("9999-W52\n")
+    assert _send(cfg, force=True) == 0 and len(smtp_plain.sessions) == 1
+    assert marker.read_text().strip() == "9999-W52"  # not lowered, not repaired
+    err = []
+    code = wd.run(cfg, NOW, env={}, out=lambda m: None, err=err.append, send=True, providers=_fakes())
+    text = "\n".join(err)
+    assert code == 4 and len(smtp_plain.sessions) == 1
+    assert "9999-W52" in text and "never repairs" in text
+    assert "rm weekly-digest-state/last-sent" in text and "> weekly-digest-state/last-sent" in text
+
+
+def test_the_cli_help_says_force_never_repairs_the_marker(capsys):
+    with pytest.raises(SystemExit):
+        wd.main(["--help"])
+    assert "never repairs" in " ".join(capsys.readouterr().out.split())
+
+
+@pytest.mark.parametrize("name", ["last-sent", "pending"])
+@pytest.mark.parametrize("kind", ["directory", "symlink", "fifo"])
+def test_state_swapped_after_guard_entry_still_exits_4_with_no_smtp(tmp_path, smtp_plain, name, kind):
+    import os
+    cfg, marker = _marker(tmp_path, smtp_plain)
+    entry = marker.parent / name
+
+    def swap(ctx):
+        if kind == "directory":
+            entry.mkdir()
+        elif kind == "symlink":
+            other = tmp_path / "other"
+            other.write_text("2026-W01\n")
+            entry.symlink_to(other)
+        else:
+            os.mkfifo(entry)
+        return _sec("Stale", ["cert z"])
+
+    err = []
+    code = wd.run(cfg, NOW, env={}, out=lambda m: None, err=err.append, send=True,
+                  providers=_fakes(expiry=swap))
+    assert code == 4 and name in "\n".join(err) and not smtp_plain.sessions
+    assert _lock_is_free(marker.parent)

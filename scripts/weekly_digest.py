@@ -364,6 +364,7 @@ class SendGuard:
 
     def __init__(self, root, name, now, force):
         self.fd, self.week, self.force = _open_state_dir(root, name), f"{now:%G-W%V}", force
+        self.name = name
         self.lockfd = None
         self.closed = False
 
@@ -423,8 +424,10 @@ class SendGuard:
             if last == self.week:
                 raise _Refused(f"a digest was already sent for {self.week}; use --force to send again")
             raise _Refused(f"the last-sent marker names {last}, which is later than the current week "
-                           f"{self.week} (the clock may have moved backward); check the clock, or fix the "
-                           f"file 'last-sent' in the state folder, or use --force")
+                           f"{self.week} (the clock may have moved backward). Check the clock. --force sends "
+                           f"one digest only and never repairs the marker, so scheduled sends stay blocked "
+                           f"until you correct or remove the file (run next to the config file): "
+                           f"printf '%s\\n' {self.week} > {self.name}/last-sent   or   rm {self.name}/last-sent")
         try:
             os.stat("pending", dir_fd=self.fd, follow_symlinks=False)
         except FileNotFoundError:
@@ -481,7 +484,10 @@ class SendGuard:
         os.fsync(self.fd)
 
     def begin_send(self):
-        """Before the message goes out: record that a send is in flight (fail closed if it dies)."""
+        """Before the message goes out: record that a send is in flight (fail closed if it dies).
+        The non-regular entry check is repeated here, because the gathering phase ran after the
+        guard was entered: a same-user swap in that time is still refused (exit 4) before any SMTP."""
+        self._require_regular_state()
         self._write_durable("pending", f"send started for {self.week}\n")
 
     def clear_pending(self):
@@ -611,7 +617,7 @@ def _once(cfg, root, now, env, out, err, send, providers, guard):
         err("dry run: nothing was sent (use --send to send)")
     else:
         try:
-            guard.begin_send()
+            guard.begin_send()  # raises _Refused (exit 4) if a state entry was swapped since guard entry
         except OSError as e:
             err(f"not sent: the state folder cannot be written ({e.strerror})")
             return 3
@@ -646,7 +652,10 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="Weekly status digest by email (dry run unless --send)")
     ap.add_argument("--config", required=True, help="path to the TOML config (docs/weekly-digest.example.toml)")
     ap.add_argument("--send", action="store_true", help="read Grafana and send the email (default: dry run, no network)")
-    ap.add_argument("--force", action="store_true", help="with --send: send even if this ISO week was already sent")
+    ap.add_argument("--force", action="store_true",
+                    help="with --send: a one-send bypass of the already-sent, later-week, damaged-marker and "
+                         "pending checks. It never repairs a future-dated last-sent marker: only correcting or "
+                         "removing that file restores scheduled sends")
     args = ap.parse_args(argv)
     if args.force and not args.send:
         ap.error("--force only applies with --send")
