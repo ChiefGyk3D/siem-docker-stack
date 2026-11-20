@@ -178,6 +178,14 @@ phone.
    2026-11-17).
 5. Rotate by changing the Doppler value and the n8n credential together.
 
+The expiry watch does not use this credential. It posts to its own endpoint,
+the `Expiry Watch Webhook` node (`/webhook/expiry-watch-alerts`), where the
+`Check Expiry Secret` Code node compares the header with the environment
+variable `EXPIRY_WATCH_ROUTER_SECRET` of the n8n container and denies with 403
+when it is unset, empty or different. The `Grafana Webhook` node and its
+credential are unchanged. See
+[expiry-watch.md](expiry-watch.md#the-router-credential).
+
 Two checks apply. Compose refuses to start Grafana when the value is unset or
 empty. `scripts/check-env.sh` (run it before `docker compose up`) also rejects
 whitespace-only, placeholder and short values. It measures the value the way

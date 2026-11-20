@@ -32,13 +32,15 @@ You need Python 3.11 or newer (for `tomllib`). There is nothing to install.
    cp docs/expiry-watch-registry.example.toml expiry-watch-registry.toml
    ```
 
-   In `expiry-watch.toml`, point `[router].url` at your router webhook and
-   point the registry provider at `expiry-watch-registry.toml`. List your own
+   In `expiry-watch.toml`, point `[router].url` at the router's own endpoint
+   for the watch, `/webhook/expiry-watch-alerts` (see
+   [The router credential](#the-router-credential)), and point the registry provider at `expiry-watch-registry.toml`. List your own
    items in the registry.
 
-2. Export the router secret. This is the value of the header credential the
-   router checks (`GRAFANA_WEBHOOK_SECRET` in this repo), without the word
-   `Bearer`. The config only names the variable:
+2. Export the router secret. This is the value the router checks on the
+   watch's own endpoint (`EXPIRY_WATCH_ROUTER_SECRET` in the n8n container; its
+   value is never the Grafana webhook secret), without the word `Bearer`. The
+   config only names the variable:
 
    ```sh
    export EXPIRY_WATCH_ROUTER_TOKEN='...'   # from your secret manager, not typed into shell history
@@ -289,6 +291,76 @@ Pushover priority is the router's decision: an alert name the router does not
 know is capped at priority 1. To let expired notices page at emergency
 priority, add the alert names to `ALLOWED_ALERTNAMES` in the router (they are
 `Expiry watch: <item name>`). That is a deliberate step, not the default.
+
+### The router credential
+
+The watch has its own endpoint on the router and its own secret, so rotating or
+revoking one of the two (Grafana, the watch) never touches the other. Owner
+decision, runbook Q11, issue #127.
+
+| | Grafana | Expiry watch |
+|---|---|---|
+| Router node | `Grafana Webhook` (unchanged) | `Expiry Watch Webhook` |
+| URL path | the private `grafana-alerts-<opaque>` path | `/webhook/expiry-watch-alerts` |
+| Header check | n8n Header Auth, credential `grafana-webhook-auth` | the `Check Expiry Secret` Code node |
+| Secret lives in | the n8n credential and `GRAFANA_WEBHOOK_SECRET` (Grafana side) | `EXPIRY_WATCH_ROUTER_SECRET` in the n8n container's environment |
+| The watch's side | | `EXPIRY_WATCH_ROUTER_TOKEN`, the same value, named in `[router].token_env` |
+| A rejected call | n8n answers 403 | the router answers 403 and routes nothing |
+
+Why the name `EXPIRY_WATCH_ROUTER_SECRET`: it matches the `EXPIRY_WATCH_*`
+family the watch already uses, and `_SECRET` (not `_TOKEN`) marks the
+router-side copy, the value the router compares against, apart from
+`EXPIRY_WATCH_ROUTER_TOKEN`, the value the watch sends. Both hold the same
+string.
+
+Why a second endpoint and not one endpoint taking two secrets: n8n Header Auth
+holds exactly one credential per webhook node, and Grafana's check is left
+exactly as it was, so a bug or a missing setting in the new check cannot stop
+Grafana's alerts from arriving. The two endpoints share everything after the
+check (the normalizer, routing, Discord, Pushover, heartbeat), so every
+downstream guard applies to both.
+
+The check, in the `Check Expiry Secret` Code node:
+
+- It reads the environment variable `EXPIRY_WATCH_ROUTER_SECRET` and compares
+  the request's `Authorization` header with `Bearer ` plus that value, exactly
+  (case and spacing included).
+- It denies when the variable is unset, empty, whitespace-only, not text or
+  unreadable (env access blocked), and when the header is missing or not text.
+  An empty value never matches an empty or missing header.
+- The comparison visits every position and ORs the differences, so its time
+  does not depend on where the first difference is, and a denied call does not
+  say whether the length or the content was wrong. A length difference is the
+  one thing it cannot hide; use the 44 character `openssl rand -base64 32` value.
+- A denied call is answered 403 with a fixed body, runs nothing else and sends
+  no message. Only the request body leaves the check node, never the header.
+- It reads no other variable, and Grafana's variable is not consulted.
+
+Needs `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` in the n8n container, the same
+setting the [heartbeat](heartbeat.md#settings-environment-of-the-n8n-container)
+needs. While env access is blocked the check cannot read the secret and denies
+every call to this endpoint, so the watch gets 403 and exits 1 (a delivery
+failure, not silent); Grafana is unaffected.
+
+Owner steps (nothing here runs from the repo; each is a live change):
+
+1. Create the secret in the secret manager, dev config first, with the value
+   piped in and the output sent to /dev/null so it is never echoed (the
+   watch's side, `EXPIRY_WATCH_ROUTER_TOKEN`; `openssl rand -base64 32` makes the
+   value). Give the n8n container the same value as
+   `EXPIRY_WATCH_ROUTER_SECRET` (an environment entry in the n8n compose file,
+   with an empty default) and make sure `N8N_BLOCK_ENV_ACCESS_IN_NODE=false`
+   is set there.
+2. Re-import `n8n/grafana-alert-router.json` with the live import helper
+   (`scripts/live-deploy/n8n-setup-alert-router.py`), then restart or activate
+   the workflow as the live-deploy runbook describes. The helper leaves the new
+   webhook's path fixed and sets the private path only on the Grafana one.
+3. Point `[router].url` in the watch's config at
+   `<n8n base>/webhook/expiry-watch-alerts` and keep the watch's variable
+   `EXPIRY_WATCH_ROUTER_TOKEN` equal to the router's.
+4. Rotate by changing both values together, then restart the n8n container so it
+   reads the new environment. To revoke the watch only, unset or empty the
+   router's variable: the endpoint then denies every call.
 
 ### What the router receives
 

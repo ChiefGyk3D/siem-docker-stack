@@ -191,7 +191,8 @@ def patch_workflow(wf, reuse_id="", pushover_on=False, origin="", webhook_path="
         for cred in (node.get("credentials") or {}).values():
             if cred.get("name") in ids:
                 cred["id"] = ids[cred["name"]]
-        if node["type"].endswith(".webhook"):
+        if node["type"].endswith(".webhook") and node["name"] == "Grafana Webhook":
+            # only Grafana's entry gets the private path; the expiry watch's entry keeps its fixed one
             node["parameters"]["path"] = webhook_path
             # With a webhookId the production URL is /webhook/<path>; without one n8n
             # serves it under /webhook/<workflowId>/<node name>/<path>.

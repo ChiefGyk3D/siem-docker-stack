@@ -718,6 +718,86 @@
         960
       ],
       "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "expiry-watch-alerts",
+        "options": {},
+        "responseMode": "responseNode"
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        1300
+      ],
+      "id": "expiry-watch-webhook",
+      "name": "Expiry Watch Webhook",
+      "webhookId": "expiry-watch-alerts"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Entry check for the expiry watch (issue #127). The expiry watch posts to its own\n// endpoint, the Expiry Watch Webhook, and proves itself with the header\n//   Authorization: Bearer <value of EXPIRY_WATCH_ROUTER_SECRET>\n// The secret is read from the n8n container environment (n8n must allow env access in\n// nodes: N8N_BLOCK_ENV_ACCESS_IN_NODE=false, as the heartbeat already needs). Grafana\n// does not come through here: it keeps n8n Header Auth on its own webhook.\n// Fails closed: an unset, blank, non-text or unreadable variable, a missing or non-text\n// header, or any difference denies the call. An empty value never matches an empty header.\n// The comparison visits every position and ORs the differences, so its time does not\n// depend on where the first difference is. Only the body leaves this node: never the\n// header, never the secret. This node never throws and never logs.\nconst isStr = (v) => typeof v === 'string';\nlet out = { authorized: false };\ntry {\n  let cfg = '';\n  try {\n    cfg = $env.EXPIRY_WATCH_ROUTER_SECRET;\n  } catch (e) {\n    cfg = '';\n  }\n  const item = $input.first().json;\n  const headers = item && typeof item === 'object' && item.headers && typeof item.headers === 'object' ? item.headers : {};\n  const hdr = headers.authorization;\n  if (isStr(cfg) && cfg.trim() !== '' && isStr(hdr)) {\n    const expected = 'Bearer ' + cfg;\n    let diff = expected.length ^ hdr.length;\n    const n = Math.max(expected.length, hdr.length);\n    for (let i = 0; i < n; i++) {\n      diff |= (expected.charCodeAt(i) || 0) ^ (hdr.charCodeAt(i) || 0);\n    }\n    if (diff === 0) {\n      out = { authorized: true, body: item.body };\n    }\n  }\n} catch (e) {\n  out = { authorized: false };\n}\nreturn [{ json: out }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        250,
+        1300
+      ],
+      "id": "expiry-check-secret",
+      "name": "Check Expiry Secret"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "expiry-authorized",
+              "leftValue": "={{ $json.authorized === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        500,
+        1300
+      ],
+      "id": "expiry-authorized-check",
+      "name": "Expiry Authorized?"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"status\": \"unauthorized\"}",
+        "options": {
+          "responseCode": 403
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        750,
+        1400
+      ],
+      "id": "respond-unauthorized",
+      "name": "Respond Unauthorized"
     }
   ],
   "connections": {
@@ -987,6 +1067,46 @@
         [
           {
             "node": "Respond OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expiry Watch Webhook": {
+      "main": [
+        [
+          {
+            "node": "Check Expiry Secret",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Expiry Secret": {
+      "main": [
+        [
+          {
+            "node": "Expiry Authorized?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Expiry Authorized?": {
+      "main": [
+        [
+          {
+            "node": "Normalize Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Unauthorized",
             "type": "main",
             "index": 0
           }

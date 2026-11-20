@@ -722,7 +722,12 @@ Prerequisites:
   `GRAFANA_WEBHOOK_SECRET`, without the word `Bearer` (VERIFIED: step 2 of the
   quick start). That value lives in `prd_network` today. Copying it to dev
   reuses a shared secret; the alternative is a second header credential for the
-  watch (a router change). OPEN QUESTION, Q11, the owner decides.
+  watch (a router change). DECIDED (Q11, 2026-11-19): the watch gets its own
+  credential. The repo side is issue #127: the router has a second endpoint,
+  `/webhook/expiry-watch-alerts`, checked against the n8n container variable
+  `EXPIRY_WATCH_ROUTER_SECRET`. Do not copy the Grafana secret. Owner steps are
+  in `docs/expiry-watch.md`, "The router credential", and need the changed
+  workflow imported live first.
 
 ### 6.0 A localhost URL for n8n (on LOGGING_BOX)
 
@@ -856,9 +861,10 @@ printf '%s' "$VAL" | doppler secrets set EXPIRY_WATCH_ROUTER_TOKEN --project hom
 unset VAL
 ```
 
-(If Q11 is answered "copy": the value is the existing router secret, entered
-from your own source; do not read it back out of the secret manager into a
-terminal.)
+(Q11 is decided: a new value, never the Grafana secret. Generate it with
+`openssl rand -base64 32` and give the same value to the n8n container as
+`EXPIRY_WATCH_ROUTER_SECRET`, per `docs/expiry-watch.md`, "The router
+credential".)
 
 ### 6c. Dry run first (changes nothing, posts nothing, saves nothing)
 
