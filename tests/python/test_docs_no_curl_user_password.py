@@ -27,7 +27,26 @@ from conftest import REPO_ROOT
 CURL_FLAG = r"(?:\s-[A-Za-z]*u|\s--user(?![\w-])|\s--basic(?![\w-])[^\n]*?\s-[A-Za-z]*u)"
 CURL_USER_ANY = re.compile(r"\bcurl\b[^\n]*?" + CURL_FLAG)
 CURL_USER_PAIR = re.compile(r"\bcurl\b[^\n]*?(?:\s-[A-Za-z]*u|\s--user(?:=|\s+))\s*[\"']?[^\s\"']*:")
-URL_CREDENTIALS = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s/\"'@]*:[^\s/\"'@]*@")
+# The userinfo of a URL is everything between the scheme separator and the first unquoted at sign. The shell joins
+# adjacent pieces, so a piece may be plain text, a quoted string, a variable, a braced variable or a command
+# substitution. A plain piece stops at any URL delimiter (slash, question mark, hash), so an at sign in a path or
+# a query is not read as userinfo. Quoted pieces hold no whitespace, so two separate quoted arguments never join.
+USERINFO_ATOM = (r"(?:[^\s/?#\"'@$]|\"[^\"\s]*\"|'[^'\s]*'|\$\{[^}]*\}|\$\([^)]*\)|\$\w*)")
+URL_USERINFO = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://(?P<userinfo>" + USERINFO_ATOM + r"*)@")
+SUBSTITUTION = re.compile(r"\$\{[^}]*\}|\$\([^)]*\)")
+
+
+def url_credentials(s):
+    """True when a URL carries a colon in its userinfo once the shell has joined the pieces.
+
+    Covers user and password in any pieces, an empty user, an empty password, and a colon that sits inside quotes.
+    A colon inside a variable expansion or a command substitution is not the separator and is ignored.
+    """
+    for m in URL_USERINFO.finditer(s):
+        joined = SUBSTITUTION.sub("", m.group("userinfo")).replace('"', "").replace("'", "")
+        if ":" in joined:
+            return True
+    return False
 BASIC_HEADER = re.compile(r"Authorization:\s*Basic\b", re.IGNORECASE)
 WGET_PASSWORD = re.compile(r"\bwget\b[^\n]*?\s--(?:http-)?(?:password|user)(?![\w-])")
 PGPASSWORD = re.compile(r"\bPGPASSWORD=")
@@ -41,7 +60,10 @@ def doc_files():
 
 
 def logical_lines(text):
-    """Yield (first line number, in_fence, text) with backslash-continued lines joined."""
+    """Yield (first line number, in_fence, text) with backslash-continued lines joined.
+
+    The shell removes a backslash and the newline after it and inserts nothing, so the pieces join with no space.
+    """
     buf, start, fenced, fence_now = [], 0, False, False
     for n, line in enumerate(text.splitlines(), 1):
         if not buf:
@@ -55,10 +77,10 @@ def logical_lines(text):
             buf.append(line.rstrip()[:-1])
             continue
         buf.append(line)
-        yield start, fence_now, " ".join(buf)
+        yield start, fence_now, "".join(buf)
         buf = []
     if buf:
-        yield start, fence_now, " ".join(buf)
+        yield start, fence_now, "".join(buf)
 
 
 # The export rule is enforced where it has been cleaned up so far; other docs (expiry-watch, jumpcloud) are
@@ -73,7 +95,7 @@ def offenders(text, export_rule=True):
     for n, fenced, s in logical_lines(text):
         bad = (
             (CURL_USER_ANY.search(s) if fenced else CURL_USER_PAIR.search(s))
-            or URL_CREDENTIALS.search(s)
+            or url_credentials(s)
             or BASIC_HEADER.search(s)
             or WGET_PASSWORD.search(s)
             or PGPASSWORD.search(s)
@@ -143,6 +165,27 @@ def fence(line):
     "export GRAFANA_PASS=literal",
     '@C@ -sS -X POST @U@ "sender@S@${PW}" \\\n  -H "A: b" https://h/',
     '@C@ -sS \\\n  @U@ "sender@S@${PW}" https://h/',
+    # userinfo pieces joined by the shell: quotes, variables, substitutions
+    '@C@ "http://admin"@S@"pw@host/"',
+    "@C@ http://admin'@S@'pw@host/",
+    "@C@ http://'admin'@S@'pw'@host/",
+    '@C@ http://"admin"@S@"pw"@host/',
+    '@C@ http://admin@S@"$PW"@host/',
+    "@C@ http://admin@S@$PW@host/",
+    "@C@ http://$USER@S@$PW@host/",
+    "@C@ http://${U}@S@${P}@host:9200/",
+    "@C@ http://$(id -un)@S@$(cat /x)@host/",
+    '@C@ http://"adm"in@S@pw@host/',
+    # empty user or empty password
+    "@C@ http://admin@S@@host/",
+    "@C@ http://@S@@host/",
+    '@C@ http://""@S@pw@host/',
+    '@C@ http://admin@S@""@host/',
+    # a backslash continuation inside the userinfo joins with no space
+    "@C@ http://admin@S@\\\npw@host/",
+    "@C@ http://adm\\\nin@S@pw@host/",
+    "@C@ http://admin\\\n@S@pw@host/",
+    "@C@ http://admin@S@${PW:-x}\\\n@host/",
 ])
 def test_the_scan_catches_every_spelling_in_a_code_block(line):
     assert offenders(fence(build(line))), line
@@ -170,6 +213,18 @@ def test_the_scan_catches_a_pair_in_prose(line):
     "wget @UU@-agent=ok https://host/",
     "ssh user@host 'echo hi'",
     "git clone git@github.com:owner/repo.git",
+    # harmless URLs: a port, an at sign in a path or a query, a user with no password, a colon only in an expansion
+    "@C@ -sk https://host:9200/",
+    "@C@ -sk https://host:9200/a/@b",
+    "@C@ -sk 'https://host:9200/?email=a@b.example'",
+    "@C@ -sk https://host:9200?email=a@b.example",
+    "@C@ -sk https://host:9200#frag@x",
+    "@C@ -sk https://user@host:9200/",
+    "@C@ -sk https://${U:-x}@host/",
+    "@C@ -sk 'https://host:9200' 'x@y'",
+    '@C@ -sk "https://host:9200" "x@y"',
+    '@C@ -sk "https://host:9200/$(echo a@b)"',
+    "@C@ -sk https://host/ \\\n  -H 'Accept: x@y'",
 ])
 def test_the_scan_leaves_safe_commands_alone(line):
     assert not offenders(fence(build(line))), line
@@ -178,6 +233,8 @@ def test_the_scan_leaves_safe_commands_alone(line):
 @pytest.mark.parametrize("line", [
     "Do not pass the password with curl's @U@ flag; use the helper.",
     "@C@ @UU@ is avoided here",
+    "A URL with a user name and a password in it is never used here.",
+    "The user@host form and the https://host:9200/ form are fine.",
 ])
 def test_the_scan_allows_prose_that_names_the_flag_without_a_pair(line):
     assert not offenders(build(line)), line
