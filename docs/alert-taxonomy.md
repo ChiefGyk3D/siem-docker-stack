@@ -131,12 +131,12 @@ The router never reads `tier`, `digest`, `source`, `alert_group` or
 
 Verified by running the test against the rule files at the time of writing.
 
-- `update-unifi-pending-24h` and `update-pfsense-pending-24h`: `severity=warning`
-  with `phone=true`. Neither P1 nor P2. They carry no `tier` label. Fixing it
-  changes routing, so it is the owner's call: either `phone=false` (P2, Discord
-  only, no phone push) or `severity=critical` (P1, phone priority and 1h repeat
-  instead of 4h). They are listed in `KNOWN_VIOLATIONS` in the test as strict
-  expected failures; remove the entry when the rule is fixed.
+- None. `update-unifi-pending-24h` and `update-pfsense-pending-24h` were
+  `severity=warning` with `phone=true` (neither P1 nor P2). Owner decision
+  2026-11-20 (issue #152): they are P2 with `phone=false`, so no phone push; they
+  alert Discord, and Matrix once the inactive example route in
+  `matrix-p2-notification-policy.yml.example` is enabled
+  (`docs/channel-redundancy.md`). `KNOWN_VIOLATIONS` in the test is empty.
 
 Pure label additions made with the test (cannot change routing, since no policy
 or router node reads `tier` or a `phone=false` on these rules): `tier` on seven
