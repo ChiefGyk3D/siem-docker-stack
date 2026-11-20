@@ -27,11 +27,13 @@ refused, the answer is size capped, and each record is shape-checked.
 - `--send` reads Grafana and sends exactly one email. There is no retry loop; exit code 3 means it was not delivered.
 - The sender is the expiry watch's `smtp_deliver` (imported, not copied): server certificate and name verified, STARTTLS required (no plaintext fallback), the login only after the connection is encrypted, one overall deadline. Details: [expiry-watch.md](expiry-watch.md).
 - Secrets are environment variable names in the TOML file, never values.
-- Every string a provider returns (titles, notes, entries) is cleaned of control characters and line breaks at render time, whatever the provider does. The subject is built from counts only.
-- The body is capped (`max_body_bytes`) and each section is capped (`max_entries_per_section`, the rest is counted).
+- Every string a provider returns (titles, notes, entries) is cleaned at render time, whatever the provider does: Unicode categories Cc (controls and line breaks), Cf (bidi overrides and isolates such as U+202E, zero-width characters, the byte order mark, soft hyphen) and Zl and Zp (line and paragraph separators) become spaces, so an alert name cannot visually reverse its meaning. Ordinary text in any script is kept. The subject is built from counts only.
+- The body is capped (`max_body_bytes`), each section is capped (`max_entries_per_section`, the rest is counted), and the WHOLE encoded message as SMTP transmits it (headers, MIME framing, transfer encoding) is capped by `max_message_bytes` (default 100000). The body is cut further until the encoded message fits.
 - A failing source does not stop the digest: the email still goes out with a `SOURCE FAILED` line and the exit code is 1.
+- A Grafana record whose time is outside the requested window (plus 5 minutes of clock skew), or is not a plain integer, is skipped on its own and reported once as a `SOURCE NOTE` line. It never costs the other records.
+- One digest per ISO week, and no overlapping runs: a send takes a lock file (created with O_EXCL) in a private state folder (`state_dir`, default `weekly-digest-state` next to the config file, mode 0700), and writes the ISO week into `last-sent` after the server accepted the message. A second `--send` in the same week is refused (exit 4) unless you add `--force`. A run that was killed leaves `lock` behind; the next run refuses and names it: check that no digest run is alive, then remove the file. A dry run touches none of this. SMTP cannot give exactly-once delivery: if the connection fails right at final acceptance the digest may or may not have arrived, and the marker is then not written, so a retry may send a duplicate (the message id is stable for identical content, which helps a receiver recognize it).
 
-Exit codes: 0 done; 1 done but a source failed; 2 config error; 3 not delivered.
+Exit codes: 0 done; 1 done but a source failed (or the sent marker could not be written); 2 config error; 3 not delivered; 4 not sent on purpose (lock held, or already sent this week).
 
 ## Setup
 

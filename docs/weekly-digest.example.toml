@@ -8,6 +8,8 @@
 [digest]
 window_days = 7                 # how far back the Grafana alert history is read (1 to 31)
 max_body_bytes = 32768          # the email body is cut here (1024 to 200000)
+max_message_bytes = 100000      # the whole encoded message, headers included (4096 to 400000)
+state_dir = "weekly-digest-state"  # lock and last-sent marker, next to this file (mode 0700); keep out of git
 max_entries_per_section = 40    # more than this: "... and N more not shown"
 delivery_budget_seconds = 60    # one overall deadline for the one delivery
 

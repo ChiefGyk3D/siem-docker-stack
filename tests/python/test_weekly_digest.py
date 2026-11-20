@@ -314,3 +314,99 @@ def test_the_example_config_parses():
     raw = tomllib.loads((REPO_ROOT / "docs" / "weekly-digest.example.toml").read_text())
     cfg = wd.parse_config(raw)
     assert cfg.grafana.token_env == "WEEKLY_DIGEST_GRAFANA_TOKEN" and cfg.email.security == "starttls"
+
+
+# --- Daybreak round 1 ----------------------------------------------------------------------
+
+def test_one_out_of_range_timestamp_does_not_drop_the_valid_results(tmp_path, grafana, smtp_plain):
+    ms = int(NOW.timestamp() * 1000)
+    _Grafana.body = json.dumps([
+        {"time": ms - 1000, "alertName": "real update pending", "newState": "Alerting"},
+        {"time": 10 ** 300, "alertName": "poison huge", "newState": "Alerting"},
+        {"time": -5, "alertName": "poison negative", "newState": "Alerting"},
+        {"time": ms + 10 * 86_400_000, "alertName": "poison future", "newState": "Normal"},
+        {"time": ms - 30 * 86_400_000, "alertName": "poison old", "newState": "Alerting"},
+        {"time": True, "alertName": "poison bool", "newState": "Alerting"},
+    ]).encode()
+    cfg = _write(tmp_path, smtp_plain.server_address[1], grafana=grafana)
+    code, _, _ = _run(cfg, send=True, env={"DIGEST_GRAFANA_TOKEN": GRAFANA_TOKEN})
+    data = smtp_plain.sessions[0]["data"]
+    assert code == 0 and "real update pending: still Alerting" in data
+    assert "poison" not in data and data.count("SOURCE NOTE") == 1 and "SOURCE FAILED" not in data
+
+
+BIDI = "‮‪‬⁦⁧⁨⁩​‌‍﻿‎‏؜⁠­"
+
+
+def test_clean_removes_bidi_and_format_characters_but_keeps_text():
+    out = wd.clean(f"Disk safe{BIDI}Update café 日本 مرحبا x y")
+    assert not any(c in out for c in BIDI + "  ")
+    assert "café" in out and "日本" in out and "مرحبا" in out
+
+
+def test_bidi_controls_never_reach_the_email(tmp_path):
+    cfg = _write(tmp_path)
+    evil = _fakes(patched=lambda c: _sec("T" + BIDI, ["a" + BIDI], "n" + BIDI),
+                  expiry=lambda c: _sec("Stale", ["b" + BIDI]))
+    out = _run(cfg, providers=evil)[1]
+    assert not any(c in out for c in BIDI)
+
+
+def _send(cfg, **kw):
+    return wd.run(cfg, kw.pop("now", NOW), env={}, out=lambda m: None, err=lambda m: None, send=True,
+                  providers=_fakes(), **kw)
+
+
+def test_a_second_send_in_the_same_week_is_refused(tmp_path, smtp_plain):
+    cfg = _write(tmp_path, smtp_plain.server_address[1])
+    assert (_send(cfg), _send(cfg)) == (0, 4) and len(smtp_plain.sessions) == 1
+
+
+def test_force_sends_again_and_a_new_week_does_not_need_it(tmp_path, smtp_plain):
+    cfg = _write(tmp_path, smtp_plain.server_address[1])
+    assert (_send(cfg), _send(cfg, force=True)) == (0, 0) and len(smtp_plain.sessions) == 2
+    assert _send(cfg, now=NOW + dt.timedelta(days=7)) == 0 and len(smtp_plain.sessions) == 3
+
+
+def test_an_existing_lock_refuses_the_send_and_is_released_after_a_run(tmp_path, smtp_plain):
+    cfg = _write(tmp_path, smtp_plain.server_address[1])
+    d = tmp_path / "weekly-digest-state"
+    d.mkdir(mode=0o700)
+    (d / "lock").write_text("1")
+    code, _, err = _run(cfg, send=True, providers=_fakes())
+    assert code == 4 and "lock" in err and not smtp_plain.sessions
+    (d / "lock").unlink()
+    assert _run(cfg, send=True, providers=_fakes())[0] == 0 and not (d / "lock").exists()
+    assert oct(d.stat().st_mode & 0o777) == "0o700" and (d / "last-sent").read_text().strip() == "2026-W47"
+
+
+def test_a_failed_delivery_leaves_no_marker_and_releases_the_lock(tmp_path, smtp_plain):
+    smtp_plain.data_reply = "554 no"
+    cfg = _write(tmp_path, smtp_plain.server_address[1])
+    assert _run(cfg, send=True, providers=_fakes())[0] == 3
+    d = tmp_path / "weekly-digest-state"
+    assert not (d / "last-sent").exists() and not (d / "lock").exists()
+
+
+def test_dry_run_touches_no_state(tmp_path):
+    cfg = _write(tmp_path)
+    _run(cfg, providers=_fakes())
+    assert not (tmp_path / "weekly-digest-state").exists()
+
+
+def test_the_cli_has_a_force_flag(monkeypatch):
+    calls = []
+    monkeypatch.setattr(wd, "run", lambda path, now, send=False, force=False, **kw: calls.append(force) or 0)
+    wd.main(["--config", "x.toml", "--send"])
+    wd.main(["--config", "x.toml", "--send", "--force"])
+    assert calls == [False, True]
+
+
+def test_the_whole_encoded_message_is_bounded(tmp_path, smtp_plain):
+    cfg = _write(tmp_path, smtp_plain.server_address[1],
+                 digest="max_body_bytes = 200000\nmax_message_bytes = 20000\nmax_entries_per_section = 200")
+    big = _fakes(expiry=lambda c: _sec("Stale", ["é" * 150 for _ in range(200)]))
+    assert _run(cfg, send=True, providers=big)[0] == 0
+    (s,) = smtp_plain.sessions
+    assert len(s["data"].encode("utf-8", "surrogateescape")) <= 20000
+    assert "truncated" in s["data"]
