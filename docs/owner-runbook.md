@@ -496,6 +496,23 @@ What the token is allowed to do, each scope and why:
 - no `--max-age`: the box needs it on every restart, so it does not expire by
   itself. The way to end it is the revoke below.
 
+Which values a command receives is a separate limit, set by the wrapper, not by the
+token. The wrapper REFUSES to run without `--only NAME1,NAME2,... --` and injects
+exactly those names and nothing else (`--only-secrets`, VERIFIED: `doppler run
+--help`, 2026-11-20). Without that, every secret in `dev_network` would be added to
+the command's environment after the wrapper cleaned it, so a secret named
+`LD_PRELOAD`, `BASH_ENV`, `PATH`, `PYTHONPATH` or `DOCKER_HOST` could run code or
+redirect Docker. The wrapper also refuses a list that names such a variable
+(`LD_*`, `BASH_*`, `ENV`, `PATH`, `HOME`, `IFS`, `SHELLOPTS`, `PYTHON*`, `DOCKER_*`,
+`COMPOSE_*`, `SUDO_*`, `DOPPLER_*` and the like), so a mistyped list cannot hand one
+over. Each operation below carries its own list: the n8n recreate gets exactly the
+heartbeat and expiry names its compose file substitutes; the Grafana restarts get
+the names the grafana service of `docker/docker-compose.yml` interpolates (a test
+computes them from that file), plus the one line added in 4b and the seven added in
+5b. A name in a list that `dev_network` does not hold is skipped, not an error
+(some of Grafana's values still live in `/opt/siem/.env`); `docker compose` itself
+refuses a required value that is missing.
+
 You need, on your own machine (where the Doppler CLI is logged in as you), the
 right to create service tokens on that config. Creating the token is the
 only step that touches Doppler; the box needs no login of its own.
@@ -507,47 +524,61 @@ only step that touches Doppler; the box needs no login of its own.
 ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'install -d -m 700 "$HOME/.config/doppler-siem-net" && install -d -m 755 "$HOME/bin" && install -m 755 REPO_DIR/scripts/siem-net-run "$HOME/bin/siem-net-run" && ls -ld "$HOME/.config/doppler-siem-net" "$HOME/bin/siem-net-run"'
 ```
 
-2. Create the token and store it. The `--plain` output goes straight into a pipe to
-   the box, where `umask 077` makes the new file mode 600 before the first byte is
-   written. It never reaches your terminal, so it is never echoed. There is no `-t`
-   on this ssh on purpose (the pipe carries the token); the line after it prints
-   the status of both ends, and `0 0` means both worked:
+   The same items 2 to 5 create the first token and rotate a later one. Nothing
+   ever overwrites the live token before the new one has been shown to work.
+
+2. Create the new token in a staging folder next to the live one. The `--plain`
+   output goes straight into a pipe to the box, where `umask 077` makes the new file
+   mode 600 before the first byte is written. It never reaches your terminal, so it
+   is never echoed. There is no `-t` on this ssh on purpose (the pipe carries the
+   token); the line after it prints the status of both ends, and `0 0` means both
+   worked. On a rotation, first list the tokens and write down the old token's slug
+   (INFERRED: the list shows names and slugs, not values):
 
 ```
+doppler configs tokens --project homelab --config dev_network
 set -o pipefail
-doppler configs tokens create siem-net-box --project homelab --config dev_network --access read --plain | ssh -i KEY_FILE -o IdentitiesOnly=yes LOGGING_BOX 'umask 077 && cat > "$HOME/.config/doppler-siem-net/token"'
+doppler configs tokens create siem-net-box --project homelab --config dev_network --access read --plain | ssh -i KEY_FILE -o IdentitiesOnly=yes LOGGING_BOX 'rm -rf "$HOME/.config/doppler-siem-net.new" && install -d -m 700 "$HOME/.config/doppler-siem-net.new" && umask 077 && cat > "$HOME/.config/doppler-siem-net.new/token"'
 echo "exit codes: ${PIPESTATUS[0]} ${PIPESTATUS[1]}"
 set +o pipefail
 ```
 
-3. Read back the owner and mode without printing the token (expect your user,
-   `600`, and `non-empty`):
+3. Read back the owner and mode of the staged file without printing the token
+   (expect your user, `600`, and `non-empty`):
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'stat -c "%U %a %n" "$HOME/.config/doppler-siem-net/token" && if [ -s "$HOME/.config/doppler-siem-net/token" ]; then echo non-empty; else echo EMPTY; fi'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'stat -c "%U %a %n" "$HOME/.config/doppler-siem-net.new/token" && if [ -s "$HOME/.config/doppler-siem-net.new/token" ]; then echo non-empty; else echo EMPTY; fi'
 ```
 
-   `EMPTY` means step 2 failed before the token arrived: run it again (the wrapper
-   refuses an empty file, so nothing runs with it).
+   `EMPTY` or an error means item 2 failed before the token arrived: run it again.
+   The live token has not been touched.
 
-4. Check that the wrapper reaches `dev_network` and sees only names (INFERRED:
-   `doppler secrets` inside `doppler run` takes the token from the environment):
+4. Prove the staged token reaches `dev_network`, through the wrapper with a
+   read-only call that prints a presence line and never a value:
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX '"$HOME/bin/siem-net-run" doppler secrets --only-names --no-check-version; echo "exit code: $?"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'SIEM_NET_CONFIG_DIR="$HOME/.config/doppler-siem-net.new" "$HOME/bin/siem-net-run" --only GRAFANA_WEBHOOK_SECRET -- sh -c "test -n \"\$(printenv GRAFANA_WEBHOOK_SECRET)\" && echo GRAFANA_WEBHOOK_SECRET present"; echo "exit code: $?"'
 ```
 
-   Expect the names from step 0b and `exit code: 0`. A line starting
+   Expect `GRAFANA_WEBHOOK_SECRET present` and `exit code: 0` (INFERRED: the wrapper
+   and the real Doppler CLI together were not run for this document). A line starting
    `siem-net-run:` says what the wrapper refused: a missing or empty token file, a
-   symlink, a file owned by someone else, a file or folder that is not private.
+   symlink, a file owned by someone else, a file or folder that is not private, or an
+   allowlist problem. A Doppler error means the token is wrong: stop here, the live
+   token is untouched, and revoke the staged one by slug as below.
 
-Rotate: run item 2 again (it replaces the file; the old token still works until
-you revoke it), run item 4, then revoke the old one. List the tokens of the
-config, read the old one's slug from the list (INFERRED: the list shows names and
-slugs, not values), and revoke by slug:
+5. Only after item 4 passed, move the staged token over the live one in a single
+   atomic rename (`mv -T`), remove the staging folder, and read the result back:
 
 ```
-doppler configs tokens --project homelab --config dev_network
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'mv -T "$HOME/.config/doppler-siem-net.new/token" "$HOME/.config/doppler-siem-net/token" && rmdir "$HOME/.config/doppler-siem-net.new" && stat -c "%U %a %n" "$HOME/.config/doppler-siem-net/token"; echo "exit code: $?"'
+```
+
+Rotate, the last part: after item 5, revoke the OLD token by its slug (the one you
+wrote down before item 2), never before. The old token stays revocable by slug until
+you do:
+
+```
 doppler configs tokens revoke --project homelab --config dev_network --slug OLD_SLUG
 ```
 
@@ -558,10 +589,14 @@ ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'rm -r "$HOME/.config/doppl
 ```
 
 After a revoke the next restart or recreate stops with a Doppler error: that is
-the intended result. `siem-net-run` passes `--fallback-readonly`, so it never
-writes a cached copy of the values to the folder (VERIFIED: `doppler run --help`,
-2026-11-20); a cache written by anything else in that folder is not read once the
-token is gone from the folder (INFERRED).
+the intended result. `siem-net-run` passes `--no-fallback` (VERIFIED: `doppler run
+--help`, 2026-11-20: "disable reading and writing the fallback file"), so it
+neither writes nor reads an encrypted cache of the values. A Doppler outage or a
+network failure therefore stops a Grafana restart or an n8n recreate (it fails
+closed) instead of starting a container from old values. The consequence is
+deliberate: while Doppler is unreachable from the box, those two operations wait.
+The folder is created by item 1 and holds only `token`; if `ls -la` of it shows
+anything else, remove it before the first use.
 
 ## Step 0c. The dedicated service account for scheduled jobs (LIVE)
 
@@ -1027,7 +1062,7 @@ step 4 of its webhook authentication list, there with `prd_network`). The token
 is scoped to `dev_network` by itself, so there is no project or config flag:
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd /opt/siem && "$HOME/bin/siem-net-run" docker compose up -d grafana; echo "exit code: $?"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd /opt/siem && "$HOME/bin/siem-net-run" --only BIND_ADDR,DISCORD_FAILURE_WEBHOOK_URL,GF_SMTP_ENABLED,GF_SMTP_FROM_ADDRESS,GF_SMTP_HOST,GF_SMTP_PASSWORD,GF_SMTP_STARTTLS_POLICY,GF_SMTP_USER,GRAFANA_ADMIN_PASS,GRAFANA_ADMIN_USER,GRAFANA_INFLUX_PASSWORD,GRAFANA_INFLUX_USER,GRAFANA_PORT,GRAFANA_VERSION,GRAFANA_WEBHOOK_SECRET,OPENSEARCH_READONLY_PASSWORD,P1_EMAIL_TO,PROMETHEUS_GRAFANA_PASSWORD,PROMETHEUS_OTLP_GRAFANA_PASSWORD,SIEM_HOST,WAZUH_GRAFANA_RO_PASSWORD,WAZUH_GRAFANA_RO_USER -- docker compose up -d --no-deps grafana; echo "exit code: $?"'
 ```
 
 (The `SERVICE_ACCOUNT` token of step 0c is for that account's jobs only.)
@@ -1138,7 +1173,7 @@ value stays in Doppler; never run `docker compose config` for the check, it
 prints resolved values). Then restart, as in 4d:
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd /opt/siem && "$HOME/bin/siem-net-run" docker compose up -d grafana; echo "exit code: $?"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd /opt/siem && "$HOME/bin/siem-net-run" --only BIND_ADDR,DISCORD_FAILURE_WEBHOOK_URL,GF_SMTP_ENABLED,GF_SMTP_FROM_ADDRESS,GF_SMTP_HOST,GF_SMTP_PASSWORD,GF_SMTP_STARTTLS_POLICY,GF_SMTP_USER,GRAFANA_ADMIN_PASS,GRAFANA_ADMIN_USER,GRAFANA_INFLUX_PASSWORD,GRAFANA_INFLUX_USER,GRAFANA_PORT,GRAFANA_VERSION,GRAFANA_WEBHOOK_SECRET,OPENSEARCH_READONLY_PASSWORD,P1_EMAIL_TO,PROMETHEUS_GRAFANA_PASSWORD,PROMETHEUS_OTLP_GRAFANA_PASSWORD,SIEM_HOST,WAZUH_GRAFANA_RO_PASSWORD,WAZUH_GRAFANA_RO_USER -- docker compose up -d --no-deps grafana; echo "exit code: $?"'
 ```
 
 Check: `docker compose ls` lists the project as running, the grafana container shows
@@ -1224,7 +1259,7 @@ sudo install -m 644 REPO_DIR/docker/grafana/provisioning/alerting/email-contact-
 ### 5d. Restart Grafana and check
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd /opt/siem && "$HOME/bin/siem-net-run" docker compose up -d grafana; echo "exit code: $?"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd /opt/siem && "$HOME/bin/siem-net-run" --only BIND_ADDR,DISCORD_FAILURE_WEBHOOK_URL,GF_SMTP_ENABLED,GF_SMTP_FROM_ADDRESS,GF_SMTP_HOST,GF_SMTP_PASSWORD,GF_SMTP_STARTTLS_POLICY,GF_SMTP_USER,GRAFANA_ADMIN_PASS,GRAFANA_ADMIN_USER,GRAFANA_INFLUX_PASSWORD,GRAFANA_INFLUX_USER,GRAFANA_PORT,GRAFANA_VERSION,GRAFANA_WEBHOOK_SECRET,OPENSEARCH_READONLY_PASSWORD,P1_EMAIL_TO,PROMETHEUS_GRAFANA_PASSWORD,PROMETHEUS_OTLP_GRAFANA_PASSWORD,SIEM_HOST,WAZUH_GRAFANA_RO_PASSWORD,WAZUH_GRAFANA_RO_USER -- docker compose up -d --no-deps grafana; echo "exit code: $?"'
 ```
 
 Check `docker logs --since 5m grafana 2>&1 | tail -40` for SMTP or provisioning
@@ -1376,7 +1411,7 @@ owner_recreate_n8n() {
   if ! docker exec n8n true > /dev/null 2>&1; then echo "STOP: no running container named n8n; nothing recorded and nothing recreated"; echo "recreate exit code: 1"; return 1; fi
   if ! ( umask 077 && docker exec n8n sh -c 'for V in HEARTBEAT_PING_URL HEARTBEAT_KIND EXPIRY_WATCH_ROUTER_SECRET; do if [ -n "$(printenv $V)" ]; then echo "$V set"; else echo "$V unset"; fi; done' > "$HOME/n8n-env-before.txt" ); then echo "STOP: could not read the running container; nothing recreated"; echo "recreate exit code: 1"; return 1; fi
   cat "$HOME/n8n-env-before.txt"
-  ( cd "$N8N_COMPOSE_DIR" && REQ_VARS="$1" PRESERVE="$2" "$HOME/bin/siem-net-run" sh -c 'for V in $REQ_VARS; do if [ -z "$(printenv $V)" ]; then echo "REFUSING: $V is empty in the compose environment; n8n was NOT recreated"; exit 1; fi; done; sudo --preserve-env="$PRESERVE" docker compose up -d n8n' )
+  ( cd "$N8N_COMPOSE_DIR" && REQ_VARS="$1" PRESERVE="$2" "$HOME/bin/siem-net-run" --only "$2" -- sh -c 'for V in $REQ_VARS; do if [ -z "$(printenv $V)" ]; then echo "REFUSING: $V is empty in the compose environment; n8n was NOT recreated"; exit 1; fi; done; sudo --preserve-env="$PRESERVE" docker compose up -d n8n' )
   R=$?
   if [ $R -eq 0 ]; then docker port n8n && docker network inspect "$SIEM_NETWORK" --format "{{range .Containers}}{{.Name}} {{end}}" && docker exec n8n sh -c 'test -n "$(printenv HEARTBEAT_PING_URL)"'; R=$?; fi
   if [ $R -eq 0 ]; then echo "n8n recreated, heartbeat variable set"; else echo "RECOVERY: the recreate failed or HEARTBEAT_PING_URL is blank in the new container. n8n data is on its volume and is unaffected. Put the value in dev_network (step 0b item 2 form), run the recreate call again, then the step 1 presence check. Until then the heartbeat is off and the observer alerts after about 20 minutes."; fi
@@ -1909,7 +1944,7 @@ printf '%s' '{"receiver":"expiry-watch","status":"firing","alerts":[{"status":"f
 1. One authenticated, valid notice. Expect `200` and one message in Discord:
 
 ```
-"$HOME/bin/siem-net-run" sh -c 'printf "Authorization: Bearer %s\n" "$EXPIRY_WATCH_ROUTER_TOKEN" | curl -s -o /dev/null -w "%{http_code}\n" -X POST -H @- -H "Content-Type: application/json" --data-binary @"$HOME/notice.json" "http://127.0.0.1:HOST_PORT/webhook/$(cat "$HOME/.config/doppler-siem/expiry-path")"'
+"$HOME/bin/siem-net-run" --only EXPIRY_WATCH_ROUTER_TOKEN -- sh -c 'printf "Authorization: Bearer %s\n" "$EXPIRY_WATCH_ROUTER_TOKEN" | curl -s -o /dev/null -w "%{http_code}\n" -X POST -H @- -H "Content-Type: application/json" --data-binary @"$HOME/notice.json" "http://127.0.0.1:HOST_PORT/webhook/$(cat "$HOME/.config/doppler-siem/expiry-path")"'
 ```
 
 2. A fast burst: three calls started at the same moment. The router accepts one
@@ -1918,7 +1953,7 @@ printf '%s' '{"receiver":"expiry-watch","status":"firing","alerts":[{"status":"f
    finding):
 
 ```
-"$HOME/bin/siem-net-run" sh -c 'for i in 1 2 3; do printf "Authorization: Bearer %s\n" "$EXPIRY_WATCH_ROUTER_TOKEN" | curl -s -o /dev/null -w "%{http_code}\n" -X POST -H @- -H "Content-Type: application/json" --data-binary @"$HOME/notice.json" "http://127.0.0.1:HOST_PORT/webhook/$(cat "$HOME/.config/doppler-siem/expiry-path")" & done; wait'
+"$HOME/bin/siem-net-run" --only EXPIRY_WATCH_ROUTER_TOKEN -- sh -c 'for i in 1 2 3; do printf "Authorization: Bearer %s\n" "$EXPIRY_WATCH_ROUTER_TOKEN" | curl -s -o /dev/null -w "%{http_code}\n" -X POST -H @- -H "Content-Type: application/json" --data-binary @"$HOME/notice.json" "http://127.0.0.1:HOST_PORT/webhook/$(cat "$HOME/.config/doppler-siem/expiry-path")" & done; wait'
 ```
 
 3. The window (only if you chose to run it): 32 calls, 2 seconds apart, then the
@@ -1926,7 +1961,7 @@ printf '%s' '{"receiver":"expiry-watch","status":"firing","alerts":[{"status":"f
    `200` appears 30 minus those times and the rest are `403`:
 
 ```
-"$HOME/bin/siem-net-run" sh -c 'for i in $(seq 1 32); do printf "Authorization: Bearer %s\n" "$EXPIRY_WATCH_ROUTER_TOKEN" | curl -s -o /dev/null -w "%{http_code}\n" -X POST -H @- -H "Content-Type: application/json" --data-binary @"$HOME/notice.json" "http://127.0.0.1:HOST_PORT/webhook/$(cat "$HOME/.config/doppler-siem/expiry-path")"; sleep 2; done | sort | uniq -c'
+"$HOME/bin/siem-net-run" --only EXPIRY_WATCH_ROUTER_TOKEN -- sh -c 'for i in $(seq 1 32); do printf "Authorization: Bearer %s\n" "$EXPIRY_WATCH_ROUTER_TOKEN" | curl -s -o /dev/null -w "%{http_code}\n" -X POST -H @- -H "Content-Type: application/json" --data-binary @"$HOME/notice.json" "http://127.0.0.1:HOST_PORT/webhook/$(cat "$HOME/.config/doppler-siem/expiry-path")"; sleep 2; done | sort | uniq -c'
 ```
 
 4. Evidence to record: the status code for every call and the number of messages

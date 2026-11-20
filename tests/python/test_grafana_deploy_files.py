@@ -681,7 +681,7 @@ def test_manual_steps_are_documented_in_both_runbooks():  # GUARD
         assert "- GRAFANA_WEBHOOK_SECRET" in text
         assert "docker-compose.yml.bak-" in text
         assert ("doppler run --project homelab --config DEV_CONFIG --" in text
-                or '"$HOME/bin/siem-net-run" docker compose up -d grafana' in text)
+                or ('"$HOME/bin/siem-net-run" --only ' in text and "-- docker compose up -d --no-deps grafana" in text))
         assert "docker compose ls" in text and "healthy" in text
     assert "never starts docker" in live.lower() and "never reads the compose file" in live.lower()
     assert "grafana-deploy.py" in owner and "--apply" in owner

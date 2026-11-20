@@ -401,7 +401,7 @@ def run_blocks(tmp_path, blocks, tail="", fail="", saved='{"nodes":[{},{}]}', st
     stub.write_text("#!/bin/sh\n[ \"$FAIL\" = import ] && exit 7\necho import ok\nexit 0\n")
     stub.chmod(0o755)
     net = home / "bin" / "siem-net-run"  # the dev_network wrapper: records one line, honors FAIL=doppler
-    net.write_text("#!/bin/sh\necho doppler >> \"$LOG\"\n[ \"$FAIL\" = doppler ] && exit 7\nexit 0\n")
+    net.write_text("#!/bin/sh\necho doppler >> \"$LOG\"\necho \"netargs $1 $2 $3\" >> \"$LOG\"\n[ \"$FAIL\" = doppler ] && exit 7\nexit 0\n")
     net.chmod(0o755)
     f = home / "router-before.json"
     f.write_text(saved)
@@ -909,3 +909,75 @@ def test_issue177_the_wrapper_is_described_where_siem_run_is():
     live = (REPO_ROOT / "docs" / "live-deploy-runbook.md").read_text(encoding="utf-8")
     assert "siem-net-run" in live
     assert "siem-net-run" in (REPO_ROOT / "docs" / "design" / "secrets-sources.md").read_text(encoding="utf-8")
+
+
+# ---- issue #177, Daybreak round 1: allowlists, no fallback file, atomic token replacement ----
+
+# Names the Grafana restarts also need beyond what the repo compose file names: the manual compose
+# lines of step 4b (one) and 5b (seven). They are checked against those steps below.
+GRAFANA_EXTRAS = ["DISCORD_FAILURE_WEBHOOK_URL", "GF_SMTP_ENABLED", "GF_SMTP_FROM_ADDRESS", "GF_SMTP_HOST",
+                  "GF_SMTP_PASSWORD", "GF_SMTP_STARTTLS_POLICY", "GF_SMTP_USER", "P1_EMAIL_TO"]
+
+
+def compose_grafana_names():
+    """Every name the grafana service of docker/docker-compose.yml interpolates or passes through."""
+    compose = (REPO_ROOT / "docker" / "docker-compose.yml").read_text(encoding="utf-8")
+    block = re.search(r"^  grafana:\n(.*?)(?=^  [a-z0-9_-]+:\n)", compose, flags=re.S | re.M).group(1)
+    return sorted(set(re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)", block))
+                  | set(re.findall(r"^\s+- ([A-Z][A-Z0-9_]*)\s*$", block, flags=re.M)))
+
+
+def test_issue177_the_grafana_allowlist_is_computed_from_the_compose_file():
+    expected = ",".join(sorted(set(compose_grafana_names()) | set(GRAFANA_EXTRAS)))
+    lines = [l for l in CODE_LINES if "docker compose up -d" in l and "grafana" in l and "siem-net-run" in l]
+    assert len(lines) == 3, lines  # 4d, 4g, 5d
+    for line in lines:
+        assert '"$HOME/bin/siem-net-run" --only ' + expected + " -- docker compose up -d --no-deps grafana" in line, line
+    for name in GRAFANA_EXTRAS[:1]:
+        assert name in section("### 4b.", "### 4c.")
+    smtp = section("### 5a.", "### 5b.")
+    for name in GRAFANA_EXTRAS[1:]:
+        assert name in smtp, name
+
+
+def test_issue177_every_wrapper_call_names_an_allowlist_and_none_is_a_process_control_name():
+    calls = [l for l in CODE_LINES if "siem-net-run" in l and "install" not in l and "rm " not in l]
+    assert calls
+    for line in calls:
+        for m in re.finditer(r'siem-net-run" (?!--only )', line):
+            assert False, "a wrapper call without --only: " + line
+    names = set()
+    for line in CODE_LINES:
+        for m in re.finditer(r"siem-net-run\" --only ([A-Za-z0-9_,]+) --", line):
+            names.update(m.group(1).split(","))
+    bad = [n for n in names if re.match(r"(LD_|BASH|PATH$|HOME$|DOCKER_|DOPPLER_|PYTHON|ENV$|IFS$|COMPOSE_)", n)]
+    assert not bad, bad
+
+
+def test_issue177_the_n8n_recreate_allowlist_is_the_preserve_list():
+    block = def_fence("owner_recreate_n8n")
+    # "$2", not "$PRESERVE": a variable set as a prefix of the same command is not visible to its own arguments
+    assert '"$HOME/bin/siem-net-run" --only "$2" -- sh -c' in block
+    for call in CALLS:
+        req, preserve = re.search(r'owner_recreate_n8n "([^"]*)" "([^"]*)"', call).groups()
+        assert set(req.split()) <= set(preserve.split(",")), call  # every required name is also allowed
+        assert set(preserve.split(",")) <= {"HEARTBEAT_PING_URL", "HEARTBEAT_KIND", "EXPIRY_WATCH_ROUTER_TOKEN"}
+
+
+def test_issue177_the_recreate_passes_its_allowlist_to_the_wrapper(tmp_path):
+    status, out, log = run_blocks(tmp_path, [CHK, RECREATE, CALLS[1]])
+    assert status == 0 and "netargs --only HEARTBEAT_PING_URL,HEARTBEAT_KIND,EXPIRY_WATCH_ROUTER_TOKEN --" in log
+
+
+def test_issue177_the_token_is_replaced_atomically_and_the_old_one_is_revoked_after_the_check():
+    text = section("### 0b.5 ", "## Step 0c.")
+    flat = " ".join(text.split())
+    assert 'cat > "$HOME/.config/doppler-siem-net/token"' not in text  # never truncates the live token
+    assert "doppler-siem-net.new" in text and "mv -T" in text and "umask 077" in text
+    assert text.index("mv -T") < text.index("revoke --project")  # the swap comes before the revoke
+    assert "--no-fallback" in flat and "fails closed" in flat.lower() and "Doppler outage" in flat
+    assert "--only" in flat and "LD_PRELOAD" in flat
+
+
+def test_issue177_the_old_fallback_readonly_claim_is_gone():
+    assert "--fallback-readonly" not in RUNBOOK.replace("`--fallback-readonly` in `siem-run`", "")

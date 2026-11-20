@@ -27,7 +27,25 @@ FAKE_DOPPLER = """#!/bin/bash
 printf '%s\\n' "$$" > '@REC@/doppler-pid'
 for a in "$@"; do printf '%s\\n' "$a"; done > '@REC@/doppler-argv'
 cat /proc/$$/environ > '@REC@/doppler-environ'
-exit "${FAKE_EXIT:-0}"
+[ -n "${FAKE_EXIT:-}" ] && exit "$FAKE_EXIT"
+# Emulate `doppler run`: inject the config's secrets (hostile names included) into the child,
+# keeping only the names given to --only-secrets, as the real CLI does.
+only=
+args=("$@")
+for a in "${args[@]}"; do case "$a" in --only-secrets=*) only=",${a#--only-secrets=}," ;; esac; done
+child=()
+seen=0
+for a in "${args[@]}"; do
+    if [ "$seen" = 1 ]; then child+=("$a"); fi
+    [ "$a" = -- ] && seen=1
+done
+inject=()
+for kv in LD_PRELOAD=/evil.so BASH_ENV=/evil.sh ENV=/evil.sh PATH=/evil DOCKER_HOST=tcp://evil:1 PYTHONPATH=/evil GOOD_ONE=one GOOD_TWO=two NOT_ASKED=nope; do
+    name=${kv%%=*}
+    if [ -z "$only" ] || [[ "$only" == *",$name,"* ]]; then inject+=("$kv"); fi
+done
+[ ${#child[@]} -gt 0 ] && exec env "${inject[@]}" "${child[@]}"
+exit 0
 """
 PROBE = """#!/bin/sh
 id=$$
@@ -73,9 +91,9 @@ class Box:
         self.token.write_text(text, encoding="utf-8")
         self.token.chmod(mode)
 
-    def run(self, args=("echo", "hi"), extra_env=None, bash_prefix=None):
+    def run(self, args=("echo", "hi"), extra_env=None, only="GOOD_ONE,GOOD_TWO", raw=None):
         env = {"PATH": "/usr/bin:/bin", "HOME": str(self.home), **(extra_env or {})}
-        cmd = [str(self.script), *args]
+        cmd = [str(self.script), *(raw if raw is not None else ["--only", only, "--", *args])]
         return subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     def finish(self, proc):
@@ -104,12 +122,14 @@ def _env_map(path):
 # ---- the exec chain ----------------------------------------------------------------
 
 def test_doppler_gets_the_documented_arguments_and_the_token_in_its_environment(box):
-    proc = box.run(("python3", "-I", "x.py", "--flag"))
+    proc = box.run(("echo", "-n", "x.py", "--flag"))
     code, out, err = box.finish(proc)
     assert code == 0, err
     argv = (box.rec / "doppler-argv").read_text().splitlines()
-    assert argv == ["run", "--config-dir", str(box.cfg), "--no-check-version", "--fallback-readonly",
-                    "--", "python3", "-I", "x.py", "--flag"]
+    assert argv == ["run", "--config-dir", str(box.cfg), "--no-check-version", "--no-fallback",
+                    "--no-exit-on-missing-only-secrets", "--only-secrets=GOOD_ONE,GOOD_TWO",
+                    "--", "echo", "-n", "x.py", "--flag"]
+    assert "--fallback-readonly" not in argv  # a stale snapshot on disk is never read (Daybreak round 1, finding 2)
     env = _env_map(box.rec / "doppler-environ")
     assert env["DOPPLER_TOKEN"] == SENTINEL  # trailing newline of the file is stripped
 
@@ -243,11 +263,73 @@ def test_a_symlinked_config_folder_is_refused(box, tmp_path):
 
 
 def test_no_command_is_a_usage_error_and_reads_nothing(box):
-    proc = box.run(args=())
+    proc = box.run(raw=[])
     code, out, err = box.finish(proc)
     assert code == 64 and "usage" in err
     assert not box.recorded("doppler-*")
     assert not box.recorded("stat-*-argv")
+
+
+@pytest.mark.parametrize("raw", [
+    ["echo", "hi"],                         # no allowlist at all
+    ["--only", "", "--", "echo"],           # empty allowlist
+    ["--only"],                             # option without a value
+    ["--only", "GOOD_ONE"],                 # no separator and no command
+    ["--only", "GOOD_ONE", "echo"],         # no separator
+    ["--only", "GOOD_ONE", "--"],           # no command
+    ["--only", "GOOD_ONE,,GOOD_TWO", "--", "echo"],
+    ["--only", ",GOOD_ONE", "--", "echo"],
+    ["--only", "GOOD_ONE,", "--", "echo"],
+    ["--only", "good one", "--", "echo"],
+    ["--only", "1BAD", "--", "echo"],
+    ["--only", "A-B", "--", "echo"],
+    ["--only", "A=B", "--", "echo"],
+])
+def test_a_missing_or_malformed_allowlist_is_a_usage_error_and_reads_nothing(box, raw):
+    code, out, err = box.finish(box.run(raw=raw))
+    assert code == 64, (code, err)
+    assert not box.recorded("doppler-*") and not box.recorded("stat-*-argv")
+
+
+HOSTILE = ["LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "BASH_ENV", "ENV", "PATH", "PYTHONPATH", "PYTHONHOME",
+           "PYTHONSTARTUP", "DOCKER_HOST", "DOCKER_CONFIG", "COMPOSE_FILE", "SHELLOPTS", "BASHOPTS", "IFS", "HOME",
+           "DOPPLER_TOKEN", "DOPPLER_CONFIG", "CDPATH", "GLOBIGNORE", "PS4", "NODE_OPTIONS", "PERL5LIB", "RUBYOPT",
+           "TMPDIR", "SHELL", "USER", "SUDO_ASKPASS", "SUDO_EDITOR", "GCONV_PATH", "LOCPATH", "NLSPATH", "HOSTALIASES",
+           "MALLOC_CHECK_", "GLIBC_TUNABLES", "JAVA_TOOL_OPTIONS", "LANG", "LC_ALL", "XDG_CONFIG_HOME"]
+
+
+@pytest.mark.parametrize("name", HOSTILE)
+def test_a_process_control_name_in_the_allowlist_is_refused(box, name):
+    code, out, err = box.finish(box.run(only="GOOD_ONE," + name))
+    assert code == 2 and "allowlist" in err and name in err, (code, err)
+    assert not box.recorded("doppler-*")
+
+
+def test_hostile_secrets_in_the_config_are_not_passed_to_the_command(box):
+    # the fake doppler injects LD_PRELOAD, BASH_ENV, ENV, PATH, DOCKER_HOST and PYTHONPATH like a poisoned config
+    probe = box.tmp / "child.sh"
+    _exe(probe, "#!/bin/sh\n/usr/bin/cat /proc/$$/environ > '" + str(box.rec) + "/child-environ'\n")
+    code, _, err = box.finish(box.run(args=(str(probe),)))
+    assert code == 0, err
+    env = _env_map(box.rec / "child-environ")
+    assert env["GOOD_ONE"] == "one" and env["GOOD_TWO"] == "two"
+    for bad in ("LD_PRELOAD", "BASH_ENV", "ENV", "DOCKER_HOST", "PYTHONPATH", "NOT_ASKED"):
+        assert bad not in env, bad
+    assert env["PATH"] != "/evil" and "/evil" not in env["PATH"]
+
+
+def test_other_doppler_variables_of_the_caller_are_removed_not_passed_on(box):
+    proc = box.run(extra_env={"DOPPLER_CONFIG": "prd", "DOPPLER_PROJECT": "x", "DOPPLER_API_HOST": "http://evil"})
+    box.finish(proc)
+    env = _env_map(box.rec / "doppler-environ")
+    assert sorted(k for k in env if k.startswith("DOPPLER_")) == ["DOPPLER_TOKEN"]
+
+
+def test_the_wrapper_does_not_pass_no_read_env_because_that_hides_the_token_variable():
+    # VERIFIED 2026-11-20 with the installed CLI: --no-read-env makes it ignore DOPPLER_TOKEN ("you must
+    # provide a token"), and the token may not go on the command line, so the wrapper clears DOPPLER_* itself.
+    exec_line = next(l for l in SCRIPT.read_text(encoding="utf-8").splitlines() if "exec doppler run" in l)
+    assert "--no-read-env" not in exec_line and "--token" not in exec_line
 
 
 def test_the_folder_is_configurable_and_the_default_is_the_documented_one(box, tmp_path):
@@ -269,7 +351,7 @@ def test_the_folder_is_configurable_and_the_default_is_the_documented_one(box, t
 def test_the_script_is_hardened_at_the_top():
     lines = SCRIPT.read_text(encoding="utf-8").splitlines()
     assert lines[0] == "#!/bin/bash -p"
-    head = "\n".join(lines[:30])
+    head = "\n".join(lines[:45])
     assert "set +x" in head
     assert "unset BASH_ENV ENV CDPATH GLOBIGNORE PS4" in head
     assert "export PATH" in head

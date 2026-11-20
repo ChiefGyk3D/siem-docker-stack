@@ -1,5 +1,5 @@
 #!/bin/bash -p
-# Run a command with the dev_network values injected from the secret manager.
+# Run a command with chosen dev_network values injected from the secret manager.
 #
 # The box reads the Doppler config dev_network (project homelab) through a
 # read-only service token kept in a mode 600 file inside a private config
@@ -9,30 +9,81 @@
 # command. A service token is already scoped to one project and config, so no
 # project or config flag is passed.
 #
+# Only the secrets NAMED on the command line are injected (--only-secrets). A
+# config that holds a secret called LD_PRELOAD, BASH_ENV, PATH or the like would
+# otherwise undo the sanitizing below, because the secret manager adds its
+# values to the child environment after this script ran. A name that controls
+# how a process starts is refused outright. The values are never read from the
+# disk cache: with no fallback file, an outage or a revoked token stops the
+# command instead of serving old values.
+#
 # Environment (optional):
 #   SIEM_NET_CONFIG_DIR   private config folder that holds the file "token"
 #                         (default: $HOME/.config/doppler-siem-net)
 #
-# Exit status: the command's own status; 2 when the token file or its folder is
-# refused; 64 when no command is given.
+# Exit status: the command's own status; 2 when the token file, its folder or
+# the allowlist is refused; 64 when the arguments are malformed.
 #
-# Usage: siem-net-run COMMAND [ARGS...]
+# Usage: siem-net-run --only NAME1,NAME2,... -- COMMAND [ARGS...]
 set +x
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
-unset BASH_ENV ENV CDPATH GLOBIGNORE PS4 DOPPLER_TOKEN
+unset BASH_ENV ENV CDPATH GLOBIGNORE PS4
 set -euo pipefail
 umask 077
 
-if [ "$#" -eq 0 ]; then
-    echo "siem-net-run: usage: siem-net-run COMMAND [ARGS...]" >&2
+# Drop every secret-manager setting the caller exported (project, config, host,
+# token): the token comes from the file below and nothing else.
+while IFS= read -r VAR_NAME; do
+    case "$VAR_NAME" in
+        DOPPLER_*) unset "$VAR_NAME" ;;
+    esac
+done < <(compgen -e)
+
+usage() {
+    echo "siem-net-run: usage: siem-net-run --only NAME1,NAME2,... -- COMMAND [ARGS...]" >&2
     exit 64
-fi
+}
 
 refuse() {
     echo "siem-net-run: $1" >&2
     exit 2
 }
+
+if [ "$#" -lt 4 ] || [ "$1" != "--only" ] || [ "$3" != "--" ]; then
+    usage
+fi
+ONLY="$2"
+shift 3
+
+# The allowlist: comma separated names, each a plain identifier, none empty.
+case "$ONLY" in
+    "" | ,* | *, | *,,*) usage ;;
+esac
+IFS=, read -r -a ONLY_NAMES <<< "$ONLY"
+for NAME in "${ONLY_NAMES[@]}"; do
+    if [[ ! "$NAME" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+        usage
+    fi
+done
+# Names that change how a program starts, finds code or reaches a daemon are
+# never injected, whatever the config holds.
+for NAME in "${ONLY_NAMES[@]}"; do
+    case "$NAME" in
+        LD_* | DYLD_* | GCONV_PATH | LOCPATH | NLSPATH | HOSTALIASES | MALLOC_* | GLIBC_TUNABLES | RESOLV_HOST_CONF | \
+        BASH_* | BASH | ENV | SHELL | SHELLOPTS | BASHOPTS | IFS | CDPATH | GLOBIGNORE | PS0 | PS1 | PS2 | PS4 | PROMPT_COMMAND | \
+        PATH | HOME | USER | LOGNAME | TMPDIR | TMP | TEMP | PWD | OLDPWD | LANG | LANGUAGE | LC_* | TZ | TERM | EDITOR | VISUAL | PAGER | \
+        PYTHON* | PERL* | RUBY* | GEM_* | NODE_* | NPM_* | JAVA_* | JDK_JAVA_OPTIONS | CLASSPATH | LUA_* | PHP* | GOFLAGS | GOROOT | GOPATH | \
+        DOCKER_* | COMPOSE_* | CONTAINER_* | PODMAN_* | SUDO_* | SSH_* | GIT_* | XDG_* | DOPPLER_* | \
+        *_PROXY | *_proxy | CURL_* | OPENSSL_* | SSL_* | REQUESTS_CA_BUNDLE | NIX_*)
+            refuse "allowlist name $NAME is not allowed (it controls how programs start or where they connect)"
+            ;;
+    esac
+done
+
+if [ "$#" -eq 0 ]; then
+    usage
+fi
 
 CFG="${SIEM_NET_CONFIG_DIR:-$HOME/.config/doppler-siem-net}"
 TOKEN_FILE="$CFG/token"
@@ -73,4 +124,7 @@ if [ -z "$TOK" ]; then
     refuse "token file is empty"
 fi
 
-DOPPLER_TOKEN="$TOK" exec doppler run --config-dir "$CFG" --no-check-version --fallback-readonly -- "$@"
+# A name missing from the config is not an error here (the caller checks what it
+# needs); an outage or a revoked token still stops the command, as there is no
+# fallback file.
+DOPPLER_TOKEN="$TOK" exec doppler run --config-dir "$CFG" --no-check-version --no-fallback --no-exit-on-missing-only-secrets --only-secrets="$ONLY" -- "$@"
