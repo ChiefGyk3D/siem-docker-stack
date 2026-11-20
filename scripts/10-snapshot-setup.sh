@@ -269,9 +269,11 @@ echo ""
 # control character (CR or LF would start a new curl config directive), escapes backslash and double
 # quote, and sends the credentials to curl on stdin as a config, never on the command line.
 # The function REFUSES to run while the calling shell traces or debugs: xtrace on (set -x, SHELLOPTS),
-# BASH_XTRACEFD set, functrace on (set -T), or a DEBUG, RETURN or ERR trap set. Those can print the
-# password through channels no redirection here can close, so the check comes before the password is read.
-# Start a fresh `bash --norc` to run it. As defense in depth the body also runs with standard error sent
+# BASH_XTRACEFD set, functrace on (set -T), or a DEBUG, RETURN or ERR trap set. The refusal comes before
+# the password is read, so it prevents curl and the hint's own read of the password. LIMIT (owner decision,
+# documented, not fixed): it cannot protect a password the caller's shell ALREADY holds when a DEBUG trap,
+# a PS4 or a BASH_XTRACEFD set before the call prints it; that runs in the caller's shell before any code
+# here. Run it in a fresh `bash --norc` whose environment does not already hold the password. As defense in depth the body also runs with standard error sent
 # to /dev/null; messages and curl's own errors go to descriptor 3, which the printed call line opens as a
 # copy of the real standard error. The call line is built with printf %q, so no argument (the URL comes
 # from the command line) can inject shell when pasted.
@@ -312,7 +314,7 @@ manual_snapshot() {
         return "$rc"
     } 2>/dev/null
 }
-echo "Manual snapshot now (paste into a fresh bash 4.2 or newer with no tracing or DEBUG/RETURN/ERR trap, where OPENSEARCH_ADMIN_PASSWORD is set and not exported):"
+echo "Manual snapshot now. Paste into a fresh 'bash --norc' (bash 4.2 or newer) that does not already hold the password, then set OPENSEARCH_ADMIN_PASSWORD (not exported). The hint refuses while tracing or a DEBUG/RETURN/ERR trap is active, but it cannot protect a password your shell already holds under a DEBUG trap, PS4 or BASH_XTRACEFD set before the call:"
 echo "# --- paste begin"
 declare -f manual_snapshot
 printf '{ manual_snapshot "$(trap -p DEBUG RETURN ERR)" %q %q %q; } 3>&2 2>/dev/null\n' "${OPENSEARCH_URL}" "${REPO_NAME}" "${SNAPSHOT_INDICES}"

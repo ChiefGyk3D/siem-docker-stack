@@ -61,8 +61,10 @@ line (between `# --- paste begin` and `# --- paste end`). Paste it into a fresh 
 (`bash --norc`), in a shell where `OPENSEARCH_ADMIN_PASSWORD` is set and not exported. It sends the
 credentials to curl on stdin and refuses a control character or an unreadable date. It also refuses to run
 while the shell is tracing (`set -x`, `SHELLOPTS`, `BASH_XTRACEFD`, `set -T`) or has a `DEBUG`, `RETURN` or
-`ERR` trap, because those can print the password where no redirection reaches. The `osc` form below is the
-manual equivalent.
+`ERR` trap, so it prevents curl and its own read of the password in that case. It cannot protect a password
+your shell already holds when a `DEBUG` trap, a `PS4` or a `BASH_XTRACEFD` set before the call prints it:
+that code runs in your shell before the function starts. Use a fresh `bash --norc` whose environment does
+not already hold the password. The `osc` form below is the manual equivalent.
 
 ```bash
 osc -X PUT "$OS/_snapshot/siem-snapshots/manual-$(date +%Y%m%d-%H%M)?wait_for_completion=false" \

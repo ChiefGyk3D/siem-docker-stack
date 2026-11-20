@@ -598,6 +598,20 @@ def test_the_printed_manual_snapshot_hint_refuses_alternate_trace_channels(tmp_p
         assert SENTINEL not in channel, "the password reached a trace channel"
 
 
+def test_known_limit_a_debug_trap_in_the_callers_shell_prints_a_password_it_already_holds(tmp_path):
+    """DOCUMENTED LIMIT (docs/backup-restore.md): the hint refuses while a DEBUG trap is set, so curl never
+    runs, but the trap belongs to the caller's shell and runs before the guard: when that shell already
+    holds OPENSEARCH_ADMIN_PASSWORD and the trap prints it, the capture contains it. This test asserts the
+    limit as it is; when the hint learns to close it, flip it to assert the sentinel is absent."""
+    hint = printed_hint(tmp_path / "p")
+    cap = tmp_path / "capture"
+    cap.write_text("", encoding="utf-8")
+    prefix = f"exec 5>>'{cap}'\ntrap 'printf \"%s\\n\" \"$OPENSEARCH_ADMIN_PASSWORD\" >&5' DEBUG\n"
+    box, proc = run_hint(tmp_path, hint, SENTINEL, prefix=prefix)
+    assert proc.returncode != 0 and not box.curl_calls(), "the guard no longer refuses"
+    assert SENTINEL in cap.read_text(encoding="utf-8"), "the documented limit no longer holds: flip this test"
+
+
 def test_the_printed_manual_snapshot_hint_still_works_in_a_clean_shell(tmp_path):
     hint = printed_hint(tmp_path / "p")
     box, proc = run_hint(tmp_path, hint, SENTINEL)
