@@ -88,7 +88,7 @@ expected; the next step initializes the users the clients need.
 ### 2c. Initialize OpenSearch security BEFORE clients can work again
 
 ```bash
-bash scripts/08b-init-opensearch-security.sh
+sudo scripts/08b-init-opensearch-security.sh
 ```
 
 - [ ] Script ends with `Authenticated admin request: HTTP 200` and
@@ -110,9 +110,9 @@ bash scripts/06-generate-wazuh-certs.sh
 bash scripts/07-generate-opensearch-certs.sh
 bash scripts/03-deploy.sh local
 # opensearch-hot stays "unhealthy" (HTTP 503) until the next line runs — expected:
-bash scripts/08b-init-opensearch-security.sh
+sudo scripts/08b-init-opensearch-security.sh
 docker compose up -d                   # in /opt/siem — starts remaining services
-bash scripts/04-apply-ism-policy.sh
+sudo scripts/04-apply-ism-policy.sh
 ```
 
 ## 4. Verification — F1 (auth everywhere)
@@ -166,7 +166,7 @@ docker logs logstash --tail 20   # no auth/TLS errors
       `curl -s 'http://localhost:8086/query?q=SHOW+DATABASES' | jq .` → auth error.
 - [ ] pfSense Telegraf + any remote writers updated with credentials and
       writing again (check `pfsense` DB measurements timestamp).
-- [ ] `bash scripts/05-verify.sh` — all green (includes the 401 check).
+- [ ] `sudo scripts/05-verify.sh` — all green (includes the 401 check).
 
 ## 5. Verification — F3 (independent alerting)
 

@@ -496,3 +496,63 @@ def test_internal_users_file_is_never_created_wider_than_final_mode(tmp_path):
     final = box.sec / "internal_users.yml"
     assert final.stat().st_mode & 0o777 == 0o640
     assert sorted(p.name for p in box.sec.iterdir() if "tmp" in p.name) == []  # no leftover temporary file
+
+
+@pytest.mark.parametrize("how", ["ps4_then_set_x", "set_x_then_ps4", "exported_ps4", "debug_trap_stdout",
+                                 "debug_trap_stderr", "return_trap"])
+def test_an_env_file_cannot_make_the_trace_or_a_trap_print_a_password(tmp_path, how):
+    """`PS4="$PASSWORD "; set -x` in the .env makes bash expand the password in every trace line, the one for
+    the `set +x` that ends tracing included; a DEBUG or RETURN trap can print it too."""
+    first = "OPENSEARCH_ADMIN_PASSWORD"
+    plain = lambda pw: "".join(f"{k}='{v}'\n" for k, v in pw.items())  # noqa: E731
+    styles = {
+        "ps4_then_set_x": lambda pw: plain(pw) + f'PS4="${first} "\nset -x\n',
+        "set_x_then_ps4": lambda pw: "set -x\n" + plain(pw) + f'PS4="${first} "\n',
+        "exported_ps4": lambda pw: plain(pw) + f'export PS4="${first} "\nset -x\n',
+        "debug_trap_stdout": lambda pw: plain(pw) + f"trap 'printf \"%s\\n\" \"${first}\"' DEBUG\n",
+        "debug_trap_stderr": lambda pw: plain(pw) + f"trap 'printf \"%s\\n\" \"${first}\" >&2' DEBUG\n",
+        "return_trap": lambda pw: plain(pw) + f"trap 'printf \"%s\\n\" \"${first}\"' RETURN\nset -T\n",
+    }
+    box = make(tmp_path)
+    proc = box.run(via="file", env_style=styles[how])
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert SENTINEL not in proc.stdout + proc.stderr, "a password printed through the trace or a trap"
+    for c in box.engine_calls():
+        assert SENTINEL not in c["argv"] and SENTINEL not in c["env"]
+    assert_children_clean(box, EVERY_TOOL)
+
+
+def test_known_limit_env_exit_trap_still_fires_and_prints_the_password(tmp_path):
+    """DOCUMENTED LIMIT (docs/container-engine.md): the .env is trusted shell code. The loader clears the
+    DEBUG, RETURN and ERR traps and tracing, but not an EXIT or signal trap: one the file installs runs
+    at exit with the script's variables. This test asserts the limit as it is; when the loader learns to
+    close it, flip this test to assert the sentinel is absent."""
+    box = make(tmp_path)
+    proc = box.run(via="file", env_style=lambda pw: "".join(f"{k}='{v}'\n" for k, v in pw.items())
+                   + "trap 'printf \"%s\\n\" \"$OPENSEARCH_ADMIN_PASSWORD\"' EXIT\n")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert SENTINEL in proc.stdout, "the documented limit no longer holds: close the docs note and flip this test"
+
+
+def test_known_limit_env_function_shadowing_a_helper_is_not_blocked(tmp_path):
+    """DOCUMENTED LIMIT (docs/container-engine.md): a function the .env defines runs in place of the
+    command of the same name, with the script's variables. This test asserts the limit as it is; when the
+    loader learns to close it, flip this test to assert the sentinel is absent."""
+    box = make(tmp_path)
+    proc = box.run(via="file", env_style=lambda pw: "".join(f"{k}='{v}'\n" for k, v in pw.items())
+                   + "tail() { cat > /dev/null; printf '%s\\n' \"$OPENSEARCH_ADMIN_PASSWORD\"; }\n")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert SENTINEL in proc.stdout, "the documented limit no longer holds: close the docs note and flip this test"
+
+
+@pytest.mark.parametrize("bad", ["false\n", "if then\n", "return 1\n"])
+def test_a_failing_env_file_is_reported_and_stops_before_any_engine_call(tmp_path, bad):
+    """A .env whose load fails (a failing command, a syntax error) must not look like success: the script
+    exits non-zero with a value-free diagnostic naming the load, and calls the engine zero times."""
+    box = make(tmp_path)
+    proc = box.run(via="file", env_style=lambda pw: "".join(f"{k}='{v}'\n" for k, v in pw.items()) + bad)
+    assert proc.returncode != 0, proc.stdout
+    out = proc.stdout + proc.stderr
+    assert "failed to load" in out and ".env" in out, out
+    assert SENTINEL not in out
+    assert box.engine_calls() == []

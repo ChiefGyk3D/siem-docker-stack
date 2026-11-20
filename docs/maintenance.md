@@ -219,7 +219,7 @@ docker compose pull
 docker compose up -d
 
 # Verify everything is healthy
-bash /path/to/scripts/05-verify.sh localhost
+sudo /path/to/scripts/05-verify.sh localhost
 ```
 
 ## Disk Space Emergency

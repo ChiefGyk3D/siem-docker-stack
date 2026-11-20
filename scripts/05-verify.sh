@@ -6,10 +6,14 @@
 # Can run locally on the SIEM server or remotely against it.
 #
 # Usage:
-#   bash scripts/05-verify.sh                        # defaults to localhost
-#   bash scripts/05-verify.sh 10.0.0.100              # check remote server
-#   bash scripts/05-verify.sh 10.0.0.100 myuser       # remote with custom SSH user
-#   SIEM_USER=myuser bash scripts/05-verify.sh 10.0.0.100
+#   sudo scripts/05-verify.sh                        # defaults to localhost
+#   sudo scripts/05-verify.sh 10.0.0.100              # check remote server
+#   sudo scripts/05-verify.sh 10.0.0.100 myuser       # remote with custom SSH user
+#   sudo SIEM_USER=myuser scripts/05-verify.sh 10.0.0.100
+#
+# Start it by its path, never through an explicit `bash` interpreter: run as root, an explicit interpreter
+# reads BASH_ENV, imported functions, SHELLOPTS and BASHOPTS before line 1 and bypasses the privileged
+# shebang. The privileged-mode check below is a diagnostic only: it cannot repair such a launch.
 # =============================================================================
 
 set +x
@@ -17,9 +21,20 @@ set +x
 unset BASH_ENV ENV CDPATH GLOBIGNORE PS4
 set -uo pipefail
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; export PATH  # fixed PATH before any command runs
+# Still before any external command runs: take the export attribute off the passwords (a caller may have
+# exported them) and switch allexport off (an inherited `bash -a` would export every later assignment).
+# Both are builtins. From here on no child inherits these named passwords through the launch environment
+# (the .env loader below handles what the file exports). What no script can change: the environment this
+# process itself was started with still holds whatever the launcher exported; pass the passwords in a
+# .env file rather than the launch environment to avoid even that.
+export -n OPENSEARCH_ADMIN_PASSWORD WAZUH_INDEXER_PASSWORD INFLUXDB_ADMIN_PASSWORD
+set +a
 
-# Root decision, privileged-mode check and the trusted script and helper tree come FIRST,
-# before anything is read, located or sourced.
+# Root decision, privileged-mode check and the trusted script and helper tree come before anything is
+# read, located or sourced (readlink, dirname and id run first, to find the script's own directory).
+# The privileged-mode check is a DIAGNOSTIC only: when the script was started as `bash script`, bash has
+# already run BASH_ENV, imported functions, SHELLOPTS and BASHOPTS, and nothing inside the script can
+# repair that. Start it by its path.
 SCRIPT_DIR="$(/usr/bin/dirname -- "$(/usr/bin/readlink -f -- "${BASH_SOURCE[0]}")")"  # the real directory, symlinks resolved
 CE_LIB="${SCRIPT_DIR}/lib-container-engine.sh"
 ce_boot_fail() { echo "refusing to source ${CE_LIB}: $1" >&2; exit 1; }
@@ -62,12 +77,61 @@ REPO_DIR="${SCRIPT_DIR}/.."
 
 # Load credentials from .env when present (OPENSEARCH_ADMIN_PASSWORD,
 # INFLUXDB_ADMIN_USER/PASSWORD) — Phase F1 secured the cluster and InfluxDB.
+# The .env is shell code, so loading it cannot be made to ignore an `export`, `declare -x` or `set -a`
+# written inside it. Guaranteed, using shell builtins only (no process is started): "noexport" keeps a
+# plain assignment from being exported; then allexport is switched off, tracing is switched off, every
+# variable NAME the file created is stripped of its export attribute, and so are the named passwords.
+# NOT guaranteed: a variable that already existed before the file ran keeps whatever export attribute
+# the file gave it (PATH, CE_TRUSTED_DIRS, this script's own variables), so write plain NAME=value lines
+# only (docs/container-engine.md). A hostile file can run any shell code, so it must be trusted (as
+# root it must be root-owned in a root-owned tree, enforced above). The environment this process was
+# started with still holds whatever its launcher exported.
+# ce_names fills the array _NAMES with every variable name in the shell (the ${!x@} expansions list the
+# names starting with one character; eval only ever sees the fixed characters of the loop).
+ce_names() {
+    local _c
+    _NAMES=()
+    for _c in {a..z} {A..Z} _; do
+        eval '_NAMES+=(${!'"$_c"'@})'
+    done
+}
+declare -A PRE_NAMES=()
+ce_names
+for _n in ${_NAMES[@]+"${_NAMES[@]}"}; do PRE_NAMES[$_n]=1; done
 for envf in /opt/siem/.env "${REPO_DIR}/.env" "${REPO_DIR}/docker/.env"; do
     if [ -f "$envf" ]; then
-        ce_source_env "$envf" || exit 1  # root: only a root-owned file in a root-owned tree, via one descriptor
+        ce_source_env "$envf" noexport || exit 1  # root: only a root-owned file in a root-owned tree, via one descriptor
         break
     fi
 done
+set +x +a
+ce_names
+for _n in ${_NAMES[@]+"${_NAMES[@]}"}; do
+    [ -n "${PRE_NAMES[$_n]:-}" ] || export -n "$_n"
+done
+export -n OPENSEARCH_ADMIN_PASSWORD WAZUH_INDEXER_PASSWORD INFLUXDB_ADMIN_PASSWORD
+unset _n _NAMES PRE_NAMES
+# A line break in a password would end the one-line curl config record (and start a new directive), so
+# refuse it before any request. The variable name is printed, never the value.
+for var in OPENSEARCH_ADMIN_PASSWORD WAZUH_INDEXER_PASSWORD INFLUXDB_ADMIN_PASSWORD INFLUXDB_ADMIN_USER; do
+    case "${!var:-}" in
+        *$'\n'* | *$'\r'*)
+            echo "${var} contains a line break, which is not allowed in a credential" >&2
+            exit 1
+            ;;
+    esac
+done
+
+# curl_auth USER_AND_PASSWORD CURL_ARGS...: the credentials go to curl on standard input as a config
+# (-K -), never in argv. Backslash and double quote are escaped for the curl config syntax. printf is a
+# builtin, so no process holds the value.
+curl_auth() {
+    local cred="$1"
+    shift
+    cred="${cred//\\/\\\\}"
+    cred="${cred//\"/\\\"}"
+    printf 'user = "%s"\n' "$cred" | curl -K - "$@"
+}
 
 # CONTAINER_ENGINE (docker by default, or podman) may come from the environment or that .env.
 ce_init_name || exit 1
@@ -112,10 +176,11 @@ check_https() {
     local expected="${3:-200}"
     local auth="${4:-}"
 
-    local curl_args="-sk"
-    [ -n "$auth" ] && curl_args="$curl_args -u $auth"
-
-    STATUS=$(curl $curl_args -o /dev/null -w "%{http_code}" --max-time 10 "$url" 2>/dev/null || echo "000")
+    if [ -n "$auth" ]; then
+        STATUS=$(curl_auth "$auth" -sk -o /dev/null -w "%{http_code}" --max-time 10 "$url" 2>/dev/null || echo "000")
+    else
+        STATUS=$(curl -sk -o /dev/null -w "%{http_code}" --max-time 10 "$url" 2>/dev/null || echo "000")
+    fi
     if [ "$STATUS" = "$expected" ] || { [ "$expected" = "any" ] && [ "$STATUS" != "000" ]; }; then
         echo -e "  ${GREEN}✓${NC} ${name} — HTTP ${STATUS}"
         ((PASS++))
@@ -136,7 +201,7 @@ check_https "OpenSearch API (hot, authenticated)" "${OS_URL}" "200" "$OS_AUTH"
 check_https "OpenSearch API (unauthenticated → 401)" "${OS_URL}" "401"
 check_http "OpenSearch Dashboards" "http://${SIEM_HOST}:5601" "302"
 
-CLUSTER_HEALTH=$(curl -sk -u "$OS_AUTH" "${OS_URL}/_cluster/health" 2>/dev/null || echo "")
+CLUSTER_HEALTH=$(curl_auth "$OS_AUTH" -sk "${OS_URL}/_cluster/health" 2>/dev/null || echo "")
 if [ -n "$CLUSTER_HEALTH" ]; then
     CS=$(echo "$CLUSTER_HEALTH" | jq -r '.status')
     NODES=$(echo "$CLUSTER_HEALTH" | jq -r '.number_of_nodes')
@@ -148,7 +213,7 @@ if [ -n "$CLUSTER_HEALTH" ]; then
     esac
 
     echo -e "  Node tiers:"
-    curl -sk -u "$OS_AUTH" "${OS_URL}/_cat/nodeattrs?h=node,attr,value" 2>/dev/null | grep "temp" | while read -r line; do
+    curl_auth "$OS_AUTH" -sk "${OS_URL}/_cat/nodeattrs?h=node,attr,value" 2>/dev/null | grep "temp" | while read -r line; do
         echo -e "    ${CYAN}${line}${NC}"
     done
 fi
@@ -227,7 +292,7 @@ fi
 # ── ISM Policy ────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${YELLOW}ISM Policy:${NC}"
-ISM_POLICIES=$(curl -sk -u "$OS_AUTH" "${OS_URL}/_plugins/_ism/policies" 2>/dev/null || echo "")
+ISM_POLICIES=$(curl_auth "$OS_AUTH" -sk "${OS_URL}/_plugins/_ism/policies" 2>/dev/null || echo "")
 if [ -n "$ISM_POLICIES" ]; then
     COUNT=$(echo "$ISM_POLICIES" | jq -r '.total_policies // 0')
     if [ "$COUNT" -gt 0 ]; then
@@ -240,7 +305,7 @@ fi
 # ── InfluxDB Databases ───────────────────────────────────────────────────────
 echo ""
 echo -e "${YELLOW}InfluxDB Databases:${NC}"
-INFLUX_DBS=$(curl -sf -u "${INFLUXDB_ADMIN_USER:-admin}:${INFLUXDB_ADMIN_PASSWORD:-}" "http://${SIEM_HOST}:8086/query?q=SHOW+DATABASES" 2>/dev/null || echo "")
+INFLUX_DBS=$(curl_auth "${INFLUXDB_ADMIN_USER:-admin}:${INFLUXDB_ADMIN_PASSWORD:-}" -sf "http://${SIEM_HOST}:8086/query?q=SHOW+DATABASES" 2>/dev/null || echo "")
 if [ -n "$INFLUX_DBS" ]; then
     echo "$INFLUX_DBS" | jq -r '.results[0].series[0].values[][0]' 2>/dev/null | while read -r db; do
         echo -e "  ${GREEN}✓${NC} ${db}"

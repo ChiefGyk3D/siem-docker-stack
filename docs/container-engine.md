@@ -34,6 +34,7 @@ The variable is validated by the same rule everywhere (exactly `docker` or
 | `scripts/live-deploy/n8n-setup-alert-router.py` | environment |
 | `scripts/deploy-n8n-soar.sh` | environment; the validated name is sent to the SIEM host for the address lookup |
 | `scripts/03-deploy.sh`, `06-generate-wazuh-certs.sh`, `11-wazuh-grafana-readonly.sh`, `prometheus-otlp-firewall.sh` | environment |
+| `scripts/04-apply-ism-policy.sh` | the `.env` file is consulted only when `OPENSEARCH_ADMIN_PASSWORD` is empty in the environment; the exported environment wins, then the first existing `.env` |
 | `scripts/05-verify.sh`, `scripts/08b-init-opensearch-security.sh` | the `.env` file these scripts already load takes precedence over the exported environment, because it is sourced first |
 
 `scripts/live-deploy/grafana-deploy.py` starts no process and is unchanged.
@@ -86,13 +87,25 @@ absolute `/usr/bin/id` (or `/bin/id`), never from `EUID` or `UID`, and stops if 
 answer is not a number.
 
 The root decision, the privileged-mode check and the trusted script and helper tree
-are the first things each script does, before it reads `SIEM_DEPLOY_DIR`, locates a
-file or sources anything. `05-verify.sh` and `08b-init-opensearch-security.sh` load a
+are done early in each script, before it reads `SIEM_DEPLOY_DIR`, locates a
+file or sources anything. `04-apply-ism-policy.sh`, `05-verify.sh` and `08b-init-opensearch-security.sh` load a
 `.env`, which is shell code: they do it through `ce_source_env`, which as root accepts
 only a regular file (not a link) that is root-owned, with every directory above it
 root-owned and not group or world writable, opens it once and sources that open
 descriptor. For an ordinary user the file must be owned by root or by you and not world
-writable.
+writable. When sourcing the complete file returns nonzero (the status of its last command,
+a syntax error, or a `return 1`), the loader prints a one-line message naming the file
+(never a value) and the script stops before any request. A command that fails in the
+middle of the file, followed by one that succeeds, does not fail the load. While the file
+runs, its output is discarded and tracing, `PS4` and `DEBUG`, `RETURN` and `ERR` traps are
+switched off before the output comes back, so a `PS4` or a trap that holds a password
+prints nothing.
+
+Start these scripts by their path (`sudo scripts/05-verify.sh`), never through an
+explicit `bash` interpreter: as root an explicit interpreter reads `BASH_ENV`, imported
+functions, `SHELLOPTS` and `BASHOPTS` before line 1 and bypasses the privileged shebang.
+The privileged-mode check inside the script is a diagnostic only and cannot repair such
+a launch.
 
 Signals (kept deliberately small): `ce_run` runs the engine in the foreground of a
 subshell that has its own traps, so your script's traps are never read or changed. The
@@ -152,6 +165,16 @@ that guarantee:
 
 - The `.env` file is sourced as shell code and must be trusted. As root it must be root-owned in a
   root-owned tree (enforced). A file that can run arbitrary shell code can do anything the script can.
+  A hostile `.env` is out of scope: keep it owner-only (mode 0600) and, as root, root-owned in a
+  root-owned tree. The loader neutralizes tracing, `PS4`, the `DEBUG`, `RETURN` and `ERR` traps and the
+  export attribute of the named variables, and nothing more. Two things it does NOT stop, because the
+  file runs in the script's own shell with the script's variables (owner decision: documented, not
+  changed): the file can install an `EXIT` or a signal trap, which still runs at exit and can print or
+  send a password; and it can define a function with the name of a command the script later runs
+  (`jq`, `tail`, `printf` and so on), which then runs in place of that command. Both are pinned by tests
+  named `test_known_limit_env_exit_trap_still_fires_and_prints_the_password` and
+  `test_known_limit_env_function_shadowing_a_helper_is_not_blocked`, so a future fix flips them on
+  purpose.
 - Within a trusted file, the script removes the export attribute from the four password variables and
   from every variable name the file newly creates. A `.env` that exports a password through a name
   that already existed before the file ran (for example `PATH`, `CE_TRUSTED_DIRS` or another variable

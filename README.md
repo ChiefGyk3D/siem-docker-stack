@@ -189,10 +189,10 @@ bash scripts/06-generate-wazuh-certs.sh
 bash scripts/03-deploy.sh local
 
 # 7. Wait ~2 minutes, then apply index templates and ISM policy
-bash scripts/04-apply-ism-policy.sh http://localhost:9200
+sudo scripts/04-apply-ism-policy.sh http://localhost:9200
 
 # 8. Verify everything is healthy
-bash scripts/05-verify.sh localhost
+sudo scripts/05-verify.sh localhost
 
 # 9. Import the Grafana dashboards (file-based provisioning is not wired up —
 #    dashboards are deployed via the Grafana API)
