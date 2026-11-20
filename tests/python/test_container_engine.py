@@ -423,7 +423,7 @@ BARE_DOCKER = re.compile(r'(^|[\s;&|(`$"\'])docker\s+(exec|ps|port|run|info|insp
 def _code_lines(path):
     for n, ln in enumerate(path.read_text().splitlines(), 1):
         s = ln.strip()
-        if s.startswith("#") or re.match(r"(echo|printf)\b", s):
+        if s.startswith("#") or re.match(r"(echo|printf|die)\b", s):
             continue
         yield n, ln
 

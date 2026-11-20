@@ -213,13 +213,33 @@ phone.
    2026-11-17).
 5. Rotate by changing the Doppler value and the n8n credential together.
 
+The expiry watch does not use this credential. It posts to its own endpoint,
+the `Expiry Watch Webhook` node (its own private path, file `expiry-path`), where the
+`Check Expiry Secret` Code node compares the header with the environment
+variable `EXPIRY_WATCH_ROUTER_SECRET` of the n8n container and denies with 403
+when it is unset, empty or different. The `Grafana Webhook` node and its
+credential are unchanged. See
+[expiry-watch.md](expiry-watch.md#the-router-credential).
+
 Two checks apply. Compose refuses to start Grafana when the value is unset or
 empty. `scripts/check-env.sh` (run it before `docker compose up`) also rejects
 whitespace-only, placeholder and short values. It measures the value the way
 Compose reads it from `.env`: an unquoted value ends at whitespace followed by
 `#` (so `x # long comment` is the one character `x`), matching quotes are
 removed, and a duplicate assignment, unmatched quote, backslash or unquoted
-`$` is rejected. Neither check can see what you typed into n8n: an n8n credential whose value is just `Bearer`
+`$` is rejected. Only the plain `NAME=value` line form is measured: a line
+with an `export` prefix, indentation, whitespace before the equals sign or a
+carriage return (a CRLF file; convert it to LF) is rejected, so is an
+assignment inside another variable's multi-line quoted value, and a duplicate
+counts in any of those forms. The value itself may use only letters, digits
+and `+ / = _ . , : @ % ^ -` (what `openssl rand -base64 32` produces), with no
+space after the `=`; any shell character (backtick, `$`, `<`, `>`, `;`, `&`,
+`|`, parentheses, quotes inside the value) is rejected. A file with a control
+byte (NUL, carriage return, escape), or with a multi-line or backslash-escaped
+quoted value anywhere, is rejected for this check, because parsers disagree on
+where the line is. The check refuses a symlinked `.env`, opens the file once and
+validates that one in-memory copy, so every check sees the same bytes. Trailing whitespace after an unquoted or quoted
+value is ignored, and a commented-out line is not an assignment. Neither check can see what you typed into n8n: an n8n credential whose value is just `Bearer`
 would accept an empty-secret call, so follow step 2 exactly and run the
 checklist below.
 

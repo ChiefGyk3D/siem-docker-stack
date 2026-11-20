@@ -198,6 +198,34 @@ to approved senders are not matched, and cannot be dropped, by the chain. Sender
 with a prefix length of 0 (which would allow everyone) are refused, and if the
 current rules cannot be read the script stops without changing anything.
 
+Root must start the script by its path (as in the commands above), never as
+`bash prometheus-otlp-firewall.sh`. The script's `#!/bin/bash -p` line puts Bash in
+privileged mode, which ignores `BASH_ENV` and `ENV` and does not import exported
+shell functions; an explicit interpreter bypasses that line, and a script cannot
+undo code that `BASH_ENV` already ran, so as root the script refuses to continue
+when it was not started in privileged mode. It also clears `BASH_ENV`, `ENV`,
+`CDPATH`, `GLOBIGNORE` and `PS4` (privileged mode already ignores `SHELLOPTS` and
+`BASHOPTS`), turns tracing off, and
+sets a fixed `PATH` before it decides whether it is root.
+
+The address arguments are checked before anything is changed, and a refusal names
+the problem and changes nothing. The bind address must be one plain IPv4 interface
+address: the script refuses an empty value, `0.0.0.0`, any IPv6 form including
+IPv4-mapped addresses (`::ffff:a.b.c.d`), this-network (`0.x`), loopback,
+multicast, reserved and broadcast addresses, a prefix length, a name, and any
+text with whitespace, a newline, shell characters or a leading dash. Senders get
+the same treatment and repeated senders produce one rule. The published address
+reported by `docker port` must be one IPv4 line and nothing else: any IPv6
+mapping (`[::]:port`, `[::1]:port`, a global address) or other output is refused
+even next to a valid IPv4 line, because the IPv4 rule would not guard it. That one
+address must be loopback (the receiver before you widen the
+bind) or the bind address itself; the script refuses a wildcard publish (every
+address) or any other address the rule would not guard. Rules are always passed
+to `iptables` as argument lists, never as shell strings. If a live
+`DOCKER-USER` rule that mentions `PROM-OTLP-A` or `PROM-OTLP-B` has an
+unexpected shape, or jumps to both chains, the script refuses without changing
+anything (`remove` first, then apply again).
+
 I could not exercise the netfilter behavior itself in this change (it needs the
 real host). It is checked when you apply it: the [Verify](#verify) step requires
 an approved sender to succeed (replies must get through) and an unapproved host

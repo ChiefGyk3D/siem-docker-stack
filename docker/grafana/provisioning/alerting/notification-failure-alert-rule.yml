@@ -35,8 +35,10 @@
 # `discord-direct` contact point (notification-failure-contact-point.yml.example),
 # a direct Discord webhook that does not go through n8n. An alert about failed
 # deliveries must never depend on the delivery that failed. The labels carry no
-# update_alert, heartbeat or phone label, so the update-alert and heartbeat
-# routes never match it and the router never sees it. To route it elsewhere,
+# update_alert or heartbeat label and phone is "false" (docs/alert-taxonomy.md
+# requires the label; the email P1 route needs phone "true"), so the
+# update-alert, heartbeat and email routes never match it and the router never
+# sees it. To route it elsewhere,
 # change the receiver on the policy route, not this rule.
 #
 # State handling:
@@ -85,5 +87,7 @@ groups:
           description: "Grafana's own failed-notification counter increased in the last 10 minutes, so alerts may not be reaching their receiver. Check the contact point and the receiver behind it. Sent through the direct Discord contact point, not n8n. The metric name is unverified, see docs/notification-failure-alerts.md."
         labels:
           severity: "warning"
+          tier: "P2"
+          phone: "false"
           alert_group: "alert-path"
           delivery_failure: "true"
