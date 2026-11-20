@@ -75,6 +75,14 @@ def sim(ready, tmp_path):
         text = (RENDER.parent / name).read_text(encoding="utf-8")
         text = text.replace("/usr/bin/id", str(stubs / "id")).replace("/bin/id", str(stubs / "id"))
         text = text.replace(fixed, f"PATH={stubs}:{ready.stub_dir}:/usr/bin:/bin\n")
+        # The real ancestor walk, absolute stat and descriptor checks are tested as real uid 0 in
+        # test_render_helper_bootstrap.py; here the stub stat table answers for the script, the helper
+        # and their directory, and the walk stops at that directory.
+        text = text.replace('/usr/bin/stat -c %u -- "$P"', 'stat -c %u "$P"')
+        text = text.replace('/usr/bin/stat -c %a -- "$P"', 'stat -c %a "$P"')
+        text = text.replace('[ "$P" = / ] && break', '[ "$(basename "$P")" = scripts ] && break')
+        text = text.replace("/usr/bin/stat -L -c %u -- /proc/self/fd/9", "echo 0")
+        text = text.replace("/usr/bin/stat -L -c %a -- /proc/self/fd/9", "echo 644")
         # a simulated root never honors the unprivileged stage override; /run is not writable here
         text = text.replace("STAGE_BASE=/run\n", f"STAGE_BASE={stage_base}\n")
         (copy_dir / name).write_text(text, encoding="utf-8")

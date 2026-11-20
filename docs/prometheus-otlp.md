@@ -210,6 +210,12 @@ when it was not started in privileged mode. It also clears `BASH_ENV`, `ENV`,
 `BASHOPTS`), turns tracing off, and
 sets a fixed `PATH` before it decides whether it is root.
 
+The render script follows the same rules for the privileged shebang and the root
+decision, with one difference for `PATH`: as root it fixes `PATH`; a non-root run keeps
+the caller's `PATH`, by design. As root it also refuses a helper (`lib-secrets.sh`) or
+any directory above it that is not root-owned and closed, and sources the helper
+only through one checked open descriptor.
+
 The address arguments are checked before anything is changed, and a refusal names
 the problem and changes nothing. The bind address must be one plain IPv4 interface
 address: the script refuses an empty value, `0.0.0.0`, any IPv6 form including

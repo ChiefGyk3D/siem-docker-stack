@@ -87,7 +87,10 @@ environment already ran, which is why the path form is required). Each script
 then clears `set -x` state and `BASH_ENV ENV CDPATH GLOBIGNORE PS4`, fixes `PATH`
 as its first command, and learns whether it is root from the kernel through the
 absolute `/usr/bin/id` (or `/bin/id`), never from `EUID` or `UID`, and stops if the
-answer is not a number.
+answer is not a number. `render-prometheus-web-config.sh` is the one exception to
+the PATH order: it learns the user number first (builtins and the absolute `id`
+only) and then, as root it fixes `PATH`; a non-root run keeps the caller's `PATH`, by
+design, because the tests and the owner's tools rely on it.
 
 The root decision, the privileged-mode check and the trusted script and helper tree
 are done early in each script, before it reads `SIEM_DEPLOY_DIR`, locates a
@@ -141,7 +144,7 @@ Each kept variable has its own pattern: `LANG` and `LC_ALL` are `C`, `POSIX`, `C
 
 ## Sourcing the helper
 
-Each script sets a fixed `PATH` as its first command (root or not), calls
+Each of these scripts (not `render-prometheus-web-config.sh`, see above) sets a fixed `PATH` as its first command, calls
 `stat`, `readlink`, `dirname` and `id` by absolute path while it bootstraps, and
 finds its own real directory (symlinks resolved). It sources
 `lib-container-engine.sh` from there, never from a directory next to a link that

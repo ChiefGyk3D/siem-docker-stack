@@ -64,8 +64,9 @@ RUN_UID="$(/usr/bin/id -u 2>/dev/null || /bin/id -u 2>/dev/null)" || RUN_UID=
 case "$RUN_UID" in '' | *[!0-9]*) die "cannot tell who is running (no numeric user number)" ;; esac
 RUN_UID=$((10#$RUN_UID))
 
-# Real root runs with a fixed PATH, so nothing is resolved from the caller's PATH. The caller's PATH
-# stays for an unprivileged run only (the tests put a stub htpasswd on it).
+# Root run: fixed PATH. Non-root run: the caller's PATH is kept, by design (the tests put a stub
+# htpasswd on it and the owner's tools rely on it). Before this point only builtins and the absolute
+# id program run, so nothing is resolved from the caller's PATH while the user number is read.
 if [ "$RUN_UID" -eq 0 ]; then
     PATH=/usr/sbin:/usr/bin:/sbin:/bin
     export PATH
@@ -75,7 +76,10 @@ if [ "$RUN_UID" -eq 0 ]; then
     fi
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve every symlink first: the helper is the one next to the REAL script, never one next to a
+# link someone else placed.
+SELF="$(/usr/bin/readlink -f -- "${BASH_SOURCE[0]}")" || die "cannot resolve this script's real path"
+SCRIPT_DIR="$(/usr/bin/dirname -- "$SELF")"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TARGET_BASE="${1:-${REPO_DIR}/docker}"
 MAIN_DIR="${TARGET_BASE}/prometheus"
@@ -90,17 +94,35 @@ else
 fi
 
 # As root, run and source only code that no one else can edit: this script, the
-# library it sources and their directory must be root-owned and not writable by
-# group or others. Use a root-owned copy (docs/prometheus-otlp.md).
+# library it sources and every directory above them (through /) must be root-owned and not
+# writable by group or others. Use a root-owned copy (docs/prometheus-otlp.md).
+LIB_PATH="${SCRIPT_DIR}/lib-secrets.sh"
+lib_fail() { die "refusing to source ${LIB_PATH}: $1"; }
 if [ "$RUN_UID" -eq 0 ]; then
-    for f in "$SCRIPT_DIR" "${SCRIPT_DIR}/lib-secrets.sh" "${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"; do
-        [ "$(stat -c '%u' "$f")" -eq 0 ] && [ $((8#$(stat -c '%a' "$f") & 8#022)) -eq 0 ] ||
-            die "${f} is not root-owned (or is group or world writable); run a root-owned copy of the script and lib-secrets.sh (docs/prometheus-otlp.md)"
+    for P in "$SELF" "$LIB_PATH"; do
+        while :; do
+            [ "$(/usr/bin/stat -c %u -- "$P")" = 0 ] && [ $((8#$(/usr/bin/stat -c %a -- "$P") & 8#022)) -eq 0 ] ||
+                lib_fail "${P} (or a directory above it) is not root-owned or is group or world writable; run a root-owned copy of the script and lib-secrets.sh (docs/prometheus-otlp.md)"
+            [ "$P" = / ] && break
+            P="$(/usr/bin/dirname -- "$P")"
+        done
     done
 fi
-
+[ -f "$LIB_PATH" ] && [ ! -L "$LIB_PATH" ] || lib_fail "it is missing or is a link"
+# Open the helper once, check the OPEN file (-L: the descriptor link points at the file), and source
+# that same descriptor, so a rename or replacement of the path after this point changes nothing.
+exec 9<"$LIB_PATH" || lib_fail "it cannot be opened"
+LIB_OWNER="$(/usr/bin/stat -L -c %u -- /proc/self/fd/9)"
+LIB_MODE="$(/usr/bin/stat -L -c %a -- /proc/self/fd/9)"
+LIB_MASK=002  # world write is never allowed; group write too when running as root
+[ "$RUN_UID" -ne 0 ] || LIB_MASK=022
+if [ ! -f /proc/self/fd/9 ] || { [ "$LIB_OWNER" != 0 ] && [ "$LIB_OWNER" != "$RUN_UID" ]; } ||
+    [ $((8#$LIB_MODE & 8#$LIB_MASK)) -ne 0 ]; then
+    lib_fail "it must be a regular file owned by root or by you, not world writable (and not group writable when run as root)"
+fi
 # shellcheck source=scripts/lib-secrets.sh
-. "${SCRIPT_DIR}/lib-secrets.sh"
+source /proc/self/fd/9
+exec 9<&-
 
 if [ "$RUN_UID" -ne 0 ] && [ "$RUN_UID" -ne "$OWNER_UID" ]; then
     die "run as root (sudo) so the files can be owned by uid ${OWNER_UID} with mode 0400; refusing to write a readable secret"
