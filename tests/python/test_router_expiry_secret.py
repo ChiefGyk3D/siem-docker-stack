@@ -167,10 +167,10 @@ def test_the_check_output_carries_the_body_and_no_header_or_secret():
     "Bearer " + SECRET[:-1] + "X", "Bearer " + SECRET[:-1], "Bearer " + SECRET + "x", "Bearer " + OTHER,
     "Bearer ", "Bearer", "", "bearer " + SECRET, "BEARER " + SECRET, "Bearer  " + SECRET, " Bearer " + SECRET,
     "Bearer " + SECRET + " ", "Basic " + SECRET, SECRET, "Bearer\t" + SECRET, "Bearer " + SECRET + "\n",
-    "Bearer " + SECRET.upper(), 5, ["Bearer " + SECRET], {"v": "Bearer " + SECRET}, True, None,
+    "Bearer " + SECRET.upper(), "Bearer " + SECRET + "\u0000", 5, ["Bearer " + SECRET], {"v": "Bearer " + SECRET}, True, None,
 ], ids=["last-char", "short", "long", "grafana-secret", "empty-token", "scheme-only", "empty", "lower-scheme",
         "upper-scheme", "double-space", "leading-space", "trailing-space", "wrong-scheme", "no-scheme", "tab",
-        "newline", "case-changed", "number", "array", "object", "boolean", "null"])
+        "newline", "case-changed", "trailing-nul", "number", "array", "object", "boolean", "null"])
 def test_a_wrong_malformed_or_oddly_typed_header_is_denied(auth):
     _assert_denied(_call(auth))
 
