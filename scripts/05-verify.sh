@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -p
 # =============================================================================
 # 05-verify.sh — Verify all SIEM services are running and healthy
 # =============================================================================
@@ -12,22 +12,65 @@
 #   SIEM_USER=myuser bash scripts/05-verify.sh 10.0.0.100
 # =============================================================================
 
+set +x
+# SHELLOPTS and BASHOPTS are readonly in bash and are ignored in privileged mode (the -p shebang).
+unset BASH_ENV ENV CDPATH GLOBIGNORE PS4
 set -uo pipefail
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; export PATH  # fixed PATH before any command runs
+
+# Root decision, privileged-mode check and the trusted script and helper tree come FIRST,
+# before anything is read, located or sourced.
+SCRIPT_DIR="$(/usr/bin/dirname -- "$(/usr/bin/readlink -f -- "${BASH_SOURCE[0]}")")"  # the real directory, symlinks resolved
+CE_LIB="${SCRIPT_DIR}/lib-container-engine.sh"
+ce_boot_fail() { echo "refusing to source ${CE_LIB}: $1" >&2; exit 1; }
+CE_UID="$(/usr/bin/id -u 2>/dev/null || /bin/id -u 2>/dev/null)" || CE_UID=
+case "$CE_UID" in '' | *[!0-9]*) ce_boot_fail "cannot tell who is running (no numeric user number)" ;; esac
+CE_UID=$((10#$CE_UID))  # asked of the kernel through id, never taken from an environment variable
+CE_STRICT=0
+[ "$CE_UID" != 0 ] || CE_STRICT=1
+if [ "$CE_STRICT" = 1 ] && ! [[ "$-" == *p* ]]; then  # as root the privileged shebang must be in force
+    ce_boot_fail "as root, run this script by its path (not as 'bash script'): the privileged shebang that keeps BASH_ENV and exported functions out is bypassed otherwise"
+fi
+if [ "$CE_STRICT" = 1 ]; then  # as root: the helper and every directory above it must be root-owned and not writable
+    CE_P="$CE_LIB"
+    while :; do
+        [ "$(/usr/bin/stat -c %u -- "$CE_P")" = 0 ] && [ $((8#$(/usr/bin/stat -c %a -- "$CE_P") & 8#022)) -eq 0 ] ||
+            ce_boot_fail "${CE_P} (or a directory above it) is not root-owned or is group or world writable"
+        [ "$CE_P" = / ] && break
+        CE_P="$(/usr/bin/dirname -- "$CE_P")"
+    done
+fi
+[ -f "$CE_LIB" ] && [ ! -L "$CE_LIB" ] || ce_boot_fail "it is missing or is a link"
+# Open the helper once, check the OPEN file (-L: the descriptor link points at the file), and source
+# that same descriptor, so a rename or replacement of the path after this point changes nothing.
+exec 9<"$CE_LIB" || ce_boot_fail "it cannot be opened"
+CE_OWNER="$(/usr/bin/stat -L -c %u -- /proc/self/fd/9)"
+CE_MODE="$(/usr/bin/stat -L -c %a -- /proc/self/fd/9)"
+CE_MASK=002  # world write is never allowed; group write too when running as root
+[ "$CE_STRICT" != 1 ] || CE_MASK=022
+if [ ! -f /proc/self/fd/9 ] || { [ "$CE_OWNER" != 0 ] && [ "$CE_OWNER" != "$CE_UID" ]; } ||
+    [ $((8#$CE_MODE & 8#$CE_MASK)) -ne 0 ]; then
+    ce_boot_fail "it must be a regular file owned by root or by you, not world writable (and not group writable when run as root)"
+fi
+# shellcheck source=scripts/lib-container-engine.sh
+source /proc/self/fd/9
+exec 9<&-
 
 SIEM_HOST="${1:-${SIEM_HOST:-localhost}}"
 SIEM_USER="${2:-${SIEM_USER:-$(whoami)}}"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="${SCRIPT_DIR}/.."
 
 # Load credentials from .env when present (OPENSEARCH_ADMIN_PASSWORD,
 # INFLUXDB_ADMIN_USER/PASSWORD) — Phase F1 secured the cluster and InfluxDB.
 for envf in /opt/siem/.env "${REPO_DIR}/.env" "${REPO_DIR}/docker/.env"; do
     if [ -f "$envf" ]; then
-        # shellcheck disable=SC1090
-        set -a; source "$envf"; set +a
+        ce_source_env "$envf" || exit 1  # root: only a root-owned file in a root-owned tree, via one descriptor
         break
     fi
 done
+
+# CONTAINER_ENGINE (docker by default, or podman) may come from the environment or that .env.
+ce_init_name || exit 1
 OPENSEARCH_ADMIN_PASSWORD="${OPENSEARCH_ADMIN_PASSWORD:-}"
 OS_AUTH="admin:${OPENSEARCH_ADMIN_PASSWORD}"
 OS_URL="https://${SIEM_HOST}:9200"
@@ -135,13 +178,15 @@ echo ""
 echo -e "${YELLOW}Docker Containers:${NC}"
 EXPECTED_CONTAINERS="alertmanager cadvisor elasticsearch-exporter grafana influxdb logstash opensearch-dashboards opensearch-hot opensearch-warm prometheus syslog-ng unifi-poller wazuh-dashboard wazuh-indexer wazuh-manager"
 
-# Try local docker first, then SSH
-if docker ps > /dev/null 2>&1; then
-    RUNNING_CONTAINERS=$(docker ps --format "{{.Names}}" 2>/dev/null | sort | tr '\n' ' ')
-    DOCKER_CMD="docker"
+# Try the local container engine first (CONTAINER_ENGINE, found in fixed root-owned
+# directories only), then SSH
+CE_BIN="$(ce_resolve "$CE_NAME" || true)"
+if [ -n "$CE_BIN" ] && ce_run ps > /dev/null 2>&1; then
+    RUNNING_CONTAINERS=$(ce_run ps --format "{{.Names}}" 2>/dev/null | sort | tr '\n' ' ')
+    DOCKER_CMD="$CE_NAME"
 elif [ "$SIEM_HOST" != "localhost" ] && [ "$SIEM_HOST" != "127.0.0.1" ]; then
-    RUNNING_CONTAINERS=$(ssh -o ConnectTimeout=5 "${SIEM_USER}@${SIEM_HOST}" 'docker ps --format "{{.Names}}"' 2>/dev/null | sort | tr '\n' ' ')
-    DOCKER_CMD="ssh ${SIEM_USER}@${SIEM_HOST} docker"
+    RUNNING_CONTAINERS=$(ssh -o ConnectTimeout=5 "${SIEM_USER}@${SIEM_HOST}" "${CE_NAME}"' ps --format "{{.Names}}"' 2>/dev/null | sort | tr '\n' ' ')
+    DOCKER_CMD="ssh ${SIEM_USER}@${SIEM_HOST} ${CE_NAME}"
 else
     echo -e "  ${YELLOW}Cannot access Docker - skipping container check${NC}"
     RUNNING_CONTAINERS=""

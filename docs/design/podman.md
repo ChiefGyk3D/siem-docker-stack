@@ -4,6 +4,11 @@ Issue: #120 (epic #62). Status: proposal, docs only. Docker stays the default
 until the owner decides. Nothing in this document changes code, config or any
 live system.
 
+Update (issue #130): the engine selector for the helper scripts is implemented;
+see docs/container-engine.md. Section 5 below is the original analysis, and the
+rows marked IMPLEMENTED (#130) have that selector. The compose files, the
+bootstrap script and the Podman behavior itself are still unverified.
+
 Claim labels. VERIFIED names a repo file or a vendor URL with the date read
 (all vendor pages read 2026-11-19). INFERRED is reasoning that was not checked
 against a source or a running Podman host; each INFERRED item needs a test on a
@@ -219,16 +224,16 @@ Vendor sources used:
 |---|---|---|
 | scripts/state_backup_lib.py, backup-state.py, restore-state.py | `DockerRuntime` accepts `docker` or `podman` via `container_runtime` (VERIFIED, lines 108, 182, 245). Uses `exec`, `cp`, `inspect -f {{.State.Running}}`, `stop`, `start`, and `run --rm --network none --cap-drop ALL --cap-add CHOWN/DAC_OVERRIDE/FOWNER --security-opt no-new-privileges --volumes-from` | Config only (`container_runtime = "podman"`), after tests of: `podman cp` returning a plain file (the code lstat-checks it, VERIFIED), `--volumes-from` of a stopped container, the cap flags, and ownership results for `n8n_uid` and `grafana_uid`. The helper container does the chown (VERIFIED comment, lines 110-112), so it should work in either runtime. Tests use fake runtimes (VERIFIED tests/python/test_state_backup*.py), so add a Podman argv case only |
 | scripts/gameday.py | `docker` config key accepts `docker` or `podman` (VERIFIED, lines 50, 108); the CLI is found only in /usr/bin, /usr/local/bin, /bin, /snap/bin and must be root-owned (VERIFIED docs/game-day.md line 123) | Works if podman is installed in those paths (INFERRED, distro packages use /usr/bin). Doc strings such as `docker compose up -d --force-recreate` need runtime-neutral wording |
-| scripts/n8n_address.py | Hard-codes `docker inspect` | Add a runtime selector; test the `podman inspect` JSON shape |
-| scripts/11-wazuh-grafana-readonly.sh | `docker exec -i wazuh-indexer ...`, secrets on stdin | A `CONTAINER_CLI` variable; keep the stdin pattern |
-| scripts/05-verify.sh | `docker ps --format`, ssh variant | Variable; `podman ps --format "{{.Names}}"` expected to match (INFERRED) |
-| scripts/03-deploy.sh | `docker info` check, `docker compose pull/up` | Variable, plus the provider choice (3.1) |
+| scripts/n8n_address.py | IMPLEMENTED (#130): `CONTAINER_ENGINE` selects `docker` or `podman` | Test the `podman inspect` JSON shape on a rehearsal host (INFERRED to match) |
+| scripts/11-wazuh-grafana-readonly.sh | `docker exec -i wazuh-indexer ...`, secrets on stdin | IMPLEMENTED (#130) as `CONTAINER_ENGINE`; the stdin pattern is kept |
+| scripts/05-verify.sh | `docker ps --format`, ssh variant | IMPLEMENTED (#130) as `CONTAINER_ENGINE`; `podman ps --format "{{.Names}}"` expected to match (INFERRED) |
+| scripts/03-deploy.sh | `docker info` check, `docker compose pull/up` | IMPLEMENTED (#130) as `CONTAINER_ENGINE` (`podman compose`); the compose provider choice (3.1) is still open |
 | scripts/02-bootstrap.sh | Installs docker-ce, daemon.json, docker group, ufw | A parallel Podman path: install podman, netavark, aardvark-dns and a compose provider; enable the socket and restart units; carry the daemon.json log and ulimit defaults into containers.conf (INFERRED equivalent); redo the firewall model. Docker group membership is root-equivalent, so rootless Podman removes that exposure (INFERRED) |
-| scripts/prometheus-otlp-firewall.sh | `docker port`, Docker-specific chains, root-owned copy | Rework and Daybreak-tier review (3.6) |
+| scripts/prometheus-otlp-firewall.sh | `docker port`, Docker-specific chains, root-owned copy | The engine binary is selectable (#130); the Docker-specific chains still need rework and Daybreak-tier review (3.6) |
 | scripts/07-generate-opensearch-certs.sh | chown 1000:1000, directory cleanup text names Docker | Rootless chown target differs (3.4); wording |
 | scripts/render-*.sh, 04, 10 | Print `docker compose` hints; 10 uses /mnt/snapshots | Text, plus snapshot path ownership |
 | scripts/live-deploy/grafana-deploy.py | Runs `docker compose -f ... up -d grafana` | Variable |
-| Docs: README, maintenance, troubleshooting, live-deploy-runbook, game-day, backup-restore | Many `docker ...` commands | One translation table plus a `CONTAINER_CLI` convention, not a copy of every command |
+| Docs: README, maintenance, troubleshooting, live-deploy-runbook, game-day, backup-restore | Many `docker ...` commands | One translation table plus a `CONTAINER_ENGINE` convention, not a copy of every command |
 
 docs/maintenance.md describes a systemd timer running `docker compose pull &&
 up -d` (VERIFIED line 46). Under the pin-every-dependency policy that timer
@@ -349,7 +354,7 @@ Recommended answer first in each.
 - Q8. Portainer on Podman: drop it (recommended) or keep it via the Podman socket?
 - Q9. Fix the stale crowdsec add-on compose file now, or leave it?
 - Q10. Is this a supported option in the published repo (both runtimes, Docker
-  default), or a one-host migration? That decides the `CONTAINER_CLI` variable and
+  default), or a one-host migration? That decides the `CONTAINER_ENGINE` variable and
   whether CI tests both.
 - Q11. Compose provider: `docker-compose` against the Podman socket
   (recommended) or `podman-compose`?

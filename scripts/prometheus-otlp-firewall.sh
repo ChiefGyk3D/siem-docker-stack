@@ -32,39 +32,82 @@ set +x
 unset BASH_ENV ENV CDPATH GLOBIGNORE PS4
 set -euo pipefail
 
+PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH  # fixed PATH before any command runs
+
+# Root decision, privileged-mode check and the trusted script and helper tree come FIRST.
+die() { echo "prometheus-otlp-firewall: $*" >&2; exit 1; }
+LIB_NAME=lib-container-engine.sh
+# Resolve every symlink first: the helper is the one next to the REAL script, never one next to a
+# link someone else placed.
+SELF="$(/usr/bin/readlink -f -- "${BASH_SOURCE[0]}")" || die "cannot resolve this script's real path"
+SCRIPT_DIR="$(/usr/bin/dirname -- "$SELF")"
+CE_LIB="${SCRIPT_DIR}/${LIB_NAME}"
+ce_boot_fail() { echo "refusing to source ${CE_LIB}: $1" >&2; exit 1; }
+CE_UID="$(/usr/bin/id -u 2>/dev/null || /bin/id -u 2>/dev/null)" || CE_UID=
+case "$CE_UID" in '' | *[!0-9]*) ce_boot_fail "cannot tell who is running (no numeric user number)" ;; esac
+CE_UID=$((10#$CE_UID))  # asked of the kernel through id, never taken from an environment variable
+CE_STRICT=0
+[ "$CE_UID" != 0 ] || CE_STRICT=1
+if [ "$CE_STRICT" = 1 ] && ! [[ "$-" == *p* ]]; then  # as root the privileged shebang must be in force
+    ce_boot_fail "as root, run this script by its path (not as 'bash script'): the privileged shebang that keeps BASH_ENV and exported functions out is bypassed otherwise"
+fi
+if [ "$CE_STRICT" = 1 ]; then  # as root: the helper and every directory above it must be root-owned and not writable
+    CE_P="$CE_LIB"
+    while :; do
+        [ "$(/usr/bin/stat -c %u -- "$CE_P")" = 0 ] && [ $((8#$(/usr/bin/stat -c %a -- "$CE_P") & 8#022)) -eq 0 ] ||
+            ce_boot_fail "${CE_P} (or a directory above it) is not root-owned or is group or world writable"
+        [ "$CE_P" = / ] && break
+        CE_P="$(/usr/bin/dirname -- "$CE_P")"
+    done
+fi
+[ -f "$CE_LIB" ] && [ ! -L "$CE_LIB" ] || ce_boot_fail "it is missing or is a link"
+# Open the helper once, check the OPEN file (-L: the descriptor link points at the file), and source
+# that same descriptor, so a rename or replacement of the path after this point changes nothing.
+exec 9<"$CE_LIB" || ce_boot_fail "it cannot be opened"
+CE_OWNER="$(/usr/bin/stat -L -c %u -- /proc/self/fd/9)"
+CE_MODE="$(/usr/bin/stat -L -c %a -- /proc/self/fd/9)"
+CE_MASK=002  # world write is never allowed; group write too when running as root
+[ "$CE_STRICT" != 1 ] || CE_MASK=022
+if [ ! -f /proc/self/fd/9 ] || { [ "$CE_OWNER" != 0 ] && [ "$CE_OWNER" != "$CE_UID" ]; } ||
+    [ $((8#$CE_MODE & 8#$CE_MASK)) -ne 0 ]; then
+    ce_boot_fail "it must be a regular file owned by root or by you, not world writable (and not group writable when run as root)"
+fi
+# shellcheck source=scripts/lib-container-engine.sh
+source /proc/self/fd/9
+exec 9<&-
+
 CHAIN_A=PROM-OTLP-A
 CHAIN_B=PROM-OTLP-B
 
-die() { echo "prometheus-otlp-firewall: $*" >&2; exit 1; }
 
-# The fixed PATH is set first, unconditionally, before any external program runs. The
-# root decision then comes from the kernel through an absolute id program, never from
-# the EUID or UID variables (bash imports those from the environment, so a caller
-# could set them to anything).
-PATH=/usr/sbin:/usr/bin:/sbin:/bin
-export PATH
-if [ -x /usr/bin/id ]; then ID_BIN=/usr/bin/id; elif [ -x /bin/id ]; then ID_BIN=/bin/id; else die "no id program found at /usr/bin/id or /bin/id"; fi
-real_uid="$("$ID_BIN" -u)" || die "could not determine the user id"
-[[ "$real_uid" =~ ^[0-9]+$ ]] || die "could not determine the user id"
 
-if [ "$real_uid" -eq 0 ]; then
-    # The privileged-mode shebang (-p) is what keeps BASH_ENV and exported functions
-    # out. `bash script` skips it, so root refuses that form (it cannot undo what
-    # BASH_ENV already ran, which is why root must start the script by its path).
-    [[ "$-" == *p* ]] || die "as root, run this script by its path (sudo scripts/prometheus-otlp-firewall.sh ...), not as 'bash script': the privileged shebang is bypassed"
-    # As root: fixed program names (no IPTABLES/DOCKER overrides, PROM_FW_NO_SUDO
-    # ignored), and only code nobody else can edit. Run the root-owned copy (docs).
-    IPT=iptables
-    DOCKER_BIN=docker
-    SELF="${BASH_SOURCE[0]}"
-    for f in "${SELF%/*}" "$SELF"; do
-        [ "$(stat -c '%u' "$f")" -eq 0 ] && [ $((8#$(stat -c '%a' "$f") & 8#022)) -eq 0 ] ||
-            die "${f} is not root-owned (or is group or world writable); run the root-owned copy of the script (docs/prometheus-otlp.md)"
+chain_ok() { # <path>: root-owned and not group or world writable, the path and every ancestor up to /
+    local p="$1" owner mode
+    while :; do
+        owner="$(/usr/bin/stat -c %u -- "$p")" || return 1
+        mode="$(/usr/bin/stat -c %a -- "$p")" || return 1
+        [ "$owner" -eq 0 ] && [ $((8#$mode & 8#022)) -eq 0 ] || return 1
+        [ "$p" = / ] && return 0
+        p="$(/usr/bin/dirname -- "$p")"
     done
+}
+
+if [ "$CE_STRICT" = 1 ]; then
+    # As root: no IPTABLES/DOCKER overrides, and only code nobody else can edit (the script, its
+    # helper and every directory above them are checked). Run the root-owned copy (docs).
+    IPT=iptables
+    chain_ok "$SELF" ||
+        die "${SELF} (or a directory above it) is not root-owned or is group or world writable; run the root-owned copy of the script and its ${LIB_NAME} (docs/prometheus-otlp.md)"
+    ce_init || exit 1
+    DOCKER_BIN="$CE_BIN"
 else
     [ "${PROM_FW_NO_SUDO:-}" = 1 ] || die "run as root (sudo)"
     IPT="${IPTABLES:-iptables}"
-    DOCKER_BIN="${DOCKER:-docker}"
+    ce_init_name || exit 1
+    # Test mode only (root ignores this): DOCKER may name a stub engine binary.
+    CE_BIN="${DOCKER:-}"
+    [ -n "$CE_BIN" ] || CE_BIN="$(ce_resolve "$CE_NAME")" || die "no trusted '${CE_NAME}' found"
+    DOCKER_BIN="$CE_BIN"
 fi
 
 OCTET='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
@@ -88,7 +131,7 @@ check_bind() { # <value>: one usable IPv4 interface address, or refuse with the 
 
 discover_port() { # prints "<address> <port>" of the receiver's single published IPv4 mapping
     local out line addr="" port="" n=0
-    out="$("$DOCKER_BIN" port prometheus-otlp 9090/tcp)" || die "docker port failed: is the prometheus-otlp container running?"
+    out="$(ce_run port prometheus-otlp 9090/tcp)" || die "${CE_NAME} port failed: is the prometheus-otlp container running?"
     while IFS= read -r line; do
         [ -n "$line" ] || continue
         if [[ "$line" =~ ^([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+)$ ]]; then

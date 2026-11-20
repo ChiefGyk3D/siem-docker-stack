@@ -43,6 +43,9 @@ import subprocess
 import sys
 import uuid
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), ".."))
+import container_engine  # noqa: E402  (the shared CONTAINER_ENGINE setting and trusted-binary resolver)
+
 CONTAINER = os.environ.get("N8N_CONTAINER", "n8n")
 GRAFANA_CONTAINER = os.environ.get("GRAFANA_CONTAINER", "grafana")
 CONFIG_DIR = os.environ.get("SIEM_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".config", "doppler-siem")
@@ -69,14 +72,25 @@ def need(name):
     return value
 
 
+def engine():
+    """The container engine name (docker unless CONTAINER_ENGINE says podman); a bad value stops the run."""
+    try:
+        return container_engine.engine_name()
+    except container_engine.ContainerEngineError as err:
+        sys.exit(str(err))
+
+
+def engine_run(args, **kwargs):
+    """Run the selected engine as the trusted binary (never through PATH); no shell is involved."""
+    try:
+        return container_engine.engine_run([engine(), *args], capture_output=True, check=False, **kwargs)
+    except container_engine.ContainerEngineError as err:
+        sys.exit(str(err))
+
+
 def docker_in(script, payload):
     """Feed payload to a shell script inside the n8n container over stdin."""
-    proc = subprocess.run(
-        ["docker", "exec", "-i", CONTAINER, "sh", "-c", script],
-        input=payload.encode(),
-        capture_output=True,
-        check=False,
-    )
+    proc = engine_run(["exec", "-i", CONTAINER, "sh", "-c", script], input=payload.encode())
     out = (proc.stdout + proc.stderr).decode(errors="replace")
     # Never echo anything that could contain a value; keep only plain status lines.
     lines = [ln for ln in out.splitlines() if ln.strip() and "Error tracking" not in ln]
@@ -84,7 +98,7 @@ def docker_in(script, payload):
 
 
 def docker_out(*args):
-    proc = subprocess.run(["docker", *args], capture_output=True, check=False)
+    proc = engine_run(list(args))
     return proc.returncode, proc.stdout.decode(errors="replace").strip()
 
 

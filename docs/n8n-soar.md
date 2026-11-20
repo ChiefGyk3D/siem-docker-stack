@@ -99,7 +99,7 @@ All scripts read configuration from environment variables. Passwords and API key
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `N8N_BASE` | N8N internal URL. Optional: when unset, scripts look up the container's address on the siem network at run time (`scripts/n8n_address.py`; `N8N_CONTAINER`, `SIEM_NETWORK`, `N8N_PORT` adjust the lookup) | `http://192.0.2.10:80` (placeholder) |
+| `N8N_BASE` | N8N internal URL. Optional: when unset, scripts look up the container's address on the siem network at run time (`scripts/n8n_address.py`; `N8N_CONTAINER`, `SIEM_NETWORK`, `N8N_PORT` adjust the lookup; `CONTAINER_ENGINE` picks docker or podman, see [container-engine.md](container-engine.md)) | `http://192.0.2.10:80` (placeholder) |
 | `N8N_API_KEY` | N8N public API key (Settings → API; required, no default) | `eyJhbGci...` |
 | `N8N_EMAIL` | N8N login email (for internal API) | `admin@example.com` |
 | `N8N_PASSWORD` | N8N login password (required, no default) | set from your secrets manager |

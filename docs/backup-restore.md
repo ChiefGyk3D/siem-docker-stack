@@ -223,7 +223,7 @@ All keys live in the TOML file; see
 | `max_member_bytes` / `max_total_bytes` / `max_archive_bytes` | 1 GiB / 2 GiB / 2 GiB | Ceilings checked before and during restore; raise `max_member_bytes` and `max_total_bytes` if your Grafana database is larger |
 | `components` | both | Subset of `["n8n", "grafana"]` |
 | `temp_dir` | system temp | Private 0700 scratch dir, removed on exit and on error |
-| `container_runtime` | `docker` | `docker` or `podman` |
+| `container_runtime` | `CONTAINER_ENGINE`, else `docker` | `docker` or `podman`. The file value wins over `CONTAINER_ENGINE`. The binary is found only in `/usr/bin`, `/usr/local/bin`, `/bin` and `/snap/bin` (root-owned, not writable by others), never through `PATH` |
 
 Grafana copy methods (a plain `cp` of a live database is never used):
 

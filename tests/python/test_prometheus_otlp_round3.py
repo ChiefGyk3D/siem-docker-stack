@@ -157,12 +157,15 @@ def fw(tmp_path):
     write_stub(stubs, "docker", textwrap.dedent("""\
         #!/usr/bin/env python3
         import os, sys
-        sys.stdout.write(os.environ.get("DOCKER_PORT_OUT", ""))
+        # the engine runs with a scrubbed environment (issue #130), so the canned output is a file
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "docker.out")) as fh:
+            sys.stdout.write(fh.read())
         """))
 
     def run(*args, docker_out="127.0.0.1:9091\n", state="", **extra_env):
         state_path = tmp_path / "ipt.state"
         state_path.write_text(state, encoding="utf-8")
+        (stubs / "docker.out").write_text(docker_out, encoding="utf-8")
         log.write_text("", encoding="utf-8")
         env = {"PATH": f"{stubs}:/usr/bin:/bin", "IPT_LOG": str(log), "IPT_STATE": str(state_path),
                "IPTABLES": str(stubs / "iptables"), "DOCKER": str(stubs / "docker"),
@@ -301,11 +304,40 @@ def fw_root(fw, tmp_path):
     copy_dir = tmp_path / "root-copy"
     copy_dir.mkdir()
     copy_dir.chmod(0o755)
+    # Inside the user namespace only the caller's own files look root-owned; every system directory
+    # (/, /tmp, /usr/bin) shows as nobody. The script checks the whole chain up to / and resolves the
+    # engine in fixed directories, so the copies use a stat wrapper that maps nobody to root and treats
+    # the directories above the sandbox as trusted (the script, helper and sandbox dir are still checked
+    # for real), and a fake trusted engine directory.
+    fake_bin = tmp_path / "trusted-bin"
+    fake_bin.mkdir()
+    fake_bin.chmod(0o755)
+    (fake_bin / "docker").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (fake_bin / "docker").chmod(0o755)
+    wrap = tmp_path / "stat-wrap" / "stat"
+    wrap.parent.mkdir()
+    wrap.parent.chmod(0o755)
+    wrap.write_text(f"""#!/bin/sh
+fmt=; last=
+for a in "$@"; do case "$a" in %u|%a|"%u %a") fmt=$a ;; esac; last=$a; done
+case "{tmp_path}/" in "$last"/*|//*) above=1 ;; *) above=0 ;; esac
+if [ "$above" = 1 ] || [ "$last" = / ]; then
+  case "$fmt" in %u) echo 0; exit 0 ;; %a) echo 755; exit 0 ;; "%u %a") echo "0 755"; exit 0 ;; esac
+fi
+out=$(/usr/bin/stat "$@") || exit $?
+printf '%s\\n' "$out" | /bin/sed 's/^65534/0/'
+""", encoding="utf-8")
+    wrap.chmod(0o755)
+    lib_text = (FIREWALL.parent / "lib-container-engine.sh").read_text(encoding="utf-8")
+    lib_text = lib_text.replace("/usr/bin/stat", str(wrap)).replace(
+        'CE_TRUSTED_DIRS="/usr/bin /usr/local/bin /bin /snap/bin"', f'CE_TRUSTED_DIRS="{fake_bin}"')
 
     def run(mode="755", *args, env_extra=None, via_bash=False):
         script = copy_dir / "prometheus-otlp-firewall.sh"
-        script.write_bytes(FIREWALL.read_bytes())
+        script.write_text(FIREWALL.read_text(encoding="utf-8").replace("/usr/bin/stat", str(wrap)), encoding="utf-8")
         script.chmod(int(mode, 8))
+        (copy_dir / "lib-container-engine.sh").write_text(lib_text, encoding="utf-8")
+        (copy_dir / "lib-container-engine.sh").chmod(0o644)
         env = {"PATH": f"{stubs}:{fw.stubs}:/usr/bin:/bin", "IPT_LOG": str(fw.log),
                "IPT_STATE": str(tmp_path / "ipt.state"), "PROM_FW_NO_SUDO": "1",
                "IPTABLES": str(fw.stubs / "iptables"), "DOCKER": str(fw.stubs / "docker"),
@@ -363,7 +395,7 @@ def test_firewall_decides_root_from_the_kernel_after_resetting_path():
     code = [ln for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
     first = next(i for i, ln in enumerate(code) if ln.startswith("PATH="))
     assert "EUID" not in "\n".join(code), "the root decision must not read EUID"
-    assert first < next(i for i, ln in enumerate(code) if '"$ID_BIN" -u' in ln)
+    assert first < next(i for i, ln in enumerate(code) if "/usr/bin/id -u" in ln)
 
 
 def _bash_env_file(tmp_path, marker):

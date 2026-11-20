@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -p
 # =============================================================================
 # 08b-init-opensearch-security.sh — Bootstrap OpenSearch security config
 # =============================================================================
@@ -24,9 +24,50 @@
 # docker/ directory (repo-local compose).
 # =============================================================================
 
+set +x
+# SHELLOPTS and BASHOPTS are readonly in bash and are ignored in privileged mode (the -p shebang).
+unset BASH_ENV ENV CDPATH GLOBIGNORE PS4
 set -euo pipefail
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; export PATH  # fixed PATH before any command runs
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Root decision, privileged-mode check and the trusted script and helper tree come FIRST,
+# before anything is read, located or sourced.
+SCRIPT_DIR="$(/usr/bin/dirname -- "$(/usr/bin/readlink -f -- "${BASH_SOURCE[0]}")")"  # the real directory, symlinks resolved
+CE_LIB="${SCRIPT_DIR}/lib-container-engine.sh"
+ce_boot_fail() { echo "refusing to source ${CE_LIB}: $1" >&2; exit 1; }
+CE_UID="$(/usr/bin/id -u 2>/dev/null || /bin/id -u 2>/dev/null)" || CE_UID=
+case "$CE_UID" in '' | *[!0-9]*) ce_boot_fail "cannot tell who is running (no numeric user number)" ;; esac
+CE_UID=$((10#$CE_UID))  # asked of the kernel through id, never taken from an environment variable
+CE_STRICT=0
+[ "$CE_UID" != 0 ] || CE_STRICT=1
+if [ "$CE_STRICT" = 1 ] && ! [[ "$-" == *p* ]]; then  # as root the privileged shebang must be in force
+    ce_boot_fail "as root, run this script by its path (not as 'bash script'): the privileged shebang that keeps BASH_ENV and exported functions out is bypassed otherwise"
+fi
+if [ "$CE_STRICT" = 1 ]; then  # as root: the helper and every directory above it must be root-owned and not writable
+    CE_P="$CE_LIB"
+    while :; do
+        [ "$(/usr/bin/stat -c %u -- "$CE_P")" = 0 ] && [ $((8#$(/usr/bin/stat -c %a -- "$CE_P") & 8#022)) -eq 0 ] ||
+            ce_boot_fail "${CE_P} (or a directory above it) is not root-owned or is group or world writable"
+        [ "$CE_P" = / ] && break
+        CE_P="$(/usr/bin/dirname -- "$CE_P")"
+    done
+fi
+[ -f "$CE_LIB" ] && [ ! -L "$CE_LIB" ] || ce_boot_fail "it is missing or is a link"
+# Open the helper once, check the OPEN file (-L: the descriptor link points at the file), and source
+# that same descriptor, so a rename or replacement of the path after this point changes nothing.
+exec 9<"$CE_LIB" || ce_boot_fail "it cannot be opened"
+CE_OWNER="$(/usr/bin/stat -L -c %u -- /proc/self/fd/9)"
+CE_MODE="$(/usr/bin/stat -L -c %a -- /proc/self/fd/9)"
+CE_MASK=002  # world write is never allowed; group write too when running as root
+[ "$CE_STRICT" != 1 ] || CE_MASK=022
+if [ ! -f /proc/self/fd/9 ] || { [ "$CE_OWNER" != 0 ] && [ "$CE_OWNER" != "$CE_UID" ]; } ||
+    [ $((8#$CE_MODE & 8#$CE_MASK)) -ne 0 ]; then
+    ce_boot_fail "it must be a regular file owned by root or by you, not world writable (and not group writable when run as root)"
+fi
+# shellcheck source=scripts/lib-container-engine.sh
+source /proc/self/fd/9
+exec 9<&-
+
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 RED='\033[0;31m'
@@ -59,11 +100,11 @@ done
 
 if [ -n "$ENV_FILE" ]; then
     echo "Loading passwords from ${ENV_FILE}"
-    set -a
-    # shellcheck disable=SC1090
-    source "$ENV_FILE"
-    set +a
+    ce_source_env "$ENV_FILE" || exit 1  # root: only a root-owned file in a root-owned tree, via one descriptor
 fi
+
+# CONTAINER_ENGINE (docker by default, or podman) may come from the environment or that .env.
+ce_init || exit 1
 
 MISSING=0
 for var in OPENSEARCH_ADMIN_PASSWORD OPENSEARCH_LOGSTASH_PASSWORD \
@@ -87,7 +128,7 @@ echo ""
 echo -e "${YELLOW}[1/4] Waiting for opensearch-hot HTTPS endpoint...${NC}"
 UP=0
 for i in {1..30}; do
-    CODE=$(docker exec opensearch-hot \
+    CODE=$(ce_run exec opensearch-hot \
         curl -sk -o /dev/null -w '%{http_code}' https://localhost:9200/ 2>/dev/null || echo "000")
     # 401 = security initialized, 503 = security index not initialized yet,
     # 200 would mean auth is off — any of these means TLS + HTTP are up.
@@ -111,7 +152,7 @@ echo -e "${YELLOW}[2/4] Generating bcrypt hashes...${NC}"
 
 hash_password() {
     local pass="$1"
-    docker exec -e HASH_PASS="$pass" opensearch-hot bash -c \
+    ce_run exec -e HASH_PASS="$pass" opensearch-hot bash -c \
         'plugins/opensearch-security/tools/hash.sh -p "$HASH_PASS"' 2>/dev/null \
         | grep -E '^\$2[aby]\$' | tail -1
 }
@@ -159,7 +200,7 @@ echo -e "${GREEN}✓ internal_users.yml rendered${NC}"
 # hostname verification (self-signed certs).
 echo ""
 echo -e "${YELLOW}[4/4] Applying security configuration (securityadmin.sh)...${NC}"
-docker exec opensearch-hot bash -c '
+ce_run exec opensearch-hot bash -c '
     plugins/opensearch-security/tools/securityadmin.sh \
         -cd /usr/share/opensearch/config/opensearch-security \
         -cacert /usr/share/opensearch/config/certs/root-ca.pem \
@@ -172,9 +213,9 @@ docker exec opensearch-hot bash -c '
 # ── Verify ───────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${YELLOW}Verifying...${NC}"
-AUTH_CODE=$(docker exec opensearch-hot curl -sk -o /dev/null -w '%{http_code}' \
+AUTH_CODE=$(ce_run exec opensearch-hot curl -sk -o /dev/null -w '%{http_code}' \
     -u "admin:${OPENSEARCH_ADMIN_PASSWORD}" https://localhost:9200/_cluster/health)
-NOAUTH_CODE=$(docker exec opensearch-hot curl -sk -o /dev/null -w '%{http_code}' \
+NOAUTH_CODE=$(ce_run exec opensearch-hot curl -sk -o /dev/null -w '%{http_code}' \
     https://localhost:9200/_cluster/health)
 
 if [ "$AUTH_CODE" = "200" ]; then

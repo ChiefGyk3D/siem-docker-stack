@@ -46,12 +46,15 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import container_engine  # noqa: E402  (the one shared engine setting and trusted-binary resolver, issue #130)
+
 MARKER = "# gameday-84"  # the line marker is MARKER + "-" + the run id
-CLI_ALLOWED = ("docker", "podman")
+CLI_ALLOWED = container_engine.ENGINES
 RUN_ID_RE = re.compile(r"[0-9a-f]{8,32}")
-TRUSTED_DIRS = ("/usr/bin", "/usr/local/bin", "/bin", "/snap/bin")
-TRUSTED_UID = 0  # the owner a trusted binary and every directory above it must have
-TRUSTED_ROOT = "/"  # ownership is checked on every directory from here down to the binary
+TRUSTED_DIRS = container_engine.TRUSTED_DIRS
+TRUSTED_UID = container_engine.TRUSTED_UID  # the owner a trusted binary and every directory above it must have
+TRUSTED_ROOT = container_engine.TRUSTED_ROOT  # ownership is checked on every directory from here down
 SAFE_BIN_PATH = "/usr/sbin:/usr/bin:/sbin:/bin"  # PATH inside the container for the hosts scripts
 BIN_PATH_RE = re.compile(r"[A-Za-z0-9_./:-]{1,512}")
 PLACEHOLDER_ID = "<RUN_ID>"  # shown in a dry-run revert when no --run-id was given
@@ -82,6 +85,10 @@ def load_config(env=None, config_path=None):
     """Merge defaults, the TOML file and the environment (environment wins)."""
     env = os.environ if env is None else env
     cfg = dict(DEFAULTS)
+    try:
+        cfg["docker"] = container_engine.engine_name(env)  # CONTAINER_ENGINE; GAMEDAY_DOCKER below still wins
+    except container_engine.ContainerEngineError as err:
+        raise GamedayError(str(err))
     path = config_path or env.get("GAMEDAY_CONFIG")
     if path:
         try:
@@ -436,52 +443,17 @@ def get_scenario(cfg, name, rid=PLACEHOLDER_ID):
 # ------------------------------------------------------------ real runners
 
 def _dirs_ok(path, owner_uid, root):
-    """True when `path` (already canonical) is at or below `root` and every directory from root down
-    to it is owned by owner_uid and not group or world writable."""
-    root = os.path.realpath(root)
-    if os.path.commonpath([root, path]) != root:
-        return False
-    chain, cur = [root], root
-    for part in os.path.relpath(path, root).split(os.sep):
-        if part in ("", "."):
-            continue
-        cur = os.path.join(cur, part)
-        chain.append(cur)
-    for d in chain:
-        try:
-            st = os.lstat(d)
-        except OSError:
-            return False
-        if not stat.S_ISDIR(st.st_mode) or st.st_uid != owner_uid or st.st_mode & 0o022:
-            return False
-    return True
+    return container_engine._dirs_ok(path, owner_uid, root)
 
 
 def resolve_cli(name, dirs=None, owner_uid=None, root=None):
-    """Find `name` in a fixed set of trusted directories and return its CANONICAL absolute path, or None.
-
-    The caller's PATH is never consulted. Links are resolved here, and the result (not the link) is
-    what gets executed. The trusted directory itself and every directory from `root` down to the
-    resolved file must be owned by owner_uid and not group or world writable, and the file must be a
-    regular executable owned by owner_uid that is not group or world writable. Residual: the final
-    parent is root-controlled, so a rename there needs root already.
-    """
-    dirs = TRUSTED_DIRS if dirs is None else dirs
-    owner_uid = TRUSTED_UID if owner_uid is None else owner_uid
-    root = TRUSTED_ROOT if root is None else root
-    for d in dirs:
-        real = os.path.realpath(os.path.join(d, name))
-        if not os.path.isfile(real) or not _dirs_ok(os.path.realpath(d), owner_uid, root):
-            continue
-        if not _dirs_ok(os.path.dirname(real), owner_uid, root):
-            continue
-        try:
-            st = os.lstat(real)
-        except OSError:
-            continue
-        if stat.S_ISREG(st.st_mode) and st.st_mode & 0o111 and st.st_uid == owner_uid and not st.st_mode & 0o022:
-            return real
-    return None
+    """The shared resolver (container_engine.resolve_cli), defaulting to this module's trusted settings."""
+    return container_engine.resolve_cli(
+        name,
+        TRUSTED_DIRS if dirs is None else dirs,
+        TRUSTED_UID if owner_uid is None else owner_uid,
+        TRUSTED_ROOT if root is None else root,
+    )
 
 
 def real_runner(argv):
@@ -489,14 +461,16 @@ def real_runner(argv):
     exe = resolve_cli(argv[0])
     if exe is None:
         return 127, f"no trusted '{argv[0]}' found in {', '.join(TRUSTED_DIRS)} (root-owned, not writable by others)"
-    env = dict(os.environ)
     good = [d for d in TRUSTED_DIRS if os.path.isdir(d) and _dirs_ok(os.path.realpath(d), TRUSTED_UID, TRUSTED_ROOT)]
-    env["PATH"] = ":".join(good)
     try:
-        proc = subprocess.run([argv[0], *argv[1:]], executable=exe, capture_output=True, text=True,
-                              timeout=120, env=env)
+        with container_engine.private_home() as home:  # no DOCKER_HOST, LD_*, per-user config or helpers
+            env = container_engine.engine_env(home, path=":".join(good))
+            proc = subprocess.run([argv[0], *argv[1:]], executable=exe, capture_output=True, text=True,
+                                  timeout=120, env=env)
     except FileNotFoundError:
         return 127, f"command not found: {argv[0]}"
+    except container_engine.ContainerEngineError as err:
+        return 127, str(err)
     except subprocess.TimeoutExpired:
         return 124, "timed out after 120 seconds"
     return proc.returncode, ((proc.stdout or "") + (proc.stderr or "")).strip()[:300]
@@ -546,6 +520,7 @@ def real_resolver(cfg):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import n8n_address
     env = dict(os.environ)
+    env["CONTAINER_ENGINE"] = cfg["docker"]  # the one engine this run chose, never re-read from the environment
     if cfg.get("n8n_base"):
         env["N8N_BASE"] = cfg["n8n_base"]
     env.setdefault("N8N_CONTAINER", cfg["n8n_container"])

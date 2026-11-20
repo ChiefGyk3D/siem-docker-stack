@@ -207,13 +207,24 @@ def _run_provision(tmp_path, password="Zx9-grafana-ro-pw", extra_env=None, seed=
     if seed:
         for fname, body in SEED.items():
             (fs / fname).write_text(body, encoding="utf-8")
+    # The script finds its engine only in fixed root-owned directories (issue #130), so the fake
+    # engine is wired in through a sandbox copy whose helper resolves to the stub. The real resolver
+    # is tested in test_container_engine.py.
+    sandbox = tmp_path / "sandbox" / "scripts"
+    sandbox.mkdir(parents=True, exist_ok=True)
+    (sandbox / PROVISION.name).write_text(PROVISION.read_text(encoding="utf-8"), encoding="utf-8")
+    lib = (REPO_ROOT / "scripts" / "lib-container-engine.sh").read_text(encoding="utf-8")
+    stub = ('\nce_init() { CE_NAME=docker; CE_BIN="%s"; }\n'
+            'ce_run() { "$CE_BIN" "$@"; }  # the fake reads FAKE_* variables the real ce_run would drop\n'
+            % (bindir / "docker"))
+    (sandbox / "lib-container-engine.sh").write_text(lib + stub, encoding="utf-8")
     env = {"PATH": f"{bindir}:{os.environ['PATH']}", "HOME": str(tmp_path),
            "FAKE_FS": str(fs), "FAKE_LOG": str(tmp_path / "log.jsonl"),
            "SIEM_DEPLOY_DIR": str(REPO_ROOT / "docker")}
     if password is not None:
         env["WAZUH_GRAFANA_RO_PASSWORD"] = password
     env.update(extra_env or {})
-    res = subprocess.run(["bash", str(PROVISION)], capture_output=True, text=True, env=env,
+    res = subprocess.run(["bash", str(sandbox / PROVISION.name)], capture_output=True, text=True, env=env,
                          check=False, timeout=60)
     log = [json.loads(ln) for ln in (tmp_path / "log.jsonl").read_text().splitlines()] \
         if (tmp_path / "log.jsonl").exists() else []

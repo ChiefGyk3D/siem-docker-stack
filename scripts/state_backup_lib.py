@@ -32,11 +32,15 @@ import shutil
 import sqlite3
 import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
 import tomllib
 import zlib
 from dataclasses import dataclass, field
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import container_engine  # noqa: E402  (the shared CONTAINER_ENGINE setting and trusted-binary resolver, issue #130)
 from datetime import datetime, timezone
 
 AGE_MAGIC = b"age-encryption.org/v1"
@@ -140,6 +144,11 @@ def load_config(path: str) -> Config:
     unknown = sorted(set(raw) - set(Config.__dataclass_fields__))
     if unknown:
         raise BackupError(f"unknown config keys: {', '.join(unknown)}")
+    if "container_runtime" not in raw:  # the file wins; otherwise the shared CONTAINER_ENGINE setting
+        try:
+            raw["container_runtime"] = container_engine.engine_name()
+        except container_engine.ContainerEngineError as exc:
+            raise BackupError(f"config: {exc}") from None
     try:
         cfg = Config(**raw)
     except TypeError as exc:
@@ -219,8 +228,10 @@ def validate_config(cfg: Config) -> Config:
 def _run(argv: list, what: str) -> subprocess.CompletedProcess:
     if FORBIDDEN_FLAG in argv:
         raise BackupError("refusing to run a command with --decrypted")
-    try:
-        proc = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, check=False)
+    try:  # docker or podman run as the resolved trusted binary, never through the caller's PATH
+        proc = container_engine.engine_run(argv, stdin=subprocess.DEVNULL, capture_output=True, check=False)
+    except container_engine.ContainerEngineError as exc:
+        raise BackupError(f"{what}: {exc}") from None
     except OSError as exc:
         raise BackupError(f"{what}: cannot run {argv[0]}: {exc.strerror}") from None
     if proc.returncode != 0:
