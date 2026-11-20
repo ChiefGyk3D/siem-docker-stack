@@ -18,18 +18,28 @@
 # =============================================================================
 
 set -euo pipefail
+# Before any external command runs: take the export attribute off the password (a caller may have
+# exported it) and switch allexport off (an inherited `bash -a` would export every later assignment).
+# Both are builtins. From here on no child of this script inherits the password. What no script can
+# change: the environment this process itself was started with still holds whatever the launcher
+# exported; pass the password in a .env file rather than the launch environment to avoid even that.
+export -n OPENSEARCH_ADMIN_PASSWORD
+set +a
 
 OPENSEARCH_URL="${1:-https://localhost:9200}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="${SCRIPT_DIR}/.."
 OPENSEARCH_DIR="${SCRIPT_DIR}/../docker/opensearch"
 
-# Load OPENSEARCH_ADMIN_PASSWORD from .env if not already set
+# Load OPENSEARCH_ADMIN_PASSWORD from .env if not already set. Plain `source` with allexport off: the
+# assignments stay in this shell only; the attribute is taken off again in case the file exports.
 if [ -z "${OPENSEARCH_ADMIN_PASSWORD:-}" ]; then
     for envf in /opt/siem/.env "${REPO_DIR}/.env" "${REPO_DIR}/docker/.env"; do
         if [ -f "$envf" ]; then
             # shellcheck disable=SC1090
-            set -a; source "$envf"; set +a
+            source "$envf"
+            set +a
+            export -n OPENSEARCH_ADMIN_PASSWORD
             break
         fi
     done
@@ -38,8 +48,21 @@ if [ -z "${OPENSEARCH_ADMIN_PASSWORD:-}" ]; then
     echo "ERROR: OPENSEARCH_ADMIN_PASSWORD not set (env or .env). See .env.example."
     exit 1
 fi
+# A line break would end the one-line curl config record below (and start a new directive), so refuse
+# it before any request. The variable name is printed, never the value.
+case "$OPENSEARCH_ADMIN_PASSWORD" in
+    *$'\n'* | *$'\r'*)
+        echo "ERROR: OPENSEARCH_ADMIN_PASSWORD contains a line break, which is not allowed in a password" >&2
+        exit 1
+        ;;
+esac
+# The credentials go to curl on standard input as a config (-K -), never in argv. Backslash and double
+# quote are escaped for the curl config syntax. printf is a builtin, so no process holds the value.
+OS_USER_CFG="admin:${OPENSEARCH_ADMIN_PASSWORD}"
+OS_USER_CFG="${OS_USER_CFG//\\/\\\\}"
+OS_USER_CFG="${OS_USER_CFG//\"/\\\"}"
 # -k: cluster certs are self-signed (see scripts/07-generate-opensearch-certs.sh)
-CURL=(curl -sk -u "admin:${OPENSEARCH_ADMIN_PASSWORD}")
+os_curl() { printf 'user = "%s"\n' "$OS_USER_CFG" | curl -sk -K - "$@"; }
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -53,8 +76,8 @@ echo ""
 # Wait for OpenSearch
 echo -e "${YELLOW}Waiting for OpenSearch...${NC}"
 for i in {1..30}; do
-    if "${CURL[@]}" -f "${OPENSEARCH_URL}/_cluster/health" > /dev/null 2>&1; then
-        HEALTH=$("${CURL[@]}" -f "${OPENSEARCH_URL}/_cluster/health" | jq -r '.status')
+    if os_curl -f "${OPENSEARCH_URL}/_cluster/health" > /dev/null 2>&1; then
+        HEALTH=$(os_curl -f "${OPENSEARCH_URL}/_cluster/health" | jq -r '.status')
         echo -e "${GREEN}✓ OpenSearch is up (cluster health: ${HEALTH})${NC}"
         break
     fi
@@ -62,12 +85,12 @@ for i in {1..30}; do
     sleep 5
 done
 
-if ! "${CURL[@]}" -f "${OPENSEARCH_URL}/_cluster/health" > /dev/null 2>&1; then
+if ! os_curl -f "${OPENSEARCH_URL}/_cluster/health" > /dev/null 2>&1; then
     echo -e "${RED}ERROR: OpenSearch not reachable at ${OPENSEARCH_URL}${NC}"
     exit 1
 fi
 
-CLUSTER_INFO=$("${CURL[@]}" -f "${OPENSEARCH_URL}/_cluster/health")
+CLUSTER_INFO=$(os_curl -f "${OPENSEARCH_URL}/_cluster/health")
 NODE_COUNT=$(echo "$CLUSTER_INFO" | jq -r '.number_of_nodes')
 echo "  Nodes: ${NODE_COUNT}"
 
@@ -75,7 +98,7 @@ echo "  Nodes: ${NODE_COUNT}"
 echo ""
 echo -e "${YELLOW}[1/5] Applying ISM hot/warm/delete policy...${NC}"
 
-"${CURL[@]}" -f -X PUT "${OPENSEARCH_URL}/_plugins/_ism/policies/siem-hot-warm-delete" \
+os_curl -f -X PUT "${OPENSEARCH_URL}/_plugins/_ism/policies/siem-hot-warm-delete" \
     -H 'Content-Type: application/json' \
     -d @"${OPENSEARCH_DIR}/ism-hot-warm-policy.json" | jq .
 
@@ -85,7 +108,7 @@ echo -e "${GREEN}✓ ISM policy applied${NC}"
 echo ""
 echo -e "${YELLOW}[2/5] Applying Suricata index template...${NC}"
 
-"${CURL[@]}" -f -X PUT "${OPENSEARCH_URL}/_index_template/suricata-template" \
+os_curl -f -X PUT "${OPENSEARCH_URL}/_index_template/suricata-template" \
     -H 'Content-Type: application/json' \
     -d @"${OPENSEARCH_DIR}/index-template-suricata.json" | jq .
 
@@ -95,7 +118,7 @@ echo -e "${GREEN}✓ Suricata template applied${NC}"
 echo ""
 echo -e "${YELLOW}[3/5] Applying pfBlockerNG index template...${NC}"
 
-"${CURL[@]}" -f -X PUT "${OPENSEARCH_URL}/_index_template/pfblockerng" \
+os_curl -f -X PUT "${OPENSEARCH_URL}/_index_template/pfblockerng" \
     -H 'Content-Type: application/json' \
     -d @"${OPENSEARCH_DIR}/index-template-pfblockerng.json" | jq .
 
@@ -105,7 +128,7 @@ echo -e "${GREEN}✓ pfBlockerNG template applied${NC}"
 echo ""
 echo -e "${YELLOW}[4/5] Applying Syslog index template...${NC}"
 
-"${CURL[@]}" -f -X PUT "${OPENSEARCH_URL}/_index_template/syslog-template" \
+os_curl -f -X PUT "${OPENSEARCH_URL}/_index_template/syslog-template" \
     -H 'Content-Type: application/json' \
     -d '{
   "index_patterns": ["syslog-*", "pfsense-*", "unifi-syslog-*", "crowdsec-events-*"],
@@ -138,15 +161,15 @@ echo ""
 echo -e "${YELLOW}[5/5] Verifying...${NC}"
 
 echo "  ISM policies:"
-"${CURL[@]}" -f "${OPENSEARCH_URL}/_plugins/_ism/policies" | jq -r '.policies[].policy.description' 2>/dev/null || echo "    (none yet)"
+os_curl -f "${OPENSEARCH_URL}/_plugins/_ism/policies" | jq -r '.policies[].policy.description' 2>/dev/null || echo "    (none yet)"
 
 echo ""
 echo "  Index templates:"
-"${CURL[@]}" -f "${OPENSEARCH_URL}/_index_template" | jq -r '.index_templates[].name' 2>/dev/null || echo "    (none yet)"
+os_curl -f "${OPENSEARCH_URL}/_index_template" | jq -r '.index_templates[].name' 2>/dev/null || echo "    (none yet)"
 
 echo ""
 echo "  Cluster allocation tags:"
-"${CURL[@]}" -f "${OPENSEARCH_URL}/_cat/nodeattrs?v&h=node,attr,value" 2>/dev/null | grep temp || echo "    (waiting for nodes)"
+os_curl -f "${OPENSEARCH_URL}/_cat/nodeattrs?v&h=node,attr,value" 2>/dev/null | grep temp || echo "    (waiting for nodes)"
 
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════╗${NC}"
