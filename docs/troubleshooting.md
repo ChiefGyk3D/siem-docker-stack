@@ -139,8 +139,12 @@ bash scripts/06-generate-wazuh-certs.sh
 docker compose logs --tail=50 wazuh-dashboard
 
 # Check Wazuh Indexer health
-curl -sk -u "admin:${WAZUH_INDEXER_PASSWORD}" https://localhost:9202/_cluster/health
+scripts/secure-curl.sh admin -sk https://localhost:9202/_cluster/health
 ```
+
+Run it from the repository root. It asks for the Wazuh indexer admin password
+without echo and hands it to curl on stdin, never as an argument, so it stays
+out of the process list, shell history and shell traces. It needs bash 4.2 or newer.
 
 ---
 

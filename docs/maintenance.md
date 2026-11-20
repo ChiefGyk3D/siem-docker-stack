@@ -147,15 +147,21 @@ docker exec influxdb influx -execute 'DELETE FROM /.*/ WHERE time < now() - 365d
 ### Grafana Maintenance
 
 ```bash
-# Reset admin password
-docker exec grafana grafana cli admin reset-admin-password newpassword
-
-# Check provisioned datasources
-curl -s -u "admin:${GRAFANA_ADMIN_PASS}" 'http://localhost:3000/api/datasources' | jq '.[].name'
+# Check provisioned datasources (from the repository root; asks for the Grafana admin password)
+scripts/secure-curl.sh admin -s 'http://localhost:3000/api/datasources' | jq '.[].name'
 
 # Export a dashboard
-curl -s -u "admin:${GRAFANA_ADMIN_PASS}" 'http://localhost:3000/api/dashboards/uid/YOUR_UID' | jq '.dashboard' > exported.json
+scripts/secure-curl.sh admin -s 'http://localhost:3000/api/dashboards/uid/YOUR_UID' | jq '.dashboard' > exported.json
 ```
+
+`scripts/secure-curl.sh` reads the password without echo and hands it to curl
+on stdin, never as an argument, so it stays out of the process list, shell
+history and shell traces. It needs bash 4.2 or newer; start it by its path.
+
+To reset the Grafana admin password, run `change-passwords.sh` (it prompts
+without echo). Do not pass a new password to `grafana cli`: it would sit in
+the argument list of the `docker exec` and of the process inside the
+container.
 
 ### Wazuh Maintenance
 
@@ -170,7 +176,7 @@ docker exec wazuh-manager /var/ossec/bin/agent_control -l | grep -c Active
 docker compose restart wazuh-manager
 
 # Check Wazuh indexer health
-curl -sk -u "admin:${WAZUH_INDEXER_PASSWORD}" 'https://localhost:9202/_cluster/health?pretty'
+scripts/secure-curl.sh admin -sk 'https://localhost:9202/_cluster/health?pretty'   # asks for the Wazuh indexer admin password
 ```
 
 ## Backup Strategy

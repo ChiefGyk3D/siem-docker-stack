@@ -123,8 +123,10 @@ owned by the container user (65534), mode 0400, directory 0500, so no other
 user can read them. It refuses to run unprivileged rather than leave a readable
 secret. The sender and Grafana passwords are never written by the script.
 The SIEM Prometheus now asks for a password too: use
-`curl -u "self:$PROMETHEUS_SELF_PASSWORD" ...` for API queries and for
-`POST /-/reload`.
+the `self` account for API queries and for `POST /-/reload`, passing the
+credentials to curl through `scripts/secure-curl.sh` as shown in
+[Verify](#verify) so the password never appears in the process list or shell
+history.
 
 Rotate an account by changing its value in `.env`, re-running the script and
 restarting the affected containers.
@@ -268,8 +270,12 @@ here is applied by merging; run each step on the SIEM host on purpose.
 
 ## Verify
 
-All four checks must pass. Read the passwords from your shell or a secrets file,
-never type them into shared history.
+All four checks must pass. The commands below use `scripts/secure-curl.sh
+USER curl-args...`, which asks for the password without echo and hands it to
+curl on stdin, never as an argument, so it stays out of the process list,
+shell history and shell traces. It needs bash 4.2 or newer. Start it by its path;
+on the sender, copy the one file there first. It asks for the password on each
+call.
 
 1. From an **approved** sender, with the sender password (expect `200`):
 
@@ -277,7 +283,7 @@ never type them into shared history.
 # From the sender: use the receiver's address and port as configured there.
 : "${OTLP_PORT:?set OTLP_PORT to the receiver's published port (docker port prometheus-otlp, on the SIEM host)}"
 now=$(date +%s)000000000
-curl -sS -o /dev/null -w '%{http_code}\n' -X POST -u "sender:${PROMETHEUS_OTLP_SENDER_PASSWORD}" \
+scripts/secure-curl.sh sender -sS -o /dev/null -w '%{http_code}\n' -X POST \
   -H 'Content-Type: application/json' \
   --cacert server.crt "https://SIEM_HOST:${OTLP_PORT}/api/v1/otlp/v1/metrics" \
   -d '{"resourceMetrics":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"otlp-smoke-test"}}]},"scopeMetrics":[{"metrics":[{"name":"otlp_smoke_test","gauge":{"dataPoints":[{"timeUnixNano":"'"$now"'","asDouble":1}]}}]}]}]}'
@@ -294,7 +300,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Type: application/
    is refused, even with the correct password):
 
 ```bash
-curl -sS --max-time 5 -o /dev/null -w '%{http_code}\n' -X POST -u "sender:${PROMETHEUS_OTLP_SENDER_PASSWORD}" \
+scripts/secure-curl.sh sender -sS --max-time 5 -o /dev/null -w '%{http_code}\n' -X POST \
   -H 'Content-Type: application/json' -d '{}' \
   --cacert server.crt "https://SIEM_HOST:${OTLP_PORT}/api/v1/otlp/v1/metrics"
 ```
@@ -308,9 +314,9 @@ effect: stop and fix it before leaving the receiver on.
 ```bash
 OTLP_PUB=$(sudo docker port prometheus-otlp 9090/tcp | grep -E '^[0-9.]+:[0-9]+$')   # exactly one IPv4 line
 OTLP_ADDR=${OTLP_PUB%:*}; OTLP_PORT=${OTLP_PUB##*:}
-curl -sS -u "sender:${PROMETHEUS_OTLP_SENDER_PASSWORD}" --cacert /opt/siem/prometheus-otlp/tls/server.crt --resolve SIEM_HOST:${OTLP_PORT}:${OTLP_ADDR} "https://SIEM_HOST:${OTLP_PORT}/api/v1/query?query=otlp_smoke_test" | grep -c otlp-smoke-test
-curl -sS -o /dev/null -w '%{http_code}\n' -X POST -u "sender:${PROMETHEUS_OTLP_SENDER_PASSWORD}" --cacert /opt/siem/prometheus-otlp/tls/server.crt --resolve SIEM_HOST:${OTLP_PORT}:${OTLP_ADDR} https://SIEM_HOST:${OTLP_PORT}/-/reload   # expect 403 or 404, not 200
-curl -sS -u "scrape:${PROMETHEUS_OTLP_SCRAPE_PASSWORD}" --cacert /opt/siem/prometheus-otlp/tls/server.crt --resolve SIEM_HOST:${OTLP_PORT}:${OTLP_ADDR} https://SIEM_HOST:${OTLP_PORT}/api/v1/status/config | grep -o 'out_of_order_time_window: [0-9a-z]*'
+scripts/secure-curl.sh sender -sS --cacert /opt/siem/prometheus-otlp/tls/server.crt --resolve SIEM_HOST:${OTLP_PORT}:${OTLP_ADDR} "https://SIEM_HOST:${OTLP_PORT}/api/v1/query?query=otlp_smoke_test" | grep -c otlp-smoke-test
+scripts/secure-curl.sh sender -sS -o /dev/null -w '%{http_code}\n' -X POST --cacert /opt/siem/prometheus-otlp/tls/server.crt --resolve SIEM_HOST:${OTLP_PORT}:${OTLP_ADDR} https://SIEM_HOST:${OTLP_PORT}/-/reload   # expect 403 or 404, not 200
+scripts/secure-curl.sh scrape -sS --cacert /opt/siem/prometheus-otlp/tls/server.crt --resolve SIEM_HOST:${OTLP_PORT}:${OTLP_ADDR} https://SIEM_HOST:${OTLP_PORT}/api/v1/status/config | grep -o 'out_of_order_time_window: [0-9a-z]*'
 ```
 
 Also confirm the `prometheus` and `prometheus-otlp` targets are up on the SIEM
