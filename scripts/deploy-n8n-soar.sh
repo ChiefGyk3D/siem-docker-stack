@@ -37,10 +37,17 @@ require_secret GRAFANA_PASS "$GRAFANA_PASS" || exit 1
 
 # The curl calls run on the SIEM server, so the lookup runs there too: the helper
 # is streamed over ssh to the remote python3 (nothing is copied or left behind).
+# The stream is container_engine.py (the shared CONTAINER_ENGINE setting and the
+# trusted-binary resolver) followed by n8n_address.py. Only the validated engine
+# name (docker or podman) is sent to the host.
+# shellcheck source=scripts/lib-container-engine.sh
+source "$(dirname "$0")/lib-container-engine.sh"
+ce_init_name || exit 1
 if [[ -z "${N8N_BASE:-}" ]]; then
+  LOOKUP_SRC="$(cat "$(dirname "$0")/container_engine.py" "$(dirname "$0")/n8n_address.py")" || exit 1
   N8N_BASE="$(ssh "${SSH_USER}@${SIEM_SERVER}" \
-    "N8N_CONTAINER=$(printf '%q' "${N8N_CONTAINER:-n8n}") SIEM_NETWORK=$(printf '%q' "${SIEM_NETWORK:-}") N8N_PORT=$(printf '%q' "${N8N_PORT:-80}") python3 -I -" \
-    < "$(dirname "$0")/n8n_address.py")" || {
+    "CONTAINER_ENGINE=$(printf '%q' "$CE_NAME") N8N_CONTAINER=$(printf '%q' "${N8N_CONTAINER:-n8n}") SIEM_NETWORK=$(printf '%q' "${SIEM_NETWORK:-}") N8N_PORT=$(printf '%q' "${N8N_PORT:-80}") python3 -I -" \
+    <<< "$LOOKUP_SRC")" || {
     echo "ERROR: could not resolve the n8n address on ${SIEM_SERVER}. Set N8N_BASE (for example http://192.0.2.10:80) to skip the lookup." >&2
     exit 1
   }

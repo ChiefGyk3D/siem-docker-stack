@@ -15,6 +15,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CERTS_DIR="${SCRIPT_DIR}/../docker/wazuh/certs"
+# shellcheck source=scripts/lib-container-engine.sh
+source "${SCRIPT_DIR}/lib-container-engine.sh"
+ce_init || exit 1
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -42,7 +45,7 @@ mkdir -p "${CERTS_DIR}"
 
 echo -e "${YELLOW}Generating certificates...${NC}"
 
-docker run --rm \
+"$CE_BIN" run --rm \
     -v "${CERTS_DIR}:/certs" \
     -e INDEXER_NAME=wazuh-indexer \
     -e MANAGER_NAME=wazuh-manager \

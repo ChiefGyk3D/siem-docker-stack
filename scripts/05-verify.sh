@@ -28,6 +28,11 @@ for envf in /opt/siem/.env "${REPO_DIR}/.env" "${REPO_DIR}/docker/.env"; do
         break
     fi
 done
+
+# CONTAINER_ENGINE (docker by default, or podman) may come from the environment or that .env.
+# shellcheck source=scripts/lib-container-engine.sh
+source "${SCRIPT_DIR}/lib-container-engine.sh"
+ce_init_name || exit 1
 OPENSEARCH_ADMIN_PASSWORD="${OPENSEARCH_ADMIN_PASSWORD:-}"
 OS_AUTH="admin:${OPENSEARCH_ADMIN_PASSWORD}"
 OS_URL="https://${SIEM_HOST}:9200"
@@ -135,13 +140,15 @@ echo ""
 echo -e "${YELLOW}Docker Containers:${NC}"
 EXPECTED_CONTAINERS="alertmanager cadvisor elasticsearch-exporter grafana influxdb logstash opensearch-dashboards opensearch-hot opensearch-warm prometheus syslog-ng unifi-poller wazuh-dashboard wazuh-indexer wazuh-manager"
 
-# Try local docker first, then SSH
-if docker ps > /dev/null 2>&1; then
-    RUNNING_CONTAINERS=$(docker ps --format "{{.Names}}" 2>/dev/null | sort | tr '\n' ' ')
-    DOCKER_CMD="docker"
+# Try the local container engine first (CONTAINER_ENGINE, found in fixed root-owned
+# directories only), then SSH
+CE_LOCAL="$(ce_resolve "$CE_NAME" || true)"
+if [ -n "$CE_LOCAL" ] && "$CE_LOCAL" ps > /dev/null 2>&1; then
+    RUNNING_CONTAINERS=$("$CE_LOCAL" ps --format "{{.Names}}" 2>/dev/null | sort | tr '\n' ' ')
+    DOCKER_CMD="$CE_NAME"
 elif [ "$SIEM_HOST" != "localhost" ] && [ "$SIEM_HOST" != "127.0.0.1" ]; then
-    RUNNING_CONTAINERS=$(ssh -o ConnectTimeout=5 "${SIEM_USER}@${SIEM_HOST}" 'docker ps --format "{{.Names}}"' 2>/dev/null | sort | tr '\n' ' ')
-    DOCKER_CMD="ssh ${SIEM_USER}@${SIEM_HOST} docker"
+    RUNNING_CONTAINERS=$(ssh -o ConnectTimeout=5 "${SIEM_USER}@${SIEM_HOST}" "${CE_NAME}"' ps --format "{{.Names}}"' 2>/dev/null | sort | tr '\n' ' ')
+    DOCKER_CMD="ssh ${SIEM_USER}@${SIEM_HOST} ${CE_NAME}"
 else
     echo -e "  ${YELLOW}Cannot access Docker - skipping container check${NC}"
     RUNNING_CONTAINERS=""

@@ -24,6 +24,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# CONTAINER_ENGINE (docker by default, or podman) comes from the environment.
+# shellcheck source=scripts/lib-container-engine.sh
+source "${SCRIPT_DIR}/lib-container-engine.sh"
+ce_init || exit 1
 
 HASH_TOOL="/usr/share/wazuh-indexer/plugins/opensearch-security/tools/hash.sh"
 SEC_TOOL="/usr/share/wazuh-indexer/plugins/opensearch-security/tools/securityadmin.sh"
@@ -68,7 +72,7 @@ for f in roles.fragment.yml roles_mapping.fragment.yml internal_users.fragment.y
 done
 
 echo "[1/4] Hashing the password inside wazuh-indexer..."
-HASH=$(printf '%s' "$WAZUH_GRAFANA_RO_PASSWORD" | docker exec -i wazuh-indexer bash -c \
+HASH=$(printf '%s' "$WAZUH_GRAFANA_RO_PASSWORD" | "$CE_BIN" exec -i wazuh-indexer bash -c \
     "export JAVA_HOME=/usr/share/wazuh-indexer/jdk && IFS= read -r P && ${HASH_TOOL} -p \"\$P\"" \
     2>/dev/null | grep -E '^\$2[aby]\$' | tail -1 || true)
 if [ -z "$HASH" ]; then
@@ -83,8 +87,8 @@ trap 'rm -rf "$WORK"' EXIT
 # (and any older block with that key) in the file, keeping everything else.
 upsert() {
     local name="$1" frag="$2"
-    docker exec wazuh-indexer cp "${SEC_CFG}/${name}" "${SEC_CFG}/${name}.bak"
-    docker exec wazuh-indexer cat "${SEC_CFG}/${name}" > "${WORK}/${name}"
+    "$CE_BIN" exec wazuh-indexer cp "${SEC_CFG}/${name}" "${SEC_CFG}/${name}.bak"
+    "$CE_BIN" exec wazuh-indexer cat "${SEC_CFG}/${name}" > "${WORK}/${name}"
     RO_USER="$RO_USER" RO_HASH="$HASH" python3 - "${WORK}/${name}" "${FRAG_DIR}/${frag}" <<'PYEOF'
 import os, re, sys
 path, frag = sys.argv[1], sys.argv[2]
@@ -99,12 +103,12 @@ content = pattern.sub("", content)
 content = content.rstrip("\n") + "\n\n" + body
 open(path, "w", encoding="utf-8").write(content)
 PYEOF
-    docker exec -i wazuh-indexer bash -c 'cat > "$0"' "${SEC_CFG}/${name}" < "${WORK}/${name}"
+    "$CE_BIN" exec -i wazuh-indexer bash -c 'cat > "$0"' "${SEC_CFG}/${name}" < "${WORK}/${name}"
 }
 
 apply() { # <file> <type>
     local out
-    out=$(docker exec wazuh-indexer bash -c "export JAVA_HOME=/usr/share/wazuh-indexer/jdk && ${SEC_TOOL} \
+    out=$("$CE_BIN" exec wazuh-indexer bash -c "export JAVA_HOME=/usr/share/wazuh-indexer/jdk && ${SEC_TOOL} \
         -f ${SEC_CFG}/$1 -t $2 \
         -cacert ${CERTS}/root-ca.pem -cert ${CERTS}/admin.pem -key ${CERTS}/admin-key.pem \
         -icl -nhnv" 2>&1) || { echo "$out" | tail -5 >&2; echo "ERROR: securityadmin failed for $2" >&2; exit 1; }
@@ -126,7 +130,7 @@ apply internal_users.yml internalusers
 probe() { # <method> <path>
     local cred="${RO_USER}:${WAZUH_GRAFANA_RO_PASSWORD}"
     cred="${cred//\\/\\\\}"; cred="${cred//\"/\\\"}"
-    printf 'user = "%s"\n' "$cred" | docker exec -i wazuh-indexer curl -K - -sk \
+    printf 'user = "%s"\n' "$cred" | "$CE_BIN" exec -i wazuh-indexer curl -K - -sk \
         -o /dev/null -w '%{http_code}' -X "$1" "https://localhost:9200$2"
 }
 

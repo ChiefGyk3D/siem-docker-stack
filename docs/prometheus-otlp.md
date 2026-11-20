@@ -94,7 +94,7 @@ from anywhere that is not root-owned:
 
 ```bash
 sudo install -d -o root -g root -m 0755 /usr/local/libexec/siem
-sudo install -o root -g root -m 0755 scripts/render-prometheus-web-config.sh scripts/prometheus-otlp-firewall.sh scripts/lib-secrets.sh /usr/local/libexec/siem/
+sudo install -o root -g root -m 0755 scripts/render-prometheus-web-config.sh scripts/prometheus-otlp-firewall.sh scripts/lib-secrets.sh scripts/lib-container-engine.sh /usr/local/libexec/siem/
 sudo /usr/local/libexec/siem/render-prometheus-web-config.sh /opt/siem
 ```
 

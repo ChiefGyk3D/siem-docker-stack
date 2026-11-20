@@ -15,6 +15,8 @@ Environment (all optional):
                   `docker network ls` shows the real name). Zero or several
                   matches is an error that tells you to set this.
   N8N_PORT        port on that address (default: 80)
+  CONTAINER_ENGINE  docker (default) or podman; the binary is found only in fixed
+                  root-owned directories (see container_engine.py)
 
 Exit status 1 with a message on stderr when the address cannot be found.
 """
@@ -23,12 +25,24 @@ import os
 import subprocess
 import sys
 
+try:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import container_engine as ce
+except (NameError, ImportError):
+    # Streamed over ssh together with container_engine.py (deploy-n8n-soar.sh): both files
+    # share one module namespace, so the shared functions are on __main__.
+    ce = sys.modules["__main__"]
+
 
 class N8nAddressError(Exception):
     """The n8n address could not be resolved; the message says what to do."""
 
 
-def resolve_n8n_base(env=None, run=subprocess.run):
+def _engine_run(argv, **kwargs):
+    return ce.engine_run(argv, **kwargs)
+
+
+def resolve_n8n_base(env=None, run=None):
     """Return the n8n base URL. `env` and `run` are injectable for tests."""
     env = os.environ if env is None else env
     override = (env.get("N8N_BASE") or "").strip()
@@ -41,14 +55,20 @@ def resolve_n8n_base(env=None, run=subprocess.run):
     hint = "Set N8N_BASE to the full URL (for example http://192.0.2.10:80) to skip the lookup."
 
     try:
+        engine = ce.engine_name(env)
+    except ce.ContainerEngineError as err:
+        raise N8nAddressError(f"{err}. {hint}")
+    run = _engine_run if run is None else run
+
+    try:
         proc = run(
-            ["docker", "inspect", "--format", "{{json .NetworkSettings.Networks}}", container],
+            [engine, "inspect", "--format", "{{json .NetworkSettings.Networks}}", container],
             capture_output=True, text=True, timeout=30,
         )
-    except FileNotFoundError:
-        raise N8nAddressError(f"docker command not found, cannot look up the address of '{container}'. {hint}")
+    except (FileNotFoundError, ce.ContainerEngineError):
+        raise N8nAddressError(f"{engine} command not found, cannot look up the address of '{container}'. {hint}")
     except subprocess.TimeoutExpired:
-        raise N8nAddressError(f"docker inspect of '{container}' timed out. {hint}")
+        raise N8nAddressError(f"{engine} inspect of '{container}' timed out. {hint}")
     if proc.returncode != 0:
         detail = (proc.stderr or "").strip()
         raise N8nAddressError(f"could not inspect container '{container}': {detail}. {hint}")
@@ -58,7 +78,7 @@ def resolve_n8n_base(env=None, run=subprocess.run):
         if not isinstance(networks, dict):
             raise ValueError("not an object")
     except ValueError:
-        raise N8nAddressError(f"docker inspect of '{container}' returned unexpected output. {hint}")
+        raise N8nAddressError(f"{engine} inspect of '{container}' returned unexpected output. {hint}")
 
     attached = ", ".join(sorted(networks)) or "none"
     if explicit:
@@ -66,7 +86,7 @@ def resolve_n8n_base(env=None, run=subprocess.run):
         if network not in networks:
             raise N8nAddressError(
                 f"container '{container}' is not attached to network '{network}' "
-                f"(attached: {attached}). Reattach it with: docker network connect {network} {container}  "
+                f"(attached: {attached}). Reattach it with: {engine} network connect {network} {container}  "
                 f"and fix its compose file so a recreate keeps the network. {hint}"
             )
     else:
@@ -75,8 +95,8 @@ def resolve_n8n_base(env=None, run=subprocess.run):
             raise N8nAddressError(
                 f"container '{container}' is not attached to a siem network "
                 f"(looked for siem-net or *_siem-net; attached: {attached}). Reattach it with: "
-                f"docker network connect <network-name> {container}  (find the name with "
-                f"`docker network ls`, usually the compose project name plus _siem-net), "
+                f"{engine} network connect <network-name> {container}  (find the name with "
+                f"`{engine} network ls`, usually the compose project name plus _siem-net), "
                 f"or set SIEM_NETWORK to the exact name. {hint}"
             )
         if len(matches) > 1:

@@ -22,6 +22,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="${SCRIPT_DIR}/.."
 DEPLOY_DIR="/opt/siem"
 
+# CONTAINER_ENGINE (docker by default, or podman): the validated name is one of two
+# fixed words, so it is safe inside the command strings run on the target host.
+# shellcheck source=scripts/lib-container-engine.sh
+source "${SCRIPT_DIR}/lib-container-engine.sh"
+ce_init_name || exit 1
+
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -68,13 +74,13 @@ run_on_server "mountpoint -q /data/hot && mountpoint -q /data/warm && echo 'DISK
 }
 echo -e "${GREEN}✓ Data disks mounted${NC}"
 
-# Verify Docker
-echo -e "${YELLOW}Verifying Docker...${NC}"
-run_on_server "docker info > /dev/null 2>&1 && echo 'DOCKER_OK'" | grep -q DOCKER_OK || {
-    echo -e "${RED}Docker not available. Run 02-bootstrap.sh first.${NC}"
+# Verify the container engine
+echo -e "${YELLOW}Verifying ${CE_NAME}...${NC}"
+run_on_server "${CE_NAME} info > /dev/null 2>&1 && echo 'ENGINE_OK'" | grep -q ENGINE_OK || {
+    echo -e "${RED}${CE_NAME} not available. Run 02-bootstrap.sh first (it installs Docker).${NC}"
     exit 1
 }
-echo -e "${GREEN}✓ Docker available${NC}"
+echo -e "${GREEN}✓ ${CE_NAME} available${NC}"
 
 # Deploy Docker configs
 echo ""
@@ -157,7 +163,7 @@ echo -e "${GREEN}✓ Permissions set${NC}"
 # Start the stack
 echo ""
 echo -e "${YELLOW}Starting SIEM stack...${NC}"
-run_on_server "cd ${DEPLOY_DIR} && docker compose pull && docker compose up -d"
+run_on_server "cd ${DEPLOY_DIR} && ${CE_NAME} compose pull && ${CE_NAME} compose up -d"
 
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════╗${NC}"

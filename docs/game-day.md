@@ -41,7 +41,7 @@ repository: keep the file outside it.
 |-----|---------|---------|
 | `n8n_container` | `n8n` | all but grafana-down |
 | `grafana_container` | `grafana` | grafana-down |
-| `docker` | `docker` | the container CLI; only `docker` or `podman` is accepted |
+| `docker` | `CONTAINER_ENGINE`, else `docker` | the container CLI; only `docker` or `podman` is accepted. `GAMEDAY_DOCKER` or this key overrides `CONTAINER_ENGINE` |
 | `discord_host` | `discord.com` | discord-unreachable |
 | `pushover_host` | `api.pushover.net` | phone-unreachable |
 | `heartbeat_host` | none, required | heartbeat-silent (host of the observer's ping URL) |

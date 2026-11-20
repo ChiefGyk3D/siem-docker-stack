@@ -65,6 +65,11 @@ if [ -n "$ENV_FILE" ]; then
     set +a
 fi
 
+# CONTAINER_ENGINE (docker by default, or podman) may come from the environment or that .env.
+# shellcheck source=scripts/lib-container-engine.sh
+source "${SCRIPT_DIR}/lib-container-engine.sh"
+ce_init || exit 1
+
 MISSING=0
 for var in OPENSEARCH_ADMIN_PASSWORD OPENSEARCH_LOGSTASH_PASSWORD \
            OPENSEARCH_READONLY_PASSWORD OPENSEARCH_DASHBOARDS_PASSWORD; do
@@ -87,7 +92,7 @@ echo ""
 echo -e "${YELLOW}[1/4] Waiting for opensearch-hot HTTPS endpoint...${NC}"
 UP=0
 for i in {1..30}; do
-    CODE=$(docker exec opensearch-hot \
+    CODE=$("$CE_BIN" exec opensearch-hot \
         curl -sk -o /dev/null -w '%{http_code}' https://localhost:9200/ 2>/dev/null || echo "000")
     # 401 = security initialized, 503 = security index not initialized yet,
     # 200 would mean auth is off — any of these means TLS + HTTP are up.
@@ -111,7 +116,7 @@ echo -e "${YELLOW}[2/4] Generating bcrypt hashes...${NC}"
 
 hash_password() {
     local pass="$1"
-    docker exec -e HASH_PASS="$pass" opensearch-hot bash -c \
+    "$CE_BIN" exec -e HASH_PASS="$pass" opensearch-hot bash -c \
         'plugins/opensearch-security/tools/hash.sh -p "$HASH_PASS"' 2>/dev/null \
         | grep -E '^\$2[aby]\$' | tail -1
 }
@@ -159,7 +164,7 @@ echo -e "${GREEN}✓ internal_users.yml rendered${NC}"
 # hostname verification (self-signed certs).
 echo ""
 echo -e "${YELLOW}[4/4] Applying security configuration (securityadmin.sh)...${NC}"
-docker exec opensearch-hot bash -c '
+"$CE_BIN" exec opensearch-hot bash -c '
     plugins/opensearch-security/tools/securityadmin.sh \
         -cd /usr/share/opensearch/config/opensearch-security \
         -cacert /usr/share/opensearch/config/certs/root-ca.pem \
@@ -172,9 +177,9 @@ docker exec opensearch-hot bash -c '
 # ── Verify ───────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${YELLOW}Verifying...${NC}"
-AUTH_CODE=$(docker exec opensearch-hot curl -sk -o /dev/null -w '%{http_code}' \
+AUTH_CODE=$("$CE_BIN" exec opensearch-hot curl -sk -o /dev/null -w '%{http_code}' \
     -u "admin:${OPENSEARCH_ADMIN_PASSWORD}" https://localhost:9200/_cluster/health)
-NOAUTH_CODE=$(docker exec opensearch-hot curl -sk -o /dev/null -w '%{http_code}' \
+NOAUTH_CODE=$("$CE_BIN" exec opensearch-hot curl -sk -o /dev/null -w '%{http_code}' \
     https://localhost:9200/_cluster/health)
 
 if [ "$AUTH_CODE" = "200" ]; then

@@ -157,7 +157,10 @@ All alerts flow through **N8N** for dedup, severity filtering, and enrichment be
 - Ubuntu 22.04+ (or any modern Linux with Docker support)
 - Two storage devices: one fast (NVMe/SSD for HOT), one large (SATA SSD/HDD for WARM)
 - At least 16 GB RAM (32+ GB recommended)
-- Docker CE 24+ with Compose V2
+- Docker CE 24+ with Compose V2. Docker is the default. The helper scripts can use Podman instead when
+  `CONTAINER_ENGINE=podman` is set (see [docs/container-engine.md](docs/container-engine.md));
+  the compose files and the bootstrap script are still Docker-first, and the Podman path is not
+  verified on a rehearsal host yet.
 
 ### Step-by-Step Installation
 
