@@ -258,7 +258,7 @@ def test_round1_f1_every_n8n_recreate_goes_through_the_safe_wrapper():
     # (1) no plain `docker compose up -d n8n` anywhere except the recorded 2026-11-20 command
     plain = [l for l in CODE_LINES if "compose up -d n8n" in l]
     assert plain, "the safe recreate block must exist"
-    safe = [l for l in plain if "doppler run" in l and "REFUSING" in l and "--preserve-env" in l]
+    safe = [l for l in plain if "siem-net-run" in l and "REFUSING" in l and "--preserve-env" in l]
     assert len(safe) == 1, plain
     recorded = [l for l in plain if l not in safe]
     assert all("bak-payload" in l or "sleep 15" in l for l in recorded), recorded
@@ -361,7 +361,7 @@ def test_round3_f5_each_function_has_exactly_one_definition_under_its_heading():
     assert_under(def_fence("owner_recreate_n8n"), "### 6.0 ", "### 6.1 ")
     assert_under(def_fence("owner_router_chain"), "**3. Re-import the router", "**4. Post-import checks.")
     assert_under(def_fence("owner_router_rollback"), "**3. Re-import the router", "**4. Post-import checks.")
-    for name, anchor in (("owner_chk_vars", "runbook-block-chk-vars-v3"), ("owner_recreate_n8n", "runbook-block-recreate-v3"),
+    for name, anchor in (("owner_chk_vars", "runbook-block-chk-vars-v3"), ("owner_recreate_n8n", "runbook-block-recreate-v4"),
                          ("owner_router_chain", "runbook-block-router-chain-v3"),
                          ("owner_router_rollback", "runbook-block-router-rollback-v3")):
         assert def_fence(name).count(': "%s"' % anchor) == 1
@@ -400,6 +400,9 @@ def run_blocks(tmp_path, blocks, tail="", fail="", saved='{"nodes":[{},{}]}', st
     stub = home / "bin" / "siem-run"
     stub.write_text("#!/bin/sh\n[ \"$FAIL\" = import ] && exit 7\necho import ok\nexit 0\n")
     stub.chmod(0o755)
+    net = home / "bin" / "siem-net-run"  # the dev_network wrapper: records one line, honors FAIL=doppler
+    net.write_text("#!/bin/sh\necho doppler >> \"$LOG\"\n[ \"$FAIL\" = doppler ] && exit 7\nexit 0\n")
+    net.chmod(0o755)
     f = home / "router-before.json"
     f.write_text(saved)
     f.chmod(0o600)
@@ -868,3 +871,41 @@ def test_round4_f4_a_bad_count_stops_before_listing_anything(tmp_path, bad):
 def test_round4_f4_the_owner_decision_for_n_is_documented():
     flat = " ".join(RUNBOOK.split())
     assert "OWNER DECISION: the value of N" in flat and "never by hand" in flat
+
+
+# ---- issue #177: the box reads dev_network through the siem-net-run wrapper, never a bare doppler run ----
+
+def test_issue177_no_bare_doppler_run_for_dev_network_remains():
+    for line in CODE_LINES:
+        assert not ("doppler run" in line and "dev_network" in line), line
+        assert not ("doppler run" in line and "DEV_CONFIG" in line), line
+
+
+def test_issue177_the_wrapper_is_used_for_the_restarts_and_the_recreate():
+    assert CODE.count('"$HOME/bin/siem-net-run"') >= 5  # 4d, 4g, 5d, the recreate, the 6.3 tests
+    assert not any("docker compose up -d grafana" in l and "siem-net-run" not in l for l in CODE_LINES)
+
+
+def test_issue177_the_two_resolved_owner_decisions_are_gone():
+    assert "how the box reads `dev_network`" not in FLAT
+    assert "OWNER DECISION: how n8n's variables reach" not in FLAT
+    assert "Recommended: (a)" not in FLAT
+
+
+def test_issue177_the_token_step_names_scope_storage_readback_and_rotation():
+    text = section("### 0b.5 ", "## Step 0c.")
+    flat = " ".join(text.split())
+    for needle in ("doppler configs tokens create", "--access read", "--plain", "--project homelab",
+                   "--config dev_network", "umask 077", "doppler configs tokens revoke",
+                   "$HOME/.config/doppler-siem-net", "stat -c", "never echoed", "scripts/siem-net-run"):
+        assert needle in flat, needle
+    # the create command's output goes into a pipe to the box, never to the terminal
+    create = [l for l in text.splitlines() if "tokens create" in l and l.lstrip().startswith("doppler")]
+    assert create and all("| ssh" in l for l in create), create
+    assert "read/write" in flat  # says that write access is refused
+
+
+def test_issue177_the_wrapper_is_described_where_siem_run_is():
+    live = (REPO_ROOT / "docs" / "live-deploy-runbook.md").read_text(encoding="utf-8")
+    assert "siem-net-run" in live
+    assert "siem-net-run" in (REPO_ROOT / "docs" / "design" / "secrets-sources.md").read_text(encoding="utf-8")

@@ -1,0 +1,76 @@
+#!/bin/bash -p
+# Run a command with the dev_network values injected from the secret manager.
+#
+# The box reads the Doppler config dev_network (project homelab) through a
+# read-only service token kept in a mode 600 file inside a private config
+# folder. This wrapper checks that file, then hands the token to `doppler run`
+# through exec, so it exists only in the environment of that one process. It is
+# never printed, never put on a command line and never exported to any other
+# command. A service token is already scoped to one project and config, so no
+# project or config flag is passed.
+#
+# Environment (optional):
+#   SIEM_NET_CONFIG_DIR   private config folder that holds the file "token"
+#                         (default: $HOME/.config/doppler-siem-net)
+#
+# Exit status: the command's own status; 2 when the token file or its folder is
+# refused; 64 when no command is given.
+#
+# Usage: siem-net-run COMMAND [ARGS...]
+set +x
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+unset BASH_ENV ENV CDPATH GLOBIGNORE PS4 DOPPLER_TOKEN
+set -euo pipefail
+umask 077
+
+if [ "$#" -eq 0 ]; then
+    echo "siem-net-run: usage: siem-net-run COMMAND [ARGS...]" >&2
+    exit 64
+fi
+
+refuse() {
+    echo "siem-net-run: $1" >&2
+    exit 2
+}
+
+CFG="${SIEM_NET_CONFIG_DIR:-$HOME/.config/doppler-siem-net}"
+TOKEN_FILE="$CFG/token"
+
+if [ -L "$TOKEN_FILE" ]; then
+    refuse "token file is a symlink; refusing"
+fi
+if [ ! -e "$TOKEN_FILE" ]; then
+    refuse "token file missing"
+fi
+if [ ! -f "$TOKEN_FILE" ] || [ ! -r "$TOKEN_FILE" ]; then
+    refuse "token file is not a readable regular file"
+fi
+
+ME="$(id -u)"
+if [ "$(stat -c '%u' "$TOKEN_FILE")" != "$ME" ]; then
+    refuse "token file owner is not the user running this command"
+fi
+FILE_MODE="$(stat -c '%a' "$TOKEN_FILE")"
+if [ $((8#$FILE_MODE & 8#077)) -ne 0 ]; then
+    refuse "token file mode $FILE_MODE lets group or others in; it must be 600 or stricter"
+fi
+
+if [ -L "$CFG" ]; then
+    refuse "config folder is a symlink; refusing"
+fi
+if [ "$(stat -c '%u' "$CFG")" != "$ME" ]; then
+    refuse "config folder is not owned by the user running this command"
+fi
+DIR_MODE="$(stat -c '%a' "$CFG")"
+if [ $((8#$DIR_MODE & 8#022)) -ne 0 ]; then
+    refuse "config folder mode $DIR_MODE lets group or others write; it must be 700"
+fi
+
+# The token is read last, after every check, and only into a shell variable.
+TOK="$(< "$TOKEN_FILE")"
+if [ -z "$TOK" ]; then
+    refuse "token file is empty"
+fi
+
+DOPPLER_TOKEN="$TOK" exec doppler run --config-dir "$CFG" --no-check-version --fallback-readonly -- "$@"

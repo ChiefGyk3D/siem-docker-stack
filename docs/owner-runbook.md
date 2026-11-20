@@ -31,6 +31,7 @@ parts true. Every fact is marked:
 | `ROUTER_ID` | The n8n id (16 hex characters) of the LIVE router workflow "Grafana SOAR - Alert Router (authenticated)". The router import does NOT print it: read it with `docker exec n8n n8n list:workflow` or from the workflow's address in the n8n interface (the id is in the URL). Passing it makes the import overwrite that workflow; leaving it out makes a second copy with a new id |
 | `HANDLER_ID` | The n8n id of the live error handler workflow "Alert Router Error Handler". Printed as `error workflow id:` by the handler import (`docs/live-deploy-runbook.md`, section 3); on a live box read it the same way as `ROUTER_ID` |
 | `OLD_ROUTER_ID` | The n8n id of the old router that step 9 deactivates (Q5); read it the same way |
+| `OLD_SLUG` | The slug of the `dev_network` service token being revoked in step 0b.5 (read it from `doppler configs tokens --project homelab --config dev_network`) |
 | `SERVICE_ACCOUNT` | The dedicated non-login account of step 0c (suggested name `siem-ops`) |
 | `N8N_COMPOSE_FILE`, `N8N_COMPOSE_DIR` | The compose file that runs n8n and its folder. The live values are `/opt/n8n/docker-compose.yml` and `/opt/n8n` (VERIFIED by the lead 2026-11-20). INFERRED root owned, because the step 6.2 run used `sudo` for every touch of it; so copies, edits and `docker compose` runs against it below use `sudo` too |
 | `HOST_PORT`, `CONTAINER_PORT` | The loopback port you publish for n8n on the host and the port n8n listens on inside its container (section 6.0) |
@@ -120,7 +121,7 @@ item numbers are in the last column.
 
 | Step | What | Risk | Depends on | Request item |
 |------|------|------|-----------|--------------|
-| 0 | Preflight, 0a: put the repo on the box, 0b: one dev config for every new Grafana value, 0c: the service account | low | nothing | |
+| 0 | Preflight, 0a: put the repo on the box, 0b: one dev config for every new Grafana value (0b.5: the read-only token and wrapper the box uses to read it), 0c: the service account | low | nothing | |
 | 1 | Read the heartbeat ping log | none, read only | heartbeat deployed | 1 |
 | 2 | First live backup and restore rehearsal | low | step 0 | 4 |
 | 3 | Delete the FAILTEST workflow and credential | low, irreversible | step 2 (a backup exists) | 2 |
@@ -467,6 +468,100 @@ credential together"; add the dev copy to that list).
 
 Rollback: delete `GRAFANA_WEBHOOK_SECRET` from the dev config in Doppler. Nothing
 in `prd_network` was changed, and the live Grafana is unaffected until step 4d.
+
+### 0b.5 The box reads `dev_network` through a read-only token (issue #177)
+
+Owner decision (2026-11-20, "Read-only service token in a mode 600 file"): every
+Grafana restart and every n8n recreate in this runbook reads `dev_network` on
+LOGGING_BOX through the wrapper `scripts/siem-net-run`, which holds a read-only
+Doppler service token. It does the same job for `dev_network` that `siem-run`
+does for the old token (`docs/live-deploy-runbook.md`, section 2). Nothing else
+logs in on the box.
+
+Flags below are VERIFIED from the installed Doppler CLI, v3.77.1,
+`doppler configs tokens create --help` and `doppler configs tokens revoke --help`,
+read 2026-11-20, and from https://docs.doppler.com/docs/service-tokens (read
+2026-11-20: a service token is limited to a single config of one project;
+revoking is permanent and takes effect at once). Anything not in those two sources
+is marked INFERRED.
+
+What the token is allowed to do, each scope and why:
+
+- project `homelab`, config `dev_network`, and no other config: the only values
+  the restarts need are the ones in step 0b. A token for `prd_network` or any prd
+  config is never used here.
+- access `read` (the CLI default; the other choice is `read/write`, which this
+  runbook refuses): the box only reads values into one child process. It never
+  creates, changes or deletes a secret, so a stolen token cannot change anything.
+- no `--max-age`: the box needs it on every restart, so it does not expire by
+  itself. The way to end it is the revoke below.
+
+You need, on your own machine (where the Doppler CLI is logged in as you), the
+right to create service tokens on that config. Creating the token is the
+only step that touches Doppler; the box needs no login of its own.
+
+1. Put the wrapper and the private folder on the box (the folder is mode 700, and
+   `siem-net-run` refuses a folder that others can write):
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'install -d -m 700 "$HOME/.config/doppler-siem-net" && install -d -m 755 "$HOME/bin" && install -m 755 REPO_DIR/scripts/siem-net-run "$HOME/bin/siem-net-run" && ls -ld "$HOME/.config/doppler-siem-net" "$HOME/bin/siem-net-run"'
+```
+
+2. Create the token and store it. The `--plain` output goes straight into a pipe to
+   the box, where `umask 077` makes the new file mode 600 before the first byte is
+   written. It never reaches your terminal, so it is never echoed. There is no `-t`
+   on this ssh on purpose (the pipe carries the token); the line after it prints
+   the status of both ends, and `0 0` means both worked:
+
+```
+set -o pipefail
+doppler configs tokens create siem-net-box --project homelab --config dev_network --access read --plain | ssh -i KEY_FILE -o IdentitiesOnly=yes LOGGING_BOX 'umask 077 && cat > "$HOME/.config/doppler-siem-net/token"'
+echo "exit codes: ${PIPESTATUS[0]} ${PIPESTATUS[1]}"
+set +o pipefail
+```
+
+3. Read back the owner and mode without printing the token (expect your user,
+   `600`, and `non-empty`):
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'stat -c "%U %a %n" "$HOME/.config/doppler-siem-net/token" && if [ -s "$HOME/.config/doppler-siem-net/token" ]; then echo non-empty; else echo EMPTY; fi'
+```
+
+   `EMPTY` means step 2 failed before the token arrived: run it again (the wrapper
+   refuses an empty file, so nothing runs with it).
+
+4. Check that the wrapper reaches `dev_network` and sees only names (INFERRED:
+   `doppler secrets` inside `doppler run` takes the token from the environment):
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX '"$HOME/bin/siem-net-run" doppler secrets --only-names --no-check-version; echo "exit code: $?"'
+```
+
+   Expect the names from step 0b and `exit code: 0`. A line starting
+   `siem-net-run:` says what the wrapper refused: a missing or empty token file, a
+   symlink, a file owned by someone else, a file or folder that is not private.
+
+Rotate: run item 2 again (it replaces the file; the old token still works until
+you revoke it), run item 4, then revoke the old one. List the tokens of the
+config, read the old one's slug from the list (INFERRED: the list shows names and
+slugs, not values), and revoke by slug:
+
+```
+doppler configs tokens --project homelab --config dev_network
+doppler configs tokens revoke --project homelab --config dev_network --slug OLD_SLUG
+```
+
+Revoke (also the whole rollback, with the removal of the box files):
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'rm -r "$HOME/.config/doppler-siem-net" && rm "$HOME/bin/siem-net-run"; echo "exit code: $?"'
+```
+
+After a revoke the next restart or recreate stops with a Doppler error: that is
+the intended result. `siem-net-run` passes `--fallback-readonly`, so it never
+writes a cached copy of the values to the folder (VERIFIED: `doppler run --help`,
+2026-11-20); a cache written by anything else in that folder is not read once the
+token is gone from the folder (INFERRED).
 
 ## Step 0c. The dedicated service account for scheduled jobs (LIVE)
 
@@ -925,22 +1020,19 @@ section 5.)
 ### 4d. Restart Grafana and check
 
 Grafana reads provisioning files only at startup (VERIFIED: runbook section 5).
-The restart reads only the one dev config from step 0b (owner decision). The
-`doppler run --project ... --config ... --` form is VERIFIED in
-`docs/update-alerting.md`, step 4 of its webhook authentication list, there with
-`prd_network`:
+The restart reads only the one dev config from step 0b, through the read-only
+token and wrapper of step 0b.5 (owner decision 2026-11-20, resolved; the
+wrapper runs `doppler run` for you, a form VERIFIED in `docs/update-alerting.md`,
+step 4 of its webhook authentication list, there with `prd_network`). The token
+is scoped to `dev_network` by itself, so there is no project or config flag:
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd /opt/siem && doppler run --project homelab --config dev_network -- docker compose up -d grafana; echo "exit code: $?"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd /opt/siem && "$HOME/bin/siem-net-run" docker compose up -d grafana; echo "exit code: $?"'
 ```
 
-(That the Doppler CLI on LOGGING_BOX is logged in to project `homelab` with
-access to the dev config is INFERRED; the runbook's token file serves `siem-run`
-only, and that token is, per the repo's examples, scoped to `prd_network`, not to `dev_network`.
-OWNER DECISION: how the box reads `dev_network` for a Grafana or n8n restart, either
-a login of your own user on the box, or a read-only service token scoped to
-`dev_network` kept in a mode 600 file and used the way `siem-run` uses its token.
-The `SERVICE_ACCOUNT` token of step 0c is for that account's jobs only.) Compose refusing to start with `GRAFANA_WEBHOOK_SECRET must be set and
+(The `SERVICE_ACCOUNT` token of step 0c is for that account's jobs only.)
+`siem-net-run: ...` on the first line is the wrapper refusing its token file
+(step 0b.5 item 4 lists the causes); nothing was restarted. Compose refusing to start with `GRAFANA_WEBHOOK_SECRET must be set and
 non-empty` means the copy in step 0b is missing; the container stays on its old
 definition until it is fixed. Any other variable Grafana needs from the old
 `prd_network` setup, such as the Pushover or datasource values, must also be in
@@ -1046,7 +1138,7 @@ value stays in Doppler; never run `docker compose config` for the check, it
 prints resolved values). Then restart, as in 4d:
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd /opt/siem && doppler run --project homelab --config DEV_CONFIG -- docker compose up -d grafana; echo "exit code: $?"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd /opt/siem && "$HOME/bin/siem-net-run" docker compose up -d grafana; echo "exit code: $?"'
 ```
 
 Check: `docker compose ls` lists the project as running, the grafana container shows
@@ -1132,7 +1224,7 @@ sudo install -m 644 REPO_DIR/docker/grafana/provisioning/alerting/email-contact-
 ### 5d. Restart Grafana and check
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd /opt/siem && doppler run --project homelab --config dev_network -- docker compose up -d grafana; echo "exit code: $?"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd /opt/siem && "$HOME/bin/siem-net-run" docker compose up -d grafana; echo "exit code: $?"'
 ```
 
 Check `docker logs --since 5m grafana 2>&1 | tail -40` for SMTP or provisioning
@@ -1259,8 +1351,8 @@ SAFE N8N RECREATE. This is the only n8n recreate command in this runbook: 6.0, 6
 and 6.2 and every rollback below use it. A plain `sudo docker compose up -d n8n`
 writes empty values for any variable the compose file takes from the environment
 (the heartbeat URL, and after 6.1 the expiry secret), and the outage would only show
-afterwards (INFERRED hazard; see the OWNER DECISION in 6.1, item 2, which this form
-implements as option (a)). So the form below (1) records which variables the RUNNING
+afterwards (INFERRED hazard; the values reach compose through the `dev_network`
+wrapper of step 0b.5, owner decision 2026-11-20, resolved). So the form below (1) records which variables the RUNNING
 container holds, names only; (2) refuses to recreate unless every required variable
 is non-empty in the compose command's own environment, before anything is touched;
 (3) checks the new container and prints the exact recovery when a value is blank.
@@ -1278,13 +1370,13 @@ last line it prints and it returns that N. In a session on LOGGING_BOX, define i
 ```
 unset -f owner_recreate_n8n 2> /dev/null
 owner_recreate_n8n() {
-  : "runbook-block-recreate-v3"
+  : "runbook-block-recreate-v4"
   local R
   owner_chk_vars || return 1
   if ! docker exec n8n true > /dev/null 2>&1; then echo "STOP: no running container named n8n; nothing recorded and nothing recreated"; echo "recreate exit code: 1"; return 1; fi
   if ! ( umask 077 && docker exec n8n sh -c 'for V in HEARTBEAT_PING_URL HEARTBEAT_KIND EXPIRY_WATCH_ROUTER_SECRET; do if [ -n "$(printenv $V)" ]; then echo "$V set"; else echo "$V unset"; fi; done' > "$HOME/n8n-env-before.txt" ); then echo "STOP: could not read the running container; nothing recreated"; echo "recreate exit code: 1"; return 1; fi
   cat "$HOME/n8n-env-before.txt"
-  ( cd "$N8N_COMPOSE_DIR" && REQ_VARS="$1" PRESERVE="$2" doppler run --project homelab --config dev_network -- sh -c 'for V in $REQ_VARS; do if [ -z "$(printenv $V)" ]; then echo "REFUSING: $V is empty in the compose environment; n8n was NOT recreated"; exit 1; fi; done; sudo --preserve-env="$PRESERVE" docker compose up -d n8n' )
+  ( cd "$N8N_COMPOSE_DIR" && REQ_VARS="$1" PRESERVE="$2" "$HOME/bin/siem-net-run" sh -c 'for V in $REQ_VARS; do if [ -z "$(printenv $V)" ]; then echo "REFUSING: $V is empty in the compose environment; n8n was NOT recreated"; exit 1; fi; done; sudo --preserve-env="$PRESERVE" docker compose up -d n8n' )
   R=$?
   if [ $R -eq 0 ]; then docker port n8n && docker network inspect "$SIEM_NETWORK" --format "{{range .Containers}}{{.Name}} {{end}}" && docker exec n8n sh -c 'test -n "$(printenv HEARTBEAT_PING_URL)"'; R=$?; fi
   if [ $R -eq 0 ]; then echo "n8n recreated, heartbeat variable set"; else echo "RECOVERY: the recreate failed or HEARTBEAT_PING_URL is blank in the new container. n8n data is on its volume and is unaffected. Put the value in dev_network (step 0b item 2 form), run the recreate call again, then the step 1 presence check. Until then the heartbeat is off and the observer alerts after about 20 minutes."; fi
@@ -1383,7 +1475,7 @@ dates and runbook links stay in the watch's own output and its Matrix and email
 channels.
 
 Prerequisites: step 0b (the `dev_network` config exists), section 6.0 (the
-localhost port), the Doppler CLI logged in where you run these commands, and the
+localhost port), the `dev_network` token and wrapper of step 0b.5 on LOGGING_BOX, and the
 heartbeat healthy (step 1) so you can tell if the re-import disturbs the router.
 
 **1. Generate the new secret and store it (watch side).** A new random value, not
@@ -1438,20 +1530,20 @@ RECREATE of 6.0 using its SECOND call (the one that also requires
 `EXPIRY_WATCH_ROUTER_TOKEN`; it refuses, before touching n8n, when the value is
 empty), and read its `recreate exit code`; it re-checks the siem network itself.
 
-OWNER DECISION: how n8n's variables reach `docker compose` on EVERY recreate. The
-entries above take their values from the environment of the compose command. A
-recreate run without them (a plain `sudo docker compose up -d n8n`, as the
-2026-11-20 run of 6.2 was) writes empty values: `HEARTBEAT_PING_URL` and `HEARTBEAT_KIND` go blank (the
-heartbeat turns off, the observer reports down after about 20 minutes) and
-`EXPIRY_WATCH_ROUTER_SECRET` goes blank (the watch gets 403). INFERRED, because no
-repo doc says how the heartbeat variables reach the compose run today. Choose one:
-(a) always run n8n's compose through `doppler run` as below, and keep the heartbeat
-values in `dev_network` too; (b) an env file next to the compose file, root owned,
-mode 600, which writes secrets to disk and so conflicts with the Doppler-only rule.
-Recommended: (a). The SAFE N8N RECREATE block in 6.0 is option (a) written out and is
-the form used everywhere below; it is INFERRED (`sudo --preserve-env=LIST` needs the
-sudoers rule to allow it, and refuses with a clear message if not). If you choose
-(b) instead, replace that block's command consistently in 6.0, 6.1 and 6.2.
+RESOLVED (owner decision 2026-11-20): how n8n's variables reach `docker compose` on
+EVERY recreate. The entries above take their values from the environment of the
+compose command. A recreate run without them (a plain `sudo docker compose up -d
+n8n`, as the 2026-11-20 run of 6.2 was) writes empty values: `HEARTBEAT_PING_URL`
+and `HEARTBEAT_KIND` go blank (the heartbeat turns off, the observer reports down
+after about 20 minutes) and `EXPIRY_WATCH_ROUTER_SECRET` goes blank (the watch gets
+403). INFERRED, because no repo doc says how the heartbeat variables reach the
+compose run today. The answer is that n8n's compose always runs through the
+`dev_network` wrapper `siem-net-run` (step 0b.5), with the heartbeat values kept in
+`dev_network` too, and no env file on disk. The SAFE N8N RECREATE block in 6.0 is
+that form written out and is the form used everywhere below; it is INFERRED
+(`sudo --preserve-env=LIST` needs the sudoers rule to allow it, and refuses with a
+clear message if not). The wrapper's token is not in the preserve list, so
+`sudo` drops it before `docker compose` runs.
 
 Check presence only, never the value:
 
@@ -1684,7 +1776,7 @@ body, so that setting is the real body cap.
 **Rotate.** Generate a new value, store it with the command in item 1 (it
 replaces the old one), then restart the n8n container so it reads the new
 environment (VERIFIED: `docs/expiry-watch.md` owner step 5): recreate n8n with the
-same `doppler run` command as item 2. Both sides change together; between the
+SAFE N8N RECREATE of 6.0 (its second call). Both sides change together; between the
 n8n restart and the next watch run the watch must already hold the new value. The
 dry run in 6c does NOT confirm that: it never reads the secret (VERIFIED:
 `scripts/expiry_watch.py` reads the token only when it posts). The first real run
@@ -1746,9 +1838,9 @@ a new run, expect the same two lines; no `N8N_PAYLOAD_SIZE_MAX` line means the
 backup name `.bak-payload` is fixed: if that file already exists, a second run
 overwrites the pre-change copy, so check with `ls` first and pick another name.
 
-That run recreated n8n WITHOUT `doppler run`, and its read-back did not check the
+That run recreated n8n WITHOUT the `dev_network` wrapper, and its read-back did not check the
 two things a recreate can drop. Read them back now, and after any repeat of this
-section (INFERRED hazard, see the OWNER DECISION in 6.1 item 2). The heartbeat and
+section (INFERRED hazard, see the RESOLVED decision in 6.1 item 2). The heartbeat and
 (once 6.1 is done) expiry variables must still say `set`, and `n8n` must still be
 on the siem network:
 
@@ -1758,8 +1850,8 @@ ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'docker network inspect SIE
 ```
 
 `HEARTBEAT_PING_URL unset` means the heartbeat is off: the observer reports down
-after about 20 minutes. Recreate n8n through the form chosen in the 6.1 OWNER
-DECISION and check again. `n8n` missing from the second list means Grafana cannot
+after about 20 minutes. Recreate n8n with the SAFE N8N RECREATE of 6.0
+and check again. `n8n` missing from the second list means Grafana cannot
 reach it: reattach it as in `docs/live-deploy-runbook.md`, "Keep n8n on the siem
 network". Also confirm the next heartbeat ping arrives (step 1).
 
@@ -1797,9 +1889,9 @@ rule to real use.
 
 The secret never goes on a command line: the commands below pass the header on
 standard input (`curl -H @-`, VERIFIED to read headers from stdin with curl 8.21,
-run 2026-11-20) from the `printf` built-in, inside `doppler run`, so the value is only
+run 2026-11-20) from the `printf` built-in, inside the `dev_network` wrapper, so the value is only
 in the environment of that one child process. Run them as yourself, in a session on
-LOGGING_BOX where the Doppler CLI is logged in with access to `dev_network` (the
+LOGGING_BOX with the token and wrapper of step 0b.5 (the
 `SERVICE_ACCOUNT` files are not needed here). The body is exactly the shape the
 watch builds (VERIFIED: `tests/python/test_router_expiry_secret.py`, `_expiry_body`):
 
@@ -1817,7 +1909,7 @@ printf '%s' '{"receiver":"expiry-watch","status":"firing","alerts":[{"status":"f
 1. One authenticated, valid notice. Expect `200` and one message in Discord:
 
 ```
-doppler run --project homelab --config dev_network -- sh -c 'printf "Authorization: Bearer %s\n" "$EXPIRY_WATCH_ROUTER_TOKEN" | curl -s -o /dev/null -w "%{http_code}\n" -X POST -H @- -H "Content-Type: application/json" --data-binary @"$HOME/notice.json" "http://127.0.0.1:HOST_PORT/webhook/$(cat "$HOME/.config/doppler-siem/expiry-path")"'
+"$HOME/bin/siem-net-run" sh -c 'printf "Authorization: Bearer %s\n" "$EXPIRY_WATCH_ROUTER_TOKEN" | curl -s -o /dev/null -w "%{http_code}\n" -X POST -H @- -H "Content-Type: application/json" --data-binary @"$HOME/notice.json" "http://127.0.0.1:HOST_PORT/webhook/$(cat "$HOME/.config/doppler-siem/expiry-path")"'
 ```
 
 2. A fast burst: three calls started at the same moment. The router accepts one
@@ -1826,7 +1918,7 @@ doppler run --project homelab --config dev_network -- sh -c 'printf "Authorizati
    finding):
 
 ```
-doppler run --project homelab --config dev_network -- sh -c 'for i in 1 2 3; do printf "Authorization: Bearer %s\n" "$EXPIRY_WATCH_ROUTER_TOKEN" | curl -s -o /dev/null -w "%{http_code}\n" -X POST -H @- -H "Content-Type: application/json" --data-binary @"$HOME/notice.json" "http://127.0.0.1:HOST_PORT/webhook/$(cat "$HOME/.config/doppler-siem/expiry-path")" & done; wait'
+"$HOME/bin/siem-net-run" sh -c 'for i in 1 2 3; do printf "Authorization: Bearer %s\n" "$EXPIRY_WATCH_ROUTER_TOKEN" | curl -s -o /dev/null -w "%{http_code}\n" -X POST -H @- -H "Content-Type: application/json" --data-binary @"$HOME/notice.json" "http://127.0.0.1:HOST_PORT/webhook/$(cat "$HOME/.config/doppler-siem/expiry-path")" & done; wait'
 ```
 
 3. The window (only if you chose to run it): 32 calls, 2 seconds apart, then the
@@ -1834,7 +1926,7 @@ doppler run --project homelab --config dev_network -- sh -c 'for i in 1 2 3; do 
    `200` appears 30 minus those times and the rest are `403`:
 
 ```
-doppler run --project homelab --config dev_network -- sh -c 'for i in $(seq 1 32); do printf "Authorization: Bearer %s\n" "$EXPIRY_WATCH_ROUTER_TOKEN" | curl -s -o /dev/null -w "%{http_code}\n" -X POST -H @- -H "Content-Type: application/json" --data-binary @"$HOME/notice.json" "http://127.0.0.1:HOST_PORT/webhook/$(cat "$HOME/.config/doppler-siem/expiry-path")"; sleep 2; done | sort | uniq -c'
+"$HOME/bin/siem-net-run" sh -c 'for i in $(seq 1 32); do printf "Authorization: Bearer %s\n" "$EXPIRY_WATCH_ROUTER_TOKEN" | curl -s -o /dev/null -w "%{http_code}\n" -X POST -H @- -H "Content-Type: application/json" --data-binary @"$HOME/notice.json" "http://127.0.0.1:HOST_PORT/webhook/$(cat "$HOME/.config/doppler-siem/expiry-path")"; sleep 2; done | sort | uniq -c'
 ```
 
 4. Evidence to record: the status code for every call and the number of messages
