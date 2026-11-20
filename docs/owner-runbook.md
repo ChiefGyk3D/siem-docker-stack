@@ -1656,10 +1656,13 @@ RAM with 30 GiB available; the live n8n container uses about 280 MiB of its 2 Gi
 limit. So the scratch limit now matches the live container's 2 GiB. Whether 2 GB is
 enough is not yet shown: the rehearsal has not passed. The function now reads
 `docker inspect --format '{{.State.OOMKilled}}'` of the scratch container before
-teardown when the import fails, and reports two cases separately: exit 137 or
+teardown when the import fails, and reports three cases separately: exit 137 or
 `OOMKilled=true` prints `the process was killed ... the memory limit is the likely
-cause, NOT evidence about the export format`; any other nonzero exit keeps the message
-that the format is not accepted. If you see the killed message again at 2 GB, stop and
+cause, NOT evidence about the export format`; if that read fails or returns anything
+other than `true` or `false`, it prints `the OOM state could not be read; the cause is
+UNKNOWN: this is NOT evidence about the export format`; only a successful read of
+`false` together with a nonzero exit other than 137 keeps the message that the format
+is not accepted. If you see the killed message again at 2 GB, stop and
 report it; do not raise the limit on your own.
 
 Blast radius: one extra container (at most 2 GB and one CPU) and one folder under your
@@ -1718,7 +1721,7 @@ owner_rehearse_down() {
 owner_rehearse_router() {
   : "runbook-block-rehearse-v4"
   local SCRATCH_NAME=n8n-rehearsal SCRATCH_DIR="$HOME/n8n-rehearsal"
-  local IMG R=0 INTR=0 TDFAIL=0 LD="" H="" F SZ K I MADE_DIR=0 MADE_CTR=0 OOM LIVE_NODES SC_NODES LIVE_CREDS SC_CREDS COUNT_PY CRED_PY
+  local IMG R=0 INTR=0 TDFAIL=0 LD="" H="" F SZ K I MADE_DIR=0 MADE_CTR=0 OOM OOMRC LIVE_NODES SC_NODES LIVE_CREDS SC_CREDS COUNT_PY CRED_PY
   COUNT_PY='import json,sys; d=json.load(sys.stdin); d=d[0] if isinstance(d,list) else d; print(len(d["nodes"]))'
   CRED_PY='import json,sys; d=json.load(sys.stdin); d=d[0] if isinstance(d,list) else d; print("\n".join(sorted({"%s:%s" % (t, (c or {}).get("name", "")) for n in d["nodes"] for t, c in (n.get("credentials") or {}).items()})))'
   owner_chk_vars || return 1
@@ -1738,7 +1741,7 @@ owner_rehearse_router() {
   if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then F="$H/router.json"; [ -f "$F" ] && [ ! -L "$F" ] && [ "$(stat -c '%u %h' "$F")" = "$(id -u) 1" ] && SZ="$(stat -c %s "$F")" && [ "$SZ" -gt 0 ] && [ "$SZ" -le 5242880 ] && install -m 600 "$F" "$SCRATCH_DIR/work/live.json" && LIVE_NODES="$(python3 -c "$COUNT_PY" < "$SCRATCH_DIR/work/live.json")" && LIVE_CREDS="$(python3 -c "$CRED_PY" < "$SCRATCH_DIR/work/live.json")"; R=$?; case "$LIVE_NODES" in ''|*[!0-9]*|0) R=1;; esac; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: reading the live export (not a plain file owned by you with one link and 1 byte to 5 MB, or not a workflow with a positive node count, got '${LIVE_NODES}')"; fi
   if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then MADE_CTR=1; docker run -d --name "$SCRATCH_NAME" --network none --restart no --memory 2g --memory-swap 2g --cpus 1 --pids-limit 256 --security-opt no-new-privileges --cap-drop ALL --user "$(id -u):$(id -g)" --env-file "$SCRATCH_DIR/env" -v "$SCRATCH_DIR/data:/home/node/.n8n" -v "$SCRATCH_DIR/work:/work" "$IMG" > /dev/null; R=$?; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: starting the scratch container (exit $R)"; fi
   if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then R=1; for I in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do if docker exec "$SCRATCH_NAME" n8n list:workflow > /dev/null 2>&1; then R=0; break; fi; sleep 3; done; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: the scratch n8n did not answer within 60 seconds (docker logs $SCRATCH_NAME shows why)"; fi
-  if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then docker exec "$SCRATCH_NAME" n8n import:workflow --input=/work/live.json; R=$?; if [ $R -ne 0 ]; then OOM="$(docker inspect --format '{{.State.OOMKilled}}' "$SCRATCH_NAME" 2> /dev/null)"; if [ $R -eq 137 ] || [ "$OOM" = true ]; then echo "REHEARSAL FAILED at: the import (exit $R): the process was killed (OOMKilled=${OOM:-unknown}): the memory limit is the likely cause, NOT evidence about the export format"; else echo "REHEARSAL FAILED at: the import (exit $R): the export format is NOT accepted by this n8n; do not rely on owner_router_rollback"; fi; fi; fi
+  if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then docker exec "$SCRATCH_NAME" n8n import:workflow --input=/work/live.json; R=$?; if [ $R -ne 0 ]; then OOM="$(docker inspect --format '{{.State.OOMKilled}}' "$SCRATCH_NAME" 2> /dev/null)"; OOMRC=$?; if [ $R -eq 137 ] || [ "$OOM" = true ]; then echo "REHEARSAL FAILED at: the import (exit $R): the process was killed (OOMKilled=${OOM:-unknown}): the memory limit is the likely cause, NOT evidence about the export format"; elif [ $OOMRC -ne 0 ] || [ "$OOM" != false ]; then echo "REHEARSAL FAILED at: the import (exit $R): the OOM state could not be read; the cause is UNKNOWN: this is NOT evidence about the export format"; else echo "REHEARSAL FAILED at: the import (exit $R): the export format is NOT accepted by this n8n; do not rely on owner_router_rollback"; fi; fi; fi
   if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then [ "$(docker exec "$SCRATCH_NAME" n8n list:workflow | grep -c "^$ROUTER_ID")" = 1 ]; R=$?; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: the imported router is not listed exactly once"; fi
   if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then docker exec "$SCRATCH_NAME" n8n export:workflow --id="$ROUTER_ID" --output=/work/scratch.json > /dev/null && SC_NODES="$(python3 -c "$COUNT_PY" < "$SCRATCH_DIR/work/scratch.json")" && SC_CREDS="$(python3 -c "$CRED_PY" < "$SCRATCH_DIR/work/scratch.json")"; R=$?; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: exporting the imported copy"; fi
   if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then [ "$SC_NODES" = "$LIVE_NODES" ]; R=$?; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: node count (live $LIVE_NODES, scratch '${SC_NODES}')"; fi

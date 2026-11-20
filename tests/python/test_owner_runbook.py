@@ -970,7 +970,7 @@ docker() {
   if [ -n "$IMPORT_RC" ] && [[ "$*" == *"import:workflow"* ]]; then return "$IMPORT_RC"; fi
   if [ -n "$FAIL" ] && [[ "$*" == *"$FAIL"* ]]; then return 7; fi
   case "$1" in
-    inspect) if [[ "$*" == *OOMKilled* ]]; then echo "${OOM_OUT:-false}"; else echo "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"; fi ;;
+    inspect) if [[ "$*" == *OOMKilled* ]]; then if [ "$OOM_OUT" = EMPTY ]; then :; else echo "${OOM_OUT:-false}"; fi; else echo "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"; fi ;;
     ps) [ -n "$CTR_EXISTS" ] && echo abc123 ;;
     cp) case "$2" in n8n:*)
           if [ -d "$3" ]; then t="${3%/}/router.json"; else t="$3"; fi
@@ -1221,6 +1221,28 @@ def test_issue187_oomkilled_true_with_another_exit_code_prints_the_killed_messag
 def test_issue187_another_nonzero_exit_keeps_the_format_message(tmp_path):
     rc, out, log, _ = run_rehearsal(tmp_path, import_rc="3")
     assert rc == 3 and "REHEARSAL FAILED at: the import (exit 3): " + FORMAT_MSG in out and KILLED_MSG not in out, out
+
+
+UNKNOWN_MSG = "REHEARSAL FAILED at: the import (exit 3): the OOM state could not be read; the cause is UNKNOWN: this is NOT evidence about the export format"
+
+
+@pytest.mark.parametrize("kw", [{"fail": "OOMKilled"}, {"oom": "EMPTY"}, {"oom": "garbage"}])
+def test_issue187_an_unreadable_oom_state_is_reported_as_unknown_not_as_a_bad_format(tmp_path, kw):
+    rc, out, log, scratch = run_rehearsal(tmp_path, import_rc="3", **kw)
+    assert rc == 3 and "rehearsal exit code: 3" in out and "teardown ok" in out, out
+    assert UNKNOWN_MSG in out and FORMAT_MSG not in out and KILLED_MSG not in out, out
+    assert not scratch.exists() and "docker rm -f n8n-rehearsal" in log
+
+
+def test_issue187_exit_137_with_a_failed_inspect_still_prints_the_killed_message(tmp_path):
+    rc, out, log, _ = run_rehearsal(tmp_path, import_rc="137", fail="OOMKilled")
+    assert rc == 137 and "(exit 137): the process was killed (OOMKilled=unknown)" in out and FORMAT_MSG not in out, out
+
+
+def test_issue187_a_successful_false_read_with_exit_3_keeps_the_format_wording(tmp_path):
+    rc, out, log, scratch = run_rehearsal(tmp_path, import_rc="3", oom="false")
+    assert rc == 3 and "rehearsal exit code: 3" in out and "teardown ok" in out, out
+    assert "(exit 3): " + FORMAT_MSG in out and "UNKNOWN" not in out, out
 
 
 def test_issue187_the_oom_flag_is_read_before_the_scratch_container_is_removed(tmp_path):
