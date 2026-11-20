@@ -104,14 +104,17 @@ Set it up:
 
 1. Create a check named "Alert path heartbeat" with a simple schedule, a period
    of 5 minutes and a grace time of at least 15 minutes. The real gap between
-   pings is 5 to 6 minutes, so this tolerates a couple of lost pings before an alert.
+   pings is 5 to 6 minutes. Healthchecks marks a check down after period plus
+   grace (inferred from its docs, not tested here), so this check goes down after
+   about 20 minutes of silence, which tolerates about three missed pings.
 2. Under Integrations, add the channels that must reach you when the check goes
    down (email, a chat service, a phone push). Choose channels that do not run
    through this stack.
 3. Copy the check's ping URL into `HEARTBEAT_PING_URL` on the n8n container and
    restart n8n.
 4. Enable the Grafana rule and the policy route (below). The check turns up after the
-   first heartbeat; stop n8n for 15 minutes to see it go down.
+   first heartbeat; stop n8n and wait at least 20 minutes (period plus grace,
+   with some margin) to see it go down.
 
 ### 2. Self-hosted Healthchecks or Uptime Kuma on another host
 
@@ -172,8 +175,18 @@ the private layer so they still reach you.
   200. If all tries fail, the ping is dropped and the next heartbeat is the
   retry. Certificate checking stays on: `allowUnauthorizedCerts` is not
   acceptable, because the ping URL is a secret and must only go to the real
-  observer. Whether 19 seconds fits inside Grafana's webhook wait is unverified
-  (the Grafana timeout was not checked); heartbeat delivery is not time critical.
+  observer.
+- **Limitation: the retries are synchronous with Grafana's webhook response.**
+  The ping runs before the router answers 200, so a heartbeat whose observer
+  call fails takes up to 19 seconds to answer. Grafana's webhook deadline is
+  unverified (not checked; the repository runs `GRAFANA_VERSION:-latest`). If
+  Grafana's deadline is shorter, it records the heartbeat notification as failed
+  and may deliver it again. If heartbeat notifications show as failed or
+  duplicated in Grafana (Alerting, contact point status and the notification
+  log), check that deadline first, and the observer's response time. Real alerts
+  never reach this node, so they are not delayed or duplicated by it. Suggested
+  later change, not made here: answer Grafana first and ping the observer from a
+  separate workflow.
 - **Contract failure sends `/fail`.** A firing heartbeat whose `phone` label is
   not exactly `false` sends `/fail` (Healthchecks) or `status=down` (Uptime Kuma)
   immediately. Still no Discord or phone message is sent.
@@ -193,8 +206,9 @@ the private layer so they still reach you.
 Work through these in order. All of it is unverified against a live system.
 
 1. Read the check's settings: use a simple schedule with a period of 5 minutes
-   and a grace time of at least 15 minutes. A cron schedule or a short grace
-   turns a 6 minute gap into a false alarm.
+   and a grace time of at least 15 minutes (down after about 20 minutes of
+   silence, period plus grace, inferred from the Healthchecks docs). A cron
+   schedule or a short grace turns a 6 minute gap into a false alarm.
 2. Read the check's ping log. Gaps with no entry mean pings never arrived (look
    at n8n and the network); a `/fail` entry means the router saw a heartbeat
    that broke its contract (the `phone` label), which is a different problem.
