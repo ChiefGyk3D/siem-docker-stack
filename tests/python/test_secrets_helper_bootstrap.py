@@ -30,15 +30,28 @@ CASES = {
 ALL_SCRIPTS = sorted(CASES)
 
 
+CAT_STUB = """#!/bin/sh
+n=$(/bin/cat "$CAT_COUNT" 2>/dev/null || echo 0); n=$((n + 1)); echo $n > "$CAT_COUNT"
+case "$CAT_MODE:$n" in
+  fail:*) exit 1 ;;
+  empty:*) /bin/cat > /dev/null; exit 0 ;;
+  truncated:*) /usr/bin/head -c 10; exit 0 ;;
+  differ:2) /usr/bin/tr a b; exit 0 ;;
+esac
+exec /bin/cat
+"""
+
+
 def wrapper_text(tmp_path):
     return f"""#!/bin/sh
 fmt=; last=
-for a in "$@"; do case "$a" in %u|%a|%h|"%u %a"|"%s %Y") fmt=$a ;; esac; last=$a; done
-if [ "$last" = /proc/self/fd/7 ] && [ "$fmt" = "%s %Y" ] && [ -n "$HOOK" ]; then
+for a in "$@"; do case "$a" in %u|%a|%h|"%u %a") fmt=$a ;; *%.9Y*) fmt=SNAP ;; esac; last=$a; done
+if {{ [ "$last" = /proc/self/fd/7 ] || [ "$last" = /proc/self/fd/9 ]; }} && [ "$fmt" = SNAP ] && [ -n "$HOOK" ]; then
   n=$(/bin/cat "$HOOK_COUNT" 2>/dev/null || echo 0); n=$((n + 1)); echo $n > "$HOOK_COUNT"
   out=$(/usr/bin/stat "$@") || exit $?
   case "$HOOK:$n" in
     grow:1) echo "# grown between the two stats" >> "$LIB_FILE" ;;
+    rewrite:1) printf 'Z' | /usr/bin/dd of="$LIB_FILE" bs=1 seek=0 count=1 conv=notrunc 2>/dev/null ;;
     touch:1) /usr/bin/touch -d '2001-02-03 04:05:06' "$LIB_FILE" ;;
     late:2) echo "echo $LATE_MARK >&2" >> "$LIB_FILE" ;;
   esac
@@ -86,11 +99,17 @@ def sandbox(tmp_path):
     envfile.chmod(0o600)
 
     def run(name, userns=False, lib_mode="644", lib_link=False, hard_link=False, dir_mode="755",
-            outer_mode="755", foreign=False, swap=False, hook=None):
+            outer_mode="755", foreign=False, swap=False, hook=None, cat_mode=None):
         needs_ce, extra = CASES[name]
         script = scripts_dir / name
-        script.write_text((SCRIPTS / name).read_text(encoding="utf-8").replace("/usr/bin/stat", str(wrap)),
-                          encoding="utf-8")
+        text = (SCRIPTS / name).read_text(encoding="utf-8").replace("/usr/bin/stat", str(wrap))
+        if cat_mode:
+            cat = tmp_path / "cat-stub" / "cat"
+            cat.parent.mkdir(exist_ok=True)
+            cat.write_text(CAT_STUB, encoding="utf-8")
+            cat.chmod(0o755)
+            text = text.replace("/bin/cat", str(cat))
+        script.write_text(text, encoding="utf-8")
         script.chmod(0o755)
         if needs_ce:
             ce = scripts_dir / "lib-container-engine.sh"
@@ -130,6 +149,11 @@ def sandbox(tmp_path):
             if count.exists():
                 count.unlink()
             env.update({"HOOK": hook, "HOOK_COUNT": str(count), "LIB_FILE": str(lib), "LATE_MARK": LATE})
+        if cat_mode:
+            ccount = tmp_path / "cat-count"
+            if ccount.exists():
+                ccount.unlink()
+            env.update({"CAT_MODE": cat_mode, "CAT_COUNT": str(ccount)})
         args = [str(envfile) if a == "ENVFILE" else a for a in extra]
         launcher = ["unshare", "-r", str(script), *args] if userns else [str(script), *args]
         proc = subprocess.run(launcher, env=env, text=True, capture_output=True,
@@ -232,6 +256,33 @@ def test_a_write_to_an_old_descriptor_after_the_checks_does_not_change_what_is_s
     assert MARK in proc.stderr and LATE not in proc.stderr, proc.stderr
 
 
+@pytest.mark.parametrize("name", ALL_SCRIPTS)
+def test_a_same_size_rewrite_within_the_same_second_is_refused(sandbox, name):
+    # The detector compares mtime and ctime to the nanosecond, not to the second.
+    proc = sandbox(name, hook="rewrite")
+    assert proc.returncode != 0 and "changed while it was being read" in proc.stderr, proc.stderr
+    assert MARK not in proc.stderr
+
+
+@pytest.mark.parametrize("name", ALL_SCRIPTS)
+def test_two_reads_that_differ_are_refused(sandbox, name):
+    proc = sandbox(name, cat_mode="differ")
+    assert proc.returncode != 0 and "changed while it was being read" in proc.stderr, proc.stderr
+    assert MARK not in proc.stderr
+
+
+@pytest.mark.parametrize("cat_mode,message", [
+    ("fail", "cannot be read"),
+    ("empty", "empty or its content length"),
+    ("truncated", "empty or its content length"),
+])
+@pytest.mark.parametrize("name", ALL_SCRIPTS)
+def test_a_failed_empty_or_truncated_read_is_refused_before_the_source(sandbox, name, cat_mode, message):
+    proc = sandbox(name, cat_mode=cat_mode)
+    assert proc.returncode != 0 and message in proc.stderr, proc.stderr
+    assert MARK not in proc.stderr
+
+
 @pytest.mark.parametrize("hook", ["grow", "touch"])
 @pytest.mark.parametrize("name", ALL_SCRIPTS)
 def test_a_helper_whose_size_or_mtime_changes_during_the_read_is_refused(sandbox, name, hook):
@@ -277,22 +328,66 @@ def test_a_writable_ancestor_directory_is_refused_as_root(sandbox, need_userns, 
 
 # --- the renderer, as a normal user ------------------------------------------------------------
 
-def run_renderer_as_user(tmp_path, lib_mode):
+def run_renderer_as_user(tmp_path, lib_mode, hook=None, cat_mode=None):
     tree = tmp_path / "render-tree"
     scripts_dir = tree / "scripts"
     scripts_dir.mkdir(parents=True)
     scripts_dir.chmod(0o755)
     tree.chmod(0o755)
-    script = scripts_dir / "render-prometheus-web-config.sh"
-    script.write_text((SCRIPTS / "render-prometheus-web-config.sh").read_text(encoding="utf-8"), encoding="utf-8")
-    script.chmod(0o755)
+    wrap = tmp_path / "rwrap" / "stat"
+    wrap.parent.mkdir()
+    wrap.write_text(wrapper_text(tmp_path), encoding="utf-8")
+    wrap.chmod(0o755)
+    text = (SCRIPTS / "render-prometheus-web-config.sh").read_text(encoding="utf-8")
+    text = text.replace("/usr/bin/stat", str(wrap))
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}
     lib = scripts_dir / "lib-secrets.sh"
+    if cat_mode:
+        cat = tmp_path / "rcat" / "cat"
+        cat.parent.mkdir()
+        cat.write_text(CAT_STUB, encoding="utf-8")
+        cat.chmod(0o755)
+        text = text.replace("/bin/cat", str(cat))
+        env.update({"CAT_MODE": cat_mode, "CAT_COUNT": str(tmp_path / "rcat-count")})
+    if hook:
+        env.update({"HOOK": hook, "HOOK_COUNT": str(tmp_path / "hook-count"), "LIB_FILE": str(lib),
+                    "LATE_MARK": LATE})
+    script = scripts_dir / "render-prometheus-web-config.sh"
+    script.write_text(text, encoding="utf-8")
+    script.chmod(0o755)
     lib.write_text(LIB_TEXT + f"\necho {MARK} >&2\n", encoding="utf-8")
     lib.chmod(int(lib_mode, 8))
     target = tmp_path / "render-target"
-    proc = subprocess.run([str(script), str(target)], env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
+    proc = subprocess.run([str(script), str(target)], env=env,
                           text=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
     return proc, target, tree
+
+
+def test_the_renderer_sources_the_snapshot_not_a_late_write(tmp_path):
+    proc, _t, _tree = run_renderer_as_user(tmp_path, "644", hook="late")
+    assert (tmp_path / "hook-count").read_text(encoding="utf-8").strip() == "2"
+    assert MARK in proc.stderr and LATE not in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("hook", ["grow", "touch", "rewrite"])
+def test_the_renderer_refuses_a_helper_that_changes_during_the_read(tmp_path, hook):
+    proc, target, _tree = run_renderer_as_user(tmp_path, "644", hook=hook)
+    assert proc.returncode != 0 and "changed while it was being read" in proc.stderr, proc.stderr
+    assert MARK not in proc.stderr and not target.exists()
+
+
+def test_the_renderer_refuses_two_reads_that_differ(tmp_path):
+    proc, target, _tree = run_renderer_as_user(tmp_path, "644", cat_mode="differ")
+    assert proc.returncode != 0 and "changed while it was being read" in proc.stderr, proc.stderr
+    assert MARK not in proc.stderr and not target.exists()
+
+
+@pytest.mark.parametrize("cat_mode,message", [("fail", "cannot be read"), ("empty", "empty or its content length"),
+                                              ("truncated", "empty or its content length")])
+def test_the_renderer_refuses_a_failed_empty_or_truncated_read(tmp_path, cat_mode, message):
+    proc, target, _tree = run_renderer_as_user(tmp_path, "644", cat_mode=cat_mode)
+    assert proc.returncode != 0 and message in proc.stderr, proc.stderr
+    assert MARK not in proc.stderr and not target.exists()
 
 
 @pytest.mark.parametrize("mode", ["664", "646"])
@@ -335,9 +430,11 @@ def test_no_script_sources_the_helper_by_pathname():
 def test_every_user_of_the_helper_sources_a_descriptor(name):
     code = "\n".join(code_lines(SCRIPTS / name))
     assert re.search(r'^source <\(printf \'%s\' "\$\w+_SNAP"\)$', code, re.M), name
-    assert re.search(r"/bin/cat <&\d;", code), "the snapshot is not read from the checked descriptor"
+    assert re.search(r"/bin/cat <&\d ", code), "the snapshot is not read from the checked descriptor"
+    assert re.search(r"/bin/cat < /proc/self/fd/\d ", code), "the helper is not read a second time"
     assert "%h" in code, "the link count of the open helper is not checked"
-    assert "%s %Y" in code, "size and mtime of the open helper are not compared across the read"
+    assert "%s %.9Y %.9Z %d:%i" in code, "size, nanosecond times and inode are not compared across the read"
+    assert "%Y'" not in code, "a whole-second mtime is not enough"
 
 
 def test_the_docs_describe_the_checked_helper_loading():
@@ -345,4 +442,5 @@ def test_the_docs_describe_the_checked_helper_loading():
     assert "no script sources it by pathname" in text
     assert "a shared loader file would itself have to be sourced unchecked first" in text
     assert "does not revoke a writable descriptor" in text
-    assert "The snapshot does not cover a write that lands before the read" in text
+    assert "This narrows the window; it does not close it" in text
+    assert "is not guaranteed to be the content that was checked" in text
