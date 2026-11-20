@@ -1638,14 +1638,31 @@ it as mode 600 `live.json` and parses that copy. That `docker cp` makes the host
 owned by the user who runs it is INFERRED; if your Docker makes it another owner, the
 check stops the rehearsal with a message and nothing is parsed.
 
-Resource limits, so a runaway scratch n8n cannot starve the live stack: `--memory 1g
---memory-swap 1g` (an idle n8n is well under that, INFERRED; the same value for swap
-means no swap), `--cpus 1`, `--pids-limit 256`, `--security-opt no-new-privileges`,
+Resource limits, so a runaway scratch n8n cannot starve the live stack: `--memory 2g
+--memory-swap 2g` (the same value for swap means no swap), `--cpus 1`, `--pids-limit 256`, `--security-opt no-new-privileges`,
 `--cap-drop ALL` and `--restart no`. A read-only root file system (`--read-only` with
 tmpfs mounts) is NOT used: whether n8n 2.10.3 starts that way is unverified, so it is
 left out rather than guessed.
 
-Blast radius: one extra container (at most 1 GB and one CPU) and one folder under your
+Why 2 GB and not 1 GB. The first live run (2026-11-20) used 1 GB and printed `variables
+ok`, then `REHEARSAL FAILED at: the import (exit 137)`, then `teardown ok` and
+`rehearsal exit code: 137`. Exit 137 is a SIGKILL. The most likely cause (INFERRED, not
+measured: the container's `OOMKilled` flag was not read in that run) is the 1 GB limit
+killing the n8n command line import, which boots the whole application and a fresh
+database. The old message blamed the export format; that was wrong, and 137 says nothing
+about the format. Read-only checks afterward (VERIFIED 2026-11-20 by the owner's box
+read): no leftover container, folder or live temporary folder; the box has 64 GiB of
+RAM with 30 GiB available; the live n8n container uses about 280 MiB of its 2 GiB
+limit. So the scratch limit now matches the live container's 2 GiB. Whether 2 GB is
+enough is not yet shown: the rehearsal has not passed. The function now reads
+`docker inspect --format '{{.State.OOMKilled}}'` of the scratch container before
+teardown when the import fails, and reports two cases separately: exit 137 or
+`OOMKilled=true` prints `the process was killed ... the memory limit is the likely
+cause, NOT evidence about the export format`; any other nonzero exit keeps the message
+that the format is not accepted. If you see the killed message again at 2 GB, stop and
+report it; do not raise the limit on your own.
+
+Blast radius: one extra container (at most 2 GB and one CPU) and one folder under your
 home for a few minutes; the live n8n gets one `docker exec` export into a new, random,
 mode 700 folder under its `/tmp`, removed as soon as the file is copied out (and
 reported loudly, with a nonzero status, if it cannot be removed).
@@ -1699,9 +1716,9 @@ owner_rehearse_down() {
   return $S
 }
 owner_rehearse_router() {
-  : "runbook-block-rehearse-v3"
+  : "runbook-block-rehearse-v4"
   local SCRATCH_NAME=n8n-rehearsal SCRATCH_DIR="$HOME/n8n-rehearsal"
-  local IMG R=0 INTR=0 TDFAIL=0 LD="" H="" F SZ K I MADE_DIR=0 MADE_CTR=0 LIVE_NODES SC_NODES LIVE_CREDS SC_CREDS COUNT_PY CRED_PY
+  local IMG R=0 INTR=0 TDFAIL=0 LD="" H="" F SZ K I MADE_DIR=0 MADE_CTR=0 OOM LIVE_NODES SC_NODES LIVE_CREDS SC_CREDS COUNT_PY CRED_PY
   COUNT_PY='import json,sys; d=json.load(sys.stdin); d=d[0] if isinstance(d,list) else d; print(len(d["nodes"]))'
   CRED_PY='import json,sys; d=json.load(sys.stdin); d=d[0] if isinstance(d,list) else d; print("\n".join(sorted({"%s:%s" % (t, (c or {}).get("name", "")) for n in d["nodes"] for t, c in (n.get("credentials") or {}).items()})))'
   owner_chk_vars || return 1
@@ -1719,9 +1736,9 @@ owner_rehearse_router() {
   if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then LD="$(docker exec n8n mktemp -d /tmp/router-rehearsal.XXXXXX)"; R=$?; [[ "$LD" =~ ^/tmp/router-rehearsal\.[A-Za-z0-9]{6}$ ]] || { R=1; LD=""; }; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: making a new private folder inside the live container (mktemp -d is INFERRED to exist in the n8n image); nothing was exported"; fi
   if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then docker exec n8n n8n export:workflow --id="$ROUTER_ID" --output="$LD/router.json" > /dev/null && docker exec n8n sh -c 'test -f "$1" && ! test -L "$1"' sh "$LD/router.json" && H="$(umask 077; mktemp -d "$SCRATCH_DIR/work/in.XXXXXX")" && [[ "$H" =~ ^/[A-Za-z0-9._/-]+/work/in\.[A-Za-z0-9]{6}$ ]] && ( umask 077; docker cp "n8n:$LD/router.json" "$H/" ); R=$?; if docker exec n8n rm -rf -- "$LD" > /dev/null 2>&1; then LD=""; else echo "LIVE LEFTOVER: $LD is still inside the live n8n container (it holds the router export); remove it with: docker exec n8n rm -rf -- $LD"; TDFAIL=1; fi; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: the read-only export of the live router (exit $R)"; fi
   if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then F="$H/router.json"; [ -f "$F" ] && [ ! -L "$F" ] && [ "$(stat -c '%u %h' "$F")" = "$(id -u) 1" ] && SZ="$(stat -c %s "$F")" && [ "$SZ" -gt 0 ] && [ "$SZ" -le 5242880 ] && install -m 600 "$F" "$SCRATCH_DIR/work/live.json" && LIVE_NODES="$(python3 -c "$COUNT_PY" < "$SCRATCH_DIR/work/live.json")" && LIVE_CREDS="$(python3 -c "$CRED_PY" < "$SCRATCH_DIR/work/live.json")"; R=$?; case "$LIVE_NODES" in ''|*[!0-9]*|0) R=1;; esac; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: reading the live export (not a plain file owned by you with one link and 1 byte to 5 MB, or not a workflow with a positive node count, got '${LIVE_NODES}')"; fi
-  if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then MADE_CTR=1; docker run -d --name "$SCRATCH_NAME" --network none --restart no --memory 1g --memory-swap 1g --cpus 1 --pids-limit 256 --security-opt no-new-privileges --cap-drop ALL --user "$(id -u):$(id -g)" --env-file "$SCRATCH_DIR/env" -v "$SCRATCH_DIR/data:/home/node/.n8n" -v "$SCRATCH_DIR/work:/work" "$IMG" > /dev/null; R=$?; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: starting the scratch container (exit $R)"; fi
+  if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then MADE_CTR=1; docker run -d --name "$SCRATCH_NAME" --network none --restart no --memory 2g --memory-swap 2g --cpus 1 --pids-limit 256 --security-opt no-new-privileges --cap-drop ALL --user "$(id -u):$(id -g)" --env-file "$SCRATCH_DIR/env" -v "$SCRATCH_DIR/data:/home/node/.n8n" -v "$SCRATCH_DIR/work:/work" "$IMG" > /dev/null; R=$?; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: starting the scratch container (exit $R)"; fi
   if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then R=1; for I in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do if docker exec "$SCRATCH_NAME" n8n list:workflow > /dev/null 2>&1; then R=0; break; fi; sleep 3; done; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: the scratch n8n did not answer within 60 seconds (docker logs $SCRATCH_NAME shows why)"; fi
-  if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then docker exec "$SCRATCH_NAME" n8n import:workflow --input=/work/live.json; R=$?; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: the import (exit $R): the export format is NOT accepted by this n8n; do not rely on owner_router_rollback"; fi
+  if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then docker exec "$SCRATCH_NAME" n8n import:workflow --input=/work/live.json; R=$?; if [ $R -ne 0 ]; then OOM="$(docker inspect --format '{{.State.OOMKilled}}' "$SCRATCH_NAME" 2> /dev/null)"; if [ $R -eq 137 ] || [ "$OOM" = true ]; then echo "REHEARSAL FAILED at: the import (exit $R): the process was killed (OOMKilled=${OOM:-unknown}): the memory limit is the likely cause, NOT evidence about the export format"; else echo "REHEARSAL FAILED at: the import (exit $R): the export format is NOT accepted by this n8n; do not rely on owner_router_rollback"; fi; fi; fi
   if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then [ "$(docker exec "$SCRATCH_NAME" n8n list:workflow | grep -c "^$ROUTER_ID")" = 1 ]; R=$?; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: the imported router is not listed exactly once"; fi
   if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then docker exec "$SCRATCH_NAME" n8n export:workflow --id="$ROUTER_ID" --output=/work/scratch.json > /dev/null && SC_NODES="$(python3 -c "$COUNT_PY" < "$SCRATCH_DIR/work/scratch.json")" && SC_CREDS="$(python3 -c "$CRED_PY" < "$SCRATCH_DIR/work/scratch.json")"; R=$?; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: exporting the imported copy"; fi
   if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then [ "$SC_NODES" = "$LIVE_NODES" ]; R=$?; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: node count (live $LIVE_NODES, scratch '${SC_NODES}')"; fi

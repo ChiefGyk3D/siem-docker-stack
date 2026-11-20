@@ -937,7 +937,7 @@ def test_issue179_the_rehearsal_block_has_no_network_no_published_port_and_never
 
 def test_issue179_the_scratch_container_carries_every_limit_flag():
     run = next(l for l in REHEARSE.splitlines() if "docker run" in l)
-    for flag in ("--memory 1g", "--memory-swap 1g", "--cpus 1", "--pids-limit 256", "--security-opt no-new-privileges",
+    for flag in ("--memory 2g", "--memory-swap 2g", "--cpus 1", "--pids-limit 256", "--security-opt no-new-privileges",
                  "--cap-drop ALL", "--restart no", "--network none", "--user"):
         assert flag in run, flag
     flat = " ".join(REHEARSAL_SECTION.split())
@@ -967,9 +967,10 @@ R_STUBS = r'''
 docker() {
   echo "docker $*" >> "$LOG"
   if [ -n "$SIG" ] && [[ "$*" == *"import:workflow"* ]]; then kill -s "$SIG" $$; return 0; fi
+  if [ -n "$IMPORT_RC" ] && [[ "$*" == *"import:workflow"* ]]; then return "$IMPORT_RC"; fi
   if [ -n "$FAIL" ] && [[ "$*" == *"$FAIL"* ]]; then return 7; fi
   case "$1" in
-    inspect) echo "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" ;;
+    inspect) if [[ "$*" == *OOMKilled* ]]; then echo "${OOM_OUT:-false}"; else echo "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"; fi ;;
     ps) [ -n "$CTR_EXISTS" ] && echo abc123 ;;
     cp) case "$2" in n8n:*)
           if [ -d "$3" ]; then t="${3%/}/router.json"; else t="$3"; fi
@@ -998,7 +999,7 @@ OWNER_FRESH=1
 CRED_JSON = '{"nodes":[{"credentials":{"discordWebhookApi":{"id":"1","name":"Discord"}}},{}]}'
 
 
-def run_rehearsal(tmp_path, fail="", ctr_exists="", pre_dir=False, scjson=CRED_JSON, sig="", bad_id=False, ossl="", dest="", mk_out="", block=None):
+def run_rehearsal(tmp_path, fail="", ctr_exists="", pre_dir=False, scjson=CRED_JSON, sig="", bad_id=False, ossl="", dest="", mk_out="", block=None, import_rc="", oom=""):
     """Run the COMPLETE documented fence once and return the real process status, the output, the stub log."""
     home = tmp_path / "home"
     home.mkdir(parents=True, exist_ok=True)
@@ -1014,7 +1015,7 @@ def run_rehearsal(tmp_path, fail="", ctr_exists="", pre_dir=False, scjson=CRED_J
     script = "\n".join([R_STUBS, CHK, overrides, block or REHEARSE])  # nothing after the fence: its own status is the process status
     env = dict(os.environ, HOME=str(home), LOG=str(log), FAIL=fail, STUBJSON=CRED_JSON, SCJSON=scjson,
                CTR_EXISTS=ctr_exists, SIG=sig, OSSL=ossl, DEST=dest,
-               SYMTARGET=str(target), MKTEMP_OUT=mk_out)
+               SYMTARGET=str(target), MKTEMP_OUT=mk_out, IMPORT_RC=import_rc, OOM_OUT=oom)
     out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, timeout=60)
     return out.returncode, out.stdout + out.stderr, log.read_text(), home / "n8n-rehearsal"
 
@@ -1026,7 +1027,7 @@ def test_issue179_rehearsal_success_tears_down_and_has_no_network_or_published_p
     assert not scratch.exists()
     run = next(l for l in log.splitlines() if l.startswith("docker run"))
     assert "--network none" in run and " -p " not in run and "--publish" not in run and "127.0.0.1" not in run
-    for flag in ("--memory 1g", "--memory-swap 1g", "--cpus 1", "--pids-limit 256", "--security-opt no-new-privileges",
+    for flag in ("--memory 2g", "--memory-swap 2g", "--cpus 1", "--pids-limit 256", "--security-opt no-new-privileges",
                  "--cap-drop ALL", "--restart no"):
         assert flag in run, flag
     assert "0.0.0.0" not in log and "/opt/n8n" not in log and "N8N_ENCRYPTION_KEY" not in log
@@ -1195,6 +1196,57 @@ def test_issue179_round3_mutation_without_the_host_file_checks_a_symlink_is_pars
     mutated = REHEARSE.replace(check, "")
     rc2, out2, log2, _ = run_rehearsal(tmp_path / "b", dest="symlink", block=mutated)
     assert "docker run" in log2  # without the check the link was followed and the run went on
+
+
+# ---- issue 187: a killed import is not evidence about the export format ----------------------
+
+FORMAT_MSG = "the export format is NOT accepted by this n8n"
+KILLED_MSG = "the process was killed"
+
+
+def test_issue187_exit_137_prints_the_killed_message_not_the_format_message(tmp_path):
+    rc, out, log, scratch = run_rehearsal(tmp_path, import_rc="137")
+    assert rc == 137 and "rehearsal exit code: 137" in out and "teardown ok" in out, out
+    assert "REHEARSAL FAILED at: the import (exit 137): the process was killed (OOMKilled=false)" in out
+    assert "the memory limit is the likely cause, NOT evidence about the export format" in out
+    assert FORMAT_MSG not in out
+    assert not scratch.exists()
+
+
+def test_issue187_oomkilled_true_with_another_exit_code_prints_the_killed_message(tmp_path):
+    rc, out, log, _ = run_rehearsal(tmp_path, import_rc="9", oom="true")
+    assert rc == 9 and "(exit 9): the process was killed (OOMKilled=true)" in out and FORMAT_MSG not in out, out
+
+
+def test_issue187_another_nonzero_exit_keeps_the_format_message(tmp_path):
+    rc, out, log, _ = run_rehearsal(tmp_path, import_rc="3")
+    assert rc == 3 and "REHEARSAL FAILED at: the import (exit 3): " + FORMAT_MSG in out and KILLED_MSG not in out, out
+
+
+def test_issue187_the_oom_flag_is_read_before_the_scratch_container_is_removed(tmp_path):
+    rc, out, log, _ = run_rehearsal(tmp_path, import_rc="137")
+    lines = log.splitlines()
+    read = next(i for i, l in enumerate(lines) if "OOMKilled" in l and "n8n-rehearsal" in l)
+    removed = next(i for i, l in enumerate(lines) if l.startswith("docker rm -f n8n-rehearsal"))
+    imported = next(i for i, l in enumerate(lines) if "import:workflow" in l)
+    assert imported < read < removed, log
+
+
+def test_issue187_mutation_without_the_oom_read_the_pin_bites(tmp_path):
+    read = """OOM="$(docker inspect --format '{{.State.OOMKilled}}' "$SCRATCH_NAME" 2> /dev/null)"; """
+    assert read in REHEARSE
+    rc, out, log, _ = run_rehearsal(tmp_path / "a", import_rc="9", oom="true")
+    assert KILLED_MSG in out and "OOMKilled" in log
+    rc2, out2, log2, _ = run_rehearsal(tmp_path / "b", import_rc="9", oom="true", block=REHEARSE.replace(read, ""))
+    assert KILLED_MSG not in out2 and "OOMKilled" not in log2  # without the read the 9 is blamed on the format
+
+
+def test_issue187_the_doc_records_the_failed_run_and_does_not_blame_the_format_on_137():
+    flat = " ".join(REHEARSAL_SECTION.split())
+    for needle in ("2026-11-20", "exit 137", "SIGKILL", "OOMKilled", "30 GiB", "280 MiB", "--memory 2g", "--memory-swap 2g"):
+        assert needle in flat, needle
+    assert "137 says nothing about the format" in flat
+    assert "has not passed" in flat  # the round trip is not claimed verified
 
 
 # ---- issue 181: the teardown-failed flag and the freshness inventory ---------------------
