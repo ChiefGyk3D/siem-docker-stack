@@ -84,10 +84,11 @@ groups:
           description: "Apply the pending UniFi firmware update. This alert clears only when the device reports no pending update."
         labels:
           severity: "warning"
+          tier: "P2"
           source: "unifi"
           alert_group: "updates"
           update_alert: "true"
-          phone: "true"
+          phone: "false"
 
       - uid: update-unifi-pending-7d
         title: "UniFi update pending over 7 days"

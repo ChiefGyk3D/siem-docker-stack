@@ -228,3 +228,76 @@ def test_docs_matrix_section_states_the_txnid_limit_and_relay_design():
                    "Doppler", "dev_network", "bot account", "Rollback", "VERIFIED", "INFERRED", "read 2026-11-19",
                    "spec.matrix.org", "webhook-notifier", "design note", "no relay code"):
         assert needle in flat, needle
+
+
+# --- Matrix P2 route (issue #152) ----------------------------------------------------------------
+# Owner decision 2026-11-20: the two "update pending over 24 hours" rules are P2 (severity=warning,
+# phone=false). They alert Discord through the n8n router and, once the owner enables this inactive
+# example, Matrix as well. They never reach the phone: the route matches phone=false only.
+MATRIX_P2_POLICY_FILE = ALERTING / "matrix-p2-notification-policy.yml.example"
+P2_UIDS = ("update-unifi-pending-24h", "update-pfsense-pending-24h")
+
+
+def _matrix_p2_route():
+    data = yaml.safe_load(MATRIX_P2_POLICY_FILE.read_text(encoding="utf-8"))
+    assert data["apiVersion"] == 1
+    root = data["policies"][0]
+    assert root["receiver"] == "n8n-grafana-router"
+    (m,) = [r for r in root["routes"] if r["receiver"] == "matrix-p1"]
+    return root, m
+
+
+def _hit(route, labels):
+    want = {k: v for k, op, v in route["object_matchers"] if op == "="}
+    assert len(want) == len(route["object_matchers"])
+    return all(labels.get(k) == v for k, v in want.items())
+
+
+def test_matrix_p2_policy_ships_as_an_inactive_example():
+    assert MATRIX_P2_POLICY_FILE.exists() and MATRIX_P2_POLICY_FILE.name.endswith(".yml.example")
+    loaded = {p.name for p in ALERTING.iterdir() if p.suffix in {".yml", ".yaml"}}
+    assert not any("matrix" in n for n in loaded)
+
+
+def test_matrix_p2_route_continues_and_never_matches_the_phone_tiers():
+    root, m = _matrix_p2_route()
+    assert m["continue"] is True, "without continue the n8n route would not see the P2 alert"
+    assert ("phone", "=", "false") in [tuple(x) for x in m["object_matchers"]]
+    assert ("severity", "=", "warning") in [tuple(x) for x in m["object_matchers"]]
+    assert _hit(m, {"severity": "warning", "tier": "P2", "phone": "false"})
+    assert not _hit(m, {"severity": "critical", "tier": "P1", "phone": "true"})
+    assert not _hit(m, {"severity": "warning", "phone": "true"})
+    assert not _hit(m, {"severity": "info", "tier": "none", "phone": "false", "heartbeat": "true"})
+    assert not _hit(m, {"severity": "info", "tier": "P3", "phone": "false", "digest": "true"})
+    # a route to n8n still follows, so Discord keeps receiving the alert
+    order = [r["receiver"] for r in root["routes"]]
+    assert order.index("matrix-p1") < len(order) - 1 and "n8n-grafana-router" in order[order.index("matrix-p1") + 1:]
+
+
+def test_the_two_update_pending_24h_rules_match_the_matrix_p2_route():
+    _, m = _matrix_p2_route()
+    rules = {}
+    for name in ("update-alert-rules-unifi.yml", "update-alert-rules-pfsense.yml"):
+        data = yaml.safe_load((ALERTING / name).read_text(encoding="utf-8"))
+        for g in data["groups"]:
+            rules.update({r["uid"]: r for r in g["rules"]})
+    for uid in P2_UIDS:
+        assert _hit(m, rules[uid]["labels"]), uid
+    # the 7 day escalations stay P1 on the phone and are not sent by the P2 route
+    for uid in ("update-unifi-pending-7d", "update-pfsense-pending-7d"):
+        assert not _hit(m, rules[uid]["labels"]), uid
+
+
+def test_matrix_p2_policy_reuses_the_relay_contact_point_and_holds_no_secret():
+    text = MATRIX_P2_POLICY_FILE.read_text(encoding="utf-8")
+    assert "matrix-contact-point.yml.example" in text and "replaces" in text
+    assert not re.search(r"https?://", text)
+    assert not re.search(r"(?i)(syt_|access_token\s*[:=]\s*[^\s$<`])", text)
+
+
+def test_docs_matrix_p2_section_covers_enable_and_rollback():
+    flat = " ".join(DOC.read_text(encoding="utf-8").split())
+    for needle in ("matrix-p2-notification-policy.yml.example", "P2 route", "severity=warning", "phone=false",
+                   "update-unifi-pending-24h", "update-pfsense-pending-24h", "never the phone", "Rollback (P2)",
+                   "Enable the P2 route"):
+        assert needle in flat, needle

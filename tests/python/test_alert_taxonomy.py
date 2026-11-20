@@ -37,12 +37,9 @@ POLICY_VALUES = {
     "heartbeat": {"true"}, "delivery_failure": {"true"},
 }
 
-# uid -> reason. Both rules are warning plus phone=true: P1 needs critical, P2
-# needs phone=false. Changing either label changes routing, so the owner picks.
-KNOWN_VIOLATIONS = {
-    "update-unifi-pending-24h": "warning with phone=true matches no tier",
-    "update-pfsense-pending-24h": "warning with phone=true matches no tier",
-}
+# uid -> reason. Empty: the two 24h update rules were fixed to P2, phone=false
+# (owner decision 2026-11-20, issue #152). A future entry here is a strict xfail.
+KNOWN_VIOLATIONS = {}
 
 
 def check_labels(labels):
@@ -149,6 +146,15 @@ def _param(item):
 def test_rule_follows_taxonomy(item):
     fname, rule = item
     assert check_labels(rule.get("labels")) == [], f"{fname} {rule['uid']}"
+
+
+@pytest.mark.parametrize("uid", ["update-unifi-pending-24h", "update-pfsense-pending-24h"])
+def test_pending_24h_rules_are_p2_without_the_phone(uid):
+    # Owner decision 2026-11-20 (issue #152): P2, no phone page.
+    (labels,) = [r["labels"] for _, r in RULES if r["uid"] == uid]
+    assert (labels["severity"], labels["tier"], labels["phone"]) == ("warning", "P2", "false")
+    assert check_labels(labels) == []
+    assert uid not in KNOWN_VIOLATIONS
 
 
 def test_known_violations_are_real_rules():

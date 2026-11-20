@@ -238,6 +238,40 @@ Live change, each step: remove the `matrix-p1` route and the contact point entry
 restart Grafana, then revoke the bot's access token and remove the variables from
 the secret manager. Email and n8n were never modified.
 
+### P2 route to Matrix (issue #152)
+
+Owner decision, 2026-11-20: the rules `update-unifi-pending-24h` and
+`update-pfsense-pending-24h` are P2 (`severity=warning`, `tier=P2`,
+`phone=false`). They alert Discord, through the n8n router as before, and Matrix
+once the owner enables the P2 route: chat, never the phone. Pushover is sent
+only for `phone=true`, and the P2 route matches `phone=false` only.
+
+The route is in `docker/grafana/provisioning/alerting/matrix-p2-notification-policy.yml.example`.
+It is inactive, like the other examples: Grafana ignores `.example` files, and
+nothing is sent to Matrix until the route is merged into the live tree. It
+matches `severity=warning`, `tier=P2` and `phone=false`, has `continue: true` so
+the alert still reaches `n8n-grafana-router` and Discord, and sends to the same
+`matrix-p1` relay contact point as the P1 route (same relay, same variables).
+The relay message carries the alert labels, so a P2 reads differently from a P1
+there. The notification failure rule is also P2 and also matches this route; that
+is intended, since a failed delivery is worth seeing in chat.
+
+#### Enable the P2 route (owner steps, each a live change)
+
+1. Finish the P1 Matrix steps above first (relay, bot, variables, the `matrix-p1`
+   contact point). The P2 route has nothing to send to without them.
+2. Merge the route from `matrix-p2-notification-policy.yml.example` into your
+   policy tree, after the P1 routes and ahead of the n8n routes. Live change.
+3. Restart Grafana (`docker compose up -d grafana`). Live change.
+4. Wait for a P2 to fire, or use a test alert with `severity=warning`,
+   `tier=P2` and `phone=false`, and confirm it reaches the Matrix room and
+   Discord, and that the phone is not paged. Live change.
+
+#### Rollback (P2)
+
+Live change: remove the P2 route from the policy tree and restart Grafana. The
+P1 route, the contact point, Discord and the phone path are not touched.
+
 ### Verified and inferred (Matrix)
 
 VERIFIED (read 2026-11-19):

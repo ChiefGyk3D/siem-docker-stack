@@ -1281,7 +1281,9 @@ def test_graph_malformed_notice_pushes_when_enabled():
 def test_every_update_rule_sets_the_phone_label_explicitly():
     seen = 0
     for _, _, rule in _rules():
-        want = "false" if rule["uid"] == "update-unifi-poller-stale" else "true"
+        # the poller-stale rule and the two 24h rules (P2, owner decision 2026-11-20, issue #152) stay off the phone
+        p2 = {"update-unifi-poller-stale", "update-unifi-pending-24h", "update-pfsense-pending-24h"}
+        want = "false" if rule["uid"] in p2 else "true"
         assert rule["labels"].get("phone") == want, rule["uid"]
         seen += 1
     assert seen >= 7
