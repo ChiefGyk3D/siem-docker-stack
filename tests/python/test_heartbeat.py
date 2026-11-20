@@ -126,13 +126,15 @@ def test_the_feature_is_off_without_a_valid_setting_and_still_answers_200(env):
 
 def test_the_ping_url_is_only_read_in_the_heartbeat_code_node_and_never_logged():
     text = ROUTER.read_text(encoding="utf-8")
-    assert set(re.findall(r"\$env\.(\w+)", text)) == {"HEARTBEAT_PING_URL", "HEARTBEAT_KIND"}
+    # the only other env read is the expiry watch's own router secret, in its own check node
+    # (test_router_expiry_secret.py)
+    assert set(re.findall(r"\$env\.(\w+)", text)) == {"HEARTBEAT_PING_URL", "HEARTBEAT_KIND", "EXPIRY_WATCH_ROUTER_SECRET"}
     code = _nodes()[BUILD_NODE]["parameters"]["jsCode"]
     for bad in ("console.", "throw ", "JSON.stringify"):
         assert bad not in code, bad
     assert "ALLOWED_ALERTNAMES" not in code
     for name, node in _nodes().items():
-        if name != BUILD_NODE:
+        if name not in (BUILD_NODE, "Check Expiry Secret"):
             assert "$env" not in json.dumps(node), name
 
 

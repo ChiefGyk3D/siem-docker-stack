@@ -22,7 +22,7 @@ delivery_budget_seconds = 300
 
 [router]
 # The n8n alert router webhook (see docs/update-alerting.md). https only, except localhost.
-url = "https://n8n.example.com/webhook/grafana-alerts"
+url = "https://n8n.example.com/webhook/expiry-watch-alerts-REPLACE_WITH_PRIVATE_PATH"
 # The NAME of the environment variable that holds the router bearer secret (the value of
 # the router's header credential, without the word Bearer). Never put the secret here.
 token_env = "EXPIRY_WATCH_ROUTER_TOKEN"
