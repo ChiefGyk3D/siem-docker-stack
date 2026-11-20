@@ -33,8 +33,8 @@ Grafana alert (severity=critical, phone=true)
   by design: failure detection can itself miss a drop.
 - The second part of the design is the outside heartbeat observer
   ([heartbeat.md](heartbeat.md)). It lives outside the lab and carries the
-  fallback when Grafana, n8n or the internet link is down. Matrix as a third
-  path is a later task and is not part of this one.
+  fallback when Grafana, n8n or the internet link is down. Matrix is a third
+  path, described in [the Matrix section](#third-path-matrix-issue-147) below.
 
 Files:
 
@@ -150,3 +150,132 @@ Not verified: Grafana never loaded these files; no email was sent; the
 Doppler dev config name is a guess; double paging behavior and the SMTP
 provider's own limits are untested; the heartbeat observer's fallback for P1 is
 described in [heartbeat.md](heartbeat.md) and is not exercised by this change.
+
+## Third path: Matrix (issue #147)
+
+Nothing here is active either. The files ship as `.example`:
+
+- `docker/grafana/provisioning/alerting/matrix-contact-point.yml.example`
+- `docker/grafana/provisioning/alerting/matrix-notification-policy.yml.example`
+  (the `matrix-p1` route, `continue: true`, directly after `email-p1`)
+
+### Why a relay: Grafana cannot post to Matrix directly
+
+This is a design note, and there is no relay code in this repository (no relay
+code ships here). Grafana has no Matrix contact point and a webhook contact point
+cannot do the job alone:
+
+- The Matrix send call is
+  `PUT /_matrix/client/v3/rooms/{roomId}/send/m.room.message/{txnId}` with an
+  `Authorization: Bearer <token>` header. The spec says the transaction id lets
+  the homeserver "distinguish a new request from a retransmission". A reused
+  txnId on the same device and endpoint is treated as a retransmission and
+  answered with the original event id, with no new message. Clients must change
+  the txnId for every new request.
+- A Grafana webhook contact point has one fixed URL. Grafana's docs show template
+  support for Title, Message and Custom Payload, and none for the URL. A fixed URL
+  means a fixed txnId. The first alert would post and every later one would be
+  dropped as a retransmission, silently, with HTTP 200 and no error in Grafana.
+  (How long a homeserver remembers a txnId is implementation specific, so the
+  failure could also come and go. That is the worse behavior for a P1 path.)
+- The access token must travel in a header. Grafana's webhook can send a Bearer
+  header, so that part works, but the txnId blocks the direct route. Sending the
+  token as a query parameter is deprecated by the spec and is not used here.
+
+So `matrix-p1` is a plain webhook to a relay you run. The relay:
+
+1. Accepts Grafana's webhook POST, and checks the bearer `P1_MATRIX_RELAY_TOKEN`
+   in constant time.
+2. Builds one `m.room.message` body from the alert payload (alert names, status,
+   severity, a link).
+3. Calls the Matrix send endpoint with a fresh txnId per message (for example a
+   random UUID, reused only for its own retries on a network error), the room id
+   percent-encoded in the path, and its own `MATRIX_ACCESS_TOKEN` and room id from
+   its environment.
+4. Returns a non-2xx status when Matrix fails, so Grafana's own notification
+   failure alert
+   ([notification-failure-alert-rule.yml](../docker/grafana/provisioning/alerting/notification-failure-alert-rule.yml))
+   sees it.
+
+The existing `scripts/expiry_watch.py` Matrix sender already does steps 2 and 3
+(its `matrix_send` derives a deterministic txnId per notice and generation and
+reads the token from an environment variable), so the relay can reuse that
+approach rather than invent one. A maintained alternative is the
+grafana-matrix-forwarder project (MIT license, password login rather than a token,
+a container image on the project's registry). It is not adopted here: it has not
+been inspected, and the project's rules require an inspection before anything
+third party is run.
+
+The relay is a new single point of failure on the Matrix path, which is fine for
+a third path, but it should run outside the failure domain you are protecting
+against (not on the same host as Grafana if you can avoid it).
+
+### Enable it (owner steps, each a live change)
+
+Not done by this repository. Build or choose the relay first (a separate task),
+then:
+
+1. Create a bot account on your homeserver and a room for P1 alerts, invite the
+   bot, and note the room id (the `!id:server` form, not an alias). Live change.
+2. Create an access token for the bot. Live change.
+3. Store the secrets by variable name only in the Doppler dev config of your
+   project (the `dev_network` config; confirm the exact name), never prd until you
+   say the stack is live: `MATRIX_ACCESS_TOKEN` and the room id for the relay,
+   `P1_MATRIX_RELAY_URL` and `P1_MATRIX_RELAY_TOKEN` for Grafana. Live change.
+4. Pass `P1_MATRIX_RELAY_URL` and `P1_MATRIX_RELAY_TOKEN` to the `grafana`
+   service in `docker/docker-compose.yml` (the compose file is unchanged here).
+   Live change.
+5. Copy the `matrix-p1` contact point into `contact-points.yml`, and merge the
+   `matrix-p1` route into your policy tree directly after `email-p1`. Live change.
+6. Restart Grafana (`docker compose up -d grafana`). Live change.
+7. Send a test P1 twice, a few minutes apart, and confirm both messages reach
+   the room (this checks the txnId handling), then confirm email, Discord and the
+   phone still receive it. Live change.
+
+### Rollback
+
+Live change, each step: remove the `matrix-p1` route and the contact point entry,
+restart Grafana, then revoke the bot's access token and remove the variables from
+the secret manager. Email and n8n were never modified.
+
+### Verified and inferred (Matrix)
+
+VERIFIED (read 2026-11-19):
+
+- The webhook contact point accepts `POST` or `PUT`, extra headers, a Bearer
+  authentication scheme and a custom payload template; templates are documented
+  for Title, Message and Custom Payload, not for the URL:
+  https://grafana.com/docs/grafana/latest/alerting/configure-notifications/manage-contact-points/integrations/webhook-notifier/
+- File provisioning of a `webhook` contact point lists `url`, `httpMethod`,
+  `authorization_scheme`, `authorization_credentials`, `maxAlerts`, `tlsConfig`
+  and `hmacConfig`, and interpolates environment variables with the `$variable`
+  syntax (an unset variable becomes an empty string):
+  https://grafana.com/docs/grafana/latest/alerting/set-up/provision-alerting-resources/file-provisioning/
+- Matrix transaction identifiers: scoped to one device and one endpoint,
+  idempotent, a reused id is a retransmission and returns the original response;
+  the Bearer header is supported and the query parameter is deprecated:
+  https://spec.matrix.org/v1.11/client-server-api/ (transaction identifiers and
+  access token sections; the page was read in part, the first 100000 characters).
+- No Matrix contact point appears in Grafana's contact point documentation, and a
+  community guide says Grafana does not support Matrix by default and uses a
+  forwarder:
+  https://gyptazy.com/howto-integrate-matrix-alerts-into-grafana-with-webhooks
+  (found by search; not read in full).
+- The repository's own `n8n-grafana-router` contact point already uses the same
+  `webhook` keys with `$GRAFANA_WEBHOOK_SECRET`.
+
+INFERRED, not read on those pages:
+
+- That the webhook URL cannot be templated per alert (the docs are silent; they
+  show templates only for the three fields above). Even if a future version
+  templated the URL, it would not produce a unique txnId.
+- How long a homeserver keeps a txnId (the spec leaves it open).
+- That `authorization_credentials` could be given as a secure setting; this
+  example uses the same `$VARIABLE` form as the n8n contact point.
+- The grafana-matrix-forwarder details above come from its README mirror and have
+  not been inspected.
+
+Not verified: Grafana never loaded these files, no relay exists, and nothing was
+sent to any homeserver. The tests in `tests/python/test_channel_redundancy.py`
+check only that the files parse, hold no secret, keep the route order and
+`continue`, and are not auto-loaded.

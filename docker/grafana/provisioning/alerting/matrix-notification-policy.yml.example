@@ -1,0 +1,46 @@
+# Notification policy route that also sends P1 alerts to Matrix (issue #147). SHIPPED AS AN EXAMPLE.
+#
+# Grafana provisions the notification policy as ONE tree for the whole
+# organization: loading this file replaces whatever policy tree exists today.
+# That is why it ends in .example and Grafana ignores it. To use it, merge the
+# `matrix-p1` route below into your tree directly AFTER the `email-p1` route from
+# email-notification-policy.yml.example (both stay ahead of your other routes).
+# The contact point it names is defined in matrix-contact-point.yml.example.
+#
+# Both routes use `continue: true`, so one P1 reaches email, Matrix and, through
+# the routes after them, n8n-grafana-router. A P1 is severity=critical with
+# phone=true; the heartbeat (severity=info, phone=false) never matches.
+apiVersion: 1
+
+policies:
+  - orgId: 1
+    receiver: n8n-grafana-router
+    group_by: ["alertname", "grafana_folder"]
+    routes:
+      - receiver: email-p1
+        continue: true
+        object_matchers:
+          - ["severity", "=", "critical"]
+          - ["phone", "=", "true"]
+        group_by: ["alertname"]
+        group_wait: 30s
+        group_interval: 5m
+        repeat_interval: 1h
+      - receiver: matrix-p1
+        continue: true
+        object_matchers:
+          - ["severity", "=", "critical"]
+          - ["phone", "=", "true"]
+        group_by: ["alertname"]
+        group_wait: 30s
+        group_interval: 5m
+        repeat_interval: 1h
+      # Your existing routes follow. P1 alerts that match none of them still
+      # reach the root receiver, n8n-grafana-router.
+      - receiver: n8n-grafana-router
+        object_matchers:
+          - ["heartbeat", "=", "true"]
+        group_by: ["alertname"]
+        group_wait: 0s
+        group_interval: 1m
+        repeat_interval: 5m
