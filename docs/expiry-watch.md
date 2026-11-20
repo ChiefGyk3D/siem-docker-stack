@@ -32,13 +32,15 @@ You need Python 3.11 or newer (for `tomllib`). There is nothing to install.
    cp docs/expiry-watch-registry.example.toml expiry-watch-registry.toml
    ```
 
-   In `expiry-watch.toml`, point `[router].url` at your router webhook and
-   point the registry provider at `expiry-watch-registry.toml`. List your own
+   In `expiry-watch.toml`, point `[router].url` at the router's own endpoint
+   for the watch, `/webhook/expiry-watch-alerts-<opaque>` (the private path, see
+   [The router credential](#the-router-credential)), and point the registry provider at `expiry-watch-registry.toml`. List your own
    items in the registry.
 
-2. Export the router secret. This is the value of the header credential the
-   router checks (`GRAFANA_WEBHOOK_SECRET` in this repo), without the word
-   `Bearer`. The config only names the variable:
+2. Export the router secret. This is the value the router checks on the
+   watch's own endpoint (`EXPIRY_WATCH_ROUTER_SECRET` in the n8n container; its
+   value is never the Grafana webhook secret), without the word `Bearer`. The
+   config only names the variable:
 
    ```sh
    export EXPIRY_WATCH_ROUTER_TOKEN='...'   # from your secret manager, not typed into shell history
@@ -289,6 +291,142 @@ Pushover priority is the router's decision: an alert name the router does not
 know is capped at priority 1. To let expired notices page at emergency
 priority, add the alert names to `ALLOWED_ALERTNAMES` in the router (they are
 `Expiry watch: <item name>`). That is a deliberate step, not the default.
+
+### The router credential
+
+The watch has its own endpoint on the router and its own secret, so rotating or
+revoking one of the two (Grafana, the watch) never touches the other. Owner
+decision, runbook Q11, issue #127.
+
+| | Grafana | Expiry watch |
+|---|---|---|
+| Router node | `Grafana Webhook` (unchanged) | `Expiry Watch Webhook` |
+| URL path | the private `grafana-alerts-<opaque>` path | the private `expiry-watch-alerts-<opaque>` path (file `expiry-path`); the committed node is DISABLED with a placeholder path, so importing the file directly serves nothing |
+| Header check | n8n Header Auth, credential `grafana-webhook-auth` | the `Check Expiry Secret` Code node |
+| Secret lives in | the n8n credential and `GRAFANA_WEBHOOK_SECRET` (Grafana side) | `EXPIRY_WATCH_ROUTER_SECRET` in the n8n container's environment |
+| The watch's side | | `EXPIRY_WATCH_ROUTER_TOKEN`, the same value, named in `[router].token_env` |
+| A rejected call | n8n answers 403 | the router answers 403 and routes nothing |
+
+Why the name `EXPIRY_WATCH_ROUTER_SECRET`: it matches the `EXPIRY_WATCH_*`
+family the watch already uses, and `_SECRET` (not `_TOKEN`) marks the
+router-side copy, the value the router compares against, apart from
+`EXPIRY_WATCH_ROUTER_TOKEN`, the value the watch sends. Both hold the same
+string.
+
+Why a second endpoint and not one endpoint taking two secrets: n8n Header Auth
+holds exactly one credential per webhook node, and Grafana's check is left
+exactly as it was, so a bug or a missing setting in the new check cannot stop
+Grafana's alerts from arriving. The two endpoints share everything after the
+check (the normalizer, routing, Discord, Pushover, heartbeat), so every
+downstream guard applies to both.
+
+The check, in the `Check Expiry Secret` Code node:
+
+- It reads the environment variable `EXPIRY_WATCH_ROUTER_SECRET` and compares
+  the request's `Authorization` header with `Bearer ` plus that value, exactly
+  (case and spacing included).
+- It denies when the variable is unset, empty, whitespace-only, not text or
+  unreadable (env access blocked), and when the header is missing or not text.
+  An empty value never matches an empty or missing header.
+- The comparison visits every position and ORs the differences, so its time
+  does not depend on where the first difference is, and a denied call does not
+  say whether the length or the content was wrong. A length difference is the
+  one thing it cannot hide; use the 44 character `openssl rand -base64 32` value.
+- A denied call is answered 403 with a fixed body, runs nothing else and sends
+  no message. Only a new body leaves the check node, never the header.
+- It reads no other variable, and Grafana's variable is not consulted.
+- An `Authorization` header over 512 characters is denied before the comparison
+  loop runs, and so is a configured secret over 400 characters (checked before
+  the loop, so an oversized value never costs work per request: the watch then
+  gets 403 on every call, which is loud). The 44 character
+  `openssl rand -base64 32` value is far below both.
+
+What the expiry secret may send (authorization, not only authentication). The
+secret proves the caller is the expiry watch, so the check also limits what that
+caller can express. It accepts exactly the body `scripts/expiry_watch.py` builds
+and builds a NEW body from the checked fields; anything else is denied with the
+same 403, not passed on:
+
+- one alert, status `firing` (a `resolved` is denied, so the secret cannot cancel
+  a repeat);
+- labels exactly `alertname` (`Expiry watch: <item>`, equal to the `item` label),
+  `severity` (`critical`, `warning` or `info`), `expiry_watch=true`, `item`
+  (1 to 100 characters: letters, digits, space, dot, colon and hyphen only,
+  starting with a letter or digit), `kind` (1 to 40 letters, digits and hyphens),
+  `stage` (a day count, `daily`,
+  `expired` or `disappeared`) and optionally `phone=true`; any other label
+  (`heartbeat`, `update_security`, `team`, `source`) is denied;
+- annotations may only be the keys `summary` and `description` (300 and 1000
+  characters at most), but their text is DROPPED: the router builds the summary
+  and description itself from `item`, `kind` and `stage` (for example "deploy-key
+  (ssh-key): expires within 14 days", "has expired", "is no longer listed by its
+  provider") and a fixed description. No free text from the caller reaches Discord
+  or the phone, so a holder of this secret cannot send a misleading message, a
+  link or a mention. Item names with an underscore, slash, `@`, backtick, angle
+  bracket, asterisk or any non-ASCII character are denied with the 403, so the
+  watch fails loudly; rename such an item in the registry or the provider. The
+  dates, owner and runbook of the full notice stay in the watch's own output
+  and its Matrix and email channels;
+- a 32 character lowercase hex `fingerprint`, an optional UTC `startsAt`; no URLs;
+- the handed-on body carries the label `source=expiry-watch`, set by the router,
+  never by the caller.
+
+Because the name prefix `Expiry watch: ` is not on the Pushover builder's alert
+name allowlist (a test enforces it), an expiry notice reaches Discord, and with
+`phone=true` Pushover at priority 1 at most; priority 2 (emergency repeat) and
+cancel-by-tag are unreachable with this secret. An expired item (`critical`)
+still pages at priority 1. If you ever add an `Expiry watch:` name to the
+allowlist, that guarantee ends.
+
+Request limits before the check (n8n and your ingress, not the workflow):
+
+- The endpoint has a private path so it cannot be found by guessing, but the path
+  is not a credential: treat it as an address.
+- n8n's own body limit is `N8N_PAYLOAD_SIZE_MAX`, default 16 MiB (n8n docs,
+  endpoints environment variables, read 2026-11-19). An expiry notice is under
+  8 KB, so set it lower for the container if your n8n allows, and set a request
+  body limit of about 16 KB for this path at the reverse proxy.
+- Put a rate limit (per source and global), request and header timeouts and a
+  concurrency limit on this path at the reverse proxy or ingress. A call that is
+  denied still starts one workflow execution; only the proxy can stop that
+  early. The watch posts a few requests a day.
+
+Needs `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` in the n8n container, the same
+setting the [heartbeat](heartbeat.md#settings-environment-of-the-n8n-container)
+needs. While env access is blocked the check cannot read the secret and denies
+every call to this endpoint, so the watch gets 403 and exits 1 (a delivery
+failure, not silent); Grafana is unaffected.
+
+Owner steps (nothing here runs from the repo; each is a live change):
+
+1. Create the secret in the secret manager, dev config first, with the value
+   piped in and the output sent to /dev/null so it is never echoed (the
+   watch's side, `EXPIRY_WATCH_ROUTER_TOKEN`; `openssl rand -base64 32` makes the
+   value). Give the n8n container the same value as
+   `EXPIRY_WATCH_ROUTER_SECRET` (an environment entry in the n8n compose file,
+   with an empty default) and make sure `N8N_BLOCK_ENV_ACCESS_IN_NODE=false`
+   is set there.
+2. Re-import `n8n/grafana-alert-router.json` with the live import helper
+   (`scripts/live-deploy/n8n-setup-alert-router.py --workflow ...`), then restart or
+   activate the workflow as the live-deploy runbook describes. The helper makes a
+   private path for each webhook and saves them in `router-path` (Grafana) and
+   `expiry-path` (the watch) in its config directory. The committed
+   `Expiry Watch Webhook` node ships `disabled` with a placeholder path (n8n
+   does not register a webhook for a disabled trigger node: UNVERIFIED against
+   a live n8n, check after the first import that the placeholder path answers
+   404); only the helper enables it, and only with a path of the form
+   `expiry-watch-alerts-` plus 24 URL-safe characters. The helper writes
+   `expiry-path` with mode 600 enforced on the opened file, reads it only if it
+   is a regular file you own with no group or other permission bits (a looser
+   file is refused with a message: delete it to get a new path), refuses
+   symlinks, and replaces a saved path that does not have the generated shape.
+3. Read the path from `expiry-path`, point `[router].url` in the watch's config at
+   `<n8n base>/webhook/<contents of expiry-path>` (never commit it), and keep the
+   watch's variable `EXPIRY_WATCH_ROUTER_TOKEN` equal to the router's.
+4. Set the ingress limits above (body size, rate limit, timeouts).
+5. Rotate by changing both values together, then restart the n8n container so it
+   reads the new environment. To revoke the watch only, unset or empty the
+   router's variable: the endpoint then denies every call.
 
 ### What the router receives
 
