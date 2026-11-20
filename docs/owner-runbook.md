@@ -40,6 +40,30 @@ parts true. Every fact is marked:
 | `ARCHIVE_FILE` | The `.tar.gz.age` archive a backup run wrote (step 2d) |
 | `OBSERVER_HOSTNAME` | The host name inside the heartbeat observer's ping URL (step 7) |
 | `VARIABLE_NAME` | A variable name from the table in 6b |
+| `EXPECTED_SHA256` | The sha256 of the repo archive, printed on YOUR WORKSTATION by step 0a (never read from the box) |
+
+Session variables. The three multi-line session blocks below (the SAFE N8N
+RECREATE, the router chain and the router rollback) do not paste placeholders into
+command positions. Instead, you set five shell variables ONCE in the session, and
+the check function refuses to run anything if one of them has an unexpected shape,
+so a value with a space or a shell metacharacter can never become syntax. Every
+expansion in those blocks is quoted. Paste this at the start of the session, with
+your real values (`REPO_DIR` and the compose folder are paths, the ids are 16 hex
+characters, the network name is letters, digits, dot, dash and underscore):
+
+```
+REPO_DIR=/opt/siem-repo
+N8N_COMPOSE_DIR=/opt/n8n
+SIEM_NETWORK=siem_siem-net
+ROUTER_ID=0000000000000000
+HANDLER_ID=0000000000000000
+chk_vars() { printf '%s\n' "$REPO_DIR" "$N8N_COMPOSE_DIR" | grep -Eqv '^/[A-Za-z0-9._/-]+$' && { echo "bad path variable"; return 1; }; printf '%s\n' "$ROUTER_ID" "$HANDLER_ID" | grep -Eqv '^[0-9a-f]{16}$' && { echo "bad workflow id"; return 1; }; printf '%s\n' "$SIEM_NETWORK" | grep -Eqv '^[A-Za-z0-9._-]+$' && { echo "bad network name"; return 1; }; return 0; }
+chk_vars && echo "variables ok"
+```
+
+The values above are examples only: replace the two ids with the live ones (`n8n
+list:workflow`) and the network with the one from `docker network ls`. `chk_vars`
+must print `variables ok`.
 
 Rules every step follows:
 
@@ -156,34 +180,53 @@ made from, so you can record it):
 git fetch origin && git rev-parse --short origin/master
 git archive --format=tar.gz --prefix=siem-docker-stack/ -o "$HOME/siem-repo.tar.gz" origin/master scripts n8n docs docker/grafana/provisioning/alerting
 gzip -dc "$HOME/siem-repo.tar.gz" | git get-tar-commit-id
-( cd "$HOME" && sha256sum siem-repo.tar.gz > siem-repo.sha256 )
-scp -i KEY_FILE -o IdentitiesOnly=yes "$HOME/siem-repo.tar.gz" "$HOME/siem-repo.sha256" LOGGING_BOX:
-rm -f "$HOME/siem-repo.tar.gz" "$HOME/siem-repo.sha256"
+sha256sum "$HOME/siem-repo.tar.gz"
+scp -i KEY_FILE -o IdentitiesOnly=yes "$HOME/siem-repo.tar.gz" LOGGING_BOX:
+rm -f "$HOME/siem-repo.tar.gz"
 ```
 
+The `sha256sum` line prints the checksum of the archive ON YOUR WORKSTATION. That
+64-character value is `EXPECTED_SHA256`. It must come from the workstation, never
+from the box and never from a file that travelled with the archive: a checksum that
+travels with the archive proves nothing against whoever altered the archive. The
+commit id from the line above is the record of what it should contain.
+
 Then unpack it on LOGGING_BOX into a fresh staging folder, never over the live
-copy. The checksum travels with the archive over the same ssh channel, so it proves
-the copy is intact, not who made it: the commit id printed above is the record of
-what it should be. `git archive` records group-writable modes (directories 775,
+copy, and replace the live copy only after the new one is verified. Paste
+`EXPECTED_SHA256` into the command by hand. `git archive` records group-writable modes (directories 775,
 files 664) and `tar` keeps them, so the steps below remove group and other write
 permission explicitly, refuse any symlink and any remaining writable entry, and only
 then swap the staging folder into place. `--strip-components=1` drops the
 `siem-docker-stack/` prefix, so the folders land directly in `REPO_DIR`:
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd "$HOME" && sha256sum -c siem-repo.sha256 && sudo rm -rf /opt/siem-repo.new && sudo install -d -m 755 -o root -g root /opt/siem-repo.new && sudo tar -xzf siem-repo.tar.gz -C /opt/siem-repo.new --strip-components=1 --no-same-owner --no-same-permissions && sudo chmod -R go-w /opt/siem-repo.new && test -z "$(sudo find /opt/siem-repo.new -perm /022 -o -type l)" && sudo rm -rf /opt/siem-repo && sudo mv /opt/siem-repo.new /opt/siem-repo && rm -f siem-repo.tar.gz siem-repo.sha256 && ls /opt/siem-repo/scripts/live-deploy /opt/siem-repo/n8n && ls -ld /opt/siem-repo && sudo find /opt/siem-repo -perm /022 | wc -l'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd "$HOME" && printf "%s  siem-repo.tar.gz\n" EXPECTED_SHA256 | sha256sum -c - && sudo rm -rf /opt/siem-repo.new && sudo install -d -m 755 -o root -g root /opt/siem-repo.new && sudo tar -xzf siem-repo.tar.gz -C /opt/siem-repo.new --strip-components=1 --no-same-owner --no-same-permissions && sudo chmod -R go-w /opt/siem-repo.new && test -z "$(sudo find /opt/siem-repo.new -perm /022 -o -type l)" && test -f /opt/siem-repo.new/scripts/live-deploy/siem-run && echo "staged tree verified"'
 ```
 
-Expected: `OK` from the checksum, the `live-deploy` scripts (including `siem-run`),
-`grafana-alert-router.json` in the `n8n` listing, `drwxr-xr-x ... root root` for the
-folder, and `0` as the last line (no entry is writable by group or others). Any
-other output stops the chain before the live copy is touched. Here
-`REPO_DIR` is `/opt/siem-repo`; substitute it in every command below. To update
-later, repeat both blocks (the old copy is replaced as a whole, so no stale file
-stays behind).
+Only when that printed `staged tree verified`, swap it in. The live name is never
+without a tree: the old tree is renamed aside to a timestamped name first, the new
+one is renamed into place, and if that second rename fails the old one is renamed
+back at once:
 
-Rollback: `sudo rm -rf /opt/siem-repo`. Nothing else changed. The archive holds
-only repository files, no secret value and no live address.
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'TS="$(date -u +%Y%m%dT%H%M%SZ)" && { sudo test ! -e /opt/siem-repo || sudo mv /opt/siem-repo "/opt/siem-repo.old-$TS"; } && { sudo mv /opt/siem-repo.new /opt/siem-repo || { echo "SWAP FAILED: restoring the old tree"; sudo test -e "/opt/siem-repo.old-$TS" && sudo mv "/opt/siem-repo.old-$TS" /opt/siem-repo; false; }; } && ls /opt/siem-repo/scripts/live-deploy /opt/siem-repo/n8n && ls -ld /opt/siem-repo && sudo find /opt/siem-repo -perm /022 | wc -l && ls -d /opt/siem-repo.old-* 2>/dev/null'
+```
+
+Expected: the `live-deploy` scripts (including `siem-run`),
+`grafana-alert-router.json` in the `n8n` listing, `drwxr-xr-x ... root root` for the
+folder, `0` (no entry is writable by group or others) and the name of the old tree
+kept aside, if there was one. Any other output means the swap did not complete and
+the old tree is back under its own name. Only after you have used the new copy
+successfully (step 0 passes) delete the old tree by hand with
+`sudo rm -rf /opt/siem-repo.old-TIMESTAMP`, naming the exact timestamp you saw, and
+delete the archive on the box (`rm -f "$HOME/siem-repo.tar.gz"`). Here
+`REPO_DIR` is `/opt/siem-repo`; substitute it in every command below. To update
+later, repeat both blocks.
+
+Rollback: if the new copy is bad, `sudo mv /opt/siem-repo /opt/siem-repo.bad &&
+sudo mv /opt/siem-repo.old-TIMESTAMP /opt/siem-repo`. On a first install there is
+nothing to roll back to: `sudo rm -rf /opt/siem-repo`. Nothing else changed. The
+archive holds only repository files, no secret value and no live address.
 
 ## Step 0b. One dev config for every new Grafana value (LIVE)
 
@@ -1135,18 +1178,46 @@ implements as option (a)). So the form below (1) records which variables the RUN
 container holds, names only; (2) refuses to recreate unless every required variable
 is non-empty in the compose command's own environment, before anything is touched;
 (3) checks the new container and prints the exact recovery when a value is blank.
-`N8N_COMPOSE_DIR` is the folder of the compose file and `SIEM_NETWORK` the real
-network name from `docker network ls` (VERIFIED: runbook). `HEARTBEAT_PING_URL`
-(and `HEARTBEAT_KIND`) must exist in `dev_network`: copy them from where they live
-today the way step 0b item 2 copies a secret, with the item 3 check, before the
-first recreate. Until 6.1 item 1 has created `EXPIRY_WATCH_ROUTER_TOKEN`, leave
-that name out of the required list and of `--preserve-env`, and leave out
-`EXPIRY_WATCH_ROUTER_SECRET` in the first command. In a session on LOGGING_BOX:
+`HEARTBEAT_PING_URL` (and `HEARTBEAT_KIND`) must exist in `dev_network`: copy them
+from where they live today the way step 0b item 2 copies a secret, with the item 3
+check, before the first recreate. The function below takes the required variable
+names and the preserve list as its two arguments, so there are two complete calls
+and nothing to rewrite by hand: the first (BEFORE 6.1 item 1 has created
+`EXPIRY_WATCH_ROUTER_TOKEN`) requires only the heartbeat variables, the second (from
+6.1 item 2 on) also requires the expiry token. It uses the session variables set at
+the top of this runbook (`chk_vars` must have printed `variables ok`), quotes every
+expansion, and its exit status is the real status: `recreate exit code: N` is the
+last line it prints and it returns that N. In a session on LOGGING_BOX, define it:
 
 ```
-docker exec n8n sh -c 'for V in HEARTBEAT_PING_URL HEARTBEAT_KIND EXPIRY_WATCH_ROUTER_SECRET; do if [ -n "$(printenv $V)" ]; then echo "$V set"; else echo "$V unset"; fi; done' | tee "$HOME/n8n-env-before.txt"
-cd N8N_COMPOSE_DIR && doppler run --project homelab --config dev_network -- sh -c 'for V in HEARTBEAT_PING_URL EXPIRY_WATCH_ROUTER_TOKEN; do if [ -z "$(printenv $V)" ]; then echo "REFUSING: $V is empty in the compose environment; n8n was NOT recreated"; exit 1; fi; done; sudo --preserve-env=HEARTBEAT_PING_URL,HEARTBEAT_KIND,EXPIRY_WATCH_ROUTER_TOKEN docker compose up -d n8n' && docker port n8n && docker network inspect SIEM_NETWORK --format "{{range .Containers}}{{.Name}} {{end}}" && docker exec n8n sh -c 'test -n "$(printenv HEARTBEAT_PING_URL)"' && echo "n8n recreated, heartbeat variable set" || echo "RECOVERY: the recreate failed or HEARTBEAT_PING_URL is blank in the new container. n8n data is on its volume and is unaffected. Put the value in dev_network (step 0b item 2 form), run the recreate command above again, then the step 1 presence check. Until then the heartbeat is off and the observer alerts after about 20 minutes."
+recreate_n8n() {
+  chk_vars || return 1
+  if ! docker exec n8n true > /dev/null 2>&1; then echo "STOP: no running container named n8n; nothing recorded and nothing recreated"; echo "recreate exit code: 1"; return 1; fi
+  if ! ( umask 077 && docker exec n8n sh -c 'for V in HEARTBEAT_PING_URL HEARTBEAT_KIND EXPIRY_WATCH_ROUTER_SECRET; do if [ -n "$(printenv $V)" ]; then echo "$V set"; else echo "$V unset"; fi; done' > "$HOME/n8n-env-before.txt" ); then echo "STOP: could not read the running container; nothing recreated"; echo "recreate exit code: 1"; return 1; fi
+  cat "$HOME/n8n-env-before.txt"
+  ( cd "$N8N_COMPOSE_DIR" && REQ_VARS="$1" PRESERVE="$2" doppler run --project homelab --config dev_network -- sh -c 'for V in $REQ_VARS; do if [ -z "$(printenv $V)" ]; then echo "REFUSING: $V is empty in the compose environment; n8n was NOT recreated"; exit 1; fi; done; sudo --preserve-env="$PRESERVE" docker compose up -d n8n' )
+  R=$?
+  if [ $R -eq 0 ]; then docker port n8n && docker network inspect "$SIEM_NETWORK" --format "{{range .Containers}}{{.Name}} {{end}}" && docker exec n8n sh -c 'test -n "$(printenv HEARTBEAT_PING_URL)"'; R=$?; fi
+  if [ $R -eq 0 ]; then echo "n8n recreated, heartbeat variable set"; else echo "RECOVERY: the recreate failed or HEARTBEAT_PING_URL is blank in the new container. n8n data is on its volume and is unaffected. Put the value in dev_network (step 0b item 2 form), run the recreate call again, then the step 1 presence check. Until then the heartbeat is off and the observer alerts after about 20 minutes."; fi
+  echo "recreate exit code: $R"
+  return $R
+}
 ```
+
+Then call it. Before 6.1 item 1 (heartbeat variables only):
+
+```
+recreate_n8n "HEARTBEAT_PING_URL" "HEARTBEAT_PING_URL,HEARTBEAT_KIND"
+```
+
+From 6.1 item 2 on (heartbeat variables and the expiry token):
+
+```
+recreate_n8n "HEARTBEAT_PING_URL EXPIRY_WATCH_ROUTER_TOKEN" "HEARTBEAT_PING_URL,HEARTBEAT_KIND,EXPIRY_WATCH_ROUTER_TOKEN"
+```
+
+Check the status the call returned with `echo $?`: only `0` is success. If the running
+container is absent the function stops before recording anything or recreating.
 
 Compare the `$HOME/n8n-env-before.txt` lines with the step 1 presence check after
 the recreate: every variable that said `set` before must say `set` after. Delete the
@@ -1264,9 +1335,9 @@ ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'B="N8N_COMPOSE_FILE.bak-$(
 adds `N8N_PAYLOAD_SIZE_MAX=1` after that line, so do 6.2 in this same edit and one
 recreate if you have not applied it yet: its `sed` needs the
 `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` line to exist.) Recreate n8n with the SAFE N8N
-RECREATE of 6.0, now with `EXPIRY_WATCH_ROUTER_TOKEN` in its required list (it
-refuses, before touching n8n, when the value is empty), and re-check the siem network
-as that block does.
+RECREATE of 6.0 using its SECOND call (the one that also requires
+`EXPIRY_WATCH_ROUTER_TOKEN`; it refuses, before touching n8n, when the value is
+empty), and read its `recreate exit code`; it re-checks the siem network itself.
 
 OWNER DECISION: how n8n's variables reach `docker compose` on EVERY recreate. The
 entries above take their values from the environment of the compose command. A
@@ -1339,8 +1410,15 @@ check out (the container-side mode of the export is not under your control, so
 `umask` alone is not enough). In a session on LOGGING_BOX:
 
 ```
-umask 077 && D="$(mktemp -d)" && docker exec n8n n8n export:workflow --id=ROUTER_ID --output=/tmp/router-before.json && docker cp n8n:/tmp/router-before.json "$D/r.json" && docker exec n8n rm -f /tmp/router-before.json && [ ! -L "$HOME/router-before.json" ] && install -m 600 "$D/r.json" "$HOME/router-before.json" && rm -rf "$D" && [ "$(stat -c %a "$HOME/router-before.json")" = 600 ] && test -s "$HOME/router-before.json" && grep -q ROUTER_ID "$HOME/router-before.json" && echo "saved copy ok: $HOME/router-before.json"
+chk_vars && umask 077 && D="$(mktemp -d)" && docker exec n8n n8n export:workflow --id="$ROUTER_ID" --output=/tmp/router-before.json && docker cp n8n:/tmp/router-before.json "$D/r.json" && docker exec n8n rm -f /tmp/router-before.json && [ ! -L "$HOME/router-before.json" ] && install -m 600 "$D/r.json" "$HOME/router-before.json" && rm -rf "$D" && [ "$(stat -c %a "$HOME/router-before.json")" = 600 ] && test -s "$HOME/router-before.json" && grep -q "$ROUTER_ID" "$HOME/router-before.json" && echo "saved copy ok: $HOME/router-before.json, $(grep -o '"typeVersion"' "$HOME/router-before.json" | wc -l) nodes"
 ```
+
+Write down the node count it prints: the rollback verification below compares
+against it. OWNER DECISION: the export-to-import round trip of this n8n version has
+never been run here, so the rollback is unproven. Before the first live import,
+rehearse it on a scratch n8n (the step 2d scratch setup): import the saved file there
+with `n8n import:workflow --input=...` and check it lists. If you do not rehearse it,
+the step 2 archive is the only proven restore, and the live import carries that risk.
 
 - The first must list the file as `-rw-------` and print `grafana-alerts-`: that file
   is the live Grafana path. If it is missing, the import makes a NEW Grafana path and
@@ -1357,19 +1435,28 @@ umask 077 && D="$(mktemp -d)" && docker exec n8n n8n export:workflow --id=ROUTER
   "$HOME/router-before.json"` after step 4 passes. The step 2 archive is the older
   fallback.
 
-Now the import, publish and restart, in a session on LOGGING_BOX. Each stage runs
-only if the one before it succeeded, and a failure prints the stage, the recovery
-and the limit:
+Now the import, publish and restart, in the same session (the session variables are
+set and `chk_vars` printed `variables ok`). It is defined as one function so the
+status `R` cannot be lost between separately pasted lines. Each stage runs only if the
+one before it succeeded, a failure prints the stage, the recovery and the limit, and
+the function returns the real status after printing `chain exit code: N`:
 
 ```
-cd REPO_DIR
-"$HOME/bin/siem-run" python3 -I scripts/live-deploy/n8n-setup-alert-router.py --workflow n8n/grafana-alert-router.json ROUTER_ID --error-workflow-id HANDLER_ID; R=$?; [ $R -eq 0 ] || echo "FAILED stage 1 of 3 (import), exit $R: the live router may be unchanged or half written; run n8n list:workflow, and if it is not active use the ROLLBACK below within 5 minutes"
-[ $R -ne 0 ] || { docker exec n8n n8n publish:workflow --id=ROUTER_ID; R=$?; [ $R -eq 0 ] || echo "FAILED stage 2 of 3 (publish), exit $R: the router is overwritten and INACTIVE. Retry this publish once, then docker restart n8n; if it fails again run the ROLLBACK below within 5 minutes"; }
-[ $R -ne 0 ] || { docker restart n8n; R=$?; [ $R -eq 0 ] || echo "FAILED stage 3 of 3 (restart), exit $R: the router is published but n8n may be stopped. Run docker start n8n, then docker ps --filter name=n8n; if it does not come up healthy within 5 minutes run the ROLLBACK below"; }
-echo "chain exit code: $R"
+router_chain() {
+  chk_vars || return 1
+  ( cd "$REPO_DIR" && "$HOME/bin/siem-run" python3 -I scripts/live-deploy/n8n-setup-alert-router.py --workflow n8n/grafana-alert-router.json "$ROUTER_ID" --error-workflow-id "$HANDLER_ID" )
+  R=$?
+  [ $R -eq 0 ] || echo "FAILED stage 1 of 3 (import), exit $R: the live router may be unchanged or half written; run n8n list:workflow, and if it is not active use router_rollback within 5 minutes"
+  if [ $R -eq 0 ]; then docker exec n8n n8n publish:workflow --id="$ROUTER_ID"; R=$?; [ $R -eq 0 ] || echo "FAILED stage 2 of 3 (publish), exit $R: the router is overwritten and INACTIVE. Retry this publish once, then docker restart n8n; if it fails again run router_rollback within 5 minutes"; fi
+  if [ $R -eq 0 ]; then docker restart n8n; R=$?; [ $R -eq 0 ] || echo "FAILED stage 3 of 3 (restart), exit $R: the router is published but n8n may be stopped. Run docker start n8n, then docker ps --filter name=n8n; if it does not come up healthy within 5 minutes run router_rollback"; fi
+  echo "chain exit code: $R"
+  return $R
+}
+router_chain
+echo "router_chain returned $?"
 ```
 
-`chain exit code: 0` is the only success. Expected output lines (VERIFIED: the
+`chain exit code: 0` (and `router_chain returned 0`) is the only success. Expected output lines (VERIFIED: the
 script and runbook section 3):
 `workflow import exit code: 0`, `new webhook path saved (mode 600): ...`,
 `expiry watch webhook path saved (mode 600): ...` and `error workflow set: True`,
@@ -1395,11 +1482,38 @@ format is NOT verified, so if the import below rejects it, restore from the step
 archive. Same session, same stop-at-the-first-failure shape:
 
 ```
-docker cp "$HOME/router-before.json" n8n:/tmp/router-before.json && docker exec n8n n8n import:workflow --input=/tmp/router-before.json && docker exec n8n rm -f /tmp/router-before.json && docker exec n8n n8n publish:workflow --id=ROUTER_ID && docker restart n8n && docker exec n8n n8n list:workflow && echo "rollback done: now run the step 1 presence check and wait for the next heartbeat ping" || echo "ROLLBACK FAILED at the last command that ran: restore from the step 2 archive (docs/backup-restore.md) and do not leave n8n stopped: docker start n8n"
+router_rollback() {
+  chk_vars || return 1
+  F="$HOME/router-before.json"
+  if [ ! -s "$F" ] || [ -L "$F" ] || [ "$(stat -c %a "$F")" != 600 ]; then echo "ROLLBACK STOP: the saved copy is missing, a symlink or not mode 600; restore from the step 2 archive"; echo "rollback exit code: 1"; return 1; fi
+  NODES_BEFORE="$(grep -o '"typeVersion"' "$F" | wc -l)"
+  R=0
+  docker cp "$F" n8n:/tmp/router-before.json; R=$?; [ $R -eq 0 ] || echo "ROLLBACK FAILED at: copy into the container (exit $R)"
+  if [ $R -eq 0 ]; then docker exec n8n n8n import:workflow --input=/tmp/router-before.json; R=$?; [ $R -eq 0 ] || echo "ROLLBACK FAILED at: import (exit $R): the saved file format was not accepted, restore from the step 2 archive"; fi
+  docker exec n8n rm -f /tmp/router-before.json /tmp/router-after.json > /dev/null 2>&1
+  if [ $R -eq 0 ]; then docker exec n8n n8n publish:workflow --id="$ROUTER_ID"; R=$?; [ $R -eq 0 ] || echo "ROLLBACK FAILED at: publish (exit $R)"; fi
+  if [ $R -eq 0 ]; then docker restart n8n; R=$?; [ $R -eq 0 ] || echo "ROLLBACK FAILED at: restart (exit $R): run docker start n8n"; fi
+  if [ $R -eq 0 ]; then sleep 30; [ "$(docker exec n8n n8n list:workflow | grep -c "^$ROUTER_ID")" = 1 ]; R=$?; [ $R -eq 0 ] || echo "ROLLBACK FAILED at: verify exists (the router id is not listed exactly once)"; fi
+  if [ $R -eq 0 ]; then docker exec n8n n8n list:workflow --active=true | grep -q "^$ROUTER_ID"; R=$?; [ $R -eq 0 ] || echo "ROLLBACK FAILED at: verify active (the router is not listed as active)"; fi
+  if [ $R -eq 0 ]; then docker exec n8n n8n export:workflow --id="$ROUTER_ID" --output=/tmp/router-after.json > /dev/null && [ "$(docker exec n8n grep -o '"typeVersion"' /tmp/router-after.json | wc -l)" = "$NODES_BEFORE" ]; R=$?; docker exec n8n rm -f /tmp/router-after.json > /dev/null 2>&1; [ $R -eq 0 ] || echo "ROLLBACK FAILED at: verify node count (expected $NODES_BEFORE)"; fi
+  if [ $R -eq 0 ]; then echo "rollback verified: router listed once, active, $NODES_BEFORE nodes; now run the step 1 presence check and wait for the next heartbeat ping"; else echo "do not leave n8n stopped (docker start n8n) and restore from the step 2 archive (docs/backup-restore.md)"; fi
+  echo "rollback exit code: $R"
+  return $R
+}
+router_rollback
+echo "router_rollback returned $?"
 ```
 
-The rollback restores the workflow as it was exported (active state included only
-after the publish and restart in the same line). It does not undo the files
+Every stage stops the rest at the first failure, the failing stage is named, and the
+function returns that real status (`rollback exit code: N`; only `0` is success). The
+container-side temporary files are removed on every path. The checks after the restart
+are read only and print names and counts only: the router id listed once, listed as
+active, and the same node count as the saved file. The `list:workflow --active=true`
+flag and the node count (a count of `typeVersion` keys, one per node) are INFERRED:
+check `n8n list:workflow --help`. If you cannot confirm them, OWNER DECISION: check by
+hand that the router is listed once, is active in the n8n interface and has the same
+number of nodes, then the heartbeat ping arrives (step 1), and record it. The
+rollback restores the workflow as it was exported. It does not undo the files
 `router-path` and `expiry-path` (they only hold paths).
 
 **4. Post-import checks.** First the placeholder path must serve nothing (the

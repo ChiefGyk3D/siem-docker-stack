@@ -157,6 +157,8 @@ def test_every_placeholder_is_defined_once_in_the_table():
     for token in TOKEN_RE.findall(CODE):
         if token in defined or token in ("EOF", "HOME", "UTC"):
             continue
+        if re.search(r"(?<![\w$])" + re.escape(token) + r"=", CODE):
+            continue  # a shell variable the runbook assigns itself
         if token not in elsewhere:
             undefined.add(token)  # not an environment name the repo knows, so it can only be a placeholder
     assert not undefined, sorted(undefined)
@@ -277,7 +279,7 @@ def test_round1_f2_router_chain_has_a_failure_branch_per_stage_and_a_rollback():
         assert stage in flat, stage
     assert "chain exit code" in flat and "MAXIMUM GAP" in flat and "5 minutes" in flat
     assert "ROLLBACK" in flat and "import:workflow --input=/tmp/router-before.json" in flat
-    assert "publish:workflow --id=ROUTER_ID && docker restart n8n" in flat  # the rollback publishes and restarts
+    assert 'publish:workflow --id="$ROUTER_ID"' in flat and "docker restart n8n" in flat  # the rollback publishes and restarts
     # the old one-line ssh with a trailing echo (which turned a failure into exit 0) is gone
     assert not any("n8n-setup-alert-router.py --workflow" in l and l.lstrip().startswith("ssh") for l in CODE_LINES)
 
@@ -317,3 +319,169 @@ def test_round1_f6_every_compose_edit_is_gated_on_this_runs_backup():
     sudoedits = [l for l in CODE_LINES if "sudoedit N8N_COMPOSE_FILE" in l]
     assert sudoedits and all("cmp N8N_COMPOSE_FILE" in l for l in sudoedits), sudoedits
     assert "bak-payload-$(date" in CODE  # the repeat form no longer overwrites a fixed name
+
+
+# ---- Daybreak round 2 on PR #176: structural tests that run the documented functions with stubs ----
+
+import os
+import subprocess
+
+VARS = {"REPO_DIR": "/tmp", "N8N_COMPOSE_DIR": "/tmp", "SIEM_NETWORK": "net",
+        "ROUTER_ID": "aaaaaaaaaaaaaaaa", "HANDLER_ID": "bbbbbbbbbbbbbbbb"}
+
+
+def func(name):
+    m = re.search(r"^" + name + r"\(\) \{\n(.*?)\n\}$", CODE, flags=re.M | re.S)
+    assert m, name + " is not defined in a fenced block"
+    return "%s() {\n%s\n}" % (name, m.group(1))
+
+
+def chk_vars_def():
+    m = re.search(r"^chk_vars\(\) \{.*\}$", CODE, flags=re.M)
+    assert m
+    return m.group(0)
+
+
+STUBS = r'''
+docker() {
+  echo "docker $*" >> "$LOG"
+  if [ -n "$FAIL" ] && [[ "$*" == *"$FAIL"* ]]; then return 7; fi
+  case "$*" in
+    *list:workflow*) echo "aaaaaaaaaaaaaaaa Router" ;;
+    *"grep -o"*) printf 'x\nx\n' ;;
+  esac
+  return 0
+}
+doppler() { echo "doppler" >> "$LOG"; [ "$FAIL" = doppler ] && return 7; return 0; }
+sleep() { :; }
+'''
+
+
+def run_function(tmp_path, name, call, fail="", extra=""):
+    home = tmp_path / "home"
+    (home / "bin").mkdir(parents=True, exist_ok=True)
+    stub = home / "bin" / "siem-run"
+    stub.write_text("#!/bin/sh\n[ \"$FAIL\" = import ] && exit 7\necho import ok\nexit 0\n")
+    stub.chmod(0o755)
+    saved = home / "router-before.json"
+    saved.write_text('{"typeVersion":1,\n"typeVersion":2}')
+    saved.chmod(0o600)
+    log = tmp_path / "log"
+    log.write_text("")
+    script = "\n".join(["set -u"] + ["%s=%s" % kv for kv in VARS.items()] +
+                       [chk_vars_def(), STUBS, extra, func(name), call, 'echo "STATUS=$?"'])
+    env = dict(os.environ, HOME=str(home), LOG=str(log), FAIL=fail)
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, timeout=60)
+    status = int(re.search(r"STATUS=(\d+)", out.stdout).group(1))
+    return status, out.stdout, log.read_text()
+
+
+PRE = 'recreate_n8n "HEARTBEAT_PING_URL" "HEARTBEAT_PING_URL,HEARTBEAT_KIND"'
+POST = 'recreate_n8n "HEARTBEAT_PING_URL EXPIRY_WATCH_ROUTER_TOKEN" "HEARTBEAT_PING_URL,HEARTBEAT_KIND,EXPIRY_WATCH_ROUTER_TOKEN"'
+
+
+def test_round2_f1_the_first_call_does_not_require_the_expiry_token():
+    assert PRE in CODE and POST in CODE
+    body = func("recreate_n8n")
+    assert "EXPIRY_WATCH_ROUTER_TOKEN" not in body.replace("EXPIRY_WATCH_ROUTER_SECRET", "")  # the list is an argument
+    assert 'for V in $REQ_VARS' in body and '--preserve-env="$PRESERVE"' in body
+    assert "EXPIRY" not in PRE
+
+
+def test_round2_f4_recreate_returns_the_real_status(tmp_path):
+    ok, out, _ = run_function(tmp_path, "recreate_n8n", PRE)
+    assert ok == 0 and "recreate exit code: 0" in out
+    for fail in ("doppler", "port n8n", "network inspect"):
+        status, out, _ = run_function(tmp_path, "recreate_n8n", POST, fail=fail)
+        assert status != 0, fail
+        assert "recreate exit code: %d" % status in out and "RECOVERY:" in out
+
+
+def test_round2_f6_a_missing_container_stops_before_recording_or_recreating(tmp_path):
+    status, out, log = run_function(tmp_path, "recreate_n8n", PRE, fail="exec n8n true")
+    assert status == 1 and "STOP:" in out and "recreate exit code: 1" in out
+    assert "doppler" not in log
+    assert not (tmp_path / "home" / "n8n-env-before.txt").exists()
+
+
+def test_round2_f4_the_before_file_is_private(tmp_path):
+    run_function(tmp_path, "recreate_n8n", PRE)
+    before = tmp_path / "home" / "n8n-env-before.txt"
+    assert before.exists() and (before.stat().st_mode & 0o077) == 0
+
+
+@pytest.mark.parametrize("fail,stage", [("import", "stage 1 of 3"), ("publish:workflow", "stage 2 of 3"),
+                                        ("restart n8n", "stage 3 of 3")])
+def test_round2_f5_router_chain_propagates_its_status(tmp_path, fail, stage):
+    status, out, log = run_function(tmp_path, "router_chain", "router_chain", fail=fail)
+    assert status == 7 and "FAILED " + stage in out and "chain exit code: 7" in out
+    if fail == "import":
+        assert "publish:workflow" not in log  # a later stage never runs after a failure
+
+
+def test_round2_f5_router_chain_success(tmp_path):
+    status, out, log = run_function(tmp_path, "router_chain", "router_chain")
+    assert status == 0 and "chain exit code: 0" in out
+
+
+@pytest.mark.parametrize("fail,label", [("cp", "copy into the container"), ("import:workflow", "import"),
+                                        ("publish:workflow", "publish"), ("restart n8n", "restart")])
+def test_round2_f3_rollback_names_the_failed_step_and_exits_nonzero(tmp_path, fail, label):
+    fail_arg = "cp " if fail == "cp" else fail
+    status, out, log = run_function(tmp_path, "router_rollback", "router_rollback", fail=fail_arg)
+    assert status == 7, out
+    assert "ROLLBACK FAILED at: " + label in out and "rollback exit code: 7" in out
+    assert "rm -f /tmp/router-before.json" in log  # the container-side temp file is removed on every path
+    assert "rollback verified" not in out
+
+
+def test_round2_f3_rollback_verifies_exists_active_and_node_count(tmp_path):
+    status, out, log = run_function(tmp_path, "router_rollback", "router_rollback")
+    assert status == 0 and "rollback verified" in out and "2 nodes" in out
+    assert "--active=true" in log and "export:workflow" in log
+    # a node count that differs from the saved file fails verification and says so
+    status, out, _ = run_function(tmp_path, "router_rollback", "router_rollback", extra='docker() { echo "docker $*" >> "$LOG"; case "$*" in *list:workflow*) echo "aaaaaaaaaaaaaaaa R";; *"grep -o"*) echo x;; esac; return 0; }')
+    assert status != 0 and "verify node count" in out
+
+
+def test_round2_f3_no_failure_masking_in_the_documented_blocks():
+    # `A && echo ok || echo FAILED` ends in status 0 whatever A did
+    for line in CODE_LINES:
+        # an `&&` chain followed by `|| echo "FAILED..."` returns 0; the status must be captured in R first
+        assert not re.search(r"&&[^|]*\|\|\s*echo\s+\"(ROLLBACK|RECOVERY|FAILED)", line), line
+
+
+def test_round2_f2_the_old_repo_is_renamed_aside_before_the_new_one_is_moved_in():
+    step = section("## Step 0a.", "## Step 0b.")
+    swap = next(l for l in fences(step) for l in l.splitlines() if "SWAP FAILED" in l)
+    aside = swap.index('mv /opt/siem-repo "/opt/siem-repo.old-$TS"')
+    into = swap.index("mv /opt/siem-repo.new /opt/siem-repo")
+    restore = swap.index('mv "/opt/siem-repo.old-$TS" /opt/siem-repo')
+    assert aside < into < restore
+    assert not re.search(r"rm -rf /opt/siem-repo(\s|'|$)", step)  # the live name is never deleted
+    assert "sha256sum -c siem-repo.sha256" not in step and "siem-repo.sha256" not in step
+    assert 'printf "%s  siem-repo.tar.gz\\n" EXPECTED_SHA256 | sha256sum -c -' in step
+    flat_step = " ".join(step.split())
+    assert "ON YOUR WORKSTATION" in flat_step and "never from the box" in flat_step
+
+
+def test_round2_f7_the_session_blocks_use_quoted_variables_not_placeholders():
+    for name in ("recreate_n8n", "router_chain", "router_rollback"):
+        body = func(name)
+        bare = re.findall(r"(?<![$\w])(REPO_DIR|N8N_COMPOSE_DIR|SIEM_NETWORK|ROUTER_ID|HANDLER_ID)(?![\w])", body)
+        assert not bare, (name, bare)
+        for var in re.findall(r"\$(REPO_DIR|N8N_COMPOSE_DIR|SIEM_NETWORK|ROUTER_ID|HANDLER_ID)\b", body):
+            pass
+        for m in re.finditer(r"(?<!\")\$(REPO_DIR|N8N_COMPOSE_DIR|SIEM_NETWORK|ROUTER_ID|HANDLER_ID)\b", body):
+            ctx = body[max(0, m.start() - 12):m.end() + 12]
+            assert '"' in ctx or "=" in ctx, ctx  # every expansion sits inside double quotes
+    assert "variables ok" in CODE and "chk_vars" in CODE
+
+
+def test_round2_f7_chk_vars_rejects_metacharacters(tmp_path):
+    for var, bad in (("REPO_DIR", "/tmp/a b"), ("N8N_COMPOSE_DIR", "/tmp;x"), ("ROUTER_ID", "zz"),
+                     ("SIEM_NETWORK", "n et")):
+        script = "\n".join(["%s=%s" % (k, ("'%s'" % bad if k == var else v)) for k, v in VARS.items()] +
+                           [chk_vars_def(), "chk_vars"])
+        out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=20)
+        assert out.returncode != 0, var
