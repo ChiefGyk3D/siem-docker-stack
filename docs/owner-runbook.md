@@ -25,7 +25,7 @@ marked:
 | `KEY_FILE` | Path to the SSH private key for LOGGING_BOX |
 | `REPO_DIR` | Where this repository is checked out on LOGGING_BOX |
 | `SIEM_DIR` | Live stack directory, default `/opt/siem` (`docs/live-deploy-runbook.md`, variable table) |
-| `DEV_CONFIG` | The Doppler dev config of project `homelab`. Its exact name is an OPEN QUESTION (Q1) |
+| `dev_network` | The Doppler branch config under the `dev` environment of project `homelab` that holds every new alerting value (created in step 0b) |
 | `ROUTER_ID`, `HANDLER_ID` | The n8n workflow ids printed by the router import (`docs/live-deploy-runbook.md`, section 3) |
 
 Rules every step follows:
@@ -39,7 +39,7 @@ Rules every step follows:
   Doppler's setting-secrets page, read 2026-11-19; `> /dev/null` per
   `docs/update-alerting.md`, webhook authentication, step 1). Secret values go
   in on stdin, never on a command line.
-- New secrets go in project `homelab`, config `DEV_CONFIG`, never `prd_network`
+- New secrets go in project `homelab`, config `dev_network`, never `prd_network`
   or any prd config, until the owner says the stack is live in production.
 - No secret value, host name, real domain or personal detail is written in this
   file. Addresses use `example.com`; the documentation range 192.0.2.x stands
@@ -50,7 +50,6 @@ Rules every step follows:
 
 | # | Question | Where it bites |
 |---|----------|----------------|
-| Q1 | What is the exact name of the `homelab` dev config? `docs/channel-redundancy.md` calls it "a guess". List it with `doppler configs --project homelab` (INFERRED command; check `doppler configs --help`). | Steps 0b, 4, 5, 6 |
 | Q4 | The names `FAILTEST` (workflow and credential) appear in no repo doc. The closest text is the failure-path test copy in `docs/live-deploy-runbook.md`, section 4, items 1 to 6 ("the copy", "a wrong credential in the copy"). Read the exact names in the n8n UI. | Step 3 |
 | Q5 | What is the live name of the old router workflow? The repo workflow is named "Grafana SOAR - Alert Router" and the runbook calls the new one "Grafana SOAR - Alert Router (authenticated)". Which one is live and old is not in a doc. | Step 9 |
 | Q7 | `scripts/live-deploy/grafana-deploy.py` copies only four alert files (`contact-points.yml`, the two update rule files, `heartbeat-alert-rule.yml`; VERIFIED: the `FILES` tuple). It does not copy the notification failure rule or the example contact points, and it rewrites `contact-points.yml` on every run. Steps 4 and 5 therefore copy files by hand into their own files. Should the deploy script take over that job (a code change, not part of this doc)? Issue #126 (an open PR, not merged) is the deploy script change that will later replace the manual file copies in steps 4 and 5; until it merges, copy by hand as written. | Steps 4, 5 |
@@ -115,7 +114,7 @@ Expected: three lines `... : present` and `exit code: 0` (VERIFIED: runbook
 section 2). `siem-run: token file missing or unreadable` means section 2 of that
 runbook is incomplete.
 
-Resolve Q1 here before steps 4 and 5, then do step 0b.
+Then do step 0b before steps 4 and 5.
 
 Rollback: nothing changed.
 
@@ -129,23 +128,47 @@ start Grafana without that variable (VERIFIED: `docker/docker-compose.yml`
 requires it non-empty). `prd_network` is not changed by anything in this step or
 in steps 4 and 5: it is only read, once, to make the copy.
 
-The dev config name is not in any doc (Q1). This file writes it as the
-placeholder `DEV_CONFIG`; replace it with the real name in every command below
-and in steps 4 to 6.
+The config is named `dev_network` (owner decision), a branch config under the
+`dev` environment of project `homelab`. It does not exist yet; item 1 creates
+it. The configs in `homelab` before this step are `dev`, `dev_personal`, `prd`,
+`prd_network` and `stg` (read with `doppler configs --project homelab` on
+2026-11-19). Do not use any prd config.
 
 Prerequisites: Doppler CLI logged in on the machine where you run these
 commands, with access to project `homelab`.
 
-1. Find or confirm the dev config (INFERRED command; check `doppler configs
-   --help`):
+1. Create `dev_network` and confirm it exists. Flags VERIFIED from
+   `doppler configs create --help`, run 2026-11-19: `--environment/-e`,
+   `--project/-p`, and the name as a positional argument or `--name`. INFERRED:
+   the naming rule for branch configs (the name starts with the environment
+   name, here `dev`); if Doppler refuses the name, stop and report the message.
 
 ```
+doppler configs create dev_network --project homelab --environment dev
 doppler configs --project homelab
 ```
 
-Pick the existing dev config, or create one in the Doppler web interface under
-the dev environment (this doc does not describe that screen; send a screenshot
-if unsure). Do not use any prd config.
+   The second command lists the configs; `dev_network` must appear next to the
+   five existing ones, and nothing existing changes. It holds no secrets yet.
+
+   Rollback for this item: delete it only while it is empty. First confirm it is
+   empty (INFERRED flag; check `doppler secrets --help`):
+
+```
+doppler secrets --only-names --project homelab --config dev_network
+```
+
+   Then delete it. Flags VERIFIED from `doppler configs delete --help`, run
+   2026-11-19: the config as a positional argument or `--config/-c`,
+   `--project/-p`, and `--yes/-y` to skip the confirmation (leave `--yes` off to
+   be asked):
+
+```
+doppler configs delete dev_network --project homelab
+```
+
+   Once later steps have put secrets in it, deleting it destroys them; use the
+   per-step rollbacks instead.
 
 2. Copy the webhook secret value from `prd_network` into the dev config without
    ever printing it. Doppler's own output goes straight into the second command
@@ -153,7 +176,7 @@ if unsure). Do not use any prd config.
    command carries `--silent` and also ends in `> /dev/null` (both, on purpose):
 
 ```
-doppler secrets get GRAFANA_WEBHOOK_SECRET --plain --project homelab --config prd_network | doppler secrets set GRAFANA_WEBHOOK_SECRET --project homelab --config DEV_CONFIG --silent > /dev/null
+doppler secrets get GRAFANA_WEBHOOK_SECRET --plain --project homelab --config prd_network | doppler secrets set GRAFANA_WEBHOOK_SECRET --project homelab --config dev_network --silent > /dev/null
 ```
 
    Method status, from Doppler's documentation read 2026-11-19
@@ -187,7 +210,7 @@ doppler secrets get GRAFANA_WEBHOOK_SECRET --plain --project homelab --config pr
    (flags are INFERRED per item 2, so confirm with `--help` first):
 
 ```
-test "$(doppler secrets get GRAFANA_WEBHOOK_SECRET --plain --project homelab --config prd_network | sha256sum | cut -d' ' -f1)" = "$(doppler secrets get GRAFANA_WEBHOOK_SECRET --plain --project homelab --config DEV_CONFIG | sha256sum | cut -d' ' -f1)" && echo same || echo differs
+test "$(doppler secrets get GRAFANA_WEBHOOK_SECRET --plain --project homelab --config prd_network | sha256sum | cut -d' ' -f1)" = "$(doppler secrets get GRAFANA_WEBHOOK_SECRET --plain --project homelab --config dev_network | sha256sum | cut -d' ' -f1)" && echo same || echo differs
 ```
 
 Expected: `same`. If it prints `differs`, the likely cause is a trailing newline
@@ -438,7 +461,7 @@ Prerequisites:
 - A datasource with uid `prometheus` exists in the live Grafana (VERIFIED in
   `docker/grafana/provisioning/datasources/datasources.yml`; INFERRED for the
   live stack, check the datasource list).
-- Step 0b done, and Q1 and Q7 settled.
+- Step 0b done, and Q7 settled.
 
 ### 4a. Store the webhook URL in Doppler dev
 
@@ -448,9 +471,9 @@ echoes values:
 
 ```
 read -rs -p "Discord failure webhook URL: " VAL; echo
-printf '%s' "$VAL" | doppler secrets set DISCORD_FAILURE_WEBHOOK_URL --project homelab --config DEV_CONFIG --silent > /dev/null
+printf '%s' "$VAL" | doppler secrets set DISCORD_FAILURE_WEBHOOK_URL --project homelab --config dev_network --silent > /dev/null
 unset VAL
-doppler secrets --project homelab --config DEV_CONFIG --only-names | grep -c DISCORD_FAILURE_WEBHOOK_URL
+doppler secrets --project homelab --config dev_network --only-names | grep -c DISCORD_FAILURE_WEBHOOK_URL
 ```
 
 The last line prints `1` when the name exists (INFERRED: the `--only-names`
@@ -504,7 +527,7 @@ The restart reads only the one dev config from step 0b (owner decision). The
 `prd_network`:
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd /opt/siem && doppler run --project homelab --config DEV_CONFIG -- docker compose up -d grafana; echo "exit code: $?"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd /opt/siem && doppler run --project homelab --config dev_network -- docker compose up -d grafana; echo "exit code: $?"'
 ```
 
 (That the Doppler CLI on LOGGING_BOX is logged in to project `homelab` with
@@ -593,7 +616,7 @@ Prerequisites (VERIFIED: the provider-neutral checklist):
 - An SMTP login for that domain, a From address on the verified domain, and the
   recipient address or addresses for `P1_EMAIL_TO`.
 - Step 4 is finished and checked (one Grafana restart at a time).
-- Step 0b done and Q1 settled.
+- Step 0b done.
 
 Mailgun values (VERIFIED against the page cited in `docs/channel-redundancy.md`,
 read 2026-11-19 by that doc): host `smtp.mailgun.org`, port 587, STARTTLS.
@@ -606,11 +629,11 @@ verified domain, not the sandbox (sandbox sends only to authorized recipients).
 In a terminal where Doppler is logged in. The non-secret values:
 
 ```
-printf '%s' 'true' | doppler secrets set GF_SMTP_ENABLED --project homelab --config DEV_CONFIG --silent > /dev/null
-printf '%s' 'smtp.mailgun.org:587' | doppler secrets set GF_SMTP_HOST --project homelab --config DEV_CONFIG --silent > /dev/null
-printf '%s' 'MandatoryStartTLS' | doppler secrets set GF_SMTP_STARTTLS_POLICY --project homelab --config DEV_CONFIG --silent > /dev/null
-printf '%s' 'alerts@example.com' | doppler secrets set GF_SMTP_FROM_ADDRESS --project homelab --config DEV_CONFIG --silent > /dev/null
-printf '%s' 'oncall@example.com' | doppler secrets set P1_EMAIL_TO --project homelab --config DEV_CONFIG --silent > /dev/null
+printf '%s' 'true' | doppler secrets set GF_SMTP_ENABLED --project homelab --config dev_network --silent > /dev/null
+printf '%s' 'smtp.mailgun.org:587' | doppler secrets set GF_SMTP_HOST --project homelab --config dev_network --silent > /dev/null
+printf '%s' 'MandatoryStartTLS' | doppler secrets set GF_SMTP_STARTTLS_POLICY --project homelab --config dev_network --silent > /dev/null
+printf '%s' 'alerts@example.com' | doppler secrets set GF_SMTP_FROM_ADDRESS --project homelab --config dev_network --silent > /dev/null
+printf '%s' 'oncall@example.com' | doppler secrets set P1_EMAIL_TO --project homelab --config dev_network --silent > /dev/null
 ```
 
 Replace `alerts@example.com` and `oncall@example.com` with your own addresses (the
@@ -619,9 +642,9 @@ echo:
 
 ```
 read -rs -p "SMTP user: " VAL; echo
-printf '%s' "$VAL" | doppler secrets set GF_SMTP_USER --project homelab --config DEV_CONFIG --silent > /dev/null
+printf '%s' "$VAL" | doppler secrets set GF_SMTP_USER --project homelab --config dev_network --silent > /dev/null
 read -rs -p "SMTP password: " VAL; echo
-printf '%s' "$VAL" | doppler secrets set GF_SMTP_PASSWORD --project homelab --config DEV_CONFIG --silent > /dev/null
+printf '%s' "$VAL" | doppler secrets set GF_SMTP_PASSWORD --project homelab --config dev_network --silent > /dev/null
 unset VAL
 ```
 
@@ -657,7 +680,7 @@ sudo install -m 644 REPO_DIR/docker/grafana/provisioning/alerting/email-contact-
 ### 5d. Restart Grafana and check
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd /opt/siem && doppler run --project homelab --config DEV_CONFIG -- docker compose up -d grafana; echo "exit code: $?"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd /opt/siem && doppler run --project homelab --config dev_network -- docker compose up -d grafana; echo "exit code: $?"'
 ```
 
 Check `docker logs --since 5m grafana 2>&1 | tail -40` for SMTP or provisioning
@@ -852,7 +875,7 @@ in `> /dev/null`:
 
 ```
 read -rs -p "Value for EXPIRY_WATCH_ROUTER_TOKEN: " VAL; echo
-printf '%s' "$VAL" | doppler secrets set EXPIRY_WATCH_ROUTER_TOKEN --project homelab --config DEV_CONFIG --silent > /dev/null
+printf '%s' "$VAL" | doppler secrets set EXPIRY_WATCH_ROUTER_TOKEN --project homelab --config dev_network --silent > /dev/null
 unset VAL
 ```
 
@@ -863,7 +886,7 @@ terminal.)
 ### 6c. Dry run first (changes nothing, posts nothing, saves nothing)
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && doppler run --project homelab --config DEV_CONFIG -- python3 scripts/expiry_watch.py --config /etc/expiry-watch/expiry-watch.toml --dry-run; echo "exit code: $?"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && doppler run --project homelab --config dev_network -- python3 scripts/expiry_watch.py --config /etc/expiry-watch/expiry-watch.toml --dry-run; echo "exit code: $?"'
 ```
 
 (`doppler run` form VERIFIED in `docs/update-alerting.md`; its use with this
@@ -885,7 +908,7 @@ Only when the dry run is clean and the route is the one you want. A real run
 posts real messages to Discord, and an unwanted message cannot be recalled:
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && doppler run --project homelab --config DEV_CONFIG -- python3 scripts/expiry_watch.py --config /etc/expiry-watch/expiry-watch.toml; echo "exit code: $?"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && doppler run --project homelab --config dev_network -- python3 scripts/expiry_watch.py --config /etc/expiry-watch/expiry-watch.toml; echo "exit code: $?"'
 ```
 
 Confirm the messages arrive and the state file `/etc/expiry-watch/expiry-watch-state.json`
@@ -894,7 +917,7 @@ systemd service and timer or a cron entry; both are given in
 `docs/expiry-watch.md`, "Scheduling", and the choice is yours. Whichever you
 pick, the job runs on the box, as the same user that owns the config folder, and
 reads its secrets only from the single dev config by wrapping the command in
-`doppler run --project homelab --config DEV_CONFIG --` (the secrets are named by
+`doppler run --project homelab --config dev_network --` (the secrets are named by
 variable only; no value goes in the unit, the cron line or the config). That
 doc's examples instead read the router secret from an `EnvironmentFile` (mode
 0600, owned by the job user); using `doppler run` in place of it is INFERRED, and
