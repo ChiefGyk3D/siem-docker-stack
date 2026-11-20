@@ -11,6 +11,7 @@ What is NOT verified here: the real Doppler CLI (no network, no real token is us
 and mode of a token file on a real box; the owner check is exercised with a fake `id`.
 """
 import os
+import re
 import shutil
 import subprocess
 
@@ -22,6 +23,7 @@ SCRIPT = REPO_ROOT / "scripts" / "siem-net-run"
 PATH_LINE = "PATH=/usr/local/sbin:"  # start of the fixed PATH assignment
 SENTINEL = "dp.st.Sentinel-Tok-5c1e"
 PROBED = ("stat", "id")
+TABLE_START = "PERMITTED_NAMES=("  # the fixed table of names the wrapper will ever inject
 
 FAKE_DOPPLER = """#!/bin/bash
 printf '%s\\n' "$$" > '@REC@/doppler-pid'
@@ -42,6 +44,7 @@ done
 inject=()
 for kv in LD_PRELOAD=/evil.so BASH_ENV=/evil.sh ENV=/evil.sh PATH=/evil DOCKER_HOST=tcp://evil:1 PYTHONPATH=/evil GOOD_ONE=one GOOD_TWO=two NOT_ASKED=nope; do
     name=${kv%%=*}
+    case ",${FAKE_OMIT:-}," in *",$name,"*) continue ;; esac  # a name Doppler does not hold
     if [ -z "$only" ] || [[ "$only" == *",$name,"* ]]; then inject+=("$kv"); fi
 done
 [ ${#child[@]} -gt 0 ] && exec env "${inject[@]}" "${child[@]}"
@@ -78,6 +81,8 @@ class Box:
         text = SCRIPT.read_text(encoding="utf-8")
         assert PATH_LINE in text
         text = text.replace(PATH_LINE, f"PATH={self.bindir}:/usr/local/sbin:", 1)
+        assert TABLE_START in text
+        text = text.replace(TABLE_START, TABLE_START + "GOOD_ONE GOOD_TWO ", 1)  # test-only names, in the copy only
         self.script = tmp_path / "siem-net-run"
         _exe(self.script, text)
         self.home = tmp_path / "home"
@@ -91,9 +96,16 @@ class Box:
         self.token.write_text(text, encoding="utf-8")
         self.token.chmod(mode)
 
-    def run(self, args=("echo", "hi"), extra_env=None, only="GOOD_ONE,GOOD_TWO", raw=None):
+    def run(self, args=("echo", "hi"), extra_env=None, require="GOOD_ONE,GOOD_TWO", optional=None, raw=None):
         env = {"PATH": "/usr/bin:/bin", "HOME": str(self.home), **(extra_env or {})}
-        cmd = [str(self.script), *(raw if raw is not None else ["--only", only, "--", *args])]
+        if raw is None:
+            raw = []
+            if require is not None:
+                raw += ["--require", require]
+            if optional is not None:
+                raw += ["--optional", optional]
+            raw += ["--", *args]
+        cmd = [str(self.script), *raw]
         return subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     def finish(self, proc):
@@ -126,9 +138,10 @@ def test_doppler_gets_the_documented_arguments_and_the_token_in_its_environment(
     code, out, err = box.finish(proc)
     assert code == 0, err
     argv = (box.rec / "doppler-argv").read_text().splitlines()
-    assert argv == ["run", "--config-dir", str(box.cfg), "--no-check-version", "--no-fallback",
-                    "--no-exit-on-missing-only-secrets", "--only-secrets=GOOD_ONE,GOOD_TWO",
-                    "--", "echo", "-n", "x.py", "--flag"]
+    assert argv[:7] == ["run", "--config-dir", str(box.cfg), "--no-check-version", "--no-fallback",
+                        "--no-exit-on-missing-only-secrets", "--only-secrets=GOOD_ONE,GOOD_TWO"]
+    # the command runs behind a small checker that fails closed when a required name is empty
+    assert argv[7:10] == ["--", "sh", "-c"] and argv[11:] == ["siem-net-run", "GOOD_ONE,GOOD_TWO", "echo", "-n", "x.py", "--flag"]
     assert "--fallback-readonly" not in argv  # a stale snapshot on disk is never read (Daybreak round 1, finding 2)
     env = _env_map(box.rec / "doppler-environ")
     assert env["DOPPLER_TOKEN"] == SENTINEL  # trailing newline of the file is stripped
@@ -271,19 +284,25 @@ def test_no_command_is_a_usage_error_and_reads_nothing(box):
 
 
 @pytest.mark.parametrize("raw", [
-    ["echo", "hi"],                         # no allowlist at all
-    ["--only", "", "--", "echo"],           # empty allowlist
-    ["--only"],                             # option without a value
-    ["--only", "GOOD_ONE"],                 # no separator and no command
-    ["--only", "GOOD_ONE", "echo"],         # no separator
-    ["--only", "GOOD_ONE", "--"],           # no command
-    ["--only", "GOOD_ONE,,GOOD_TWO", "--", "echo"],
-    ["--only", ",GOOD_ONE", "--", "echo"],
-    ["--only", "GOOD_ONE,", "--", "echo"],
-    ["--only", "good one", "--", "echo"],
-    ["--only", "1BAD", "--", "echo"],
-    ["--only", "A-B", "--", "echo"],
-    ["--only", "A=B", "--", "echo"],
+    ["echo", "hi"],                         # no names at all
+    ["--", "echo", "hi"],                   # no names at all
+    ["--require", "", "--", "echo"],        # empty list
+    ["--require"],                          # option without a value
+    ["--require", "GOOD_ONE"],              # no separator and no command
+    ["--require", "GOOD_ONE", "echo"],      # no separator
+    ["--require", "GOOD_ONE", "--"],        # no command
+    ["--optional", "GOOD_ONE", "--"],       # no command
+    ["--require", "GOOD_ONE,,GOOD_TWO", "--", "echo"],
+    ["--require", ",GOOD_ONE", "--", "echo"],
+    ["--require", "GOOD_ONE,", "--", "echo"],
+    ["--require", "good one", "--", "echo"],
+    ["--require", "good_one", "--", "echo"],  # the second check: upper case only
+    ["--require", "1BAD", "--", "echo"],
+    ["--require", "A-B", "--", "echo"],
+    ["--require", "A=B", "--", "echo"],
+    ["--require", "GOOD_ONE", "--require", "GOOD_TWO", "--", "echo"],  # a flag twice
+    ["--require", "GOOD_ONE", "--optional", "GOOD_ONE", "--", "echo"],  # a name in both lists
+    ["--only", "GOOD_ONE", "--", "echo"],   # the old spelling is gone
 ])
 def test_a_missing_or_malformed_allowlist_is_a_usage_error_and_reads_nothing(box, raw):
     code, out, err = box.finish(box.run(raw=raw))
@@ -295,14 +314,89 @@ HOSTILE = ["LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "BASH_ENV", "ENV", "PATH
            "PYTHONSTARTUP", "DOCKER_HOST", "DOCKER_CONFIG", "COMPOSE_FILE", "SHELLOPTS", "BASHOPTS", "IFS", "HOME",
            "DOPPLER_TOKEN", "DOPPLER_CONFIG", "CDPATH", "GLOBIGNORE", "PS4", "NODE_OPTIONS", "PERL5LIB", "RUBYOPT",
            "TMPDIR", "SHELL", "USER", "SUDO_ASKPASS", "SUDO_EDITOR", "GCONV_PATH", "LOCPATH", "NLSPATH", "HOSTALIASES",
-           "MALLOC_CHECK_", "GLIBC_TUNABLES", "JAVA_TOOL_OPTIONS", "LANG", "LC_ALL", "XDG_CONFIG_HOME"]
+           "MALLOC_CHECK_", "GLIBC_TUNABLES", "JAVA_TOOL_OPTIONS", "LANG", "LC_ALL", "XDG_CONFIG_HOME",
+           # Daybreak round 2: names a deny list missed
+           "ZDOTDIR", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "INPUTRC", "BROWSER", "CARGO_HOME", "GOFLAGS",
+           "NPM_CONFIG_USERCONFIG", "VIMINIT", "GREP_OPTIONS", "LESSOPEN", "MANPAGER", "CC", "CFLAGS", "HTTP_PROXY",
+           "https_proxy", "SSL_CERT_FILE", "KUBECONFIG", "AWS_PROFILE", "GIT_SSH_COMMAND", "OTHER_NAME"]
 
 
+@pytest.mark.parametrize("flag", ["--require", "--optional"])
 @pytest.mark.parametrize("name", HOSTILE)
-def test_a_process_control_name_in_the_allowlist_is_refused(box, name):
-    code, out, err = box.finish(box.run(only="GOOD_ONE," + name))
-    assert code == 2 and "allowlist" in err and name in err, (code, err)
+def test_a_name_that_is_not_in_the_fixed_table_is_refused(box, name, flag):
+    raw = [flag, name, "--", "echo", "hi"]
+    code, out, err = box.finish(box.run(raw=raw))
+    assert code in (2, 64), (code, err)  # not in the table (2), or not even a plain upper case name (64)
     assert not box.recorded("doppler-*")
+
+
+@pytest.mark.parametrize("name", [n for n in HOSTILE if re.fullmatch(r"[A-Z][A-Z0-9_]*", n)])
+def test_a_well_formed_name_outside_the_table_is_refused_with_exit_2(box, name):
+    code, out, err = box.finish(box.run(raw=["--require", name, "--", "echo"]))
+    assert code == 2 and "not permitted" in err and name in err, (code, err)
+
+
+def _table():
+    text = SCRIPT.read_text(encoding="utf-8")
+    start = text.index(TABLE_START) + len(TABLE_START)
+    return text[start:text.index(")", start)].split()
+
+
+def test_the_table_holds_exactly_the_names_the_runbook_passes_and_all_are_plain():
+    names = _table()
+    assert names == sorted(names) and len(names) == len(set(names))
+    assert all(re.fullmatch(r"[A-Z][A-Z0-9_]*", n) for n in names)
+    compose = (REPO_ROOT / "docker" / "docker-compose.yml").read_text(encoding="utf-8")
+    block = re.search(r"^  grafana:\n(.*?)(?=^  [a-z0-9_-]+:\n)", compose, flags=re.S | re.M).group(1)
+    grafana = set(re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)", block)) | set(re.findall(r"^\s+- ([A-Z][A-Z0-9_]*)\s*$", block, flags=re.M))
+    manual = {"DISCORD_FAILURE_WEBHOOK_URL", "GF_SMTP_ENABLED", "GF_SMTP_FROM_ADDRESS", "GF_SMTP_HOST", "GF_SMTP_PASSWORD",
+              "GF_SMTP_STARTTLS_POLICY", "GF_SMTP_USER", "P1_EMAIL_TO"}
+    n8n = {"HEARTBEAT_PING_URL", "HEARTBEAT_KIND", "EXPIRY_WATCH_ROUTER_TOKEN"}
+    assert set(names) == grafana | manual | n8n, set(names) ^ (grafana | manual | n8n)
+
+
+def test_no_dangerous_name_is_in_the_table():
+    dangerous = {n for n in HOSTILE if n != "OTHER_NAME"}
+    assert not dangerous & set(_table())
+    for name in _table():
+        assert not re.match(r"(LD_|BASH|DOCKER_|COMPOSE_|DOPPLER_|PYTHON|SUDO_|RUST|CARGO|NODE_|XDG_|LC_)", name), name
+        assert name not in ("PATH", "HOME", "ENV", "IFS", "SHELL", "ZDOTDIR", "INPUTRC", "BROWSER")
+
+
+def test_a_required_name_missing_from_the_config_fails_closed_even_if_the_caller_has_it(box):
+    marker = box.tmp / "ran"
+    probe = box.tmp / "child2.sh"
+    _exe(probe, "#!/bin/sh\ntouch '" + str(marker) + "'\n")
+    proc = box.run(args=(str(probe),), extra_env={"GOOD_TWO": "caller-value", "FAKE_OMIT": "GOOD_TWO"})
+    code, out, err = box.finish(proc)
+    assert code == 3 and "GOOD_TWO" in err and "missing" in err, (code, err)
+    assert not marker.exists()
+    assert "caller-value" not in out + err
+
+
+def test_an_optional_name_missing_from_the_config_is_absent_not_the_callers_copy(box):
+    probe = box.tmp / "child3.sh"
+    _exe(probe, "#!/bin/sh\n/usr/bin/cat /proc/$$/environ > '" + str(box.rec) + "/child-environ'\n")
+    proc = box.run(args=(str(probe),), require="GOOD_ONE", optional="GOOD_TWO",
+                   extra_env={"GOOD_TWO": "caller-value", "FAKE_OMIT": "GOOD_TWO"})
+    code, out, err = box.finish(proc)
+    assert code == 0, err
+    env = _env_map(box.rec / "child-environ")
+    assert env["GOOD_ONE"] == "one" and "GOOD_TWO" not in env
+
+
+def test_a_required_name_that_doppler_returns_is_passed_and_the_callers_copy_is_replaced(box):
+    probe = box.tmp / "child4.sh"
+    _exe(probe, "#!/bin/sh\n/usr/bin/cat /proc/$$/environ > '" + str(box.rec) + "/child-environ'\n")
+    code, _, err = box.finish(box.run(args=(str(probe),), extra_env={"GOOD_ONE": "caller-value"}))
+    assert code == 0, err
+    assert _env_map(box.rec / "child-environ")["GOOD_ONE"] == "one"
+
+
+def test_the_requested_names_are_unset_in_the_wrapper_before_doppler_starts(box):
+    box.finish(box.run(extra_env={"GOOD_ONE": "caller-value", "GOOD_TWO": "caller-value"}))
+    env = _env_map(box.rec / "doppler-environ")
+    assert "GOOD_ONE" not in env and "GOOD_TWO" not in env
 
 
 def test_hostile_secrets_in_the_config_are_not_passed_to_the_command(box):
@@ -351,7 +445,7 @@ def test_the_folder_is_configurable_and_the_default_is_the_documented_one(box, t
 def test_the_script_is_hardened_at_the_top():
     lines = SCRIPT.read_text(encoding="utf-8").splitlines()
     assert lines[0] == "#!/bin/bash -p"
-    head = "\n".join(lines[:45])
+    head = "\n".join(lines[:60])
     assert "set +x" in head
     assert "unset BASH_ENV ENV CDPATH GLOBIGNORE PS4" in head
     assert "export PATH" in head

@@ -9,22 +9,31 @@
 # command. A service token is already scoped to one project and config, so no
 # project or config flag is passed.
 #
-# Only the secrets NAMED on the command line are injected (--only-secrets). A
-# config that holds a secret called LD_PRELOAD, BASH_ENV, PATH or the like would
-# otherwise undo the sanitizing below, because the secret manager adds its
-# values to the child environment after this script ran. A name that controls
-# how a process starts is refused outright. The values are never read from the
-# disk cache: with no fallback file, an outage or a revoked token stops the
-# command instead of serving old values.
+# Only the secrets NAMED on the command line are injected (--only-secrets), and
+# only names in the fixed table below are accepted at all. A config that holds a
+# secret called LD_PRELOAD, BASH_ENV, PATH or ZDOTDIR would otherwise undo the
+# sanitizing, because the secret manager adds its values to the child
+# environment after this script ran; a list of bad names is never complete, so
+# the table lists the good ones. A change to the table is a change to this file.
+#
+# --require names must exist and be non-empty in the config: the wrapper clears
+# every requested name from its own environment first (so a copy inherited from
+# the caller cannot stand in for a missing secret) and the command is started
+# only after a small checker has found each required name non-empty (exit 3
+# otherwise). --optional names are injected when the config has them and are
+# simply absent when it does not. The values are never read from the disk cache:
+# with no fallback file, an outage or a revoked token stops the command instead
+# of serving old values.
 #
 # Environment (optional):
 #   SIEM_NET_CONFIG_DIR   private config folder that holds the file "token"
 #                         (default: $HOME/.config/doppler-siem-net)
 #
-# Exit status: the command's own status; 2 when the token file, its folder or
-# the allowlist is refused; 64 when the arguments are malformed.
+# Exit status: the command's own status; 2 when the token file, its folder or a
+# name is refused; 3 when a required secret is missing or empty; 64 when the
+# arguments are malformed.
 #
-# Usage: siem-net-run --only NAME1,NAME2,... -- COMMAND [ARGS...]
+# Usage: siem-net-run [--require NAME1,NAME2] [--optional NAME3,NAME4] -- COMMAND [ARGS...]
 set +x
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
@@ -40,8 +49,20 @@ while IFS= read -r VAR_NAME; do
     esac
 done < <(compgen -e)
 
+# The exact names this wrapper will ever inject: the n8n recreate, the Grafana
+# restarts (the names the grafana service of docker/docker-compose.yml uses, plus
+# the manual lines of the owner runbook, steps 4b and 5b) and the router test.
+PERMITTED_NAMES=(
+    BIND_ADDR DISCORD_FAILURE_WEBHOOK_URL EXPIRY_WATCH_ROUTER_TOKEN
+    GF_SMTP_ENABLED GF_SMTP_FROM_ADDRESS GF_SMTP_HOST GF_SMTP_PASSWORD GF_SMTP_STARTTLS_POLICY GF_SMTP_USER
+    GRAFANA_ADMIN_PASS GRAFANA_ADMIN_USER GRAFANA_INFLUX_PASSWORD GRAFANA_INFLUX_USER GRAFANA_PORT
+    GRAFANA_VERSION GRAFANA_WEBHOOK_SECRET HEARTBEAT_KIND HEARTBEAT_PING_URL OPENSEARCH_READONLY_PASSWORD
+    P1_EMAIL_TO PROMETHEUS_GRAFANA_PASSWORD PROMETHEUS_OTLP_GRAFANA_PASSWORD SIEM_HOST
+    WAZUH_GRAFANA_RO_PASSWORD WAZUH_GRAFANA_RO_USER
+)
+
 usage() {
-    echo "siem-net-run: usage: siem-net-run --only NAME1,NAME2,... -- COMMAND [ARGS...]" >&2
+    echo "siem-net-run: usage: siem-net-run [--require NAME1,NAME2] [--optional NAME3,NAME4] -- COMMAND [ARGS...]" >&2
     exit 64
 }
 
@@ -50,40 +71,75 @@ refuse() {
     exit 2
 }
 
-if [ "$#" -lt 4 ] || [ "$1" != "--only" ] || [ "$3" != "--" ]; then
-    usage
-fi
-ONLY="$2"
-shift 3
-
-# The allowlist: comma separated names, each a plain identifier, none empty.
-case "$ONLY" in
-    "" | ,* | *, | *,,*) usage ;;
-esac
-IFS=, read -r -a ONLY_NAMES <<< "$ONLY"
-for NAME in "${ONLY_NAMES[@]}"; do
-    if [[ ! "$NAME" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
-        usage
-    fi
-done
-# Names that change how a program starts, finds code or reaches a daemon are
-# never injected, whatever the config holds.
-for NAME in "${ONLY_NAMES[@]}"; do
-    case "$NAME" in
-        LD_* | DYLD_* | GCONV_PATH | LOCPATH | NLSPATH | HOSTALIASES | MALLOC_* | GLIBC_TUNABLES | RESOLV_HOST_CONF | \
-        BASH_* | BASH | ENV | SHELL | SHELLOPTS | BASHOPTS | IFS | CDPATH | GLOBIGNORE | PS0 | PS1 | PS2 | PS4 | PROMPT_COMMAND | \
-        PATH | HOME | USER | LOGNAME | TMPDIR | TMP | TEMP | PWD | OLDPWD | LANG | LANGUAGE | LC_* | TZ | TERM | EDITOR | VISUAL | PAGER | \
-        PYTHON* | PERL* | RUBY* | GEM_* | NODE_* | NPM_* | JAVA_* | JDK_JAVA_OPTIONS | CLASSPATH | LUA_* | PHP* | GOFLAGS | GOROOT | GOPATH | \
-        DOCKER_* | COMPOSE_* | CONTAINER_* | PODMAN_* | SUDO_* | SSH_* | GIT_* | XDG_* | DOPPLER_* | \
-        *_PROXY | *_proxy | CURL_* | OPENSSL_* | SSL_* | REQUESTS_CA_BUNDLE | NIX_*)
-            refuse "allowlist name $NAME is not allowed (it controls how programs start or where they connect)"
+REQUIRE=""
+OPTIONAL=""
+SEEN_REQUIRE=0
+SEEN_OPTIONAL=0
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --require)
+            [ "$#" -ge 2 ] && [ "$SEEN_REQUIRE" -eq 0 ] || usage
+            REQUIRE="$2"
+            SEEN_REQUIRE=1
+            shift 2
+            ;;
+        --optional)
+            [ "$#" -ge 2 ] && [ "$SEEN_OPTIONAL" -eq 0 ] || usage
+            OPTIONAL="$2"
+            SEEN_OPTIONAL=1
+            shift 2
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            usage
             ;;
     esac
 done
-
-if [ "$#" -eq 0 ]; then
+if [ "$#" -eq 0 ] || { [ "$SEEN_REQUIRE" -eq 0 ] && [ "$SEEN_OPTIONAL" -eq 0 ]; }; then
     usage
 fi
+
+# Each list: comma separated, no empty item, plain upper case names (the second
+# check), and every name in the fixed table (the first).
+ALL_NAMES=()
+check_list() {
+    local list="$1" name permitted found
+    local -a items
+    case "$list" in
+        "" | ,* | *, | *,,*) usage ;;
+    esac
+    IFS=, read -r -a items <<< "$list"
+    for name in "${items[@]}"; do
+        if [[ ! "$name" =~ ^[A-Z][A-Z0-9_]*$ ]]; then
+            usage
+        fi
+        found=0
+        for permitted in "${PERMITTED_NAMES[@]}"; do
+            if [ "$name" = "$permitted" ]; then
+                found=1
+            fi
+        done
+        if [ "$found" -eq 0 ]; then
+            refuse "name $name is not permitted (it is not in the table of this wrapper)"
+        fi
+        for permitted in ${ALL_NAMES[@]+"${ALL_NAMES[@]}"}; do
+            if [ "$name" = "$permitted" ]; then
+                usage
+            fi
+        done
+        ALL_NAMES+=("$name")
+    done
+}
+if [ "$SEEN_REQUIRE" -eq 1 ]; then
+    check_list "$REQUIRE"
+fi
+if [ "$SEEN_OPTIONAL" -eq 1 ]; then
+    check_list "$OPTIONAL"
+fi
+ONLY="$(IFS=,; echo "${ALL_NAMES[*]}")"
 
 CFG="${SIEM_NET_CONFIG_DIR:-$HOME/.config/doppler-siem-net}"
 TOKEN_FILE="$CFG/token"
@@ -124,7 +180,14 @@ if [ -z "$TOK" ]; then
     refuse "token file is empty"
 fi
 
-# A name missing from the config is not an error here (the caller checks what it
-# needs); an outage or a revoked token still stops the command, as there is no
-# fallback file.
-DOPPLER_TOKEN="$TOK" exec doppler run --config-dir "$CFG" --no-check-version --no-fallback --no-exit-on-missing-only-secrets --only-secrets="$ONLY" -- "$@"
+# A caller's own copy of a requested name must never stand in for the config's.
+for NAME in "${ALL_NAMES[@]}"; do
+    unset "$NAME"
+done
+
+# Runs inside doppler, after the secrets are injected, before the command: every
+# required name must be non-empty. (Doppler warns but does not fail for a name
+# the config lacks, because of --no-exit-on-missing-only-secrets.)
+CHECK='req=$1; shift; IFS=,; for v in $req; do if [ -z "$(printenv "$v")" ]; then echo "siem-net-run: required secret $v is missing or empty in the config" >&2; exit 3; fi; done; unset IFS; exec "$@"'
+
+DOPPLER_TOKEN="$TOK" exec doppler run --config-dir "$CFG" --no-check-version --no-fallback --no-exit-on-missing-only-secrets --only-secrets="$ONLY" -- sh -c "$CHECK" siem-net-run "$REQUIRE" "$@"

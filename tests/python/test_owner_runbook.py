@@ -928,11 +928,15 @@ def compose_grafana_names():
 
 
 def test_issue177_the_grafana_allowlist_is_computed_from_the_compose_file():
-    expected = ",".join(sorted(set(compose_grafana_names()) | set(GRAFANA_EXTRAS)))
+    everything = set(compose_grafana_names()) | set(GRAFANA_EXTRAS)
+    step4 = {"DISCORD_FAILURE_WEBHOOK_URL", "GRAFANA_WEBHOOK_SECRET"}  # stored in 0b and 4a: must exist
+    step5 = step4 | {n for n in GRAFANA_EXTRAS if n.startswith("GF_SMTP")} | {"P1_EMAIL_TO"}  # plus 5a's seven
     lines = [l for l in CODE_LINES if "docker compose up -d" in l and "grafana" in l and "siem-net-run" in l]
     assert len(lines) == 3, lines  # 4d, 4g, 5d
-    for line in lines:
-        assert '"$HOME/bin/siem-net-run" --only ' + expected + " -- docker compose up -d --no-deps grafana" in line, line
+    for line, required in zip(lines, (step4, step4, step5)):
+        want = ('"$HOME/bin/siem-net-run" --require ' + ",".join(sorted(required)) + " --optional "
+                + ",".join(sorted(everything - required)) + " -- docker compose up -d --no-deps grafana")
+        assert want in line, line
     for name in GRAFANA_EXTRAS[:1]:
         assert name in section("### 4b.", "### 4c.")
     smtp = section("### 5a.", "### 5b.")
@@ -944,29 +948,32 @@ def test_issue177_every_wrapper_call_names_an_allowlist_and_none_is_a_process_co
     calls = [l for l in CODE_LINES if "siem-net-run" in l and "install" not in l and "rm " not in l]
     assert calls
     for line in calls:
-        for m in re.finditer(r'siem-net-run" (?!--only )', line):
-            assert False, "a wrapper call without --only: " + line
+        for m in re.finditer(r'siem-net-run" (?!--(?:require|optional) |--only )', line):
+            assert False, "a wrapper call without a name list: " + line
+        assert "--only " not in line  # the old spelling
     names = set()
     for line in CODE_LINES:
-        for m in re.finditer(r"siem-net-run\" --only ([A-Za-z0-9_,]+) --", line):
+        for m in re.finditer(r"--(?:require|optional) ([A-Za-z0-9_,]+)", line):
             names.update(m.group(1).split(","))
-    bad = [n for n in names if re.match(r"(LD_|BASH|PATH$|HOME$|DOCKER_|DOPPLER_|PYTHON|ENV$|IFS$|COMPOSE_)", n)]
-    assert not bad, bad
+    script = (REPO_ROOT / "scripts" / "siem-net-run").read_text(encoding="utf-8")
+    start = script.index("PERMITTED_NAMES=(") + len("PERMITTED_NAMES=(")
+    table = set(script[start:script.index(")", start)].split())
+    assert names and names <= table, sorted(names - table)  # every name the runbook passes is in the wrapper's table
 
 
 def test_issue177_the_n8n_recreate_allowlist_is_the_preserve_list():
     block = def_fence("owner_recreate_n8n")
     # "$2", not "$PRESERVE": a variable set as a prefix of the same command is not visible to its own arguments
-    assert '"$HOME/bin/siem-net-run" --only "$2" -- sh -c' in block
+    assert '"$HOME/bin/siem-net-run" --require "$2" -- sh -c' in block
     for call in CALLS:
         req, preserve = re.search(r'owner_recreate_n8n "([^"]*)" "([^"]*)"', call).groups()
-        assert set(req.split()) <= set(preserve.split(",")), call  # every required name is also allowed
+        assert set(req.split()) == set(preserve.split(",")), call  # every name the compose file takes is required
         assert set(preserve.split(",")) <= {"HEARTBEAT_PING_URL", "HEARTBEAT_KIND", "EXPIRY_WATCH_ROUTER_TOKEN"}
 
 
 def test_issue177_the_recreate_passes_its_allowlist_to_the_wrapper(tmp_path):
     status, out, log = run_blocks(tmp_path, [CHK, RECREATE, CALLS[1]])
-    assert status == 0 and "netargs --only HEARTBEAT_PING_URL,HEARTBEAT_KIND,EXPIRY_WATCH_ROUTER_TOKEN --" in log
+    assert status == 0 and "netargs --require HEARTBEAT_PING_URL,HEARTBEAT_KIND,EXPIRY_WATCH_ROUTER_TOKEN --" in log
 
 
 def test_issue177_the_token_is_replaced_atomically_and_the_old_one_is_revoked_after_the_check():
@@ -976,7 +983,11 @@ def test_issue177_the_token_is_replaced_atomically_and_the_old_one_is_revoked_af
     assert "doppler-siem-net.new" in text and "mv -T" in text and "umask 077" in text
     assert text.index("mv -T") < text.index("revoke --project")  # the swap comes before the revoke
     assert "--no-fallback" in flat and "fails closed" in flat.lower() and "Doppler outage" in flat
-    assert "--only" in flat and "LD_PRELOAD" in flat
+    assert "--require" in flat and "--optional" in flat and "LD_PRELOAD" in flat and "ZDOTDIR" in flat
+    assert "fixed table" in flat and "exit 3" in flat
+    assert "GF_SMTP_HOST" in flat and "whoever can edit" in flat.lower()  # the accepted residual risk is named
+    item4 = [l for l in text.splitlines() if "SIEM_NET_CONFIG_DIR=" in l]
+    assert item4 and "--require GRAFANA_WEBHOOK_SECRET --" in item4[0]
 
 
 def test_issue177_the_old_fallback_readonly_claim_is_gone():
