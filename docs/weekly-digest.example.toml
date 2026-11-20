@@ -1,0 +1,41 @@
+# Weekly status digest: example config (issue #69).
+# Copy to weekly-digest.toml, edit, then:
+#   python3 scripts/weekly_digest.py --config weekly-digest.toml          (dry run: prints, no network)
+#   python3 scripts/weekly_digest.py --config weekly-digest.toml --send   (reads Grafana, sends one email)
+# Relative paths are relative to the folder this file is in.
+# Nothing secret goes in this file: tokens and logins are environment variable NAMES only.
+
+[digest]
+window_days = 7                 # how far back the Grafana alert history is read (1 to 31)
+max_body_bytes = 32768          # the email body is cut here (1024 to 200000)
+max_entries_per_section = 40    # more than this: "... and N more not shown"
+delivery_budget_seconds = 60    # one overall deadline for the one delivery
+
+[expiry]
+# The expiry watch's own state file, read-only (see docs/expiry-watch.md). Never written.
+state_file = "expiry-watch-state.json"
+warn_days = 30                  # list items that expire within this many days, or already did
+stale_run_days = 3              # say so when the watch has not saved its state for this many days
+
+# Same settings and same hardened sender as the expiry watch [email] table.
+[email]
+host = "smtp.example.com"
+port = 587
+security = "starttls"           # starttls | tls | plaintext (plaintext also needs allow_plaintext = true)
+from = "digest@example.com"
+to = ["ops@example.com"]        # up to 4 plain addresses
+username_env = "WEEKLY_DIGEST_SMTP_USER"
+password_env = "WEEKLY_DIGEST_SMTP_PASSWORD"
+# timeout_seconds = 20
+# helo_name = "localhost"
+# ca_file = "internal-ca.pem"
+
+# Optional. Alert state history through the Grafana HTTP API (GET /api/annotations?type=alert).
+# The token is a READ-ONLY service account token. Without this table the two Grafana sections
+# say "Not configured".
+[grafana]
+url = "https://grafana.example.com"
+token_env = "WEEKLY_DIGEST_GRAFANA_TOKEN"
+# timeout_seconds = 10
+# limit = 500                              # most state changes read (1 to 1000)
+# needs_action_words = ["update", "reboot"]  # alerts whose name has one of these and that are not Normal
