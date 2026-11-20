@@ -36,6 +36,8 @@ The variable is validated by the same rule everywhere (exactly `docker` or
 | `scripts/03-deploy.sh`, `06-generate-wazuh-certs.sh`, `11-wazuh-grafana-readonly.sh`, `prometheus-otlp-firewall.sh` | environment |
 | `scripts/04-apply-ism-policy.sh` | the `.env` file is consulted only when `OPENSEARCH_ADMIN_PASSWORD` is empty in the environment; the exported environment wins, then the first existing `.env` |
 | `scripts/05-verify.sh`, `scripts/08b-init-opensearch-security.sh` | the `.env` file these scripts already load takes precedence over the exported environment, because it is sourced first |
+| `scripts/08-crowdsec-smoketest.sh`, `scripts/09-test-crowdsec-pfsense-ingest.sh` | the `.env` file takes precedence over the exported environment, because it is sourced first |
+| `scripts/10-snapshot-setup.sh` | like `04-apply-ism-policy.sh`: the `.env` file is consulted only when `OPENSEARCH_ADMIN_PASSWORD` is empty in the environment |
 
 `scripts/live-deploy/grafana-deploy.py` starts no process and is unchanged.
 `scripts/02-bootstrap.sh` still installs Docker only.
@@ -88,7 +90,8 @@ answer is not a number.
 
 The root decision, the privileged-mode check and the trusted script and helper tree
 are done early in each script, before it reads `SIEM_DEPLOY_DIR`, locates a
-file or sources anything. `04-apply-ism-policy.sh`, `05-verify.sh` and `08b-init-opensearch-security.sh` load a
+file or sources anything. `04-apply-ism-policy.sh`, `05-verify.sh`, `08-crowdsec-smoketest.sh`,
+`08b-init-opensearch-security.sh`, `09-test-crowdsec-pfsense-ingest.sh` and `10-snapshot-setup.sh` load a
 `.env`, which is shell code: they do it through `ce_source_env`, which as root accepts
 only a regular file (not a link) that is root-owned, with every directory above it
 root-owned and not group or world writable, opens it once and sources that open
@@ -187,6 +190,20 @@ that guarantee:
 - Inside the container the password is in the environment of the hash tool's one `java` process for the
   moment it runs (readable by the same container user, container root and host root), never in an
   argument list.
+
+## Passwords in the smoke test, the ingest test and the snapshot setup
+
+`08-crowdsec-smoketest.sh`, `09-test-crowdsec-pfsense-ingest.sh` and `10-snapshot-setup.sh` follow the
+same design as `04-apply-ism-policy.sh` and `05-verify.sh`: the OpenSearch admin password (and, in the
+smoke test, the Grafana password from `GRAFANA_PASS` or `GRAFANA_ADMIN_PASS`) goes to `curl` on standard
+input as a config (`curl -K -`), never in an argument list (no `-u`), and the named password variables
+and every variable the `.env` newly creates lose their export attribute, so no child process inherits
+them. A line break in a password (or in `GRAFANA_USER`) is refused before any request, and a `.env` that
+fails to load stops the script before any request. The limits listed above for
+`08b-init-opensearch-security.sh` (trusted `.env`, `EXIT` and signal traps, function shadowing, names that
+already existed, the launcher's own environment) apply here unchanged. Start all three by their path
+(`sudo scripts/10-snapshot-setup.sh`), never through an explicit `bash` interpreter. The tests are in
+`tests/python/test_crowdsec_snapshot_credentials.py`.
 
 ## Not covered
 

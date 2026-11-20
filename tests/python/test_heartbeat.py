@@ -97,8 +97,28 @@ def test_the_ping_node_is_the_only_new_http_node_and_never_fails_the_run():
     assert "credentials" not in p and "authentication" not in p["parameters"]
 
 
+def test_the_ping_is_retried_and_the_worst_case_stays_bounded():
+    """Issue #169: one dropped ping must not be lost. 3 tries, short timeout, bounded total."""
+    p = _nodes()[PING_NODE]
+    assert p["retryOnFail"] is True
+    assert p["maxTries"] == 3
+    wait = p["waitBetweenTries"]
+    timeout = p["parameters"]["options"]["timeout"]
+    assert 1000 <= wait <= 5000
+    assert 3000 <= timeout <= 8000
+    # worst case: every try times out, with a wait between tries
+    worst_ms = p["maxTries"] * timeout + (p["maxTries"] - 1) * wait
+    assert worst_ms == 19000, "the docs promise 19 seconds; change both together"
+    # a failed ping still continues regularly, and the certificate check stays on
+    assert p["onError"] == "continueRegularOutput"
+    assert "allowUnauthorizedCerts" not in json.dumps(p)
+
+
 @pytest.mark.parametrize("pushover", [False, True])
 def test_a_failed_ping_never_fails_the_run(pushover):
+    """Models one instantaneous failure of the ping node. The model never interprets retryOnFail, maxTries,
+    waitBetweenTries, the timeout duration or a client disconnect; the retry settings are checked by the
+    arithmetic test above only."""
     res = _run(_hb(), pushover_enabled=pushover, fail={PING_NODE})
     assert res["response"] == "200" and res["run"] == "success" and res["error"] == ""
     assert PING_NODE in res["failed"] and "Respond Error" not in res["reached"]
@@ -337,15 +357,22 @@ def test_the_new_files_are_not_picked_up_by_the_update_rule_schema_tests():
 def test_docs_cover_setup_observers_and_what_is_unverified():
     flat = " ".join(DOC.read_text(encoding="utf-8").split())
     for needle in ("HEARTBEAT_PING_URL", "HEARTBEAT_KIND", "healthchecks", "uptimekuma", "Healthchecks.io",
-                   "period of 5 minutes", "grace time of 10 minutes", "N8N_BLOCK_ENV_ACCESS_IN_NODE",
+                   "period of 5 minutes", "grace time of at least 15 minutes", "N8N_BLOCK_ENV_ACCESS_IN_NODE",
+                   "up to 3 times", "worst case", "NODE_EXTRA_CA_CERTS", "allowUnauthorizedCerts",
                    "example.com", "192.0.2.", "private-access", "/fail", "status=down",
                    "Verified", "Unverified", "failure domain", "repeat_interval", "off when unset",
                    "never fails the delivery of a real alert", "Alert path heartbeat"):
         assert needle in flat, needle
+    # observer timing: down after period plus grace (5 + 15 = about 20 minutes), about three missed pings
+    for needle in ("about 20 minutes", "at least 20 minutes", "period plus grace", "about three missed",
+                   "synchronous", "19 seconds", "separate workflow", "alerts never reach this node",
+                   "Grafana's webhook deadline is unverified"):
+        assert needle in flat, needle
+    assert "stop n8n for 15 minutes" not in flat and "a couple of lost pings" not in flat
     # only documentation addresses
     for host in re.findall(r"https?://([\w.-]+)", flat):
         assert host.endswith("example.com") or host.startswith("192.0.2.") or host in {
-            "hc-ping.com", "healthchecks.io", "localhost"}, host
+            "hc-ping.com", "healthchecks.io", "localhost", "docs.n8n.io"}, host
     assert "hc-ping.com/" not in re.sub(r"https://hc-ping\.com/<[^>]+>", "", flat), "no real ping URL"
     assert "heartbeat.md" in (REPO_ROOT / "docs" / "update-alerting.md").read_text(encoding="utf-8")
 

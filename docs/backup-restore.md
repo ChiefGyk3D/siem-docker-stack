@@ -49,7 +49,7 @@ credential.
   - `include_global_state: false`, `partial: true`
 
 ```bash
-bash scripts/10-snapshot-setup.sh          # idempotent — re-run any time
+sudo scripts/10-snapshot-setup.sh          # idempotent - re-run any time
 ```
 
 ### Check status
@@ -63,6 +63,16 @@ osc "$OS/_cat/snapshots/siem-snapshots?v&h=id,status,start_time,duration,indices
 ---
 
 ## Manual snapshot
+
+`sudo scripts/10-snapshot-setup.sh` ends by printing a ready-to-paste `manual_snapshot` function and its call
+line (between `# --- paste begin` and `# --- paste end`). Paste it into a fresh bash 4.2 or newer
+(`bash --norc`), in a shell where `OPENSEARCH_ADMIN_PASSWORD` is set and not exported. It sends the
+credentials to curl on stdin and refuses a control character or an unreadable date. It also refuses to run
+while the shell is tracing (`set -x`, `SHELLOPTS`, `BASH_XTRACEFD`, `set -T`) or has a `DEBUG`, `RETURN` or
+`ERR` trap, so it prevents curl and its own read of the password in that case. It cannot protect a password
+your shell already holds when a `DEBUG` trap, a `PS4` or a `BASH_XTRACEFD` set before the call prints it:
+that code runs in your shell before the function starts. Use a fresh `bash --norc` whose environment does
+not already hold the password. The `osc` form below is the manual equivalent.
 
 ```bash
 osc -X PUT "$OS/_snapshot/siem-snapshots/manual-$(date +%Y%m%d-%H%M)?wait_for_completion=false" \
