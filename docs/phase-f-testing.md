@@ -150,7 +150,7 @@ docker logs logstash --tail 20   # no auth/TLS errors
 ```
 
 - [ ] Doc count increased; no `401`/`SSL` errors in logstash logs.
-- [ ] Fixture replay passes: `bash scripts/09-test-crowdsec-pfsense-ingest.sh`
+- [ ] Fixture replay passes: `sudo scripts/09-test-crowdsec-pfsense-ingest.sh`
 
 **Grafana datasources healthy:**
 
@@ -206,7 +206,7 @@ curl -s http://127.0.0.1:9093/api/v2/alerts | jq '.[].labels.alertname'
 ## 6. Verification — F4 (snapshots + restore drill)
 
 ```bash
-bash scripts/10-snapshot-setup.sh
+sudo scripts/10-snapshot-setup.sh
 # Take a manual snapshot right now instead of waiting for 03:00 UTC:
 curl -sk -u "admin:${OPENSEARCH_ADMIN_PASSWORD}" -X PUT \
   "https://localhost:9200/_snapshot/siem-snapshots/manual-test?wait_for_completion=true" \
@@ -225,7 +225,7 @@ curl -sk -u "admin:${OPENSEARCH_ADMIN_PASSWORD}" -X PUT \
 
 - [ ] `docker ps` — no crash-looping containers (watch `opensearch-dashboards`,
       `alertmanager`, `elasticsearch-exporter`, `influxdb`).
-- [ ] `bash scripts/08-crowdsec-smoketest.sh` passes.
+- [ ] `sudo scripts/08-crowdsec-smoketest.sh` passes.
 - [ ] Reboot test (optional but recommended): `docker compose restart` in
       /opt/siem — cluster comes back green without re-running 08b (security
       config persists in the `.opendistro_security` index).

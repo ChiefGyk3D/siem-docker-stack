@@ -41,7 +41,7 @@ OS=https://localhost:9200
   - `include_global_state: false`, `partial: true`
 
 ```bash
-bash scripts/10-snapshot-setup.sh          # idempotent — re-run any time
+sudo scripts/10-snapshot-setup.sh          # idempotent - re-run any time
 ```
 
 ### Check status

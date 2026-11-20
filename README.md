@@ -553,7 +553,7 @@ OPENSEARCH_URL="http://localhost:9200" \
 GRAFANA_URL="http://localhost:3000" \
 GRAFANA_USER="admin" \
 GRAFANA_PASS="$GRAFANA_ADMIN_PASS" \
-bash scripts/08-crowdsec-smoketest.sh
+sudo scripts/08-crowdsec-smoketest.sh
 ```
 
 The smoke test verifies synthetic CrowdSec events can be indexed and that the CrowdSec Grafana alert rule/dashboard are present.
