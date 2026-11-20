@@ -25,13 +25,15 @@ from conftest import REPO_ROOT
 SCRIPT = REPO_ROOT / "scripts" / "siem-net-run"
 PATH_LINE = "PATH=/usr/local/sbin:"  # start of the fixed PATH assignment
 SENTINEL = "dp.st.Sentinel-Tok-5c1e"
-PROBED = ("stat", "id")
+PROBED = ("stat", "id", "sh", "printenv")  # sh is the checker stage, printenv runs inside it
 TABLE_START = "PERMITTED_NAMES=("  # the fixed table of names the wrapper will ever inject
 
 FAKE_DOPPLER = """#!/bin/bash
+# Only bash builtins run here, as in the real CLI: no helper program ever sees the token before the
+# command stage starts (the first program started is the checker shell, which holds it and drops it).
 printf '%s\\n' "$$" > '@REC@/doppler-pid'
 for a in "$@"; do printf '%s\\n' "$a"; done > '@REC@/doppler-argv'
-cat /proc/$$/environ > '@REC@/doppler-environ'
+while IFS= read -r -d '' kv; do printf '%s\\0' "$kv"; done < "/proc/$$/environ" > '@REC@/doppler-environ'
 [ -n "${FAKE_EXIT:-}" ] && exit "$FAKE_EXIT"
 # Emulate `doppler run`: inject the config's secrets (hostile names included) into the child,
 # keeping only the names given to --only-secrets, as the real CLI does.
@@ -44,19 +46,24 @@ for a in "${args[@]}"; do
     if [ "$seen" = 1 ]; then child+=("$a"); fi
     [ "$a" = -- ] && seen=1
 done
+cmd="${child[0]:-}"
+case "$cmd" in /*) ;; *) cmd=$(command -v "$cmd") ;; esac   # resolve before any injected PATH
 inject=()
 for kv in LD_PRELOAD=/evil.so BASH_ENV=/evil.sh ENV=/evil.sh PATH=/evil DOCKER_HOST=tcp://evil:1 PYTHONPATH=/evil GOOD_ONE=one GOOD_TWO=two NOT_ASKED=nope; do
     name=${kv%%=*}
     case ",${FAKE_OMIT:-}," in *",$name,"*) continue ;; esac  # a name Doppler does not hold
     if [ -z "$only" ] || [[ "$only" == *",$name,"* ]]; then inject+=("$kv"); fi
 done
-[ ${#child[@]} -gt 0 ] && exec env "${inject[@]}" "${child[@]}"
+if [ ${#child[@]} -gt 0 ]; then
+    for kv in "${inject[@]}"; do export "$kv"; done
+    exec "$cmd" "${child[@]:1}"
+fi
 exit 0
 """
-PROBE = """#!/bin/sh
+PROBE = """#!/bin/bash
 id=$$
 for a in "$@"; do printf '%s\\n' "$a"; done > '@REC@/@TOOL@-'$id'-argv'
-/usr/bin/cat /proc/$$/environ > '@REC@/@TOOL@-'$id'-environ'
+while IFS= read -r -d '' kv; do printf '%s\\0' "$kv"; done < "/proc/$$/environ" > '@REC@/@TOOL@-'$id'-environ'
 exec @REAL@ "$@"
 """
 FAKE_ID = """#!/bin/sh
@@ -171,12 +178,32 @@ def test_the_token_is_not_in_any_argument_list_or_any_other_environment(box):
     assert SENTINEL not in out + err
     for p in box.rec.iterdir():
         text = p.read_text(errors="replace")
-        if p.name == "doppler-environ":
-            assert text.count(SENTINEL) == 1  # once, as the value of DOPPLER_TOKEN
+        if p.name == "doppler-environ" or re.fullmatch(r"sh-\d+-environ", p.name):
+            assert text.count(SENTINEL) == 1  # once, as the value of DOPPLER_TOKEN (doppler, then the checker)
         else:
             assert SENTINEL not in text, p.name
     assert not box.recorded("doppler-argv") or SENTINEL not in (box.rec / "doppler-argv").read_text()
     assert box.recorded("stat-*-argv") and box.recorded("id-*-argv")  # the probes did run before the read
+
+
+def test_only_the_doppler_image_and_the_checker_stage_ever_hold_the_token(box):
+    # every process the fake starts is recorded: stat and id (before the token is read), the checker shell,
+    # printenv inside it, and the command. The token is in the first two images only, and they are one process.
+    cmd = box.tmp / "cmd.sh"
+    _exe(cmd, "#!/bin/bash\nwhile IFS= read -r -d '' kv; do printf '%s\\0' \"$kv\"; done < \"/proc/$$/environ\" > '"
+              + str(box.rec) + "/cmd-environ'\n")
+    code, out, err = box.finish(box.run(args=(str(cmd),)))
+    assert code == 0, err
+    holders = sorted(p.name for p in box.rec.glob("*-environ") if SENTINEL in p.read_text(errors="replace"))
+    shells = box.recorded("sh-*-environ")
+    assert len(shells) == 1 and holders == sorted(["doppler-environ", shells[0].name]), holders
+    # no program ran between doppler and the checker: they are the same process, and printenv/cmd are clean
+    doppler_pid = int((box.rec / "doppler-pid").read_text())
+    assert shells[0].name == "sh-%d-environ" % doppler_pid
+    assert box.recorded("printenv-*-environ") and (box.rec / "cmd-environ").exists()
+    assert "DOPPLER_TOKEN" not in _env_map(box.rec / "cmd-environ")
+    for p in box.recorded("printenv-*-environ"):
+        assert "DOPPLER_TOKEN" not in _env_map(p)
 
 
 def test_an_inherited_token_variable_is_replaced_not_passed_on(box):

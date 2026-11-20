@@ -989,9 +989,10 @@ def test_issue177_the_token_is_replaced_atomically_and_the_old_one_is_revoked_af
     # round 3: no equivalence claim, a table of routing values with consequences, and an owner decision
     assert "same trust as editing" not in flat and "equivalent" not in flat.lower()
     routing = " ".join(section("Routing and destination values", "You need, on your own machine").split())
-    for name in ("BIND_ADDR", "SIEM_HOST", "GF_SMTP_HOST", "GRAFANA_VERSION", "GRAFANA_PORT",
-                 "PROMETHEUS_GRAFANA_PASSWORD", "PROMETHEUS_OTLP_GRAFANA_PASSWORD", "GRAFANA_INFLUX_USER",
-                 "WAZUH_GRAFANA_RO_USER", "DISCORD_FAILURE_WEBHOOK_URL", "HEARTBEAT_PING_URL"):
+    for name in ("BIND_ADDR", "SIEM_HOST", "GF_SMTP_HOST", "GRAFANA_VERSION", "GRAFANA_PORT", "GRAFANA_INFLUX_USER",
+                 "WAZUH_GRAFANA_RO_USER", "DISCORD_FAILURE_WEBHOOK_URL", "HEARTBEAT_PING_URL", "P1_EMAIL_TO",
+                 "GF_SMTP_STARTTLS_POLICY", "GF_SMTP_ENABLED", "GF_SMTP_FROM_ADDRESS", "HEARTBEAT_KIND",
+                 "GRAFANA_ADMIN_USER"):
         assert name in routing, name
     assert "OWNER DECISION" in routing and ".env" in routing and "dev_network" in routing
     assert "doppler activity" in routing and "NOT verified" in routing  # how to check, and what is unverified
@@ -999,6 +1000,32 @@ def test_issue177_the_token_is_replaced_atomically_and_the_old_one_is_revoked_af
     assert "not a sandbox" in flat
     item4 = [l for l in text.splitlines() if "SIEM_NET_CONFIG_DIR=" in l]
     assert item4 and "--require GRAFANA_WEBHOOK_SECRET --" in item4[0]
+
+
+def _table_names(text):
+    names = []
+    for cell in re.findall(r"^\| ((?:`[A-Z][A-Z0-9_]*`(?:, )?)+) \|", text, flags=re.M):
+        names += re.findall(r"`([A-Z][A-Z0-9_]*)`", cell)
+    return names
+
+
+def test_issue177_every_name_in_the_wrappers_table_is_in_exactly_one_runbook_table():
+    script = (REPO_ROOT / "scripts" / "siem-net-run").read_text(encoding="utf-8")
+    start = script.index("PERMITTED_NAMES=(") + len("PERMITTED_NAMES=(")
+    permitted = script[start:script.index(")", start)].split()
+    assert len(permitted) == 25, permitted
+    text = section("### 0b.5 ", "## Step 0c.")
+    secrets = _table_names(section("Secret values (who must never see them)", "Routing and destination values"))
+    routing = _table_names(section("Routing and destination values", "You need, on your own machine"))
+    assert len(secrets) == len(set(secrets)) and len(routing) == len(set(routing))
+    assert not set(secrets) & set(routing), sorted(set(secrets) & set(routing))  # never in both
+    missing = [n for n in permitted if n not in secrets and n not in routing]
+    assert not missing, missing  # in neither table
+    extra = (set(secrets) | set(routing)) - set(permitted)
+    assert not extra, sorted(extra)  # a name the wrapper no longer permits
+    assert "P1_EMAIL_TO" in routing and "GF_SMTP_STARTTLS_POLICY" in routing and "GRAFANA_ADMIN_USER" in routing
+    assert "GF_SMTP_PASSWORD" in secrets and "GRAFANA_ADMIN_PASS" in secrets
+    assert "25" in text  # the text says how many names the table holds
 
 
 def test_issue177_the_old_fallback_readonly_claim_is_gone():

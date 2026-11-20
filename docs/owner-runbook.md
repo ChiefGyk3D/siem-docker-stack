@@ -535,13 +535,35 @@ command line, and the installed CLI v3.77.1, run 2026-11-20 on a throwaway
 folder, stored a `secret-...` reference rather than the token in the file, which
 points at the system secret store, not at the private folder.)
 
+Every one of the 25 names in the wrapper's table is in exactly one of the two tables
+below (a test checks this against the script).
+
+Secret values (who must never see them). These are credentials; a leak lets the
+holder act as the service named. Keep them out of logs, tickets and chat; only the
+named consumer needs them.
+
+| Name | Who must never see it |
+|------|-----------------------|
+| `GRAFANA_ADMIN_PASS` | anyone but the Grafana administrator: it is the admin login |
+| `GRAFANA_WEBHOOK_SECRET` | anyone outside Grafana and the n8n router credential: it authenticates alert posts to the router |
+| `EXPIRY_WATCH_ROUTER_TOKEN` | anyone outside the expiry watch and the n8n router: it authenticates expiry notices |
+| `GF_SMTP_USER`, `GF_SMTP_PASSWORD` | anyone outside Grafana and the mail provider: they send mail as you |
+| `GRAFANA_INFLUX_PASSWORD`, `OPENSEARCH_READONLY_PASSWORD`, `WAZUH_GRAFANA_RO_PASSWORD` | anyone outside Grafana and that datasource: read access to the logs and metrics |
+| `PROMETHEUS_GRAFANA_PASSWORD`, `PROMETHEUS_OTLP_GRAFANA_PASSWORD` | anyone outside Grafana and Prometheus: read access to metrics (a changed destination in the next table would present them to another party) |
+
 Routing and destination values. The table only stops a name from becoming a
 process-control variable. A WRONG VALUE of a name that is meant to be injected
-still takes effect at the next restart, so these 11 names, which decide where
-something connects or what runs, matter beyond being secrets:
+still takes effect at the next restart, so these 15 names, which decide where
+something connects, who receives what, or what runs, matter beyond being secrets:
 
 | Name | A wrong value does this |
 |------|-------------------------|
+| `P1_EMAIL_TO` | P1 alert and resolution mail goes to another recipient (alert content leaves to an address you do not control) |
+| `GF_SMTP_ENABLED` | email delivery is switched off (P1 mail silently stops) or on |
+| `GF_SMTP_STARTTLS_POLICY` | a weaker policy sends the SMTP login and mail without enforced transport encryption |
+| `GF_SMTP_FROM_ADDRESS` | the asserted sender of alert mail changes (spoofing, or the provider rejects it) |
+| `HEARTBEAT_KIND` | selects another observer integration; the heartbeat goes to the wrong kind of service |
+| `GRAFANA_ADMIN_USER` | the Grafana administrator account name changes, and with it which account the admin password belongs to |
 | `BIND_ADDR` | Grafana is published on another interface (default `127.0.0.1`), possibly reachable from the network |
 | `GRAFANA_PORT` | Grafana moves to another host port; links and probes miss it |
 | `GRAFANA_VERSION` | selects the Grafana image tag: an unwanted version, including a downgrade |
@@ -549,7 +571,6 @@ something connects or what runs, matter beyond being secrets:
 | `GF_SMTP_HOST` | Grafana presents `GF_SMTP_USER` and `GF_SMTP_PASSWORD` to that SMTP server and sends mail through it |
 | `DISCORD_FAILURE_WEBHOOK_URL` | the failure alerts, and their text, go to another destination |
 | `HEARTBEAT_PING_URL` | the heartbeat ping goes elsewhere (the observer reports down), or the ping URL leaks to another party |
-| `PROMETHEUS_GRAFANA_PASSWORD`, `PROMETHEUS_OTLP_GRAFANA_PASSWORD` | datasource logins; a wrong value breaks the datasource, and with a changed destination they are the credentials presented to it |
 | `GRAFANA_INFLUX_USER`, `WAZUH_GRAFANA_RO_USER` | the account name Grafana uses for those datasources; a wrong name fails or uses a different account |
 
 Who can change these is whoever has write access to `dev_network` in project
