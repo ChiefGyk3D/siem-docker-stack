@@ -15,6 +15,7 @@ environment is set by whoever starts the script and is out of the script's hands
 import hashlib
 import json
 import os
+import re
 import subprocess
 
 import pytest
@@ -29,6 +30,7 @@ PATH_LINE = "PATH=/usr/local/sbin:"  # start of the script's fixed PATH assignme
 SENTINEL = "S3ntinel-Pw-9f2c"  # recognizable, no shell or curl-config special characters
 PASS_VARS = ["OPENSEARCH_ADMIN_PASSWORD", "OPENSEARCH_LOGSTASH_PASSWORD",
              "OPENSEARCH_READONLY_PASSWORD", "OPENSEARCH_DASHBOARDS_PASSWORD"]
+ABS_TOOLS = ("readlink", "dirname", "id", "stat", "mktemp", "rm", "env")  # called by absolute path
 OTHER_SECRET = "Other-Secret-7d41"  # another value in the same .env, which no child may inherit
 
 # The engine stub: records the client call, then plays the container for `exec ... bash -c PAYLOAD`.
@@ -49,6 +51,9 @@ case " $* " in
         shift  # bash
         shift  # -c
         payload=$1
+        # what the image's own environment holds: where its java lives
+        OPENSEARCH_JAVA_HOME="$INNER/jdk"
+        export OPENSEARCH_JAVA_HOME
         cd "$INNER" && /bin/bash -c "$payload" < "$d/stdin"
         ;;
     *" curl "*)
@@ -64,10 +69,26 @@ exit 0
 
 # The fake hashing tool: understands -p VALUE and -env NAME like the real one, records what it was
 # given, and answers a "bcrypt" line derived from the whole password so any change to it shows.
+# It has the shape of the pinned tools/hash.sh: unrelated helper children first (path discovery), then
+# `"$BIN_PATH" $JAVA_OPTS -cp ... Hasher "$@"` as a CHILD, where BIN_PATH is $OPENSEARCH_JAVA_HOME/bin/java,
+# else $JAVA_HOME/bin/java, else plain java.
 HASH_TOOL = r"""#!/bin/bash
+helper=$(/usr/bin/env > "$INNERREC/helper-$$-environ"; /usr/bin/dirname "$0")
+BIN_PATH="java"
+if [ ! -z "$OPENSEARCH_JAVA_HOME" ]; then
+    BIN_PATH="$OPENSEARCH_JAVA_HOME/bin/java"
+elif [ ! -z "$JAVA_HOME" ]; then
+    BIN_PATH="$JAVA_HOME/bin/java"
+fi
+"$BIN_PATH" $JAVA_OPTS -cp "$helper/../*" org.opensearch.security.tools.Hasher "$@"
+"""
+# The fake java: understands -p VALUE and -env NAME like the real Hasher, records what it was given, and
+# answers a "bcrypt" line derived from the whole password so any change to it shows.
+JAVA_TOOL = r"""#!/bin/bash
 pw=
 id=$$
-printf '%s\n' "$@" > "$INNERREC/hash-$id-argv"
+printf '%s\n' "$@" > "$INNERREC/java-$id-argv"
+cat /proc/$$/environ > "$INNERREC/java-$id-environ"
 while [ $# -gt 0 ]; do
     case "$1" in
         -p) pw=$2; shift ;;
@@ -75,13 +96,12 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
-cat /proc/$$/environ > "$INNERREC/hash-$id-environ"
 printf '$2a$12$%s\n' "$(printf '%s' "$pw" | sha256sum | cut -c1-53)"
 """
 PROBE = r"""#!/bin/sh
 id=$$
 for a in "$@"; do printf '%s\n' "$a"; done > '@PROBES@/@TOOL@-'$id'-argv'
-cat /proc/$$/environ > '@PROBES@/@TOOL@-'$id'-environ'
+/usr/bin/cat /proc/$$/environ > '@PROBES@/@TOOL@-'$id'-environ'
 exec /usr/bin/@TOOL@ "$@"
 """
 
@@ -110,6 +130,10 @@ def my_os_open(path, flags, mode=0o777, **k):
     return real_os_open(path, flags, mode, **k)
 builtins.open = my_open
 os.open = my_os_open
+if os.path.exists(f"{probes}/fail-replace"):  # a test asks for the final rename to fail
+    def boom(*a, **k):
+        raise OSError("forced failure")
+    os.replace = boom
 code = sys.stdin.read()
 sys.argv = sys.argv[1:]
 exec(compile(code, "<stdin>", "exec"), {"__name__": "__main__"})
@@ -132,11 +156,13 @@ class Box:
         tools.mkdir(parents=True)
         self._exe(tools / "hash.sh", self._with_vars(hash_tool))
         self._exe(tools / "securityadmin.sh", "#!/bin/sh\necho applied\n")
+        (self.inner / "jdk" / "bin").mkdir(parents=True)
+        self._exe(self.inner / "jdk" / "bin" / "java", self._with_vars(JAVA_TOOL))
         stub = tmp_path / "engine-stub"
         self._exe(stub, "#!/bin/sh\n" + self._with_vars(STUB))
         bindir = tmp_path / "probe-bin"
         bindir.mkdir()
-        for tool in ("grep", "tail"):
+        for tool in ("grep", "tail") + ABS_TOOLS:
             self._exe(bindir / tool, PROBE.replace("@PROBES@", str(self.probes)).replace("@TOOL@", tool))
         shim = tmp_path / "pyshim.py"
         shim.write_text(PY_SHIM.replace("@PROBES@", str(self.probes)), encoding="utf-8")
@@ -144,9 +170,11 @@ class Box:
         text = script_text if script_text is not None else (SCRIPTS / SCRIPT).read_text(encoding="utf-8")
         assert PATH_LINE in text
         text = text.replace(PATH_LINE, f"PATH={bindir}:/usr/local/sbin:", 1)
+        text = self._probe_absolute(text, bindir)
         (self.scripts / SCRIPT).write_text(text, encoding="utf-8")
         (self.scripts / SCRIPT).chmod(0o755)
         lib = (SCRIPTS / "lib-container-engine.sh").read_text(encoding="utf-8")
+        lib = self._probe_absolute(lib, bindir)
         lib += f"\nce_init() {{ CE_NAME=docker; CE_BIN='{stub}'; }}\n"
         (self.scripts / "lib-container-engine.sh").write_text(lib, encoding="utf-8")
         (self.scripts / "lib-container-engine.sh").chmod(0o644)
@@ -155,6 +183,12 @@ class Box:
         self.sec.mkdir(parents=True)
         (self.sec / "internal_users.yml.template").write_text(
             (SECURITY_SRC / "internal_users.yml.template").read_text(encoding="utf-8"), encoding="utf-8")
+
+    @staticmethod
+    def _probe_absolute(text, bindir):
+        """The scripts call these by absolute path; point each at the recording wrapper."""
+        return re.sub(r"(?<![A-Za-z0-9_])/(?:usr/)?bin/(" + "|".join(ABS_TOOLS) + r")\b",
+                      lambda m: f"{bindir}/{m.group(1)}", text)
 
     def _with_vars(self, text):
         # ce_run starts the engine with an empty environment, so the directories are written into the text
@@ -169,7 +203,7 @@ class Box:
         path.write_text(text, encoding="utf-8")
         path.chmod(0o755)
 
-    def run(self, passwords=None, via="env", extra_env=None, umask=0o022):
+    def run(self, passwords=None, via="env", extra_env=None, umask=0o022, bash_args=()):
         """via='env': passwords in the launching environment; via='file': in the deploy dir .env."""
         pw = {v: (passwords or {}).get(v, SENTINEL) for v in PASS_VARS}
         env = {"PATH": "/usr/bin:/bin", "SIEM_DEPLOY_DIR": str(self.deploy), "HOME": str(self.rec.parent)}
@@ -180,7 +214,7 @@ class Box:
             (self.deploy / ".env").write_text("\n".join(lines) + "\n", encoding="utf-8")
             (self.deploy / ".env").chmod(0o600)
         env.update(extra_env or {})
-        return subprocess.run(["bash", str(self.scripts / SCRIPT)], env=env, text=True, capture_output=True,
+        return subprocess.run(["bash", *bash_args, str(self.scripts / SCRIPT)], env=env, text=True, capture_output=True,
                               timeout=120, preexec_fn=lambda: os.umask(umask))
 
     def engine_calls(self):
@@ -217,15 +251,22 @@ def test_sentinel_never_in_engine_argv_or_environment(tmp_path, via):
 
 @pytest.mark.parametrize("via", ["env", "file"])
 def test_no_host_child_sees_a_secret_in_argv_or_environ(tmp_path, via):
-    """grep, tail and python3 are real children of the script: none may inherit a password or another
-    secret the .env set, and none may get one in its arguments."""
+    """Every external the script runs (the bootstrap commands too, not only grep, tail and python3) is a
+    recording wrapper: none may inherit a password or another secret the .env set, or get one in its
+    arguments."""
     box = make(tmp_path)
     assert box.run(via=via).returncode == 0
-    probes = box.probes
-    names = sorted(p.name for p in probes.iterdir())
-    for tool in ("grep", "tail", "python3"):  # the probes really ran
-        assert any(n.startswith(f"{tool}-") and n.endswith("-environ") for n in names), names
-    for p in probes.iterdir():
+    assert_children_clean(box, EVERY_TOOL)
+
+
+EVERY_TOOL = ("grep", "tail", "python3") + ABS_TOOLS
+
+
+def assert_children_clean(box, tools):
+    names = sorted(p.name for p in box.probes.iterdir())
+    for tool in tools:  # the probes really ran
+        assert any(n.startswith(f"{tool}-") and n.endswith("-environ") for n in names), (tool, names)
+    for p in box.probes.iterdir():
         if p.name.endswith(("-argv", "-environ")):
             data = p.read_bytes().decode("utf-8", errors="replace")
             assert SENTINEL not in data, f"secret in {p.name}"
@@ -234,17 +275,87 @@ def test_no_host_child_sees_a_secret_in_argv_or_environ(tmp_path, via):
                 assert f"{v}=" not in data, f"{v} inherited by {p.name}"
 
 
+@pytest.mark.parametrize("how", ["bash_a", "shellopts", "both"])
+@pytest.mark.parametrize("via", ["env", "file"])
+def test_inherited_allexport_does_not_export_later_assignments(tmp_path, how, via):
+    """A shell started with allexport (bash -a, or SHELLOPTS=allexport in the environment) would export
+    every later assignment, such as the admin credential string: the script switches it off first."""
+    box = make(tmp_path)
+    kw = {}
+    if how in ("bash_a", "both"):
+        kw["bash_args"] = ("-a",)
+    if how in ("shellopts", "both"):
+        kw["extra_env"] = {"SHELLOPTS": "allexport"}
+    proc = box.run(via=via, **kw)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert_children_clean(box, EVERY_TOOL)
+    for c in box.engine_calls():  # the client environment too (it is built with env -i)
+        assert SENTINEL not in c["env"]
+    # the credential string the script builds for the admin check is never exported to a child either
+    assert "ADMIN_CRED" not in "".join(p.read_text(errors="replace") for p in box.probes.iterdir()
+                                       if p.name.endswith("-environ"))
+
+
+def test_exported_functions_run_with_no_password_exported(tmp_path):
+    """A function inherited through the environment runs inside the shell, and a child it starts gets the
+    shell's exported variables. Shadow grep, pwd and compgen with functions that dump a child's
+    environment: nothing secret may be in it at any of those points."""
+    box = make(tmp_path)
+    dump = box.probes / "fn-env.txt"
+    fns = {}
+    for name in ("grep", "pwd", "compgen"):
+        fns[f"BASH_FUNC_{name}%%"] = (f"() {{  /usr/bin/env >> '{dump}'\n"
+                                     f" builtin {name} \"$@\" 2>/dev/null || /usr/bin/{name} \"$@\"\n}}")
+    proc = box.run(extra_env=fns)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    text = dump.read_text(errors="replace") if dump.exists() else ""
+    assert SENTINEL not in text and OTHER_SECRET not in text
+    for v in PASS_VARS:
+        assert f"{v}=" not in text
+
+
 def test_hash_tool_gets_the_password_by_name_not_by_argument(tmp_path):
-    """The pinned tool takes -p VALUE (an argument: visible to everyone) or -env NAME (an environment:
-    visible to the owner and root only). Only the second is acceptable."""
+    """The pinned Hasher takes -p VALUE (an argument: visible to everyone) or -env NAME (an environment).
+    Only the second is acceptable."""
     box = make(tmp_path)
     assert box.run().returncode == 0
     argvs = box.files(box.inner_rec, "-argv")
-    assert len(argvs) == 4
-    for name, data in argvs.items():
+    java = {n: d for n, d in argvs.items() if n.startswith("java-")}
+    assert len(java) == 4
+    for name, data in java.items():
         assert SENTINEL not in data, name
         assert "-p\n" not in data and not data.startswith("-p"), f"{name}: password argument option"
-        assert data.splitlines()[:1] == ["-env"], name
+        assert data.splitlines()[-2:] == ["-env", "HASH_PASS"], name
+
+
+def test_only_the_hasher_process_has_the_password_in_its_environment(tmp_path):
+    """The wrapper (hash.sh) runs unrelated helper children before it starts java. The password is handed
+    to the java process alone: not to the wrapper, not to any helper."""
+    box = make(tmp_path)
+    assert box.run().returncode == 0
+    envs = box.files(box.inner_rec, "-environ")
+    helpers = {n: d for n, d in envs.items() if n.startswith("helper-")}
+    javas = {n: d for n, d in envs.items() if n.startswith("java-")}
+    assert len(helpers) == 4 and len(javas) == 4
+    for name, data in helpers.items():
+        assert SENTINEL not in data, f"a helper child of the wrapper inherited the password: {name}"
+        assert "\x00HASH_PASS=" not in "\x00" + data, name  # (the function text names it; a variable would be NAME=)
+    for name, data in javas.items():
+        assert SENTINEL in data, f"the hasher process did not get the password: {name}"
+    # the engine client never sees it, nor does anything on the host (see the other tests)
+    for c in box.engine_calls():
+        assert SENTINEL not in c["env"]
+
+
+def test_temp_file_is_removed_when_the_final_rename_fails(tmp_path):
+    box = make(tmp_path)
+    (box.sec / "internal_users.yml").write_text("old\n", encoding="utf-8")
+    (box.probes / "fail-replace").write_text("", encoding="utf-8")
+    proc = box.run()
+    assert proc.returncode != 0
+    assert "forced failure" in proc.stdout + proc.stderr
+    assert sorted(p.name for p in box.sec.iterdir() if "tmp" in p.name) == []
+    assert (box.sec / "internal_users.yml").read_text(encoding="utf-8") == "old\n"
 
 
 def test_hash_derives_from_the_whole_password(tmp_path):

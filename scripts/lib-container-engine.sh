@@ -193,7 +193,8 @@ ce_run() {
 # as root it and every directory above it must be root-owned and not group or world writable; for
 # anyone it must be owned by root or by the running user and not world writable. The file is opened
 # once, the OPEN file is checked, and that same descriptor is sourced, so replacing the path after the
-# check changes nothing. Needs the bootstrap's CE_STRICT and CE_UID. Variables are exported.
+# check changes nothing. Needs the bootstrap's CE_STRICT and CE_UID. Variables are exported, unless the
+# second argument is the word noexport (then they stay in the calling shell only).
 ce_source_env() {
     _ce_ef=$1
     if [ ! -f "$_ce_ef" ] || [ -L "$_ce_ef" ]; then
@@ -222,9 +223,13 @@ ce_source_env() {
         echo "refusing to source ${_ce_ef}: it must be owned by root or by you and not world writable (and not group writable when run as root)" >&2
         return 1
     fi
-    set -a
-    . /proc/self/fd/8
-    set +a
+    if [ "${2-}" = noexport ]; then  # keep every value in this shell only, so no child process inherits it
+        . /proc/self/fd/8
+    else
+        set -a
+        . /proc/self/fd/8
+        set +a
+    fi
     exec 8<&-
 }
 
