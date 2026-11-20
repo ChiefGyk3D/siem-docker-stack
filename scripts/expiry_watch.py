@@ -1286,6 +1286,7 @@ class _Deadline:
         self.end = time.monotonic() + seconds
         self.seconds = seconds
         self.sock = None
+        self.data_started = False  # set by the worker just before MAIL FROM, RCPT TO and DATA begin
         self.delivered = False  # set by the worker once the server has accepted the message
         self.aborted = threading.Event()
 
@@ -1524,11 +1525,9 @@ def email_message_id(cfg, notice, generation):
 
 
 def email_send(cfg, env, notice, now, root=None, budget=None, generation=""):
-    """Send one plain text message. TLS is verified (system trust, or ca_file). With starttls the
-    upgrade is required: a server that does not offer it is an error, never a plaintext fallback,
-    and the login is sent only after the connection is encrypted. The EHLO name is helo_name, not
-    this machine's name. Headers are built by the email package from cleaned single-line values."""
-    login = email_secrets(cfg, env)
+    """Send one plain text message for a notice (see smtp_deliver for the transport rules).
+    Headers are built by the email package from cleaned single-line values."""
+    email_secrets(cfg, env)  # a missing login is refused before anything is built
     subject, body = build_message(notice, now)
     msg = email.message.EmailMessage()
     msg["From"], msg["To"] = cfg.sender, ", ".join(cfg.to)
@@ -1537,7 +1536,16 @@ def email_send(cfg, env, notice, now, root=None, budget=None, generation=""):
     msg["Message-ID"] = email_message_id(cfg, notice, generation)
     msg["Auto-Submitted"] = "auto-generated"
     msg.set_content(body)
+    smtp_deliver(cfg, env, msg, root=root, budget=budget)
 
+
+def smtp_deliver(cfg, env, msg, root=None, budget=None):
+    """Deliver one prepared message. The transport rules live here, for every caller: TLS is
+    verified (system trust, or ca_file). With starttls the upgrade is required: a server that does
+    not offer it is an error, never a plaintext fallback, and the login is sent only after the
+    connection is encrypted. The EHLO name is helo_name, not this machine's name. One overall
+    deadline covers the whole delivery."""
+    login = email_secrets(cfg, env)
     dl = _Deadline(_seconds(cfg, budget))
 
     def send():
@@ -1553,6 +1561,7 @@ def email_send(cfg, env, notice, now, root=None, budget=None, generation=""):
                 conn.starttls(context=context)
             if login:
                 conn.login(*login)
+            dl.data_started = True  # from here a failure without a server reply is uncertain
             conn.send_message(msg, from_addr=cfg.sender, to_addrs=list(cfg.to))
             dl.delivered = True  # accepted by the server: a slow QUIT below cannot turn it into a failure
         except BaseException:
@@ -1565,23 +1574,35 @@ def email_send(cfg, env, notice, now, root=None, budget=None, generation=""):
         finally:
             conn.close()
 
+    def failed(exc, uncertain):
+        """Tag the error with what the caller must know: `uncertain` is True when the server MAY
+        have accepted the message (a failure without a server reply after the message data began
+        to go out: timeout, lost connection, TLS error, deadline). An explicit reply code from the
+        server, or a failure before the data began, is a certain "not accepted"."""
+        exc.uncertain = bool(uncertain)
+        return exc
+
     where = f"email {cfg.host}"
     try:
         _run_deadline(dl, send)
     except _Overrun as e:
-        raise _Overrun(f"{where}: {e}") from None
-    except ExpiryWatchError:
-        raise
+        raise failed(_Overrun(f"{where}: {e}"), dl.data_started) from None
+    except ExpiryWatchError as e:
+        raise failed(e, False)
     except smtplib.SMTPNotSupportedError:
-        raise ExpiryWatchError(f"{where}: the server does not offer the required TLS or login; nothing sent") from None
+        raise failed(ExpiryWatchError(f"{where}: the server does not offer the required TLS or login; nothing sent"),
+                     False) from None
     except smtplib.SMTPResponseException as e:
-        raise ExpiryWatchError(f"{where} rejected: SMTP {e.smtp_code}") from None
+        raise failed(ExpiryWatchError(f"{where} rejected: SMTP {e.smtp_code}"), False) from None
+    except smtplib.SMTPRecipientsRefused as e:
+        raise failed(ExpiryWatchError(f"{where} failed: {type(e).__name__}"), False) from None
     except smtplib.SMTPException as e:
-        raise ExpiryWatchError(f"{where} failed: {type(e).__name__}") from None
+        raise failed(ExpiryWatchError(f"{where} failed: {type(e).__name__}"), dl.data_started) from None
     except ssl.SSLError as e:
-        raise ExpiryWatchError(f"{where}: TLS failed: {e.reason or type(e).__name__}") from None
+        raise failed(ExpiryWatchError(f"{where}: TLS failed: {e.reason or type(e).__name__}"), dl.data_started) from None
     except (OSError, ValueError) as e:
-        raise ExpiryWatchError(f"{where} unreachable: {getattr(e, 'strerror', None) or type(e).__name__}") from None
+        raise failed(ExpiryWatchError(f"{where} unreachable: {getattr(e, 'strerror', None) or type(e).__name__}"),
+                     dl.data_started) from None
 
 
 # --- state file ----------------------------------------------------------------------------------

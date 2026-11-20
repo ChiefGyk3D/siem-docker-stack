@@ -104,7 +104,7 @@ class _SmtpHandler(socketserver.StreamRequestHandler):
                     send("250 ok")
                 elif verb == "RCPT":
                     sess["rcpt"].append(line)
-                    send("250 ok")
+                    send(getattr(srv, "rcpt_reply", "250 ok"))
                 elif verb == "DATA":
                     send("354 go")
                     lines = []
@@ -115,6 +115,9 @@ class _SmtpHandler(socketserver.StreamRequestHandler):
                         lines.append(row)
                     sess["data"] = "".join(lines)
                     if srv.drop_after_data:  # queued, but the final reply never comes
+                        return
+                    if getattr(srv, "hang_after_data", 0):  # queued, then silence (the client times out)
+                        time.sleep(srv.hang_after_data)
                         return
                     send(srv.data_reply)
                 elif verb == "QUIT":

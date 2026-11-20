@@ -776,7 +776,7 @@ these as unconfirmed:
 - **ntfy and other generic channels** beyond `webhook` through the router.
 - **Grafana alert rules** driven by an expiry state metric, and a collector
   that writes days left as a metric, so Grafana can alert without the script.
-- **A weekly digest line** for the low-urgency items.
+- **A weekly digest line** for the low-urgency items (the digest itself is built: [weekly-digest.md](weekly-digest.md)).
 - **Per-item overrides** of thresholds or routing, and a "resolved" message.
 - **Provider plug-ins loaded from a directory.** Today a plug-in is code that
   imports the module and registers itself.
