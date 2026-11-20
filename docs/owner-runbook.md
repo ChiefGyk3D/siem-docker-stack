@@ -56,7 +56,7 @@ Rules every step follows:
 | Q8 | The Grafana group id for `grafana_uid`/`grafana_gid` in the backup config is not stated. The compose file sets `user: "472"` (VERIFIED) and the example says `grafana_gid = 0`. Read it with `docker exec grafana id`. | Step 2 |
 | Q9a | How does the dedicated service account get Docker access for `docker cp` and `docker exec`? Docker group membership is root-equivalent; the safer option is a root-owned wrapper allowed by one exact `sudoers` rule. This doc does not choose. | Steps 0c, 2 |
 | Q10 | How is a P1 produced on demand to test the email route end to end? No doc says. | Step 5 |
-| Q12 | Where do the expiry endpoint's ingress limits (about 16 KB body, rate, timeouts, concurrency) live, when the watch posts to a loopback port that bypasses any reverse proxy? | Step 6 |
+| Q12 | ANSWERED (owner decision 2026-11-20, issue #157). The limits live in the watch (it refuses a body over 16 KB, waits 2 s between posts, posts at most 15 per run) and in the router's `Check Expiry Secret` node (it denies a body over 16 KB, a call under 1 s after the last accepted one, and more than 30 accepted calls in 10 minutes). See `docs/expiry-watch.md`, "Request limits". | Step 6 |
 
 ## Order and why
 
@@ -1124,19 +1124,24 @@ keep `[router].token_env = "EXPIRY_WATCH_ROUTER_TOKEN"`. Never commit the path.
 The file `expiry-path` may belong to the user who ran the helper while the config
 belongs to SERVICE_ACCOUNT; copy the one line by hand.
 
-**6. Ingress limits (owner step, OPEN QUESTION Q12).** The docs say to set a
-request body limit of about 16 KB for this path at the reverse proxy, and a rate
-limit (per source and global), request and header timeouts and a concurrency
-limit there, because a denied call still starts one workflow execution and only
-the proxy can stop that early (VERIFIED: `docs/expiry-watch.md`). The watch posts
-a few requests a day. n8n's own body limit is `N8N_PAYLOAD_SIZE_MAX`, default 16
-(MiB per the cited n8n docs, read 2026-11-19 by that doc); check its unit and
-minimum in the n8n docs before lowering it, since this runbook does not set it
-(INFERRED that it can go lower). Q12: the watch posts to the loopback port in 6.0,
-which does not pass a reverse proxy, so those limits do not apply on that path,
-and anyone who can reach n8n's webhook address on the siem network or LAN can also
-reach this endpoint with a denied call. Decide where the limits live for this
-path.
+**6. Ingress limits (Q12, ANSWERED 2026-11-20, issue #157).** The watch posts
+to the loopback port in 6.0, which does not pass a reverse proxy, so a proxy
+cannot enforce limits on this path. They live in the watch and in the router
+instead (VERIFIED: `docs/expiry-watch.md`, "Request limits"): the watch refuses a
+body over 16 KB, waits 2 seconds between posts and posts at most 15 times per
+run; the router's `Check Expiry Secret` node denies a body over 16 KB, a call
+under 1 second after the last accepted one and more than 30 accepted calls in 10
+minutes. No owner step is needed for these once the router is re-imported. After
+the first import, check the items that doc marks UNVERIFIED (that the Code node
+can read the workflow static data in a production execution, which the check
+needs or it denies every call, that two overlapping executions do not both read
+the old counter, that the counter persists across executions, and that the
+`content-length` header reaches it).
+A denied call still starts one workflow execution, and anyone who can reach n8n's
+webhook address on the siem network or LAN can still cause that. n8n's own body
+limit is `N8N_PAYLOAD_SIZE_MAX`, default 16 (MiB per the cited n8n docs, read
+2026-11-19 by that doc); check its unit and minimum in the n8n docs before
+lowering it, since this runbook does not set it (INFERRED that it can go lower).
 
 **Rotate.** Generate a new value, store it with the command in item 1 (it
 replaces the old one), then restart the n8n container so it reads the new
