@@ -11,7 +11,7 @@ copied): TLS verified, STARTTLS required, one overall delivery deadline, login f
 variables named in the config. Secrets are only ever environment variable NAMES in the config.
 
 Exit codes: 0 done; 1 done, but a data source failed (named in the email); 2 config error;
-3 the email was not delivered; 4 not sent on purpose (lock held, already sent this week, damaged
+3 delivery failed, or its outcome is uncertain (the server may have accepted it, so `pending` is kept); 4 not sent on purpose (lock held, already sent this week, damaged
 marker, or an earlier send that was not recorded: see docs/weekly-digest.md). Exit 1 also covers a
 sent digest whose state could not be recorded.
 """
