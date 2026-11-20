@@ -32,6 +32,12 @@ jobs:
       # compose, promtool, amtool, logstash, Wazuh XML and rule ids, pytest.
       test-install-command: python3 -m pip install --user pytest requests pyyaml
       test-command: |
+        # The root-hardening tests run the firewall script as uid 0 inside `unshare -r`.
+        # Ubuntu 24.04 restricts unprivileged user namespaces with AppArmor, so lift that on
+        # this ephemeral runner (a local sysctl write, no network), then prove it worked so the
+        # tests can never skip silently (Ubuntu 24.04 release notes, read 2026-11-19).
+        sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        unshare -r true || { echo "::error title=userns::unshare -r still fails; the root-hardening tests cannot run"; exit 1; }
         # required secrets are ${VAR:?}; tests/compose.ci.env supplies throwaway values
         (cd docker && docker compose --env-file ../tests/compose.ci.env -f docker-compose.yml config --quiet)
         # Registry pulls time out about once a day (error pulling image configuration: i/o timeout,
