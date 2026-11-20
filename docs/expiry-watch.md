@@ -477,7 +477,10 @@ a proxy is never handed the token; the vendor must be reachable directly), end
 the request at the deadline by closing the connection (a name lookup is the
 exception: **DNS resolution cannot be interrupted**, so a stuck lookup keeps its
 worker thread until the resolver returns; at most 4 such threads can exist, and
-further requests are refused with a message saying so instead of starting more),
+further requests are refused with a message saying so instead of starting more;
+when the deadline passes, the call waits up to one more second for its worker to
+end, so a timed out request can take up to about one second longer than
+`timeout_seconds`),
 never follow a
 redirect (a redirect is an error), cap a response at 1 MiB and a list at 1000
 tokens, refuse JSON with duplicate keys, `NaN` or absurd nesting, and refuse
