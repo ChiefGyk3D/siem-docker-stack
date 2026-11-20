@@ -1524,11 +1524,9 @@ def email_message_id(cfg, notice, generation):
 
 
 def email_send(cfg, env, notice, now, root=None, budget=None, generation=""):
-    """Send one plain text message. TLS is verified (system trust, or ca_file). With starttls the
-    upgrade is required: a server that does not offer it is an error, never a plaintext fallback,
-    and the login is sent only after the connection is encrypted. The EHLO name is helo_name, not
-    this machine's name. Headers are built by the email package from cleaned single-line values."""
-    login = email_secrets(cfg, env)
+    """Send one plain text message for a notice (see smtp_deliver for the transport rules).
+    Headers are built by the email package from cleaned single-line values."""
+    email_secrets(cfg, env)  # a missing login is refused before anything is built
     subject, body = build_message(notice, now)
     msg = email.message.EmailMessage()
     msg["From"], msg["To"] = cfg.sender, ", ".join(cfg.to)
@@ -1537,7 +1535,16 @@ def email_send(cfg, env, notice, now, root=None, budget=None, generation=""):
     msg["Message-ID"] = email_message_id(cfg, notice, generation)
     msg["Auto-Submitted"] = "auto-generated"
     msg.set_content(body)
+    smtp_deliver(cfg, env, msg, root=root, budget=budget)
 
+
+def smtp_deliver(cfg, env, msg, root=None, budget=None):
+    """Deliver one prepared message. The transport rules live here, for every caller: TLS is
+    verified (system trust, or ca_file). With starttls the upgrade is required: a server that does
+    not offer it is an error, never a plaintext fallback, and the login is sent only after the
+    connection is encrypted. The EHLO name is helo_name, not this machine's name. One overall
+    deadline covers the whole delivery."""
+    login = email_secrets(cfg, env)
     dl = _Deadline(_seconds(cfg, budget))
 
     def send():
