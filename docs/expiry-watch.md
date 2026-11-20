@@ -378,18 +378,38 @@ cancel-by-tag are unreachable with this secret. An expired item (`critical`)
 still pages at priority 1. If you ever add an `Expiry watch:` name to the
 allowlist, that guarantee ends.
 
-Request limits before the check (n8n and your ingress, not the workflow):
+Request limits (owner decision Q12, issue #157). The watch posts to n8n over
+loopback, so no reverse proxy is in this path and the limits live in the watch
+and in the router, not at a proxy:
 
-- The endpoint has a private path so it cannot be found by guessing, but the path
-  is not a credential: treat it as an address.
-- n8n's own body limit is `N8N_PAYLOAD_SIZE_MAX`, default 16 MiB (n8n docs,
-  endpoints environment variables, read 2026-11-19). An expiry notice is under
-  8 KB, so set it lower for the container if your n8n allows, and set a request
-  body limit of about 16 KB for this path at the reverse proxy.
-- Put a rate limit (per source and global), request and header timeouts and a
-  concurrency limit on this path at the reverse proxy or ingress. A call that is
-  denied still starts one workflow execution; only the proxy can stop that
-  early. The watch posts a few requests a day.
+- The watch refuses to send a body over 16 KB (16384 bytes): it sends nothing,
+  names the size in the error and exits 1. It also waits at least 2 seconds
+  between router posts and posts at most 25 times per run; a notice that was
+  not posted stays due for the next run.
+- The router's `Check Expiry Secret` node denies (403) a body over 16 KB (the
+  parsed body re-serialized, and the `content-length` header when n8n passes it
+  on), a call less than 1 second after the last accepted call, and more than 30
+  accepted calls in 10 minutes. Only a call that has the right secret and a valid
+  notice counts, so a caller without the secret cannot use up the watch's
+  allowance. The watch's limits sit inside the router's, so a normal run is never
+  denied. The counter is kept in the workflow static data; if that cannot be read,
+  the call is denied.
+- UNVERIFIED against a live n8n, check after the first import: that a Code node
+  can read `$getWorkflowStaticData('global')` in a production execution (the
+  check denies every call if it cannot), that two executions that overlap do not
+  both read the old counter (a burst may then slip through), and that the
+  `content-length` header reaches the node. A Code node cannot see the raw body
+  bytes, and it runs after n8n has read the whole body, so it does not stop that
+  work.
+- What these limits cannot do: a denied call still starts one workflow
+  execution, and n8n's own body limit is `N8N_PAYLOAD_SIZE_MAX`, default 16 MiB
+  (n8n docs, endpoints environment variables, read 2026-11-19). Lower it for the
+  n8n container if your n8n allows (an expiry notice is under 8 KB; check the
+  unit and minimum in the n8n docs first). Request and header timeouts and a
+  concurrency limit are n8n's and the host's, not the workflow's. The endpoint has
+  a private path so it cannot be found by guessing, but the path is not a
+  credential: treat it as an address, and keep n8n's port off networks that
+  should not reach it.
 
 Needs `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` in the n8n container, the same
 setting the [heartbeat](heartbeat.md#settings-environment-of-the-n8n-container)
@@ -423,7 +443,8 @@ Owner steps (nothing here runs from the repo; each is a live change):
 3. Read the path from `expiry-path`, point `[router].url` in the watch's config at
    `<n8n base>/webhook/<contents of expiry-path>` (never commit it), and keep the
    watch's variable `EXPIRY_WATCH_ROUTER_TOKEN` equal to the router's.
-4. Set the ingress limits above (body size, rate limit, timeouts).
+4. The body and rate limits above are in the watch and the imported router and
+   need no step. Optionally lower `N8N_PAYLOAD_SIZE_MAX` for the n8n container.
 5. Rotate by changing both values together, then restart the n8n container so it
    reads the new environment. To revoke the watch only, unset or empty the
    router's variable: the endpoint then denies every call.

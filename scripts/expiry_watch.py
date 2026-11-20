@@ -51,7 +51,15 @@ MAX_RESPONSE_BYTES = 1024 * 1024
 MAX_SERVICE_ACCOUNTS = 50
 MAX_MISSED = 1000
 MAX_ACKNOWLEDGED = 200
-MAX_STUCK_FETCHES = 4  # name lookups cannot be interrupted: at most this many may be pending at once
+# Limits on the router post (issue #157). The watch posts to n8n over loopback, so no reverse proxy
+# enforces them: the watch keeps them itself, and the router's Check Expiry Secret node enforces the
+# same bounds (body 16384 bytes, at least 1 s between accepted calls, 30 accepted calls per 10 minutes).
+# The watch's own limits stay inside the router's, so a normal run is never denied by the router.
+MAX_ROUTER_BODY_BYTES = 16 * 1024
+ROUTER_MIN_INTERVAL_SECONDS = 2.0
+MAX_ROUTER_POSTS_PER_RUN = 25
+_pause = time.sleep  # a hook, so a test does not have to wait
+MAX_STUCK_FETCHES = 4 # name lookups cannot be interrupted: at most this many may be pending at once
 UTC = dt.timezone.utc
 KNOWN_CHANNELS = ("pushover", "discord", "matrix", "email", "webhook")
 # Channels the n8n router delivers. matrix and email are delivered directly by this script.
@@ -1249,6 +1257,9 @@ def post_json(url, token, payload, timeout, opener=None):
     if not isinstance(token, str) or not _TOKEN.fullmatch(token):
         raise ExpiryWatchError("the router secret is empty or contains characters not allowed in a header")
     body = json.dumps(payload).encode()
+    if len(body) > MAX_ROUTER_BODY_BYTES:  # the watch posts over loopback, so no proxy caps the body: cap it here
+        raise ExpiryWatchError(f"the router body is {len(body)} bytes, over the {MAX_ROUTER_BODY_BYTES} byte limit; "
+                               "it was not sent")
     if opener is None:  # the real path: one absolute deadline, no proxy, no redirect (see _http_exchange)
         parts = urllib.parse.urlsplit(url)
         _http_exchange("router", "POST", url, parts.path + (f"?{parts.query}" if parts.query else ""), token, body,
@@ -1864,6 +1875,8 @@ def _run_pass(root, leaf, now, env, out, err, dry_run, opener):
     dead = set()  # a channel that overran its deadline is not tried again in this run
     budget_end = time.monotonic() + config.delivery_budget_seconds  # one budget for every delivery of the pass
     over_budget = 0
+    router_posts = router_capped = 0
+    last_router_post = None
     # notice key -> generation, for the notices that stay due (see matrix_txn_id). When a provider
     # failed this run, a notice that is still due may simply not have been rebuilt, so every earlier
     # entry is carried forward; with every provider healthy, an entry whose notice is not due now is
@@ -1920,6 +1933,21 @@ def _run_pass(root, leaf, now, env, out, err, dry_run, opener):
                 err(f"delivery error: {tag}: {chan} skipped, it timed out earlier in this run")
                 delivered = False
                 continue
+            if chan == "router":  # the post rate: a cap per run and a space between posts (see the limits above)
+                if router_posts >= MAX_ROUTER_POSTS_PER_RUN:
+                    router_capped += 1
+                    delivered = False
+                    continue
+                if last_router_post is not None:
+                    wait = ROUTER_MIN_INTERVAL_SECONDS - (time.monotonic() - last_router_post)
+                    if wait >= left:  # waiting would use up the rest of the budget: try again next run
+                        over_budget += 1
+                        delivered = False
+                        continue
+                    if wait > 0:
+                        _pause(wait)
+                        left = budget_end - time.monotonic()
+                router_posts += 1
             try:
                 send(b=left)
                 out(f"{'posted' if chan == 'router' else 'sent ' + chan}: {tag}")
@@ -1930,12 +1958,18 @@ def _run_pass(root, leaf, now, env, out, err, dry_run, opener):
             except ExpiryWatchError as e:
                 err(f"delivery error: {tag}: {e}")
                 delivered = False
+            finally:
+                if chan == "router":
+                    last_router_post = time.monotonic()
         if not delivered:  # one channel failing keeps the whole notice due: a retry may repeat the others
             failed = True
             undo(n)
             new_pending[notice_key(n)] = generation
         else:
             new_pending.pop(notice_key(n), None)
+    if router_capped:
+        err(f"delivery error: the router post limit ({MAX_ROUTER_POSTS_PER_RUN} per run) was reached; "
+            f"{router_capped} post(s) were not tried and stay due for the next run")
     if over_budget:
         err(f"delivery error: the delivery budget ({config.delivery_budget_seconds:g}s) ran out; "
             f"{over_budget} delivery(ies) were not tried and stay due for the next run")
