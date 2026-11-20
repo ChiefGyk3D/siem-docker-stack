@@ -112,9 +112,10 @@ done
 # inventory itself exposes nothing): "noexport" keeps a plain assignment from being exported; then,
 # whatever the file did, allexport is switched off again, every variable NAME the file created is
 # stripped of its export attribute, and so are the four passwords. NOT guaranteed: a variable that
-# already existed before the file ran keeps whatever export attribute the file gave it (these are
-# the script's own variables, never secrets), and a hostile file can run any shell code at all, so the
-# file must be trusted (as root it must be root-owned in a root-owned tree, already enforced above).
+# already existed before the file ran keeps whatever export attribute the file gave it, so a .env
+# that exports a password THROUGH such a name (PATH, CE_TRUSTED_DIRS, the script's own variables) is
+# NOT neutralized: write plain NAME=value lines only (documented in docs/container-engine.md and
+# pinned by a test). A hostile file can run any shell code at all, so the file must be trusted (as root it must be root-owned in a root-owned tree, already enforced above).
 # ce_names fills the array _NAMES with every variable name in the shell (the ${!x@} expansions list the
 # names starting with one character; eval only ever sees the fixed characters of the loop).
 ce_names() {

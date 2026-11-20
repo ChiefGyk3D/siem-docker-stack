@@ -305,6 +305,20 @@ def test_an_env_file_that_exports_cannot_reach_children(tmp_path, style):
         assert SENTINEL not in c["env"] and OTHER_SECRET not in c["env"]
 
 
+def test_known_limit_env_file_can_export_through_a_name_that_already_existed(tmp_path):
+    """DOCUMENTED LIMIT (docs/container-engine.md): the .env is trusted shell code. A name that existed
+    before it ran (here CE_TRUSTED_DIRS, a variable of the script's own helper) keeps an export given
+    by the file, so a password put in it reaches host children. This test asserts the limit as it is;
+    when the script learns to close it, this test must be flipped to assert the opposite."""
+    box = make(tmp_path)
+    proc = box.run(via="file", env_style=lambda pw: "".join(f"{k}='{v}'\n" for k, v in pw.items())
+                   + f"CE_HOME_BASES='/run /var/tmp /tmp {OTHER_SECRET}'\nexport CE_HOME_BASES\n")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    leaked = [p.name for p in box.probes.iterdir()
+              if p.name.endswith("-environ") and OTHER_SECRET in p.read_bytes().decode("utf-8", errors="replace")]
+    assert leaked, "the documented limit no longer holds: close the docs note and flip this test"
+
+
 def test_declare_x_in_an_env_file_is_local_to_the_loader_and_leaks_nothing(tmp_path):
     """Plain `declare -x` inside the sourcing function is function-local: the passwords are then unset
     and the script refuses to run, still without any secret reaching a child."""
