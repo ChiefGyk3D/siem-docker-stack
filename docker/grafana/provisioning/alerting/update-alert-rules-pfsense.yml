@@ -89,6 +89,7 @@ groups:
           description: "Escalated: the update has been pending for over 7 days. This alert clears only when the metric returns to 0."
         labels:
           severity: "critical"
+          tier: "P1"
           source: "pfsense"
           alert_group: "updates"
           update_alert: "true"
@@ -125,6 +126,7 @@ groups:
           description: "A pfSense security release is available. Apply it. This alert clears only when the metric returns to 0."
         labels:
           severity: "critical"
+          tier: "P1"
           source: "pfsense"
           alert_group: "updates"
           update_alert: "true"
@@ -162,6 +164,7 @@ groups:
           description: "The metric pfsense_update_check_success is 0 or missing. Update alerts cannot be trusted until the check works again. Check the Telegraf exec input and scripts/pfsense-update-metric.sh on the firewall."
         labels:
           severity: "critical"
+          tier: "P1"
           source: "pfsense"
           alert_group: "updates"
           update_alert: "true"
