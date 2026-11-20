@@ -11,6 +11,7 @@ brackets. Documentation addresses (192.0.2.x) stand for real ones.
 | File | Role |
 |------|------|
 | `scripts/live-deploy/siem-run` | Runs a command with the alert values injected from the secret manager |
+| `scripts/siem-net-run` | The same idea for the Doppler config `dev_network` (project `homelab`): reads a read-only service token from `$SIEM_NET_CONFIG_DIR/token` (default `$HOME/.config/doppler-siem-net`), refuses a missing, symlinked, non-private or foreign-owned file, and runs a command with the token only in that process. It needs `--require NAMES` and/or `--optional NAMES` then `--` (only those secrets are injected, only names in its fixed table are accepted, and a required one that is missing stops the command) and reads no cached copy. It restarts Grafana and recreates n8n for the owner runbook (`docs/owner-runbook.md`, step 0b.5) |
 | `scripts/live-deploy/n8n-setup-alert-router.py` | Creates the two n8n credentials and imports the router workflow |
 | `scripts/live-deploy/n8n-test-router.py` | Pre-deploy checks against the router (401/403 cases, test alerts, phone test) |
 | `scripts/live-deploy/grafana-deploy.py` | Grafana file deploy (dry run by default): allowlisted alert files with backups, one datasource file; never starts docker |

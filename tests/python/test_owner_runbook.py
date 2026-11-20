@@ -258,7 +258,7 @@ def test_round1_f1_every_n8n_recreate_goes_through_the_safe_wrapper():
     # (1) no plain `docker compose up -d n8n` anywhere except the recorded 2026-11-20 command
     plain = [l for l in CODE_LINES if "compose up -d n8n" in l]
     assert plain, "the safe recreate block must exist"
-    safe = [l for l in plain if "doppler run" in l and "REFUSING" in l and "--preserve-env" in l]
+    safe = [l for l in plain if "siem-net-run" in l and "REFUSING" in l and "--preserve-env" in l]
     assert len(safe) == 1, plain
     recorded = [l for l in plain if l not in safe]
     assert all("bak-payload" in l or "sleep 15" in l for l in recorded), recorded
@@ -361,7 +361,7 @@ def test_round3_f5_each_function_has_exactly_one_definition_under_its_heading():
     assert_under(def_fence("owner_recreate_n8n"), "### 6.0 ", "### 6.1 ")
     assert_under(def_fence("owner_router_chain"), "**3. Re-import the router", "**4. Post-import checks.")
     assert_under(def_fence("owner_router_rollback"), "**3. Re-import the router", "**4. Post-import checks.")
-    for name, anchor in (("owner_chk_vars", "runbook-block-chk-vars-v3"), ("owner_recreate_n8n", "runbook-block-recreate-v3"),
+    for name, anchor in (("owner_chk_vars", "runbook-block-chk-vars-v3"), ("owner_recreate_n8n", "runbook-block-recreate-v4"),
                          ("owner_router_chain", "runbook-block-router-chain-v3"),
                          ("owner_router_rollback", "runbook-block-router-rollback-v3")):
         assert def_fence(name).count(': "%s"' % anchor) == 1
@@ -400,6 +400,9 @@ def run_blocks(tmp_path, blocks, tail="", fail="", saved='{"nodes":[{},{}]}', st
     stub = home / "bin" / "siem-run"
     stub.write_text("#!/bin/sh\n[ \"$FAIL\" = import ] && exit 7\necho import ok\nexit 0\n")
     stub.chmod(0o755)
+    net = home / "bin" / "siem-net-run"  # the dev_network wrapper: records one line, honors FAIL=doppler
+    net.write_text("#!/bin/sh\necho doppler >> \"$LOG\"\necho \"netargs $1 $2 $3\" >> \"$LOG\"\n[ \"$FAIL\" = doppler ] && exit 7\nexit 0\n")
+    net.chmod(0o755)
     f = home / "router-before.json"
     f.write_text(saved)
     f.chmod(0o600)
@@ -868,3 +871,162 @@ def test_round4_f4_a_bad_count_stops_before_listing_anything(tmp_path, bad):
 def test_round4_f4_the_owner_decision_for_n_is_documented():
     flat = " ".join(RUNBOOK.split())
     assert "OWNER DECISION: the value of N" in flat and "never by hand" in flat
+
+
+# ---- issue #177: the box reads dev_network through the siem-net-run wrapper, never a bare doppler run ----
+
+def test_issue177_no_bare_doppler_run_for_dev_network_remains():
+    for line in CODE_LINES:
+        assert not ("doppler run" in line and "dev_network" in line), line
+        assert not ("doppler run" in line and "DEV_CONFIG" in line), line
+
+
+def test_issue177_the_wrapper_is_used_for_the_restarts_and_the_recreate():
+    assert CODE.count('"$HOME/bin/siem-net-run"') >= 5  # 4d, 4g, 5d, the recreate, the 6.3 tests
+    assert not any("docker compose up -d grafana" in l and "siem-net-run" not in l for l in CODE_LINES)
+
+
+def test_issue177_the_two_resolved_owner_decisions_are_gone():
+    assert "how the box reads `dev_network`" not in FLAT
+    assert "OWNER DECISION: how n8n's variables reach" not in FLAT
+    assert "Recommended: (a)" not in FLAT
+
+
+def test_issue177_the_token_step_names_scope_storage_readback_and_rotation():
+    text = section("### 0b.5 ", "## Step 0c.")
+    flat = " ".join(text.split())
+    for needle in ("doppler configs tokens create", "--access read", "--plain", "--project homelab",
+                   "--config dev_network", "umask 077", "doppler configs tokens revoke",
+                   "$HOME/.config/doppler-siem-net", "stat -c", "never echoed", "scripts/siem-net-run"):
+        assert needle in flat, needle
+    # the create command's output goes into a pipe to the box, never to the terminal
+    create = [l for l in text.splitlines() if "tokens create" in l and l.lstrip().startswith("doppler")]
+    assert create and all("| ssh" in l for l in create), create
+    assert "read/write" in flat  # says that write access is refused
+
+
+def test_issue177_the_wrapper_is_described_where_siem_run_is():
+    live = (REPO_ROOT / "docs" / "live-deploy-runbook.md").read_text(encoding="utf-8")
+    assert "siem-net-run" in live
+    assert "siem-net-run" in (REPO_ROOT / "docs" / "design" / "secrets-sources.md").read_text(encoding="utf-8")
+
+
+# ---- issue #177, Daybreak round 1: allowlists, no fallback file, atomic token replacement ----
+
+# Names the Grafana restarts also need beyond what the repo compose file names: the manual compose
+# lines of step 4b (one) and 5b (seven). They are checked against those steps below.
+GRAFANA_EXTRAS = ["DISCORD_FAILURE_WEBHOOK_URL", "GF_SMTP_ENABLED", "GF_SMTP_FROM_ADDRESS", "GF_SMTP_HOST",
+                  "GF_SMTP_PASSWORD", "GF_SMTP_STARTTLS_POLICY", "GF_SMTP_USER", "P1_EMAIL_TO"]
+
+
+def compose_grafana_names():
+    """Every name the grafana service of docker/docker-compose.yml interpolates or passes through."""
+    compose = (REPO_ROOT / "docker" / "docker-compose.yml").read_text(encoding="utf-8")
+    block = re.search(r"^  grafana:\n(.*?)(?=^  [a-z0-9_-]+:\n)", compose, flags=re.S | re.M).group(1)
+    return sorted(set(re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)", block))
+                  | set(re.findall(r"^\s+- ([A-Z][A-Z0-9_]*)\s*$", block, flags=re.M)))
+
+
+def test_issue177_the_grafana_allowlist_is_computed_from_the_compose_file():
+    everything = set(compose_grafana_names()) | set(GRAFANA_EXTRAS)
+    step4 = {"DISCORD_FAILURE_WEBHOOK_URL", "GRAFANA_WEBHOOK_SECRET"}  # stored in 0b and 4a: must exist
+    step5 = step4 | {n for n in GRAFANA_EXTRAS if n.startswith("GF_SMTP")} | {"P1_EMAIL_TO"}  # plus 5a's seven
+    lines = [l for l in CODE_LINES if "docker compose up -d" in l and "grafana" in l and "siem-net-run" in l]
+    assert len(lines) == 3, lines  # 4d, 4g, 5d
+    for line, required in zip(lines, (step4, step4, step5)):
+        want = ('"$HOME/bin/siem-net-run" --require ' + ",".join(sorted(required)) + " --optional "
+                + ",".join(sorted(everything - required)) + " -- docker compose up -d --no-deps grafana")
+        assert want in line, line
+    for name in GRAFANA_EXTRAS[:1]:
+        assert name in section("### 4b.", "### 4c.")
+    smtp = section("### 5a.", "### 5b.")
+    for name in GRAFANA_EXTRAS[1:]:
+        assert name in smtp, name
+
+
+def test_issue177_every_wrapper_call_names_an_allowlist_and_none_is_a_process_control_name():
+    calls = [l for l in CODE_LINES if "siem-net-run" in l and "install" not in l and "rm " not in l]
+    assert calls
+    for line in calls:
+        for m in re.finditer(r'siem-net-run" (?!--(?:require|optional) |--only )', line):
+            assert False, "a wrapper call without a name list: " + line
+        assert "--only " not in line  # the old spelling
+    names = set()
+    for line in CODE_LINES:
+        for m in re.finditer(r"--(?:require|optional) ([A-Za-z0-9_,]+)", line):
+            names.update(m.group(1).split(","))
+    script = (REPO_ROOT / "scripts" / "siem-net-run").read_text(encoding="utf-8")
+    start = script.index("PERMITTED_NAMES=(") + len("PERMITTED_NAMES=(")
+    table = set(script[start:script.index(")", start)].split())
+    assert names and names <= table, sorted(names - table)  # every name the runbook passes is in the wrapper's table
+
+
+def test_issue177_the_n8n_recreate_allowlist_is_the_preserve_list():
+    block = def_fence("owner_recreate_n8n")
+    # "$2", not "$PRESERVE": a variable set as a prefix of the same command is not visible to its own arguments
+    assert '"$HOME/bin/siem-net-run" --require "$2" -- sh -c' in block
+    for call in CALLS:
+        req, preserve = re.search(r'owner_recreate_n8n "([^"]*)" "([^"]*)"', call).groups()
+        assert set(req.split()) == set(preserve.split(",")), call  # every name the compose file takes is required
+        assert set(preserve.split(",")) <= {"HEARTBEAT_PING_URL", "HEARTBEAT_KIND", "EXPIRY_WATCH_ROUTER_TOKEN"}
+
+
+def test_issue177_the_recreate_passes_its_allowlist_to_the_wrapper(tmp_path):
+    status, out, log = run_blocks(tmp_path, [CHK, RECREATE, CALLS[1]])
+    assert status == 0 and "netargs --require HEARTBEAT_PING_URL,HEARTBEAT_KIND,EXPIRY_WATCH_ROUTER_TOKEN --" in log
+
+
+def test_issue177_the_token_is_replaced_atomically_and_the_old_one_is_revoked_after_the_check():
+    text = section("### 0b.5 ", "## Step 0c.")
+    flat = " ".join(text.split())
+    assert 'cat > "$HOME/.config/doppler-siem-net/token"' not in text  # never truncates the live token
+    assert "doppler-siem-net.new" in text and "mv -T" in text and "umask 077" in text
+    assert text.index("mv -T") < text.index("revoke --project")  # the swap comes before the revoke
+    assert "--no-fallback" in flat and "fails closed" in flat.lower() and "Doppler outage" in flat
+    assert "--require" in flat and "--optional" in flat and "LD_PRELOAD" in flat and "ZDOTDIR" in flat
+    assert "fixed table" in flat and "exit 3" in flat
+    assert "GF_SMTP_HOST" in flat
+    # round 3: no equivalence claim, a table of routing values with consequences, and an owner decision
+    assert "same trust as editing" not in flat and "equivalent" not in flat.lower()
+    routing = " ".join(section("Routing and destination values", "You need, on your own machine").split())
+    for name in ("BIND_ADDR", "SIEM_HOST", "GF_SMTP_HOST", "GRAFANA_VERSION", "GRAFANA_PORT", "GRAFANA_INFLUX_USER",
+                 "WAZUH_GRAFANA_RO_USER", "DISCORD_FAILURE_WEBHOOK_URL", "HEARTBEAT_PING_URL", "P1_EMAIL_TO",
+                 "GF_SMTP_STARTTLS_POLICY", "GF_SMTP_ENABLED", "GF_SMTP_FROM_ADDRESS", "HEARTBEAT_KIND",
+                 "GRAFANA_ADMIN_USER"):
+        assert name in routing, name
+    assert "OWNER DECISION" in routing and ".env" in routing and "dev_network" in routing
+    assert "doppler activity" in routing and "NOT verified" in routing  # how to check, and what is unverified
+    assert "does not inherit the token" in flat or "do not inherit the token" in flat
+    assert "not a sandbox" in flat
+    item4 = [l for l in text.splitlines() if "SIEM_NET_CONFIG_DIR=" in l]
+    assert item4 and "--require GRAFANA_WEBHOOK_SECRET --" in item4[0]
+
+
+def _table_names(text):
+    names = []
+    for cell in re.findall(r"^\| ((?:`[A-Z][A-Z0-9_]*`(?:, )?)+) \|", text, flags=re.M):
+        names += re.findall(r"`([A-Z][A-Z0-9_]*)`", cell)
+    return names
+
+
+def test_issue177_every_name_in_the_wrappers_table_is_in_exactly_one_runbook_table():
+    script = (REPO_ROOT / "scripts" / "siem-net-run").read_text(encoding="utf-8")
+    start = script.index("PERMITTED_NAMES=(") + len("PERMITTED_NAMES=(")
+    permitted = script[start:script.index(")", start)].split()
+    assert len(permitted) == 25, permitted
+    text = section("### 0b.5 ", "## Step 0c.")
+    secrets = _table_names(section("Secret values (who must never see them)", "Routing and destination values"))
+    routing = _table_names(section("Routing and destination values", "You need, on your own machine"))
+    assert len(secrets) == len(set(secrets)) and len(routing) == len(set(routing))
+    assert not set(secrets) & set(routing), sorted(set(secrets) & set(routing))  # never in both
+    missing = [n for n in permitted if n not in secrets and n not in routing]
+    assert not missing, missing  # in neither table
+    extra = (set(secrets) | set(routing)) - set(permitted)
+    assert not extra, sorted(extra)  # a name the wrapper no longer permits
+    assert "P1_EMAIL_TO" in routing and "GF_SMTP_STARTTLS_POLICY" in routing and "GRAFANA_ADMIN_USER" in routing
+    assert "GF_SMTP_PASSWORD" in secrets and "GRAFANA_ADMIN_PASS" in secrets
+    assert "25" in text  # the text says how many names the table holds
+
+
+def test_issue177_the_old_fallback_readonly_claim_is_gone():
+    assert "--fallback-readonly" not in RUNBOOK.replace("`--fallback-readonly` in `siem-run`", "")
