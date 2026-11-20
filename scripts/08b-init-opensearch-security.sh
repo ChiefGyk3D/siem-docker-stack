@@ -29,6 +29,15 @@ set +x
 unset BASH_ENV ENV CDPATH GLOBIGNORE PS4
 set -euo pipefail
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; export PATH  # fixed PATH before any command runs
+# Still before any external command runs: take the export attribute off the four password variables (a
+# caller may have exported them) and switch allexport off (an inherited `bash -a` or SHELLOPTS would
+# export every later assignment). Both are builtins, so no child process exists yet. From this line on
+# no child of this script inherits a password. What no script can change: the environment this process
+# itself was started with still holds whatever the launcher exported (see /proc/PID/environ of this
+# shell); pass the passwords in a .env file rather than the launch environment to avoid even that.
+export -n OPENSEARCH_ADMIN_PASSWORD OPENSEARCH_LOGSTASH_PASSWORD \
+          OPENSEARCH_READONLY_PASSWORD OPENSEARCH_DASHBOARDS_PASSWORD
+set +a
 
 # Root decision, privileged-mode check and the trusted script and helper tree come FIRST,
 # before anything is read, located or sourced.
@@ -98,10 +107,39 @@ for candidate in "${DEPLOY_DIR}/.env" "${REPO_DIR}/.env" "${REPO_DIR}/docker/.en
     fi
 done
 
+# The .env is shell code, so loading it cannot be made to ignore an `export`, `declare -x` or `set -a`
+# written inside it. What is guaranteed, using shell builtins only (no process is started, so the
+# inventory itself exposes nothing): "noexport" keeps a plain assignment from being exported; then,
+# whatever the file did, allexport is switched off again, every variable NAME the file created is
+# stripped of its export attribute, and so are the four passwords. NOT guaranteed: a variable that
+# already existed before the file ran keeps whatever export attribute the file gave it, so a .env
+# that exports a password THROUGH such a name (PATH, CE_TRUSTED_DIRS, the script's own variables) is
+# NOT neutralized: write plain NAME=value lines only (documented in docs/container-engine.md and
+# pinned by a test). A hostile file can run any shell code at all, so the file must be trusted (as root it must be root-owned in a root-owned tree, already enforced above).
+# ce_names fills the array _NAMES with every variable name in the shell (the ${!x@} expansions list the
+# names starting with one character; eval only ever sees the fixed characters of the loop).
+ce_names() {
+    local _c
+    _NAMES=()
+    for _c in {a..z} {A..Z} _; do
+        eval '_NAMES+=(${!'"$_c"'@})'
+    done
+}
+declare -A PRE_NAMES=()
+ce_names
+for _n in ${_NAMES[@]+"${_NAMES[@]}"}; do PRE_NAMES[$_n]=1; done
 if [ -n "$ENV_FILE" ]; then
     echo "Loading passwords from ${ENV_FILE}"
-    ce_source_env "$ENV_FILE" || exit 1  # root: only a root-owned file in a root-owned tree, via one descriptor
+    ce_source_env "$ENV_FILE" noexport || exit 1  # root: only a root-owned file in a root-owned tree, via one descriptor
 fi
+set +a
+ce_names
+for _n in ${_NAMES[@]+"${_NAMES[@]}"}; do
+    [ -n "${PRE_NAMES[$_n]:-}" ] || export -n "$_n"
+done
+export -n OPENSEARCH_ADMIN_PASSWORD OPENSEARCH_LOGSTASH_PASSWORD \
+          OPENSEARCH_READONLY_PASSWORD OPENSEARCH_DASHBOARDS_PASSWORD
+unset _n _NAMES PRE_NAMES
 
 # CONTAINER_ENGINE (docker by default, or podman) may come from the environment or that .env.
 ce_init || exit 1
@@ -115,6 +153,18 @@ for var in OPENSEARCH_ADMIN_PASSWORD OPENSEARCH_LOGSTASH_PASSWORD \
     fi
 done
 [ "$MISSING" -eq 1 ] && exit 1
+
+# A line break in a password would end the one-line stdin record (and, in a curl config, start a new
+# directive), so refuse it before any engine call. The variable name is printed, never the value.
+for var in OPENSEARCH_ADMIN_PASSWORD OPENSEARCH_LOGSTASH_PASSWORD \
+           OPENSEARCH_READONLY_PASSWORD OPENSEARCH_DASHBOARDS_PASSWORD; do
+    case "${!var}" in
+        *$'\n'* | *$'\r'*)
+            echo -e "${RED}✗ ${var} contains a line break, which is not allowed in a password${NC}" >&2
+            exit 1
+            ;;
+    esac
+done
 
 SECURITY_DIR="${DEPLOY_DIR}/opensearch/security"
 TEMPLATE="${SECURITY_DIR}/internal_users.yml.template"
@@ -150,11 +200,29 @@ fi
 echo ""
 echo -e "${YELLOW}[2/4] Generating bcrypt hashes...${NC}"
 
+# The password goes to the container on standard input: never in an argument of the engine client, and
+# never in the environment of the client. Inside the container the pinned hash tool (OpenSearch security
+# 2.19.0.0, src/main/java/org/opensearch/security/tools/Hasher.java and tools/hash.sh, read 2026-11-20;
+# the Hasher option names were read there, the real image was not run: UNVERIFIED on the live image)
+# reads a password from one of three places: -p VALUE (a command-line argument, readable by every
+# user), -env NAME (an environment variable of its own process), or an interactive console (it fails
+# without a terminal, so piped input does not work). -env is the least exposed supported route. The
+# wrapper hash.sh starts unrelated helper commands (realpath, dirname, pwd) and then runs java as a
+# child, so the variable is NOT exported to the wrapper: a function named java (exported into the
+# wrapper, which runs plain "java" once OPENSEARCH_JAVA_HOME and JAVA_HOME are unset, their value kept in
+# J) reads the line from stdin itself and starts the real java with the variable set for that one
+# process only. RESIDUAL EXPOSURE: for the well under a second java runs, the password is in that one
+# process's environment inside the container: readable by processes of the same container user, by
+# the container's root and by host root (all through /proc/PID/environ). It is in no argument list.
 hash_password() {
     local pass="$1"
-    ce_run exec -e HASH_PASS="$pass" opensearch-hot bash -c \
-        'plugins/opensearch-security/tools/hash.sh -p "$HASH_PASS"' 2>/dev/null \
-        | grep -E '^\$2[aby]\$' | tail -1
+    printf '%s\n' "$pass" | ce_run exec -i opensearch-hot bash -c \
+        'J="${OPENSEARCH_JAVA_HOME:-${JAVA_HOME:-/usr/share/opensearch/jdk}}"; export J
+         unset OPENSEARCH_JAVA_HOME JAVA_HOME
+         java() { local HASH_PASS; IFS= read -r HASH_PASS || return 1; HASH_PASS=$HASH_PASS "$J/bin/java" "$@"; }
+         export -f java
+         exec plugins/opensearch-security/tools/hash.sh -env HASH_PASS' \
+        2>/dev/null | grep -E '^\$2[aby]\$' | tail -1
 }
 
 ADMIN_HASH=$(hash_password "$OPENSEARCH_ADMIN_PASSWORD")
@@ -186,9 +254,22 @@ for token, env in [("__ADMIN_HASH__", "ADMIN_HASH"),
                    ("__READONLY_HASH__", "READONLY_HASH"),
                    ("__DASHBOARDS_HASH__", "DASHBOARDS_HASH")]:
     content = content.replace(token, os.environ[env])
-with open(out, "w", encoding="utf-8") as f:
-    f.write(content)
-os.chmod(out, 0o640)
+# The file holds password hashes: create it with its final mode from the first byte (a temporary
+# file opened exclusively with 0640, then renamed over the target), never create-then-chmod.
+tmp = f"{out}.tmp.{os.getpid()}"
+old_umask = os.umask(0o137)  # the mode below is then exactly 0640 whatever umask the caller had
+try:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640)
+finally:
+    os.umask(old_umask)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(content)
+    os.replace(tmp, out)
+except BaseException:
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+    raise
 print(f"  wrote {out}")
 PYEOF
 echo -e "${GREEN}✓ internal_users.yml rendered${NC}"
@@ -213,8 +294,13 @@ ce_run exec opensearch-hot bash -c '
 # ── Verify ───────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${YELLOW}Verifying...${NC}"
-AUTH_CODE=$(ce_run exec opensearch-hot curl -sk -o /dev/null -w '%{http_code}' \
-    -u "admin:${OPENSEARCH_ADMIN_PASSWORD}" https://localhost:9200/_cluster/health)
+# Credentials go to curl inside the container on standard input as a config (-K -), never in argv.
+# Backslash and double quote are escaped for the curl config syntax; a line break was refused above.
+ADMIN_CRED="admin:${OPENSEARCH_ADMIN_PASSWORD}"
+ADMIN_CRED="${ADMIN_CRED//\\/\\\\}"
+ADMIN_CRED="${ADMIN_CRED//\"/\\\"}"
+AUTH_CODE=$(printf 'user = "%s"\n' "$ADMIN_CRED" | ce_run exec -i opensearch-hot curl -K - -sk \
+    -o /dev/null -w '%{http_code}' https://localhost:9200/_cluster/health)
 NOAUTH_CODE=$(ce_run exec opensearch-hot curl -sk -o /dev/null -w '%{http_code}' \
     https://localhost:9200/_cluster/health)
 

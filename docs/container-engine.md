@@ -144,6 +144,27 @@ world writable. Install both files into the root-owned directory, as in
 [prometheus-otlp.md](prometheus-otlp.md). The script still changes only the
 `DOCKER-USER` chain; whether that chain exists under Podman is not verified.
 
+## Passwords and the `.env` file in `08b-init-opensearch-security.sh`
+
+The script keeps the four OpenSearch passwords out of every argument list and out of the environment
+of every child process it starts. It sends them to the container on standard input. Two things bound
+that guarantee:
+
+- The `.env` file is sourced as shell code and must be trusted. As root it must be root-owned in a
+  root-owned tree (enforced). A file that can run arbitrary shell code can do anything the script can.
+- Within a trusted file, the script removes the export attribute from the four password variables and
+  from every variable name the file newly creates. A `.env` that exports a password through a name
+  that already existed before the file ran (for example `PATH`, `CE_TRUSTED_DIRS` or another variable
+  of the script itself) is NOT neutralized: that child-visible copy stays. Write plain
+  `NAME=value` lines only. This limit is documented and pinned by a test
+  (`test_known_limit_env_file_can_export_through_a_name_that_already_existed`), so a future fix will
+  flip that test on purpose.
+- A password given in the launching environment stays in the environment of the script's own process
+  (only the launcher can change that); put the passwords in the `.env` file instead.
+- Inside the container the password is in the environment of the hash tool's one `java` process for the
+  moment it runs (readable by the same container user, container root and host root), never in an
+  argument list.
+
 ## Not covered
 
 - Compose files, the bootstrap script and rootless Podman behavior (see the design doc).
