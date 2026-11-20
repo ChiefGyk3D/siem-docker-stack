@@ -365,7 +365,11 @@ def test_round3_f5_each_function_has_exactly_one_definition_under_its_heading():
                          ("owner_router_chain", "runbook-block-router-chain-v3"),
                          ("owner_router_rollback", "runbook-block-router-rollback-v3")):
         assert def_fence(name).count(': "%s"' % anchor) == 1
-        assert "declare -f %s | grep -q '%s'" % (name, anchor) in CODE  # the call checks the installed definition
+    # round 4: the gate compares a checksum taken at paste time, not a substring, and needs a fresh shell
+    assert "grep -q 'runbook-block" not in CODE
+    assert CODE.count('[ "$OWNER_FRESH" = 1 ] && [ "$(declare -f ') >= 7
+    for var in ("OWNER_SUM_CHK", "OWNER_SUM_RECREATE", "OWNER_SUM_CHAIN", "OWNER_SUM_ROLLBACK", "OWNER_SUM_PRUNE"):
+        assert var + '="$(declare -f ' in CODE and '= "$' + var + '" ]' in CODE, var
 
 
 def test_round3_f5_a_duplicate_definition_is_detected():
@@ -526,11 +530,18 @@ def test_round3_f3_chk_vars_accepts_the_documented_values():
     assert "variables ok" in out.stdout and "RC=0" in out.stdout
 
 
-@pytest.mark.parametrize("fence_name", ["owner_chk_vars", "owner_recreate_n8n", "owner_router_chain", "owner_router_rollback"])
+PRUNE = def_fence("owner_prune_releases")
+PRUNE_CALLS = [f for f in ALL_FENCES if "owner_prune_releases 3" in f]
+
+
+@pytest.mark.parametrize("fence_name", ["owner_chk_vars", "owner_recreate_n8n", "owner_router_chain", "owner_router_rollback",
+                                        "owner_prune_releases"])
 def test_round3_f4_a_readonly_older_function_is_detected_not_run(tmp_path, fence_name):
-    old = '%s() { echo OLD-CODE-RAN; return 0; }; readonly -f %s' % (fence_name, fence_name)
+    # the old function even carries the old anchor text: the checksum gate does not care about substrings
+    old = '%s() { : "runbook-block-x-v3"; echo OLD-CODE-RAN; return 0; }; readonly -f %s' % (fence_name, fence_name)
     blocks = {"owner_chk_vars": [CHK], "owner_recreate_n8n": [CHK, RECREATE, CALLS[0]],
-              "owner_router_chain": [CHK, CHAIN], "owner_router_rollback": [CHK, ROLLBACK]}[fence_name]
+              "owner_router_chain": [CHK, CHAIN], "owner_router_rollback": [CHK, ROLLBACK],
+              "owner_prune_releases": [CHK, PRUNE, PRUNE_CALLS[0]]}[fence_name]
     home = tmp_path / "h"
     home.mkdir()
     script = "\n".join([STUBS, old] + blocks + ['echo "STATUS=$?"'])
@@ -556,8 +567,10 @@ def test_round2_f7_the_session_blocks_use_quoted_variables_not_placeholders():
 
 # ---- the repo swap (Daybreak round 2 finding 2 and round 3 finding 1): run it for real, under a temp root ----
 
-SWAP = next(l for l in CODE_LINES if "sudo mv -T /opt/siem-repo.next /opt/siem-repo" in l and l.startswith("ssh "))
+SWAP = next(l for l in CODE_LINES if "STAGING FAILED" in l and l.startswith("ssh "))
 SWAP_BODY = SWAP.split("LOGGING_BOX '", 1)[1].rsplit("'", 1)[0]
+ROLLBACK_SSH = next(l for l in CODE_LINES if "ROLLED BACK" in l and l.startswith("ssh "))
+ROLLBACK_BODY = ROLLBACK_SSH.split("LOGGING_BOX '", 1)[1].rsplit("'", 1)[0]
 SUDO = r'''
 sudo() { if [ -n "$FAIL" ] && [[ "$*" == *"$FAIL"* ]]; then return 9; fi; "$@"; }
 install() { local a=(); local skip=0; for x in "$@"; do if [ $skip -eq 1 ]; then skip=0; continue; fi; case "$x" in -o|-g) skip=1;; *) a+=("$x");; esac; done; command install "${a[@]}"; }
@@ -585,7 +598,14 @@ def make_archive(path, symlink=False):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def run_swap(tmp_path, fail="", sha=None, symlink=False, watch=False):
+FIXED_NAME = "20260101T000000Z-deadbeef"
+FIXED = r'''
+date() { echo 20260101T000000Z; }
+od() { echo " de ad be ef"; }
+'''
+
+
+def run_swap(tmp_path, fail="", sha=None, symlink=False, watch=False, fixed=False):
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
     digest = make_archive(home / "siem-repo.tar.gz", symlink=symlink)
@@ -608,7 +628,8 @@ def run_swap(tmp_path, fail="", sha=None, symlink=False, watch=False):
     if watch:
         t.start()
     env = dict(os.environ, HOME=str(home), FAIL=fail)
-    out = subprocess.run(["bash", "-c", SUDO + body], capture_output=True, text=True, env=env, timeout=60)
+    out = subprocess.run(["bash", "-c", SUDO + (FIXED if fixed else "") + body], capture_output=True, text=True,
+                         env=env, timeout=60)
     stop.set()
     if watch:
         t.join()
@@ -629,8 +650,7 @@ def test_round3_f1_first_install_and_update_flip_one_symlink_and_the_path_never_
     assert os.stat(root / "siem-repo" / "scripts").st_mode & 0o022 == 0  # group/other write removed
     os.utime(first, None)
     # a second release; poll the live path while the flip happens
-    import time
-    time.sleep(1.1)  # the release name is a UTC timestamp with one second resolution
+    # no sleep: the release name carries a random suffix, so two runs in the same second never collide
     out2, root2, missing = run_swap(tmp_path, watch=True)
     assert out2.returncode == 0, out2.stdout + out2.stderr
     assert live_target(root) != first and "previous: " + first in out2.stdout
@@ -642,8 +662,6 @@ def test_round3_f1_a_failure_at_any_step_leaves_the_old_tree_live(tmp_path, fail
     out, root, _ = run_swap(tmp_path)
     assert out.returncode == 0
     old = live_target(root)
-    import time
-    time.sleep(1.1)
     out, root, _ = run_swap(tmp_path, fail=fail)
     assert out.returncode != 0, fail
     assert live_target(root) == old, (fail, out.stdout + out.stderr)
@@ -680,3 +698,173 @@ def test_round3_f1_the_expected_checksum_comes_from_the_workstation():
     assert "ON YOUR WORKSTATION" in step and "never from the box" in step
     assert "siem-repo.sha256" not in step
     assert "rm -rf /opt/siem-repo " not in step and "mv /opt/siem-repo.new" not in step
+
+
+# ---- the owner's four round 4 fixes ----
+
+def test_round4_f1_a_name_collision_is_refused_and_touches_nothing(tmp_path):
+    out, root, _ = run_swap(tmp_path, fixed=True)
+    assert out.returncode == 0, out.stdout + out.stderr
+    live = live_target(root)
+    assert live.endswith(FIXED_NAME)
+    marker = root / "siem-repo-releases" / FIXED_NAME / "marker"
+    marker.write_text("keep me")
+    # same second, same random suffix: mkdir (no -p) must fail and nothing may be extracted or removed
+    out, root, _ = run_swap(tmp_path, fixed=True)
+    assert out.returncode != 0
+    assert live_target(root) == live
+    assert marker.read_text() == "keep me"
+    assert "removing only" not in out.stdout and "STAGING FAILED" not in out.stdout  # cleanup never even armed
+    # and even with a staging failure in the colliding run the live release survives
+    out, root, _ = run_swap(tmp_path, fixed=True, fail="tar -xzf")
+    assert out.returncode != 0 and marker.read_text() == "keep me"
+    assert (root / "siem-repo" / "scripts" / "live-deploy" / "siem-run").is_file()
+
+
+def test_round4_f1_cleanup_never_removes_the_directory_the_live_link_points_to(tmp_path):
+    # the live link already points at the (not yet existing) name this run will create, and staging fails
+    root = tmp_path / "opt"
+    (root).mkdir(exist_ok=True)
+    target = root / "siem-repo-releases" / FIXED_NAME
+    os.symlink(str(target), root / "siem-repo")
+    out, root, _ = run_swap(tmp_path, fixed=True, fail="tar -xzf")
+    assert out.returncode != 0
+    assert target.is_dir(), out.stdout + out.stderr  # created by this run, but it is the live target: kept
+    assert "not removing" in out.stdout and "removing only the release this run created" not in out.stdout
+
+
+def test_round4_f1_only_the_run_created_directory_is_removed_on_failure(tmp_path):
+    out, root, _ = run_swap(tmp_path)
+    old = live_target(root)
+    out, root, _ = run_swap(tmp_path, fail="chmod -R")
+    assert out.returncode != 0 and "removing only the release this run created" in out.stdout
+    assert [p.name for p in (root / "siem-repo-releases").iterdir()] == [os.path.basename(old)]
+
+
+def test_round4_f1_the_swap_uses_a_random_suffix_and_a_plain_mkdir():
+    assert "/dev/urandom" in SWAP_BODY and 'sudo mkdir -m 755 "$NEW"' in SWAP_BODY and "mkdir -p" not in SWAP_BODY
+    assert 'sudo test ! -e "$NEW"' in SWAP_BODY and 'CREATED="$NEW"' in SWAP_BODY
+
+
+def run_rollback(tmp_path, path_for, make=None):
+    """Set up two releases (rel1 old, rel2 live), run the documented rollback with `path_for(root)` as the target."""
+    root = tmp_path / "opt"
+    rl = root / "siem-repo-releases"
+    for name in ("rel1", "rel2"):
+        d = rl / name
+        (d / "scripts" / "live-deploy").mkdir(parents=True)
+        (d / "n8n").mkdir()
+        (d / "scripts" / "live-deploy" / "n8n-setup-alert-router.py").write_text("x")
+        (d / "n8n" / "grafana-alert-router.json").write_text("{}")
+    os.symlink(str(rl / "rel2"), root / "siem-repo")
+    if make:
+        make(root)
+    target = path_for(root)
+    body = ROLLBACK_BODY.replace("/opt/siem-repo", str(root / "siem-repo")).replace("PREVIOUS_RELEASE_DIR", target)
+    out = subprocess.run(["bash", "-c", SUDO + body], capture_output=True, text=True, env=dict(os.environ, FAIL=""), timeout=30)
+    return out, root
+
+
+def test_round4_f2_a_valid_rollback_target_is_installed_and_read_back(tmp_path):
+    out, root = run_rollback(tmp_path, lambda r: str(r / "siem-repo-releases" / "rel1"))
+    assert out.returncode == 0 and "ROLLED BACK" in out.stdout, out.stdout + out.stderr
+    assert live_target(root) == str(root / "siem-repo-releases" / "rel1")
+    assert (root / "siem-repo" / "scripts" / "live-deploy" / "n8n-setup-alert-router.py").is_file()
+
+
+def _symlinked(root):
+    os.symlink(str(root / "siem-repo-releases" / "rel1"), root / "siem-repo-releases" / "viasym")
+
+
+def _no_marker(root):
+    (root / "siem-repo-releases" / "rel1" / "scripts" / "live-deploy" / "n8n-setup-alert-router.py").unlink()
+
+
+def _outside(root):
+    (root.parent / "elsewhere" / "scripts" / "live-deploy").mkdir(parents=True)
+    (root.parent / "elsewhere" / "scripts" / "live-deploy" / "n8n-setup-alert-router.py").write_text("x")
+    (root.parent / "elsewhere" / "n8n").mkdir()
+    (root.parent / "elsewhere" / "n8n" / "grafana-alert-router.json").write_text("{}")
+
+
+@pytest.mark.parametrize("name,path_for,make", [
+    ("symlink", lambda r: str(r / "siem-repo-releases" / "viasym"), _symlinked),
+    ("outside prefix", lambda r: str(r.parent / "elsewhere"), _outside),
+    ("missing dir", lambda r: str(r / "siem-repo-releases" / "nothere"), None),
+    ("missing marker", lambda r: str(r / "siem-repo-releases" / "rel1"), _no_marker),
+    ("current target", lambda r: str(r / "siem-repo-releases" / "rel2"), None),
+    ("traversal", lambda r: str(r / "siem-repo-releases" / ".." / "siem-repo-releases" / "rel1"), None),
+    ("unsafe characters", lambda r: str(r / "siem-repo-releases" / "rel1; touch pwned"), None),
+    ("empty", lambda r: "", None),
+])
+def test_round4_f2_an_invalid_rollback_target_is_refused_and_the_link_is_unchanged(tmp_path, name, path_for, make):
+    out, root = run_rollback(tmp_path, path_for, make)
+    assert out.returncode != 0 and "ROLLED BACK: live is now" not in out.stdout, (name, out.stdout, out.stderr)
+    assert "ROLLBACK NOT DONE" in out.stdout
+    assert live_target(root) == str(root / "siem-repo-releases" / "rel2"), name
+    assert (root / "siem-repo" / "scripts" / "live-deploy" / "n8n-setup-alert-router.py").is_file()  # still not dangling
+    assert not (root / "siem-repo-releases" / "rel1; touch pwned").exists() and not (root / "pwned").exists()
+
+
+def test_round4_f3_the_gate_is_a_checksum_taken_at_paste_time(tmp_path):
+    # a function replaced after the paste (even keeping the old anchor text) fails the gate
+    script = "\n".join([STUBS, CHK, CHAIN.replace("owner_router_chain\n", ""),
+                        'owner_router_chain() { : "runbook-block-router-chain-v3"; echo REPLACED-CODE-RAN; return 0; }',
+                        CHAIN.splitlines()[-2], CHAIN.splitlines()[-1]])
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                         env=dict(os.environ, HOME=str(tmp_path), LOG=str(tmp_path / "l"), FAIL="", STUBJSON="{}"), timeout=30)
+    assert "REPLACED-CODE-RAN" not in out.stdout and "STALE FUNCTION" in out.stdout, out.stdout + out.stderr
+    assert "does NOT prove" in " ".join(RUNBOOK.split())  # the text says what the check does not prove
+
+
+def make_releases(tmp_path):
+    root = tmp_path / "opt"
+    rl = root / "siem-repo-releases"
+    names = ["20260101T000001Z-aaaaaaa1", "20260101T000002Z-aaaaaaa2", "20260101T000003Z-aaaaaaa3",
+             "20260101T000004Z-aaaaaaa4", "20260101T000005Z-aaaaaaa5"]
+    for n in names:
+        (rl / n).mkdir(parents=True)
+    (rl / "legacy").mkdir()
+    (rl / "20260101T000006Z-bbbbbbb6").symlink_to(rl / "legacy")  # release-shaped but a symlink: never touched
+    os.symlink(str(rl / names[1]), root / "siem-repo")  # the live release is an OLD one
+    return root, rl, names
+
+
+def run_prune(tmp_path, root, args):
+    fn = PRUNE.replace("/opt/siem-repo", str(root / "siem-repo"))
+    script = SUDO + fn + "\nowner_prune_releases " + args + '\necho "RC=$?"'
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=dict(os.environ, FAIL=""), timeout=30)
+    return out
+
+
+def test_round4_f4_the_dry_run_lists_only_candidates_and_removes_nothing(tmp_path):
+    root, rl, names = make_releases(tmp_path)
+    out = run_prune(tmp_path, root, '1 "%s"' % (rl / names[3]))
+    assert "RC=0" in out.stdout, out.stdout + out.stderr
+    cands = [l.split(": ", 1)[1] for l in out.stdout.splitlines() if l.startswith("candidate: ")]
+    assert cands == [str(rl / names[2]), str(rl / names[0])], out.stdout
+    assert "keep (live): " + str(rl / names[1]) in out.stdout and "keep (previous): " + str(rl / names[3]) in out.stdout
+    assert all(p.exists() for p in rl.iterdir())  # a dry run removes nothing
+
+
+def test_round4_f4_apply_removes_only_candidates_never_live_previous_legacy_or_symlinks(tmp_path):
+    root, rl, names = make_releases(tmp_path)
+    out = run_prune(tmp_path, root, '1 "%s" apply' % (rl / names[3]))
+    assert "RC=0" in out.stdout, out.stdout + out.stderr
+    assert not (rl / names[0]).exists() and not (rl / names[2]).exists()
+    for keep in (names[1], names[3], names[4], "legacy", "20260101T000006Z-bbbbbbb6"):
+        assert (rl / keep).exists(), keep
+    assert live_target(root) == str(rl / names[1])
+
+
+@pytest.mark.parametrize("bad", ["", "x", "-1", "1 2"])
+def test_round4_f4_a_bad_count_stops_before_listing_anything(tmp_path, bad):
+    root, rl, names = make_releases(tmp_path)
+    out = run_prune(tmp_path, root, '"%s" ""' % bad)
+    assert "RC=1" in out.stdout and "candidate:" not in out.stdout
+    assert all(p.exists() for p in rl.iterdir())
+
+
+def test_round4_f4_the_owner_decision_for_n_is_documented():
+    flat = " ".join(RUNBOOK.split())
+    assert "OWNER DECISION: the value of N" in flat and "never by hand" in flat

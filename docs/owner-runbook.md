@@ -57,7 +57,7 @@ older shell cannot be replaced; the blocks detect that and print `STALE FUNCTION
 and the answer is always a fresh shell:
 
 ```
-unset -f owner_chk_vars owner_recreate_n8n owner_router_chain owner_router_rollback 2> /dev/null
+OWNER_FRESH=1; for F in owner_chk_vars owner_recreate_n8n owner_router_chain owner_router_rollback owner_prune_releases; do unset -f "$F" 2> /dev/null; if declare -f "$F" > /dev/null 2>&1; then OWNER_FRESH=0; echo "STALE FUNCTION: $F cannot be removed (read-only or inherited): open a fresh bash shell"; fi; done
 REPO_DIR=/opt/siem-repo
 N8N_COMPOSE_DIR=/opt/n8n
 SIEM_NETWORK=siem_siem-net
@@ -71,7 +71,8 @@ owner_chk_vars() {
   [[ "$SIEM_NETWORK" =~ $re_net ]] || { echo "bad network name"; return 1; }
   return 0
 }
-if declare -f owner_chk_vars | grep -q 'runbook-block-chk-vars-v3'; then owner_chk_vars && echo "variables ok"; else echo "STALE FUNCTION: open a fresh bash shell and paste again"; false; fi
+OWNER_SUM_CHK="$(declare -f owner_chk_vars | sha256sum | cut -d' ' -f1)"
+if [ "$OWNER_FRESH" = 1 ] && [ "$(declare -f owner_chk_vars | sha256sum | cut -d' ' -f1)" = "$OWNER_SUM_CHK" ]; then owner_chk_vars && echo "variables ok"; else echo "STALE FUNCTION: open a fresh bash shell and paste again"; false; fi
 ```
 
 The values above are examples only: replace the two ids with the live ones (`n8n
@@ -228,7 +229,7 @@ leftover `/opt/siem-repo.new` directory from an earlier run is not used any more
 `sudo rm -rf /opt/siem-repo.new` removes it.
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd "$HOME" && TS="$(date -u +%Y%m%dT%H%M%SZ)" && RL=/opt/siem-repo-releases && printf "%s  siem-repo.tar.gz\n" EXPECTED_SHA256 | sha256sum -c - && { ! sudo test -e /opt/siem-repo || sudo test -L /opt/siem-repo || { echo "STOP: /opt/siem-repo is a real directory; migrate it once by hand (see the text above)"; false; }; } && sudo install -d -m 755 -o root -g root "$RL" "$RL/$TS" && { { sudo tar -xzf siem-repo.tar.gz -C "$RL/$TS" --strip-components=1 --no-same-owner --no-same-permissions && sudo chmod -R go-w "$RL/$TS" && test -z "$(sudo find "$RL/$TS" -perm /022 -o -type l)" && sudo test -f "$RL/$TS/scripts/live-deploy/siem-run"; } || { echo "STAGING FAILED: removing only the new release $RL/$TS; the live link is untouched"; sudo rm -rf "$RL/$TS"; false; }; } && PREV="$(sudo readlink /opt/siem-repo || true)" && sudo rm -f /opt/siem-repo.next && sudo ln -s "$RL/$TS" /opt/siem-repo.next && sudo mv -T /opt/siem-repo.next /opt/siem-repo && [ "$(sudo readlink /opt/siem-repo)" = "$RL/$TS" ] && echo "LIVE: $RL/$TS (previous: ${PREV:-none})" && sudo find -L /opt/siem-repo -perm /022 | wc -l && ls /opt/siem-repo/scripts/live-deploy /opt/siem-repo/n8n'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd "$HOME" && TS="$(date -u +%Y%m%dT%H%M%SZ)-$(od -An -N4 -tx1 /dev/urandom | tr -d " \n")" && RL=/opt/siem-repo-releases && NEW="$RL/$TS" && CREATED="" && printf "%s  siem-repo.tar.gz\n" EXPECTED_SHA256 | sha256sum -c - && { ! sudo test -e /opt/siem-repo || sudo test -L /opt/siem-repo || { echo "STOP: /opt/siem-repo is a real directory; migrate it once by hand (see the text above)"; false; }; } && sudo install -d -m 755 -o root -g root "$RL" && sudo test ! -e "$NEW" && sudo mkdir -m 755 "$NEW" && CREATED="$NEW" && { { sudo tar -xzf siem-repo.tar.gz -C "$RL/$TS" --strip-components=1 --no-same-owner --no-same-permissions && sudo chmod -R go-w "$RL/$TS" && test -z "$(sudo find "$RL/$TS" -perm /022 -o -type l)" && sudo test -f "$RL/$TS/scripts/live-deploy/siem-run"; } || { echo "STAGING FAILED: the live link is untouched"; if [ -n "$CREATED" ] && [ "$(sudo readlink -f "$CREATED")" != "$(sudo readlink -f /opt/siem-repo)" ]; then echo "removing only the release this run created: $CREATED"; sudo rm -rf "$CREATED"; else echo "not removing $CREATED (not created by this run, or it is the live release)"; fi; false; }; } && PREV="$(sudo readlink /opt/siem-repo || true)" && sudo rm -f /opt/siem-repo.next && sudo ln -s "$RL/$TS" /opt/siem-repo.next && sudo mv -T /opt/siem-repo.next /opt/siem-repo && [ "$(sudo readlink /opt/siem-repo)" = "$RL/$TS" ] && echo "LIVE: $RL/$TS (previous: ${PREV:-none})" && sudo find -L /opt/siem-repo -perm /022 | wc -l && ls /opt/siem-repo/scripts/live-deploy /opt/siem-repo/n8n'
 ```
 
 Expected: `OK` from the checksum, then `LIVE: /opt/siem-repo-releases/TIMESTAMP
@@ -238,22 +239,80 @@ listings of the `live-deploy` scripts (including `siem-run`) and of `n8n`
 (`grafana-alert-router.json`). Any other output means the link was not changed.
 Note the `previous:` value: that is the rollback target. Prove which tree is live at
 any time with `readlink /opt/siem-repo`. Delete the archive on the box
-(`rm -f "$HOME/siem-repo.tar.gz"`). Old release folders stay until you remove them
-by hand (`ls /opt/siem-repo-releases`; `sudo rm -rf /opt/siem-repo-releases/TIMESTAMP`
-naming a release that is not the live one). Here `REPO_DIR` is `/opt/siem-repo`;
+(`rm -f "$HOME/siem-repo.tar.gz"`). A release folder is named
+`UTC-TIMESTAMP-RANDOMHEX` (seconds plus 8 random hex digits), is created with a plain
+`mkdir` that fails if the name exists, and the command refuses to go on in that case,
+so two runs in the same second can never share or clean up each other's folder; the
+cleanup after a failed staging removes only the folder this very run created and
+never the one the live link points to. Old releases accumulate: prune them with the
+step below, never by hand. Here `REPO_DIR` is `/opt/siem-repo`;
 substitute it in every command below. To update later, repeat both blocks.
 
-Rollback: flip the link back to the `previous:` release with the same single rename
-(no deletion involved):
+Rollback: flip the link back to the `previous:` release with the same single rename.
+The command validates the target BEFORE the rename, because a typo would otherwise
+install a dangling link: it must be a plain absolute path of safe characters, a real
+directory (not a symlink), directly under `/opt/siem-repo-releases` after
+`realpath`, not the current live release, and it must contain the repository marker
+files. It refuses with a message otherwise and changes nothing; after the rename it
+reads the link back and checks the tree is reachable. Put the path in the quotes
+(`PREVIOUS_RELEASE_DIR` is the `previous:` path printed above):
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo rm -f /opt/siem-repo.next && sudo ln -s PREVIOUS_RELEASE_DIR /opt/siem-repo.next && sudo mv -T /opt/siem-repo.next /opt/siem-repo && readlink /opt/siem-repo'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'P="PREVIOUS_RELEASE_DIR" && RL=/opt/siem-repo-releases && case "$P" in ""|*[!A-Za-z0-9._/-]*) echo "REFUSING: the path is empty or has unsafe characters"; false;; esac && case "$P" in "$RL"/*) true;; *) echo "REFUSING: $P is not under $RL"; false;; esac && sudo test -d "$P" && ! sudo test -L "$P" && R="$(sudo realpath -e "$P")" && [ "$R" = "$P" ] && [ "$(dirname "$R")" = "$RL" ] && sudo test -f "$P/scripts/live-deploy/n8n-setup-alert-router.py" && sudo test -f "$P/n8n/grafana-alert-router.json" && [ "$(sudo readlink -f /opt/siem-repo)" != "$P" ] && sudo rm -f /opt/siem-repo.next && sudo ln -s "$P" /opt/siem-repo.next && sudo mv -T /opt/siem-repo.next /opt/siem-repo && [ "$(sudo readlink /opt/siem-repo)" = "$P" ] && sudo test -f /opt/siem-repo/scripts/live-deploy/n8n-setup-alert-router.py && echo "ROLLED BACK: live is now $(sudo readlink /opt/siem-repo)" || { echo "ROLLBACK NOT DONE: a check failed; the live link is unchanged unless it was the last read-back that failed, so run: readlink /opt/siem-repo"; false; }'
 ```
 
-`PREVIOUS_RELEASE_DIR` is the `previous:` path printed above (an absolute path under
-`/opt/siem-repo-releases`). On a first install there is nothing to go back to:
+If it prints `ROLLBACK NOT DONE`, read which message came before it (`REFUSING`, or
+no message when the directory, a marker file or the not-current check failed) and fix
+the path; nothing was changed. On a first install there is nothing to go back to:
 `sudo rm -f /opt/siem-repo`. Nothing else changed. The archive holds only repository
 files, no secret value and no live address.
+
+Prune old releases (needed over time: every update adds a release and nothing else
+removes one). The function below keeps the live release, the previous release you
+give it, and the newest N other releases, and lists as candidates only folders under
+`/opt/siem-repo-releases` whose names have the release shape
+`YYYYMMDDTHHMMSSZ-8hex` (so `legacy` and anything else are never touched), that are
+real directories (not symlinks), and that are neither the live nor the previous
+release. The default is a dry run that only lists; `apply` removes the candidates,
+re-checking each one against the live link right before its removal. OWNER DECISION:
+the value of N (suggested 3, so at most live + previous + 3 releases stay; the size of
+one release is a few MB, so this is about safety margin, not disk). In a session (the
+session variables block has been pasted, and `OWNER_FRESH` is `1`):
+
+```
+owner_prune_releases() {
+  : "runbook-block-prune-v3"
+  local N="$1" PREV="$2" MODE="${3:-dry-run}" RL=/opt/siem-repo-releases LIVE D B KEPT=0 I
+  local -a L
+  case "$N" in ''|*[!0-9]*) echo "STOP: N must be a whole number"; return 1;; esac
+  LIVE="$(sudo readlink -f /opt/siem-repo)" && [ -n "$LIVE" ] && sudo test -d "$LIVE" || { echo "STOP: the live release cannot be resolved"; return 1; }
+  if [ -n "$PREV" ]; then PREV="$(sudo readlink -f "$PREV")" || { echo "STOP: the previous release cannot be resolved"; return 1; }; fi
+  L=("$RL"/*/)
+  for (( I=${#L[@]}-1; I>=0; I-- )); do
+    D="${L[$I]%/}"; B="${D##*/}"
+    [[ "$B" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$ ]] || continue
+    [ -L "$D" ] && continue
+    if [ "$D" = "$LIVE" ]; then echo "keep (live): $D"; continue; fi
+    if [ -n "$PREV" ] && [ "$D" = "$PREV" ]; then echo "keep (previous): $D"; continue; fi
+    KEPT=$((KEPT+1))
+    if [ $KEPT -le "$N" ]; then echo "keep (newest $N): $D"; continue; fi
+    echo "candidate: $D"
+    if [ "$MODE" = apply ]; then
+      if [ "$(sudo realpath -e "$D")" = "$D" ] && [ "$D" != "$(sudo readlink -f /opt/siem-repo)" ] && sudo rm -rf -- "$D"; then echo "removed: $D"; else echo "STOP: refused to remove $D"; return 1; fi
+    fi
+  done
+  return 0
+}
+OWNER_SUM_PRUNE="$(declare -f owner_prune_releases | sha256sum | cut -d' ' -f1)"
+```
+
+First the dry run (lists only; `PREVIOUS_RELEASE_DIR` as above, or an empty string if
+there is none), then, after reading the candidates, the apply:
+
+```
+if [ "$OWNER_FRESH" = 1 ] && [ "$(declare -f owner_prune_releases | sha256sum | cut -d' ' -f1)" = "$OWNER_SUM_PRUNE" ]; then owner_prune_releases 3 "PREVIOUS_RELEASE_DIR"; else echo "STALE FUNCTION: open a fresh bash shell, set the session variables and paste again"; false; fi
+if [ "$OWNER_FRESH" = 1 ] && [ "$(declare -f owner_prune_releases | sha256sum | cut -d' ' -f1)" = "$OWNER_SUM_PRUNE" ]; then owner_prune_releases 3 "PREVIOUS_RELEASE_DIR" apply; else echo "STALE FUNCTION: open a fresh bash shell, set the session variables and paste again"; false; fi
+```
 
 ## Step 0b. One dev config for every new Grafana value (LIVE)
 
@@ -1232,20 +1291,28 @@ owner_recreate_n8n() {
   echo "recreate exit code: $R"
   return $R
 }
+OWNER_SUM_RECREATE="$(declare -f owner_recreate_n8n | sha256sum | cut -d' ' -f1)"
 ```
 
-Then call it. Each call first confirms the definition just pasted is the one that
-is installed (a read-only older function would otherwise run instead). Before 6.1
+Then call it. Each call first checks two things (the same gate guards every function
+block in this runbook). `OWNER_FRESH=1`, set when the session variables were pasted,
+means none of the function names existed before the paste (an older read-only or
+inherited function cannot be removed, so it would be reported there as `STALE
+FUNCTION`). And the sha256 of the installed definition equals the one taken right
+after it was pasted, so it was not replaced or edited in between. This does NOT prove
+the pasted text matches the runbook character for character (a mistyped paste hashes
+to its own value); to check that, run `echo "$OWNER_SUM_RECREATE"` and compare it with
+the same value on a second shell you pasted the block into. Before 6.1
 item 1 (heartbeat variables only):
 
 ```
-if declare -f owner_recreate_n8n | grep -q 'runbook-block-recreate-v3'; then owner_recreate_n8n "HEARTBEAT_PING_URL" "HEARTBEAT_PING_URL,HEARTBEAT_KIND"; else echo "STALE FUNCTION: open a fresh bash shell, set the session variables and paste again"; false; fi
+if [ "$OWNER_FRESH" = 1 ] && [ "$(declare -f owner_recreate_n8n | sha256sum | cut -d' ' -f1)" = "$OWNER_SUM_RECREATE" ]; then owner_recreate_n8n "HEARTBEAT_PING_URL" "HEARTBEAT_PING_URL,HEARTBEAT_KIND"; else echo "STALE FUNCTION: open a fresh bash shell, set the session variables and paste again"; false; fi
 ```
 
 From 6.1 item 2 on (heartbeat variables and the expiry token):
 
 ```
-if declare -f owner_recreate_n8n | grep -q 'runbook-block-recreate-v3'; then owner_recreate_n8n "HEARTBEAT_PING_URL EXPIRY_WATCH_ROUTER_TOKEN" "HEARTBEAT_PING_URL,HEARTBEAT_KIND,EXPIRY_WATCH_ROUTER_TOKEN"; else echo "STALE FUNCTION: open a fresh bash shell, set the session variables and paste again"; false; fi
+if [ "$OWNER_FRESH" = 1 ] && [ "$(declare -f owner_recreate_n8n | sha256sum | cut -d' ' -f1)" = "$OWNER_SUM_RECREATE" ]; then owner_recreate_n8n "HEARTBEAT_PING_URL EXPIRY_WATCH_ROUTER_TOKEN" "HEARTBEAT_PING_URL,HEARTBEAT_KIND,EXPIRY_WATCH_ROUTER_TOKEN"; else echo "STALE FUNCTION: open a fresh bash shell, set the session variables and paste again"; false; fi
 ```
 
 Check the status the call returned with `echo $?`: only `0` is success. If the running
@@ -1487,7 +1554,8 @@ owner_router_chain() {
   echo "chain exit code: $R"
   return $R
 }
-if declare -f owner_router_chain | grep -q 'runbook-block-router-chain-v3'; then owner_router_chain; else echo "STALE FUNCTION: a read-only or older owner_router_chain exists; open a fresh bash shell, set the session variables and paste again"; false; fi
+OWNER_SUM_CHAIN="$(declare -f owner_router_chain | sha256sum | cut -d' ' -f1)"
+if [ "$OWNER_FRESH" = 1 ] && [ "$(declare -f owner_router_chain | sha256sum | cut -d' ' -f1)" = "$OWNER_SUM_CHAIN" ]; then owner_router_chain; else echo "STALE FUNCTION: a read-only or older owner_router_chain exists; open a fresh bash shell, set the session variables and paste again"; false; fi
 echo "owner_router_chain returned $?"
 ```
 
@@ -1541,7 +1609,8 @@ owner_router_rollback() {
   echo "rollback exit code: $R"
   return $R
 }
-if declare -f owner_router_rollback | grep -q 'runbook-block-router-rollback-v3'; then owner_router_rollback; else echo "STALE FUNCTION: a read-only or older owner_router_rollback exists; open a fresh bash shell, set the session variables and paste again"; false; fi
+OWNER_SUM_ROLLBACK="$(declare -f owner_router_rollback | sha256sum | cut -d' ' -f1)"
+if [ "$OWNER_FRESH" = 1 ] && [ "$(declare -f owner_router_rollback | sha256sum | cut -d' ' -f1)" = "$OWNER_SUM_ROLLBACK" ]; then owner_router_rollback; else echo "STALE FUNCTION: a read-only or older owner_router_rollback exists; open a fresh bash shell, set the session variables and paste again"; false; fi
 echo "owner_router_rollback returned $?"
 ```
 
