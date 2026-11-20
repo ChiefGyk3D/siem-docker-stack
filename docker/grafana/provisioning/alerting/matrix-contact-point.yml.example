@@ -1,0 +1,35 @@
+# Matrix contact point for P1 alerts (issue #147, docs/channel-redundancy.md).
+# SHIPPED AS AN EXAMPLE: Grafana ignores .example files.
+#
+# Grafana has no native Matrix integration and cannot post to the Matrix send
+# endpoint itself: that endpoint needs a unique transaction id (txnId) in its URL
+# for every message, and a webhook contact point sends one fixed URL. So this is a
+# plain webhook to a small relay that you run, which then calls Matrix with a
+# fresh txnId per message. See the Matrix section of docs/channel-redundancy.md
+# for the relay design. No relay code ships in this repository.
+#
+# To use it, add the entry below to the contactPoints list of contact-points.yml
+# (or load it as its own file), set the variables below in the Grafana container
+# environment, and merge the route from matrix-notification-policy.yml.example
+# into your policy tree. Nothing sensitive is written here. Grafana interpolates
+# $VARIABLE from its container environment:
+#   P1_MATRIX_RELAY_URL    the relay's URL, for example https://relay.example.com/grafana
+#   P1_MATRIX_RELAY_TOKEN  a bearer secret shared with the relay (sent as
+#                          "Authorization: Bearer <value>"); NOT the Matrix token
+# The Matrix access token and room id live only in the relay's own environment.
+# Pass the two variables to the grafana service in docker-compose, like
+# GRAFANA_WEBHOOK_SECRET.
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: matrix-p1
+    receivers:
+      - uid: matrix-p1
+        type: webhook
+        settings:
+          url: $P1_MATRIX_RELAY_URL
+          httpMethod: POST
+          authorization_scheme: Bearer
+          authorization_credentials: $P1_MATRIX_RELAY_TOKEN
+        disableResolveMessage: false

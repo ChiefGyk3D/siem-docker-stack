@@ -1,0 +1,36 @@
+# Patch Gremlin scrape job. DRAFT, INACTIVE: nothing loads this file.
+# Issue #65, epic #62. Read docs/patch-gremlin-alerts.md first.
+#
+# Patch Gremlin has no HTTP endpoint of its own. Its exporter
+# (monitoring/prometheus-exporter.sh) writes a file for the node_exporter
+# textfile collector, so the series are served by node_exporter on each Linux
+# host (port 9100 by default). Two ways to collect them:
+#
+# 1. A host that is already in one of the existing node_exporter jobs
+#    (twingate-ztna, Security, Computers, and so on) needs NO new job: once the
+#    textfile collector is on, the patch_gremlin_* series appear under that job.
+#    Do nothing here for those hosts.
+# 2. A Linux host that is in no job yet: copy the job below into
+#    docker/prometheus/prometheus.yml under scrape_configs, copy
+#    targets/patch-gremlin.example.json to targets/patch-gremlin.json (real
+#    file, gitignored) and fill in the targets.
+#
+# Do not put the same host in two jobs: the alert queries aggregate with
+# max by (instance), so a duplicate does not double count, but it doubles the
+# stored series.
+#
+# On each host, node_exporter must run with the textfile directory the exporter
+# writes to (verified from the exporter header comment):
+#   --collector.textfile.directory=/var/lib/node_exporter
+scrape_configs:
+  - job_name: 'patch-gremlin'
+    scrape_interval: 60s
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/patch-gremlin.json']
+    # Keep only the Patch Gremlin series (and the optional reboot-required
+    # gauge) so this job adds a handful of series per host, not the full
+    # node_exporter set.
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'patch_gremlin_.*|node_reboot_required'
+        action: keep
