@@ -1626,6 +1626,18 @@ https://docs.n8n.io/deploy/host-n8n/configure-n8n/basic-configuration/use-enviro
 read 2026-11-20; that they take effect in 2.10.3 is INFERRED). There is no published
 port, so nobody else on the box can reach the fresh, unowned n8n editor.
 
+How the export is copied out. `docker cp` copies a symlink as a symlink, so a link
+inside the live folder, or a link already at the host destination, could pull another
+file out or write through it. The function therefore (1) refuses unless the exported
+file in the live container is a regular file and not a symlink (`test -f` and `! test
+-L` through `docker exec`); (2) copies into a brand new directory made with `mktemp -d`
+under umask 077 inside the mode 700 scratch folder, never to a predictable name; (3)
+before it parses anything, refuses unless the copy is a regular file, not a symlink,
+owned by you with a link count of 1, and between 1 byte and 5 MB; (4) only then installs
+it as mode 600 `live.json` and parses that copy. That `docker cp` makes the host file
+owned by the user who runs it is INFERRED; if your Docker makes it another owner, the
+check stops the rehearsal with a message and nothing is parsed.
+
 Resource limits, so a runaway scratch n8n cannot starve the live stack: `--memory 1g
 --memory-swap 1g` (an idle n8n is well under that, INFERRED; the same value for swap
 means no swap), `--cpus 1`, `--pids-limit 256`, `--security-opt no-new-privileges`,
@@ -1689,7 +1701,7 @@ owner_rehearse_down() {
 owner_rehearse_router() {
   : "runbook-block-rehearse-v3"
   local SCRATCH_NAME=n8n-rehearsal SCRATCH_DIR="$HOME/n8n-rehearsal"
-  local IMG R=0 INTR=0 TDFAIL=0 LD="" K I MADE_DIR=0 MADE_CTR=0 LIVE_NODES SC_NODES LIVE_CREDS SC_CREDS COUNT_PY CRED_PY
+  local IMG R=0 INTR=0 TDFAIL=0 LD="" H="" F SZ K I MADE_DIR=0 MADE_CTR=0 LIVE_NODES SC_NODES LIVE_CREDS SC_CREDS COUNT_PY CRED_PY
   COUNT_PY='import json,sys; d=json.load(sys.stdin); d=d[0] if isinstance(d,list) else d; print(len(d["nodes"]))'
   CRED_PY='import json,sys; d=json.load(sys.stdin); d=d[0] if isinstance(d,list) else d; print("\n".join(sorted({"%s:%s" % (t, (c or {}).get("name", "")) for n in d["nodes"] for t, c in (n.get("credentials") or {}).items()})))'
   owner_chk_vars || return 1
@@ -1705,8 +1717,8 @@ owner_rehearse_router() {
   ( umask 077; mkdir -m 700 "$SCRATCH_DIR/data" "$SCRATCH_DIR/work" ); R=$?; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: scratch folders (exit $R)"
   if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then K="$(openssl rand -hex 32)"; R=$?; [[ "$K" =~ ^[0-9a-f]{64}$ ]] || R=1; if [ $R -eq 0 ]; then ( umask 077; printf 'HOME=/home/node\nN8N_ENCRYPTION_KEY=%s\nN8N_DIAGNOSTICS_ENABLED=false\nN8N_VERSION_NOTIFICATIONS_ENABLED=false\nN8N_TEMPLATES_ENABLED=false\n' "$K" > "$SCRATCH_DIR/env" ); R=$?; fi; K=""; [ $R -eq 0 ] && [ "$(stat -c %a "$SCRATCH_DIR/env")" = 600 ] && [ "$(wc -c < "$SCRATCH_DIR/env")" -ge 120 ]; R=$?; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: the scratch key file (not written, not mode 600 or too short)"; fi
   if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then LD="$(docker exec n8n mktemp -d /tmp/router-rehearsal.XXXXXX)"; R=$?; [[ "$LD" =~ ^/tmp/router-rehearsal\.[A-Za-z0-9]{6}$ ]] || { R=1; LD=""; }; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: making a new private folder inside the live container (mktemp -d is INFERRED to exist in the n8n image); nothing was exported"; fi
-  if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then docker exec n8n n8n export:workflow --id="$ROUTER_ID" --output="$LD/router.json" > /dev/null && ( umask 077; docker cp "n8n:$LD/router.json" "$SCRATCH_DIR/work/live.json" ); R=$?; if docker exec n8n rm -rf -- "$LD" > /dev/null 2>&1; then LD=""; else echo "LIVE LEFTOVER: $LD is still inside the live n8n container (it holds the router export); remove it with: docker exec n8n rm -rf -- $LD"; TDFAIL=1; fi; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: the read-only export of the live router (exit $R)"; fi
-  if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then chmod 600 "$SCRATCH_DIR/work/live.json" && LIVE_NODES="$(python3 -c "$COUNT_PY" < "$SCRATCH_DIR/work/live.json")" && LIVE_CREDS="$(python3 -c "$CRED_PY" < "$SCRATCH_DIR/work/live.json")"; R=$?; case "$LIVE_NODES" in ''|*[!0-9]*|0) R=1;; esac; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: reading the live export (not a workflow with a positive node count, got '${LIVE_NODES}')"; fi
+  if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then docker exec n8n n8n export:workflow --id="$ROUTER_ID" --output="$LD/router.json" > /dev/null && docker exec n8n sh -c 'test -f "$1" && ! test -L "$1"' sh "$LD/router.json" && H="$(umask 077; mktemp -d "$SCRATCH_DIR/work/in.XXXXXX")" && [[ "$H" =~ ^/[A-Za-z0-9._/-]+/work/in\.[A-Za-z0-9]{6}$ ]] && ( umask 077; docker cp "n8n:$LD/router.json" "$H/" ); R=$?; if docker exec n8n rm -rf -- "$LD" > /dev/null 2>&1; then LD=""; else echo "LIVE LEFTOVER: $LD is still inside the live n8n container (it holds the router export); remove it with: docker exec n8n rm -rf -- $LD"; TDFAIL=1; fi; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: the read-only export of the live router (exit $R)"; fi
+  if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then F="$H/router.json"; [ -f "$F" ] && [ ! -L "$F" ] && [ "$(stat -c '%u %h' "$F")" = "$(id -u) 1" ] && SZ="$(stat -c %s "$F")" && [ "$SZ" -gt 0 ] && [ "$SZ" -le 5242880 ] && install -m 600 "$F" "$SCRATCH_DIR/work/live.json" && LIVE_NODES="$(python3 -c "$COUNT_PY" < "$SCRATCH_DIR/work/live.json")" && LIVE_CREDS="$(python3 -c "$CRED_PY" < "$SCRATCH_DIR/work/live.json")"; R=$?; case "$LIVE_NODES" in ''|*[!0-9]*|0) R=1;; esac; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: reading the live export (not a plain file owned by you with one link and 1 byte to 5 MB, or not a workflow with a positive node count, got '${LIVE_NODES}')"; fi
   if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then MADE_CTR=1; docker run -d --name "$SCRATCH_NAME" --network none --restart no --memory 1g --memory-swap 1g --cpus 1 --pids-limit 256 --security-opt no-new-privileges --cap-drop ALL --user "$(id -u):$(id -g)" --env-file "$SCRATCH_DIR/env" -v "$SCRATCH_DIR/data:/home/node/.n8n" -v "$SCRATCH_DIR/work:/work" "$IMG" > /dev/null; R=$?; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: starting the scratch container (exit $R)"; fi
   if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then R=1; for I in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do if docker exec "$SCRATCH_NAME" n8n list:workflow > /dev/null 2>&1; then R=0; break; fi; sleep 3; done; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: the scratch n8n did not answer within 60 seconds (docker logs $SCRATCH_NAME shows why)"; fi
   if [ $R -eq 0 ] && [ "$INTR" = 0 ]; then docker exec "$SCRATCH_NAME" n8n import:workflow --input=/work/live.json; R=$?; [ $R -eq 0 ] || echo "REHEARSAL FAILED at: the import (exit $R): the export format is NOT accepted by this n8n; do not rely on owner_router_rollback"; fi

@@ -960,7 +960,7 @@ def test_issue179_the_block_traps_signals_runs_the_same_teardown_and_uses_privat
     assert re.search(r"trap '[^\n]*owner_rehearse_down[^\n]*INTR=1[^\n]*' INT TERM HUP", REHEARSE)
     assert re.search(r"trap '[^\n]*owner_rehearse_down[^\n]*' EXIT", REHEARSE)
     assert REHEARSE.count("trap - INT TERM HUP EXIT") >= 1
-    assert "mkdir -m 700" in REHEARSE and REHEARSE.count("umask 077") >= 3 and "chmod 600" in REHEARSE
+    assert "mkdir -m 700" in REHEARSE and REHEARSE.count("umask 077") >= 3 and "install -m 600" in REHEARSE
 
 
 R_STUBS = r'''
@@ -971,10 +971,20 @@ docker() {
   case "$1" in
     inspect) echo "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" ;;
     ps) [ -n "$CTR_EXISTS" ] && echo abc123 ;;
-    cp) case "$2" in n8n:*) printf '%s' "$STUBJSON" > "$3";; esac ;;
+    cp) case "$2" in n8n:*)
+          if [ -d "$3" ]; then t="${3%/}/router.json"; else t="$3"; fi
+          case "$DEST" in
+            symlink) ln -s "$SYMTARGET" "$t" ;;
+            dir) mkdir "$t" ;;
+            empty) : > "$t" ;;
+            hard) printf '%s' "$STUBJSON" > "$t"; ln "$t" "$t.extra" ;;
+            big) head -c 6000000 /dev/zero > "$t" ;;
+            *) printf '%s' "$STUBJSON" > "$t" ;;
+          esac ;;
+        esac ;;
     exec)
       case "$*" in
-        "exec n8n mktemp -d "*) echo "/tmp/router-rehearsal.AbC123" ;;
+        "exec n8n mktemp -d "*) echo "${MKTEMP_OUT:-/tmp/router-rehearsal.AbC123}" ;;
         *"export:workflow"*"/work/scratch.json"*) printf '%s' "$SCJSON" > "$HOME/n8n-rehearsal/work/scratch.json" ;;
         *"n8n-rehearsal n8n list:workflow"*) echo "aaaaaaaaaaaaaaaa|Router" ;;
       esac ;;
@@ -988,7 +998,7 @@ OWNER_FRESH=1
 CRED_JSON = '{"nodes":[{"credentials":{"discordWebhookApi":{"id":"1","name":"Discord"}}},{}]}'
 
 
-def run_rehearsal(tmp_path, fail="", ctr_exists="", pre_dir=False, scjson=CRED_JSON, sig="", bad_id=False, ossl=""):
+def run_rehearsal(tmp_path, fail="", ctr_exists="", pre_dir=False, scjson=CRED_JSON, sig="", bad_id=False, ossl="", dest="", mk_out="", block=None):
     """Run the COMPLETE documented fence once and return the real process status, the output, the stub log."""
     home = tmp_path / "home"
     home.mkdir(parents=True, exist_ok=True)
@@ -999,9 +1009,12 @@ def run_rehearsal(tmp_path, fail="", ctr_exists="", pre_dir=False, scjson=CRED_J
     log.write_text("")
     values = dict(VARS, ROUTER_ID="bad" if bad_id else VARS["ROUTER_ID"])
     overrides = "\n".join("%s=%s" % kv for kv in values.items())
-    script = "\n".join([R_STUBS, CHK, overrides, REHEARSE])  # nothing after the fence: its own status is the process status
+    target = tmp_path / "symtarget.json"
+    target.write_text(CRED_JSON)
+    script = "\n".join([R_STUBS, CHK, overrides, block or REHEARSE])  # nothing after the fence: its own status is the process status
     env = dict(os.environ, HOME=str(home), LOG=str(log), FAIL=fail, STUBJSON=CRED_JSON, SCJSON=scjson,
-               CTR_EXISTS=ctr_exists, SIG=sig, OSSL=ossl)
+               CTR_EXISTS=ctr_exists, SIG=sig, OSSL=ossl, DEST=dest,
+               SYMTARGET=str(target), MKTEMP_OUT=mk_out)
     out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, timeout=60)
     return out.returncode, out.stdout + out.stderr, log.read_text(), home / "n8n-rehearsal"
 
@@ -1125,3 +1138,60 @@ def test_issue179_a_signal_mid_run_removes_the_container_and_the_folder(tmp_path
 def test_issue179_the_rehearsal_key_file_is_private_and_not_the_live_key():
     assert "umask 077" in REHEARSE and '= 600' in REHEARSE and "openssl rand -hex 32" in REHEARSE
     assert "docker exec n8n env" not in REHEARSE and "inspect --format '{{.Config.Env" not in REHEARSE
+
+
+# ---- Daybreak round 3: the copy out of the live container, and mutation checks ----------
+
+@pytest.mark.parametrize("dest", ["symlink", "dir", "empty", "hard", "big"])
+def test_issue179_round3_a_bad_copy_destination_stops_before_parsing_and_tears_down(tmp_path, dest):
+    rc, out, log, scratch = run_rehearsal(tmp_path, dest=dest)
+    assert rc != 0 and "REHEARSAL FAILED at: reading the live export" in out, out
+    assert "docker run" not in log and "import:workflow" not in log  # nothing parsed, nothing started
+    assert not scratch.exists() and "docker exec n8n rm -rf -- /tmp/router-rehearsal.AbC123" in log
+
+
+def test_issue179_round3_a_live_export_that_is_not_a_plain_file_is_never_copied(tmp_path):
+    rc, out, log, scratch = run_rehearsal(tmp_path, fail="test -f")
+    assert rc != 0 and "REHEARSAL FAILED at: the read-only export" in out, out
+    assert "docker cp" not in log and "docker run" not in log and not scratch.exists()
+
+
+def test_issue179_round3_the_copy_goes_into_a_new_private_directory_not_a_fixed_name(tmp_path):
+    rc, out, log, scratch = run_rehearsal(tmp_path)
+    assert rc == 0, out
+    cp = next(l for l in log.splitlines() if l.startswith("docker cp"))
+    assert re.search(r"/n8n-rehearsal/work/in\.[A-Za-z0-9]{6}/$", cp), cp
+    assert "work/live.json" not in cp
+    assert 'mktemp -d "$SCRATCH_DIR/work/in.XXXXXX"' in REHEARSE and "install -m 600" in REHEARSE
+    assert '[ ! -L "$F" ]' in REHEARSE and "5242880" in REHEARSE and "%u %h" in REHEARSE
+    assert "symlink as a symlink" in " ".join(REHEARSAL_SECTION.split())
+
+
+def test_issue179_round3_mutation_without_the_live_folder_name_check_a_bad_name_is_used(tmp_path):
+    check = '[[ "$LD" =~ ^/tmp/router-rehearsal\\.[A-Za-z0-9]{6}$ ]] || { R=1; LD=""; }'
+    assert check in REHEARSE
+    rc, out, log, _ = run_rehearsal(tmp_path / "a", mk_out="/tmp/evil")
+    assert rc != 0 and "/tmp/evil" not in log  # the real block refuses the name and never touches it
+    mutated = REHEARSE.replace(check, "true")
+    rc2, out2, log2, _ = run_rehearsal(tmp_path / "b", mk_out="/tmp/evil", block=mutated)
+    assert "rm -rf -- /tmp/evil" in log2 or "--output=/tmp/evil/router.json" in log2  # so the pin bites
+
+
+def test_issue179_round3_mutation_without_the_removal_status_the_trap_reports_a_clean_teardown(tmp_path):
+    leftover = 'remove it with: docker exec n8n rm -rf -- $L"; S=1; }'
+    assert leftover in REHEARSE
+    rc, out, log, _ = run_rehearsal(tmp_path / "a", fail="n8n rm -rf", sig="INT")
+    assert "teardown INCOMPLETE" in out and rc != 0
+    mutated = REHEARSE.replace(leftover, 'remove it with: docker exec n8n rm -rf -- $L"; }')
+    rc2, out2, log2, _ = run_rehearsal(tmp_path / "b", fail="n8n rm -rf", sig="INT", block=mutated)
+    assert "teardown INCOMPLETE" not in out2  # the failure flag is what carried the message
+
+
+def test_issue179_round3_mutation_without_the_host_file_checks_a_symlink_is_parsed(tmp_path):
+    check = '[ -f "$F" ] && [ ! -L "$F" ] && '
+    assert check in REHEARSE
+    rc, out, log, _ = run_rehearsal(tmp_path / "a", dest="symlink")
+    assert rc != 0 and "docker run" not in log
+    mutated = REHEARSE.replace(check, "")
+    rc2, out2, log2, _ = run_rehearsal(tmp_path / "b", dest="symlink", block=mutated)
+    assert "docker run" in log2  # without the check the link was followed and the run went on
