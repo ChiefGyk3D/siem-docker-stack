@@ -1306,3 +1306,35 @@ def test_docs_have_the_label_taxonomy_and_health_notes():
     flat = " ".join(text.split())
     assert "stay off the phone until they carry `phone=true`" in flat
     assert "heartbeat" in flat.lower() and "not part of this change" in flat.lower()
+
+
+# --- issue #61: a failing query must alert, never read as OK ---
+
+def test_no_update_rule_treats_a_query_error_as_ok():
+    rules = _rules()
+    files = {fname for fname, _, _ in rules}
+    assert any("unifi" in f for f in files) and any("pfsense" in f for f in files)
+    assert len(rules) >= 7
+    for fname, _group, rule in rules:
+        # the key must be present: Grafana's default is Alerting, but the rule
+        # files state it so a later edit cannot lean on a default
+        assert "execErrState" in rule, rule["uid"]
+        assert rule["execErrState"] == "Alerting", (fname, rule["uid"], rule["execErrState"])
+        assert rule["execErrState"] not in {"OK", "Error"}, rule["uid"]
+
+
+@pytest.mark.parametrize("uid", sorted({r["uid"] for _, _, r in _rules()}))
+def test_each_update_rule_alerts_on_query_error(uid):
+    rule = {r["uid"]: r for _, _, r in _rules()}[uid]
+    assert rule["execErrState"] == "Alerting"
+    # NoData is a separate decision: only the two UniFi pending rules treat it as OK
+    expect = "OK" if uid in PENDING_UNIFI else "Alerting"
+    assert rule["noDataState"] == expect
+
+
+def test_docs_describe_the_query_error_failure_mode():
+    flat = " ".join((REPO_ROOT / "docs" / "update-alerting.md").read_text().split())
+    assert "### Query errors" in flat
+    assert "`execErrState: Alerting`" in flat
+    assert "DatasourceError" in flat
+    assert "instead of the default" in flat
