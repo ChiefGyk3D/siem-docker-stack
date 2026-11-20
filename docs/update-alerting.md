@@ -184,7 +184,12 @@ whitespace-only, placeholder and short values. It measures the value the way
 Compose reads it from `.env`: an unquoted value ends at whitespace followed by
 `#` (so `x # long comment` is the one character `x`), matching quotes are
 removed, and a duplicate assignment, unmatched quote, backslash or unquoted
-`$` is rejected. Neither check can see what you typed into n8n: an n8n credential whose value is just `Bearer`
+`$` is rejected. Only the plain `NAME=value` line form is measured: a line
+with an `export` prefix, indentation, whitespace before the equals sign or a
+carriage return (a CRLF file; convert it to LF) is rejected, so is an
+assignment inside another variable's multi-line quoted value, and a duplicate
+counts in any of those forms. Trailing whitespace after an unquoted or quoted
+value is ignored, and a commented-out line is not an assignment. Neither check can see what you typed into n8n: an n8n credential whose value is just `Bearer`
 would accept an empty-secret call, so follow step 2 exactly and run the
 checklist below.
 

@@ -48,17 +48,48 @@ for var in "${REQUIRED[@]}"; do
 done
 
 # The Grafana to n8n webhook secret (docs/update-alerting.md) also needs a
-# minimum length. Docker Compose reads the same .env file, so the value is
-# parsed the way Compose parses it for this variable: an unquoted value ends at
-# whitespace followed by '#', matching single or double quotes are removed, and
-# the quoted text may be followed by a comment. Anything ambiguous (a duplicate
-# assignment, an unmatched quote, a backslash, a '$' Compose would interpolate,
-# a carriage return) is rejected. The parsed value must be non-empty, not
-# whitespace-only, not a placeholder and at least 32 characters. It is never
-# printed.
+# minimum length. Docker Compose reads the same .env file, but Compose, a shell
+# that sources the file and an editor can each read an unusual line differently.
+# So only the plain `NAME=value` form is measured, and every other form of an
+# assignment to this variable is rejected: an `export` prefix, indentation,
+# whitespace before the equals sign, a carriage return (a CRLF file), a
+# duplicate in any of those forms, and an assignment that sits inside another
+# variable's multi-line quoted value. For the plain form the value is parsed the
+# way Compose parses it: an unquoted value ends at whitespace followed by '#',
+# matching single or double quotes are removed, and the quoted text may be
+# followed by a comment. Anything ambiguous (an unmatched quote, a backslash, a
+# '$' Compose would interpolate) is rejected. The parsed value must be
+# non-empty, not whitespace-only, not a placeholder and at least 32 characters.
+# It is never printed.
 var=GRAFANA_WEBHOOK_SECRET
-count="$(grep -cE "^${var}=" "$ENV_FILE" || true)"
-line="$(grep -E "^${var}=" "$ENV_FILE" | tail -1 || true)"
+qc="[\"']"
+re_any="^[[:space:]]*(export[[:space:]]+)?${var}[[:space:]]*="
+re_open="^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[[:space:]]*(${qc})(.*)\$"
+cr=$'\r'
+count=0
+line=""
+odd_form=0
+in_quote=""
+while IFS= read -r raw || [ -n "$raw" ]; do
+    if [ -n "$in_quote" ]; then
+        # Inside another variable's multi-line quoted value: an assignment to the
+        # webhook variable here is read differently by different parsers.
+        if [[ "$raw" =~ $re_any ]]; then count=$((count + 1)); odd_form=1; line="$raw"; fi
+        stripped="${raw//[^$in_quote]/}"
+        if [ $(( ${#stripped} % 2 )) -eq 1 ]; then in_quote=""; fi
+        continue
+    fi
+    if [[ "$raw" =~ $re_any ]]; then
+        count=$((count + 1))
+        line="$raw"
+        case "$raw" in "${var}="*) ;; *) odd_form=1 ;; esac
+        case "$raw" in *"$cr"*) odd_form=1 ;; esac
+    elif [[ "$raw" =~ $re_open ]]; then
+        q="${BASH_REMATCH[2]}"
+        stripped="${BASH_REMATCH[3]//[^$q]/}"
+        if [ $(( ${#stripped} % 2 )) -eq 0 ]; then in_quote="$q"; fi
+    fi
+done < "$ENV_FILE"
 rest="${line#*=}"
 rest="${rest#"${rest%%[![:space:]]*}"}"
 re_dq='^"([^"\\]*)"([[:space:]]+#.*)?[[:space:]]*$'
@@ -87,7 +118,10 @@ if [ -z "$line" ] || { [ "$parse_ok" -eq 1 ] && [ -z "$trimmed" ]; }; then
     echo "check-env: ${var} is missing, empty or only whitespace" >&2
     bad=1
 elif [ "$count" -gt 1 ]; then
-    echo "check-env: ${var} is assigned more than once; keep exactly one assignment" >&2
+    echo "check-env: ${var} is assigned more than once (or inside a multi-line quoted value); keep exactly one plain NAME=value assignment" >&2
+    bad=1
+elif [ "$odd_form" -eq 1 ]; then
+    echo "check-env: ${var} must be one plain NAME=value line: no export prefix, no space around the name or before the equals sign, no carriage return (convert CRLF to LF)" >&2
     bad=1
 elif [ "$parse_ok" -eq 0 ]; then
     echo "check-env: ${var} has an unmatched quote or a quote inside an unquoted value" >&2

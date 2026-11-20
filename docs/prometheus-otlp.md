@@ -198,6 +198,21 @@ to approved senders are not matched, and cannot be dropped, by the chain. Sender
 with a prefix length of 0 (which would allow everyone) are refused, and if the
 current rules cannot be read the script stops without changing anything.
 
+The address arguments are checked before anything is changed, and a refusal names
+the problem and changes nothing. The bind address must be one plain IPv4 interface
+address: the script refuses an empty value, `0.0.0.0`, any IPv6 form including
+IPv4-mapped addresses (`::ffff:a.b.c.d`), this-network (`0.x`), loopback,
+multicast, reserved and broadcast addresses, a prefix length, a name, and any
+text with whitespace, a newline, shell characters or a leading dash. Senders get
+the same treatment and repeated senders produce one rule. The published address
+reported by `docker port` must be loopback (the receiver before you widen the
+bind) or the bind address itself; the script refuses a wildcard publish (every
+address) or any other address the rule would not guard. Rules are always passed
+to `iptables` as argument lists, never as shell strings. If a live
+`DOCKER-USER` rule that mentions `PROM-OTLP-A` or `PROM-OTLP-B` has an
+unexpected shape, or jumps to both chains, the script refuses without changing
+anything (`remove` first, then apply again).
+
 I could not exercise the netfilter behavior itself in this change (it needs the
 real host). It is checked when you apply it: the [Verify](#verify) step requires
 an approved sender to succeed (replies must get through) and an unapproved host
