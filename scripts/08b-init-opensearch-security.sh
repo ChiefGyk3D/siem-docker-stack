@@ -116,6 +116,18 @@ for var in OPENSEARCH_ADMIN_PASSWORD OPENSEARCH_LOGSTASH_PASSWORD \
 done
 [ "$MISSING" -eq 1 ] && exit 1
 
+# A line break in a password would end the one-line stdin record (and, in a curl config, start a new
+# directive), so refuse it before any engine call. The variable name is printed, never the value.
+for var in OPENSEARCH_ADMIN_PASSWORD OPENSEARCH_LOGSTASH_PASSWORD \
+           OPENSEARCH_READONLY_PASSWORD OPENSEARCH_DASHBOARDS_PASSWORD; do
+    case "${!var}" in
+        *$'\n'* | *$'\r'*)
+            echo -e "${RED}✗ ${var} contains a line break, which is not allowed in a password${NC}" >&2
+            exit 1
+            ;;
+    esac
+done
+
 SECURITY_DIR="${DEPLOY_DIR}/opensearch/security"
 TEMPLATE="${SECURITY_DIR}/internal_users.yml.template"
 if [ ! -f "$TEMPLATE" ]; then
@@ -150,10 +162,11 @@ fi
 echo ""
 echo -e "${YELLOW}[2/4] Generating bcrypt hashes...${NC}"
 
+# The password goes to the container on standard input, never in an argument or the environment.
 hash_password() {
     local pass="$1"
-    ce_run exec -e HASH_PASS="$pass" opensearch-hot bash -c \
-        'plugins/opensearch-security/tools/hash.sh -p "$HASH_PASS"' 2>/dev/null \
+    printf '%s\n' "$pass" | ce_run exec -i opensearch-hot bash -c \
+        'IFS= read -r P && plugins/opensearch-security/tools/hash.sh -p "$P"' 2>/dev/null \
         | grep -E '^\$2[aby]\$' | tail -1
 }
 
@@ -213,8 +226,13 @@ ce_run exec opensearch-hot bash -c '
 # ── Verify ───────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${YELLOW}Verifying...${NC}"
-AUTH_CODE=$(ce_run exec opensearch-hot curl -sk -o /dev/null -w '%{http_code}' \
-    -u "admin:${OPENSEARCH_ADMIN_PASSWORD}" https://localhost:9200/_cluster/health)
+# Credentials go to curl inside the container on standard input as a config (-K -), never in argv.
+# Backslash and double quote are escaped for the curl config syntax; a line break was refused above.
+ADMIN_CRED="admin:${OPENSEARCH_ADMIN_PASSWORD}"
+ADMIN_CRED="${ADMIN_CRED//\\/\\\\}"
+ADMIN_CRED="${ADMIN_CRED//\"/\\\"}"
+AUTH_CODE=$(printf 'user = "%s"\n' "$ADMIN_CRED" | ce_run exec -i opensearch-hot curl -K - -sk \
+    -o /dev/null -w '%{http_code}' https://localhost:9200/_cluster/health)
 NOAUTH_CODE=$(ce_run exec opensearch-hot curl -sk -o /dev/null -w '%{http_code}' \
     https://localhost:9200/_cluster/health)
 
