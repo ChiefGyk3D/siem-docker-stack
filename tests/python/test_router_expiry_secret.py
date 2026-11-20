@@ -18,7 +18,7 @@ import subprocess
 
 import pytest
 
-from conftest import REPO_ROOT
+from conftest import REPO_ROOT, import_module_from_path
 from test_update_alerting import (DISCORD_FIRING, ENV_EXAMPLE, ROUTER, _alert, _edges, _reachable, _run_code_node,
                                   _run_graph, _workflow)
 
@@ -41,10 +41,29 @@ def _by_name():
     return {n["name"]: n for n in _workflow()["nodes"]}
 
 
-def _item(auth="Bearer " + SECRET, status="firing"):
+def _expiry_body(severity="warning", phone=True, stage="14", name="deploy-key"):
+    """What scripts/expiry_watch.py build_payload sends (see the contract test below)."""
+    labels = {"alertname": "Expiry watch: " + name, "severity": severity, "expiry_watch": "true", "item": name,
+              "kind": "ssh-key", "stage": stage}
+    if phone:
+        labels["phone"] = "true"
+    return {"receiver": "expiry-watch", "status": "firing", "alerts": [{
+        "status": "firing", "labels": labels,
+        "annotations": {"summary": "MARKER-SUMMARY", "description": "MARKER-DESCRIPTION"},
+        "startsAt": "2026-01-01T12:00:00Z", "fingerprint": "0123456789abcdef0123456789abcdef"}]}
+
+
+def _built(body):
+    """The body the check node must hand on: a fresh copy with the fixed source label."""
+    a = body["alerts"][0]
+    return {"status": "firing", "alerts": [{
+        "labels": dict(a["labels"], source="expiry-watch"),
+        "annotations": a["annotations"], "startsAt": a["startsAt"], "fingerprint": a["fingerprint"]}]}
+
+
+def _item(auth="Bearer " + SECRET, body=None):
     headers = {} if auth is None else {"authorization": auth}
-    body = _alert(status, {"severity": "warning"}, name="Expiry watch notice")
-    return {"headers": headers, "body": body}
+    return {"headers": headers, "body": body if body is not None else _expiry_body()}
 
 
 def _call(auth="Bearer " + SECRET, env=None, **kw):
@@ -98,6 +117,7 @@ def test_the_expiry_webhook_is_a_post_webhook_answering_through_a_response_node(
     p = hook["parameters"]
     assert hook["type"] == "n8n-nodes-base.webhook"
     assert p["httpMethod"] == "POST" and p["responseMode"] == "responseNode"
+    # the committed path is a placeholder; the import helper replaces it with a private one
     assert p["path"] == "expiry-watch-alerts" and hook["webhookId"] == "expiry-watch-alerts"
     # no n8n credential: the check is the Code node's, from the environment
     assert p.get("authentication", "none") == "none" and "credentials" not in hook
@@ -145,9 +165,10 @@ def test_the_right_secret_is_routed_to_discord_and_answered_200():
     assert res["reached"].index(CHECK) < res["reached"].index(GATE) < res["reached"].index("Normalize Alert")
 
 
-def test_a_resolved_notice_is_accepted_the_same_way():
-    res = _run_graph(_item(status="resolved"), env={VAR: SECRET}, start=EXPIRY_HOOK)
-    assert res["response"] == "200" and "Discord — Resolved" in res["notified"]
+def test_a_resolved_notice_is_denied_because_the_watch_only_fires():
+    body = _expiry_body()
+    body["status"] = "resolved"
+    _assert_denied(_run_graph(_item(body=body), env={VAR: SECRET}, start=EXPIRY_HOOK))
 
 
 def test_the_check_output_carries_the_body_and_no_header_or_secret():
@@ -155,7 +176,7 @@ def test_the_check_output_carries_the_body_and_no_header_or_secret():
     node = _by_name()[CHECK]
     out = _run_code_node(node, _item(), {"env": {VAR: SECRET}})
     assert len(out) == 1 and out[0]["authorized"] is True
-    assert out[0]["body"] == _item()["body"]
+    assert out[0]["body"] == _built(_item()["body"])
     assert set(out[0]) == {"authorized", "body"}
     assert SECRET not in json.dumps(out)
     assert _run_code_node(node, _item("Bearer wrong"), {"env": {VAR: SECRET}}) == [{"authorized": False}]
@@ -234,12 +255,202 @@ def test_the_secret_may_contain_pattern_and_unicode_characters():
     assert _run_code_node(node, _item("Bearer " + near), {"env": {VAR: tricky}}) == [{"authorized": False}]
 
 
+# --- what the expiry entry may express (Daybreak round 1, finding 1) ----------------------------
+
+EW = import_module_from_path("expiry_watch", REPO_ROOT / "scripts" / "expiry_watch.py")
+PREFIX = "Expiry watch: "
+
+
+def _check(body=None, env=None):
+    out = _run_code_node(_by_name()[CHECK], _item(body=body), {"env": {VAR: SECRET} if env is None else env})
+    assert len(out) == 1
+    return out[0]
+
+
+def _mut(fn, **kw):
+    body = _expiry_body(**kw)
+    fn(body, body["alerts"][0], body["alerts"][0]["labels"], body["alerts"][0]["annotations"])
+    return body
+
+
+def _downstream(body):
+    """Run the real Normalize Alert and Pushover payload nodes on what the check handed on."""
+    nodes = _by_name()
+    checked = _check(body)
+    assert checked["authorized"] is True, checked
+    norm = _run_code_node(nodes["Normalize Alert"], checked, {})[0]
+    build = json.loads(json.dumps(nodes["Build Pushover Payload"]))
+    build["parameters"]["jsCode"] = build["parameters"]["jsCode"].replace(
+        "const PUSHOVER_ENABLED = false;", "const PUSHOVER_ENABLED = true;")
+    push = _run_code_node(build, norm, {"outputs": {"Normalize Alert": [norm]}})[0]
+    assert "malformed" not in push["pushover"]["title"], "the builder must read a real alert, not its error path"
+    return norm, push
+
+
+@pytest.mark.parametrize("stage,days", [("30", 30), ("14", 14), ("7", 7), ("daily", 3), ("expired", -2),
+                                         ("disappeared", 0)])
+@pytest.mark.parametrize("phone", [True, False])
+def test_every_payload_the_watch_really_builds_is_accepted_and_handed_on_unchanged(stage, days, phone):
+    """Contract: the check admits exactly what build_payload produces, so tightening it cannot silence the watch."""
+    import datetime as dt
+    item = EW.Item.build(name="deploy-key", kind="ssh-key", expires=dt.date(2026, 3, 1), owner="ops@example.com",
+                         runbook="https://wiki.example.com/runbooks/rotate-key")
+    chans = ("discord", "pushover") if phone else ("discord",)
+    notice = EW.Notice(item, stage, days, chans)
+    body = EW.build_payload(notice, dt.datetime(2026, 1, 1, 12, 0, tzinfo=dt.timezone.utc))
+    out = _check(body)
+    assert out["authorized"] is True
+    handed = out["body"]["alerts"][0]
+    sent = body["alerts"][0]
+    assert handed["labels"] == dict(sent["labels"], source="expiry-watch")
+    assert handed["annotations"] == sent["annotations"] and handed["fingerprint"] == sent["fingerprint"]
+    assert out["body"]["status"] == "firing" and len(out["body"]["alerts"]) == 1
+
+
+def test_the_source_label_is_always_expiry_watch_and_cannot_be_chosen_by_the_caller():
+    assert _check()["body"]["alerts"][0]["labels"]["source"] == "expiry-watch"
+    body = _mut(lambda b, a, l, an: l.update(source="grafana"))
+    _assert_denied(_run_graph(_item(body=body), env={VAR: SECRET}, start=EXPIRY_HOOK))
+
+
+def test_the_check_builds_a_fresh_body_so_nothing_unlisted_is_handed_on():
+    out = _check()
+    assert set(out["body"]) == {"status", "alerts"}
+    assert set(out["body"]["alerts"][0]) == {"labels", "annotations", "startsAt", "fingerprint"}
+    assert set(out["body"]["alerts"][0]["labels"]) == {"alertname", "severity", "expiry_watch", "item", "kind",
+                                                       "stage", "phone", "source"}
+
+
+IMPERSONATIONS = {
+    "grafana-allowlisted-name": lambda b, a, l, an: l.update(alertname="pfSense SECURITY update pending"),
+    "allowlisted-name-with-prefix-trick": lambda b, a, l, an: l.update(alertname="pfSense update pending over 24h"),
+    "update-security-label": lambda b, a, l, an: l.update(update_security="true"),
+    "heartbeat-label": lambda b, a, l, an: l.update(heartbeat="true", phone="false"),
+    "heartbeat-label-alone": lambda b, a, l, an: l.update(heartbeat="true"),
+    "extra-label": lambda b, a, l, an: l.update(team="x"),
+    "source-label": lambda b, a, l, an: l.update(source="grafana"),
+    "name-not-in-namespace": lambda b, a, l, an: l.update(alertname="Disk full"),
+    "name-differs-from-item": lambda b, a, l, an: l.update(alertname=PREFIX + "other"),
+    "namespace-only-case": lambda b, a, l, an: l.update(alertname="expiry watch: deploy-key"),
+    "expiry-flag-missing": lambda b, a, l, an: l.pop("expiry_watch"),
+    "expiry-flag-false": lambda b, a, l, an: l.update(expiry_watch="false"),
+    "expiry-flag-boolean": lambda b, a, l, an: l.update(expiry_watch=True),
+    "severity-unknown": lambda b, a, l, an: l.update(severity="page-me"),
+    "severity-missing": lambda b, a, l, an: l.pop("severity"),
+    "severity-case": lambda b, a, l, an: l.update(severity="CRITICAL"),
+    "phone-false": lambda b, a, l, an: l.update(phone="false"),
+    "phone-boolean": lambda b, a, l, an: l.update(phone=True),
+    "phone-yes": lambda b, a, l, an: l.update(phone="yes"),
+    "stage-unknown": lambda b, a, l, an: l.update(stage="page"),
+    "stage-missing": lambda b, a, l, an: l.pop("stage"),
+    "kind-missing": lambda b, a, l, an: l.pop("kind"),
+    "item-empty": lambda b, a, l, an: l.update(item="", alertname=PREFIX),
+    "item-too-long": lambda b, a, l, an: l.update(item="x" * 101, alertname=PREFIX + "x" * 101),
+    "kind-too-long": lambda b, a, l, an: l.update(kind="k" * 41),
+    "label-number": lambda b, a, l, an: l.update(kind=5),
+    "labels-array": lambda b, a, l, an: a.update(labels=[]),
+    "labels-missing": lambda b, a, l, an: a.pop("labels"),
+    "annotation-extra": lambda b, a, l, an: an.update(trigger_logic="x"),
+    "annotation-number": lambda b, a, l, an: an.update(summary=5),
+    "summary-too-long": lambda b, a, l, an: an.update(summary="s" * 301),
+    "description-too-long": lambda b, a, l, an: an.update(description="d" * 1001),
+    "annotations-array": lambda b, a, l, an: a.update(annotations=[]),
+    "dashboard-url": lambda b, a, l, an: a.update(dashboardURL="https://grafana.example.com/d/x"),
+    "panel-url": lambda b, a, l, an: a.update(panelURL="https://grafana.example.com/p"),
+    "generator-url": lambda b, a, l, an: a.update(generatorURL="https://grafana.example.com/g"),
+    "alert-extra-key": lambda b, a, l, an: a.update(valueString="x"),
+    "alert-status-resolved": lambda b, a, l, an: a.update(status="resolved"),
+    "top-status-resolved": lambda b, a, l, an: b.update(status="resolved"),
+    "top-status-missing": lambda b, a, l, an: b.pop("status"),
+    "top-extra-key": lambda b, a, l, an: b.update(externalURL="https://x.example.com"),
+    "receiver-other": lambda b, a, l, an: b.update(receiver="grafana-default"),
+    "two-alerts": lambda b, a, l, an: b["alerts"].append(copy.deepcopy(a)),
+    "no-alerts": lambda b, a, l, an: b.update(alerts=[]),
+    "alerts-object": lambda b, a, l, an: b.update(alerts={"0": a}),
+    "fingerprint-allowlist-style": lambda b, a, l, an: a.update(fingerprint="DEADBEEF"),
+    "fingerprint-short": lambda b, a, l, an: a.update(fingerprint="abcdef"),
+    "fingerprint-missing": lambda b, a, l, an: a.pop("fingerprint"),
+    "starts-at-junk": lambda b, a, l, an: a.update(startsAt="tomorrow"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(IMPERSONATIONS))
+def test_a_caller_holding_only_the_expiry_secret_cannot_send_anything_but_an_expiry_notice(name):
+    """Each forged shape is denied by the check, and nothing is sent or routed."""
+    body = _mut(IMPERSONATIONS[name])
+    assert _check(body) == {"authorized": False}
+    _assert_denied(_run_graph(_item(body=body), env={VAR: SECRET}, start=EXPIRY_HOOK, pushover_enabled=True))
+
+
+def test_a_non_object_body_is_denied():
+    for body in ("text", 5, None, [], [_expiry_body()], True):
+        item = {"headers": {"authorization": "Bearer " + SECRET}, "body": body}
+        assert _run_code_node(_by_name()[CHECK], item, {"env": {VAR: SECRET}}) == [{"authorized": False}]
+
+
+@pytest.mark.parametrize("severity,phone", [("critical", True), ("critical", False), ("warning", True),
+                                              ("warning", False), ("info", True), ("info", False)])
+def test_an_expiry_notice_can_never_reach_a_higher_tier_than_priority_1_or_cancel_or_tag(severity, phone):
+    """The tier cap: whatever the watch may legitimately send ends at Discord, or Pushover priority 1 at most."""
+    norm, push = _downstream(_expiry_body(severity=severity, phone=phone))
+    assert push["pushover"]["priority"] <= 1, push
+    assert "retry" not in push["pushover"] and "tags" not in push["pushover"]
+    assert push["cancelTag"] == ""
+    assert push["enabled"] is phone
+    assert norm["body"]["alerts"][0]["labels"]["source"] == "expiry-watch"
+    # the legitimate case keeps working: an expired item with the phone channel pages at priority 1
+    if severity == "critical" and phone:
+        assert push["pushover"]["priority"] == 1
+
+
+def test_no_public_allowlisted_alert_name_is_inside_the_expiry_namespace():
+    """Guard: the one constant the tier cap rests on. If a name starting with the expiry prefix were ever
+    allowlisted, an expiry caller could reach priority 2."""
+    from test_update_alerting import _build_node
+    code = _build_node()["parameters"]["jsCode"]
+    names = re.findall(r"'([^']+)',?\n", code[code.index("ALLOWED_ALERTNAMES = ["):code.index("];")])
+    assert names, "allowlist not found"
+    assert not [n for n in names if n.startswith(PREFIX)]
+
+
+def test_a_forged_grafana_payload_changes_nothing_downstream_even_if_it_were_admitted_by_name():
+    """Defense in depth: the heartbeat branch is unreachable from the expiry entry for any admitted body."""
+    res = _call()
+    assert "Heartbeat?" in res["reached"] and "Build Heartbeat Ping" not in res["reached"]
+    assert res["requests"] == []
+
+
+# --- bounded work before authentication (Daybreak round 1, finding 2) --------------------------
+
+def test_an_oversized_authorization_header_is_denied_before_any_length_dependent_work():
+    code = "\n".join(ln for ln in _by_name()[CHECK]["parameters"]["jsCode"].splitlines() if not ln.lstrip().startswith("//"))
+    assert "MAX_HEADER = 512" in code
+    assert code.index("MAX_HEADER") < code.index("for (let i")
+    long_secret = "s" * 600
+    assert _check(env={VAR: long_secret}) == {"authorized": False}
+    assert _run_code_node(_by_name()[CHECK], _item("Bearer " + long_secret), {"env": {VAR: long_secret}}) == [{"authorized": False}]
+    # a secret that fits is still accepted at the documented maximum
+    fit = "s" * 400
+    assert _run_code_node(_by_name()[CHECK], _item("Bearer " + fit), {"env": {VAR: fit}})[0]["authorized"] is True
+
+
+def test_the_total_body_is_bounded_by_the_field_limits():
+    """Every field has a cap, so an admitted body is small; the largest one the check accepts stays under 8 KB."""
+    body = _expiry_body(name="n" * 100)
+    a = body["alerts"][0]
+    a["labels"]["kind"] = "k" * 40
+    a["annotations"] = {"summary": "s" * 300, "description": "d" * 1000}
+    out = _check(body)
+    assert out["authorized"] is True and len(json.dumps(out["body"])) < 8000
+
+
 # --- constant-time shape -------------------------------------------------------------------
 
 def test_the_comparison_has_no_early_exit_on_the_secret():
     """Guard (static): the loop visits every position and ORs the differences; no built-in string
     equality or search is applied to the secret or the header."""
-    code = _by_name()[CHECK]["parameters"]["jsCode"]
+    whole = _by_name()[CHECK]["parameters"]["jsCode"]
+    code = whole[whole.index("const expected"):whole.index("if (diff === 0)")]
     assert not re.search(r"\.(startsWith|endsWith|includes|indexOf|localeCompare|match|test|split)\(", code)
     assert not re.search(r"\b(cfg|hdr)\b\s*[!=]==?", code) and not re.search(r"[!=]==?\s*\b(cfg|hdr)\b", code)
     assert "|=" in code and "^" in code, "a difference accumulator is expected"
@@ -294,16 +505,46 @@ def test_both_entries_feed_the_same_normalizer():
 
 # --- live-deploy script, env example and docs -----------------------------------------------
 
-def test_the_import_helper_changes_only_the_grafana_webhook_path():
+def _setup():
     spec = importlib.util.spec_from_file_location("n8n_setup", SETUP)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    out = mod.patch_workflow(copy.deepcopy(_workflow()), webhook_path="grafana-alerts-opaque")
+    return mod
+
+
+def test_the_import_helper_gives_each_webhook_its_own_private_path():
+    out = _setup().patch_workflow(copy.deepcopy(_workflow()), webhook_path="grafana-alerts-opaque",
+                                  expiry_path="expiry-watch-alerts-opaque2")
     by = {n["name"]: n for n in out["nodes"]}
     assert by[GRAFANA_HOOK]["parameters"]["path"] == "grafana-alerts-opaque"
-    assert by[EXPIRY_HOOK]["parameters"]["path"] == "expiry-watch-alerts"
-    assert by[EXPIRY_HOOK]["webhookId"] == "expiry-watch-alerts"
+    assert by[EXPIRY_HOOK]["parameters"]["path"] == "expiry-watch-alerts-opaque2"
     assert by[GRAFANA_HOOK]["webhookId"] != by[EXPIRY_HOOK]["webhookId"]
+    assert by[EXPIRY_HOOK]["webhookId"] != "expiry-watch-alerts", "the committed webhook id is replaced as well"
+
+
+def test_the_import_helper_never_leaves_the_expiry_path_predictable():
+    """With no path given the helper makes a random one, never the committed placeholder."""
+    mod = _setup()
+    paths = set()
+    for _ in range(3):
+        out = mod.patch_workflow(copy.deepcopy(_workflow()), webhook_path="grafana-alerts-x")
+        p = next(n for n in out["nodes"] if n["name"] == EXPIRY_HOOK)["parameters"]["path"]
+        assert re.fullmatch(r"expiry-watch-alerts-[A-Za-z0-9_-]{20,}", p), p
+        paths.add(p)
+    assert len(paths) == 3
+
+
+def test_the_expiry_path_is_kept_in_its_own_private_file_and_reused():
+    mod = _setup()
+    assert mod.EXPIRY_PATH_FILE != mod.PATH_FILE and mod.EXPIRY_PATH_FILE.endswith("expiry-path")
+    saved = "expiry-watch-alerts-" + "A" * 24
+    assert mod.choose_webhook_path(saved + "\n", prefix=mod.EXPIRY_PATH_PREFIX) == saved
+    # a Grafana path is never accepted as the expiry path, and the reverse
+    assert mod.choose_webhook_path("grafana-alerts-" + "A" * 24, token_fn=lambda: "N",
+                                   prefix=mod.EXPIRY_PATH_PREFIX) == "expiry-watch-alerts-N"
+    assert mod.choose_webhook_path(saved, token_fn=lambda: "N") == "grafana-alerts-N"
+    text = SETUP.read_text(encoding="utf-8")
+    assert "umask(0o077)" in text and text.count("EXPIRY_PATH_FILE") >= 3
 
 
 def test_env_example_lists_the_name_only_commented_and_empty():
@@ -315,7 +556,8 @@ def test_env_example_lists_the_name_only_commented_and_empty():
 def test_docs_name_the_variable_the_reason_and_the_owner_steps():
     text = DOC.read_text(encoding="utf-8")
     for needle in (VAR, "Expiry Watch Webhook", "expiry-watch-alerts", "N8N_BLOCK_ENV_ACCESS_IN_NODE", "403",
-                   "Owner steps", "EXPIRY_WATCH_ROUTER_TOKEN", "own endpoint"):
+                   "Owner steps", "EXPIRY_WATCH_ROUTER_TOKEN", "own endpoint", "expiry-path", "N8N_PAYLOAD_SIZE_MAX",
+                   "16 MiB", "source=expiry-watch", "rate limit", "512", "priority 1"):
         assert needle in text, needle
     assert VAR in RUNBOOK.read_text(encoding="utf-8")
     upd = UPDATE_DOC.read_text(encoding="utf-8")

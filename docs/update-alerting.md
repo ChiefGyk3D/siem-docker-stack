@@ -179,7 +179,7 @@ phone.
 5. Rotate by changing the Doppler value and the n8n credential together.
 
 The expiry watch does not use this credential. It posts to its own endpoint,
-the `Expiry Watch Webhook` node (`/webhook/expiry-watch-alerts`), where the
+the `Expiry Watch Webhook` node (its own private path, file `expiry-path`), where the
 `Check Expiry Secret` Code node compares the header with the environment
 variable `EXPIRY_WATCH_ROUTER_SECRET` of the n8n container and denies with 403
 when it is unset, empty or different. The `Grafana Webhook` node and its

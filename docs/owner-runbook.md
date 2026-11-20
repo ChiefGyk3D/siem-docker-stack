@@ -724,7 +724,7 @@ Prerequisites:
   reuses a shared secret; the alternative is a second header credential for the
   watch (a router change). DECIDED (Q11, 2026-11-19): the watch gets its own
   credential. The repo side is issue #127: the router has a second endpoint,
-  `/webhook/expiry-watch-alerts`, checked against the n8n container variable
+  `/webhook/expiry-watch-alerts-<opaque>` (private path in the helper's `expiry-path` file), checked against the n8n container variable
   `EXPIRY_WATCH_ROUTER_SECRET`. Do not copy the Grafana secret. Owner steps are
   in `docs/expiry-watch.md`, "The router credential", and need the changed
   workflow imported live first.

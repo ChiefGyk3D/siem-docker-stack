@@ -21,7 +21,8 @@ errorWorkflow setting (a placeholder id would be rejected by n8n).
 
 Environment (all optional, the current values are the defaults):
   SIEM_CONFIG_DIR         private config directory (default: $HOME/.config/doppler-siem);
-                          holds the file "router-path" with the private webhook path
+                          holds the file "router-path" with the private Grafana webhook path
+                          and the file "expiry-path" with the private expiry watch path
   N8N_CONTAINER           n8n container name (default: n8n)
   GRAFANA_CONTAINER       Grafana container name, read for the dashboard origin
                           (default: grafana)
@@ -45,6 +46,7 @@ CONTAINER = os.environ.get("N8N_CONTAINER", "n8n")
 GRAFANA_CONTAINER = os.environ.get("GRAFANA_CONTAINER", "grafana")
 CONFIG_DIR = os.environ.get("SIEM_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".config", "doppler-siem")
 PATH_FILE = os.path.join(CONFIG_DIR, "router-path")
+EXPIRY_PATH_FILE = os.path.join(CONFIG_DIR, "expiry-path")
 CRED_HEADER_ID = os.environ.get("N8N_CRED_HEADER_ID", "gfwebhookauth01")
 CRED_PUSHOVER_ID = os.environ.get("N8N_CRED_PUSHOVER_ID", "pushoverapi0001")
 CRED_DISCORD_ID = os.environ.get("N8N_CRED_DISCORD_ID", "dscwhk1479574998")
@@ -54,6 +56,7 @@ NEEDED = ("GRAFANA_WEBHOOK_SECRET", "PUSHOVER_API_KEY", "PUSHOVER_USER_KEY")
 HANDLER_NAME = os.environ.get("N8N_HANDLER_NAME", "Alert Router Error Handler")
 ERROR_PLACEHOLDER = "ERROR_WORKFLOW_ID"
 PATH_PREFIX = "grafana-alerts-"
+EXPIRY_PATH_PREFIX = "expiry-watch-alerts-"
 STRIP_KEYS = ("activeVersionId", "shared", "versionMetadata", "versionCounter",
               "createdAt", "updatedAt", "triggerCount", "pinData", "isArchived")
 
@@ -113,12 +116,12 @@ def credential_id_map():
     }
 
 
-def choose_webhook_path(existing, token_fn=None):
+def choose_webhook_path(existing, token_fn=None, prefix=PATH_PREFIX):
     """Reuse the saved private path when it looks right, else make a new one."""
     existing = (existing or "").strip()
-    if existing.startswith(PATH_PREFIX) and len(existing) >= 20:
+    if existing.startswith(prefix) and len(existing) >= 20:
         return existing
-    return PATH_PREFIX + (token_fn or (lambda: secrets.token_urlsafe(18)))()
+    return prefix + (token_fn or (lambda: secrets.token_urlsafe(18)))()
 
 
 def valid_origin(text):
@@ -170,7 +173,7 @@ def parse_workflow_args(rest):
 
 
 def patch_workflow(wf, reuse_id="", pushover_on=False, origin="", webhook_path="",
-                   webhook_id=None, new_id=None, error_workflow_id=""):
+                   webhook_id=None, new_id=None, error_workflow_id="", expiry_path=None):
     """Return the workflow patched for import. Mutates and returns wf."""
     check_id(reuse_id)
     check_id(error_workflow_id, "error workflow id")
@@ -191,8 +194,12 @@ def patch_workflow(wf, reuse_id="", pushover_on=False, origin="", webhook_path="
         for cred in (node.get("credentials") or {}).values():
             if cred.get("name") in ids:
                 cred["id"] = ids[cred["name"]]
-        if node["type"].endswith(".webhook") and node["name"] == "Grafana Webhook":
-            # only Grafana's entry gets the private path; the expiry watch's entry keeps its fixed one
+        if node["type"].endswith(".webhook") and node["name"] == "Expiry Watch Webhook":
+            # the expiry watch's entry gets its own private path (never the committed placeholder),
+            # so an anonymous caller cannot find it and start executions
+            node["parameters"]["path"] = expiry_path or choose_webhook_path("", prefix=EXPIRY_PATH_PREFIX)
+            node["webhookId"] = str(uuid.uuid4())
+        elif node["type"].endswith(".webhook"):
             node["parameters"]["path"] = webhook_path
             # With a webhookId the production URL is /webhook/<path>; without one n8n
             # serves it under /webhook/<workflowId>/<node name>/<path>.
@@ -265,12 +272,19 @@ def workflow(path, reuse_id="", pushover_on=False, error_workflow_id=""):
         with open(PATH_FILE, encoding="utf-8") as handle:
             existing = handle.read()
     new_path = choose_webhook_path(existing)
+    expiry_existing = ""
+    if os.path.isfile(EXPIRY_PATH_FILE):
+        with open(EXPIRY_PATH_FILE, encoding="utf-8") as handle:
+            expiry_existing = handle.read()
+    expiry_path = choose_webhook_path(expiry_existing, prefix=EXPIRY_PATH_PREFIX)
     origin = grafana_origin()
-    wf = patch_workflow(wf, reuse_id, pushover_on, origin, new_path, error_workflow_id=error_workflow_id)
+    wf = patch_workflow(wf, reuse_id, pushover_on, origin, new_path, error_workflow_id=error_workflow_id,
+                        expiry_path=expiry_path)
     old = os.umask(0o077)
     try:
-        with open(PATH_FILE, "w", encoding="utf-8") as handle:
-            handle.write(new_path)
+        for target, value in ((PATH_FILE, new_path), (EXPIRY_PATH_FILE, expiry_path)):
+            with open(target, "w", encoding="utf-8") as handle:
+                handle.write(value)
     finally:
         os.umask(old)
     script = "cat > /tmp/wf.json && n8n import:workflow --input=/tmp/wf.json; rc=$?; rm -f /tmp/wf.json; exit $rc"
@@ -279,6 +293,7 @@ def workflow(path, reuse_id="", pushover_on=False, error_workflow_id=""):
         print(ln[:160])
     print("workflow import exit code:", rc)
     print("new webhook path saved (mode 600):", PATH_FILE)
+    print("expiry watch webhook path saved (mode 600):", EXPIRY_PATH_FILE)
     print("dashboard origin constant set:", bool(origin))
     print("error workflow set:", bool(error_workflow_id))
     return rc

@@ -33,7 +33,7 @@ You need Python 3.11 or newer (for `tomllib`). There is nothing to install.
    ```
 
    In `expiry-watch.toml`, point `[router].url` at the router's own endpoint
-   for the watch, `/webhook/expiry-watch-alerts` (see
+   for the watch, `/webhook/expiry-watch-alerts-<opaque>` (the private path, see
    [The router credential](#the-router-credential)), and point the registry provider at `expiry-watch-registry.toml`. List your own
    items in the registry.
 
@@ -301,7 +301,7 @@ decision, runbook Q11, issue #127.
 | | Grafana | Expiry watch |
 |---|---|---|
 | Router node | `Grafana Webhook` (unchanged) | `Expiry Watch Webhook` |
-| URL path | the private `grafana-alerts-<opaque>` path | `/webhook/expiry-watch-alerts` |
+| URL path | the private `grafana-alerts-<opaque>` path | the private `expiry-watch-alerts-<opaque>` path (file `expiry-path`) |
 | Header check | n8n Header Auth, credential `grafana-webhook-auth` | the `Check Expiry Secret` Code node |
 | Secret lives in | the n8n credential and `GRAFANA_WEBHOOK_SECRET` (Grafana side) | `EXPIRY_WATCH_ROUTER_SECRET` in the n8n container's environment |
 | The watch's side | | `EXPIRY_WATCH_ROUTER_TOKEN`, the same value, named in `[router].token_env` |
@@ -333,8 +333,49 @@ The check, in the `Check Expiry Secret` Code node:
   say whether the length or the content was wrong. A length difference is the
   one thing it cannot hide; use the 44 character `openssl rand -base64 32` value.
 - A denied call is answered 403 with a fixed body, runs nothing else and sends
-  no message. Only the request body leaves the check node, never the header.
+  no message. Only a new body leaves the check node, never the header.
 - It reads no other variable, and Grafana's variable is not consulted.
+- An `Authorization` header over 512 characters is denied before the comparison
+  loop runs, so the secret (the part after `Bearer `) must be at most 400
+  characters; the 44 character `openssl rand -base64 32` value is far below it.
+
+What the expiry secret may send (authorization, not only authentication). The
+secret proves the caller is the expiry watch, so the check also limits what that
+caller can express. It accepts exactly the body `scripts/expiry_watch.py` builds
+and builds a NEW body from the checked fields; anything else is denied with the
+same 403, not passed on:
+
+- one alert, status `firing` (a `resolved` is denied, so the secret cannot cancel
+  a repeat);
+- labels exactly `alertname` (`Expiry watch: <item>`, equal to the `item` label),
+  `severity` (`critical`, `warning` or `info`), `expiry_watch=true`, `item`
+  (1 to 100 characters), `kind` (1 to 40), `stage` (a day count, `daily`,
+  `expired` or `disappeared`) and optionally `phone=true`; any other label
+  (`heartbeat`, `update_security`, `team`, `source`) is denied;
+- annotations only `summary` (300 characters) and `description` (1000), a
+  32 character lowercase hex `fingerprint`, an optional UTC `startsAt`; no URLs;
+- the handed-on body carries the label `source=expiry-watch`, set by the router,
+  never by the caller.
+
+Because the name prefix `Expiry watch: ` is not on the Pushover builder's alert
+name allowlist (a test enforces it), an expiry notice reaches Discord, and with
+`phone=true` Pushover at priority 1 at most; priority 2 (emergency repeat) and
+cancel-by-tag are unreachable with this secret. An expired item (`critical`)
+still pages at priority 1. If you ever add an `Expiry watch:` name to the
+allowlist, that guarantee ends.
+
+Request limits before the check (n8n and your ingress, not the workflow):
+
+- The endpoint has a private path so it cannot be found by guessing, but the path
+  is not a credential: treat it as an address.
+- n8n's own body limit is `N8N_PAYLOAD_SIZE_MAX`, default 16 MiB (n8n docs,
+  endpoints environment variables, read 2026-11-19). An expiry notice is under
+  8 KB, so set it lower for the container if your n8n allows, and set a request
+  body limit of about 16 KB for this path at the reverse proxy.
+- Put a rate limit (per source and global), request and header timeouts and a
+  concurrency limit on this path at the reverse proxy or ingress. A call that is
+  denied still starts one workflow execution; only the proxy can stop that
+  early. The watch posts a few requests a day.
 
 Needs `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` in the n8n container, the same
 setting the [heartbeat](heartbeat.md#settings-environment-of-the-n8n-container)
@@ -352,13 +393,16 @@ Owner steps (nothing here runs from the repo; each is a live change):
    with an empty default) and make sure `N8N_BLOCK_ENV_ACCESS_IN_NODE=false`
    is set there.
 2. Re-import `n8n/grafana-alert-router.json` with the live import helper
-   (`scripts/live-deploy/n8n-setup-alert-router.py`), then restart or activate
-   the workflow as the live-deploy runbook describes. The helper leaves the new
-   webhook's path fixed and sets the private path only on the Grafana one.
-3. Point `[router].url` in the watch's config at
-   `<n8n base>/webhook/expiry-watch-alerts` and keep the watch's variable
-   `EXPIRY_WATCH_ROUTER_TOKEN` equal to the router's.
-4. Rotate by changing both values together, then restart the n8n container so it
+   (`scripts/live-deploy/n8n-setup-alert-router.py --workflow ...`), then restart or
+   activate the workflow as the live-deploy runbook describes. The helper makes a
+   private path for each webhook and saves them (mode 600) in `router-path` (Grafana)
+   and `expiry-path` (the watch) in its config directory; the committed
+   `expiry-watch-alerts` is only a placeholder and is never served.
+3. Read the path from `expiry-path`, point `[router].url` in the watch's config at
+   `<n8n base>/webhook/<contents of expiry-path>` (never commit it), and keep the
+   watch's variable `EXPIRY_WATCH_ROUTER_TOKEN` equal to the router's.
+4. Set the ingress limits above (body size, rate limit, timeouts).
+5. Rotate by changing both values together, then restart the n8n container so it
    reads the new environment. To revoke the watch only, unset or empty the
    router's variable: the endpoint then denies every call.
 
