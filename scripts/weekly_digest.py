@@ -21,6 +21,7 @@ import email.utils
 import hashlib
 import os
 import re
+import stat
 import sys
 import unicodedata
 import urllib.parse
@@ -40,7 +41,8 @@ _SPACES = re.compile(r" {2,}")
 # Unicode categories removed from provider text: Cc control characters (including C0, C1 and
 # line breaks), Cf format characters (bidi overrides and isolates, zero-width characters, the
 # byte order mark, soft hyphen), Zl and Zp line and paragraph separators.
-_DROP_CATEGORIES = frozenset(("Cc", "Cf", "Zl", "Zp"))
+_DROP_CATEGORIES = frozenset(("Cc", "Cf", "Cs", "Zl", "Zp"))  # Cs: lone surrogates, which cannot be encoded
+_WEEK = re.compile(r"\d{4}-W\d{2}")
 _STATE_DIR = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 CLOCK_SKEW_MS = 5 * 60 * 1000
 
@@ -50,7 +52,8 @@ def clean(text, limit=MAX_ENTRY_CHARS):
     separator characters become spaces, runs of spaces collapse, length is capped. Ordinary
     printable text in any script is kept. Applied to EVERY provider string at render time."""
     text = "".join(" " if unicodedata.category(c) in _DROP_CATEGORIES else c for c in str(text))
-    return _SPACES.sub(" ", text).strip()[:limit]
+    text = _SPACES.sub(" ", text).strip()[:limit]
+    return text.encode("utf-8", "replace").decode("utf-8")  # final safety: never hand on unencodable text
 
 
 # --- config ---------------------------------------------------------------------------------
@@ -193,7 +196,7 @@ def _grafana_events(ctx):
         # value costs that record only, never the other results.
         if (isinstance(t, int) and not isinstance(t, bool) and start - CLOCK_SKEW_MS <= t <= end + CLOCK_SKEW_MS):
             events.append((t, name, state))
-        elif isinstance(t, (int, float)) or t is None:
+        else:
             skipped += 1
     if skipped:
         ctx.setdefault("notes", []).append(
@@ -279,9 +282,14 @@ def build_message(cfg, subject, body, now):
 
 
 def wire_size(msg):
-    """Bytes of the complete message as SMTP transmits it: headers, MIME framing and the
-    transfer encoding (which can expand non-ASCII text), not just the body text."""
-    return len(msg.as_bytes(policy=email.policy.SMTP))
+    """Bytes of the complete DATA section as SMTP transmits it: headers, MIME framing, the
+    transfer encoding (which can expand non-ASCII text), dot-stuffing and the final CRLF.CRLF
+    terminator, not just the body text."""
+    raw = msg.as_bytes(policy=email.policy.SMTP)
+    stuffed = re.sub(rb"(?m)^\.", b"..", raw)  # what smtplib does to every line that starts with a dot
+    if not stuffed.endswith(b"\r\n"):
+        stuffed += b"\r\n"
+    return len(stuffed) + len(b".\r\n")  # and the DATA terminator
 
 
 def fit_message(cfg, subject, body, now):
@@ -331,21 +339,42 @@ class SendGuard:
         try:
             os.close(os.open("lock", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=self.fd))
         except FileExistsError:
+            os.close(self.fd)
             raise _Refused("another digest run holds the lock (state folder file 'lock'); if no run is "
                            "alive, remove that file") from None
         self.locked = True
-        if not self.force and self.last_sent() == self.week:
-            raise _Refused(f"a digest was already sent for {self.week}; use --force to send again")
+        try:  # __exit__ does not run when __enter__ raises: release here
+            if not self.force and self.last_sent() == self.week:
+                raise _Refused(f"a digest was already sent for {self.week}; use --force to send again")
+        except BaseException:
+            self.__exit__()
+            raise
         return self
 
     def last_sent(self):
+        """The ISO week of the last send, or None ONLY when the marker file does not exist. A marker
+        that exists but cannot be read, is not a regular file, or does not hold a week is a state
+        error: the run is refused (exit 4) until the owner repairs it or uses --force."""
+        bad = _Refused("the last-sent marker is damaged or unreadable; fix or remove the file "
+                       "'last-sent' in the state folder, or use --force")
         try:
-            fd = os.open("last-sent", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=self.fd)
-        except OSError:
+            fd = os.open("last-sent", os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0), dir_fd=self.fd)
+        except FileNotFoundError:
             return None
-        with os.fdopen(fd, "r", encoding="ascii", errors="replace") as fh:
-            value = fh.read(32).strip()
-        return value if re.fullmatch(r"\d{4}-W\d{2}", value) else None
+        except OSError:
+            raise bad from None
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise bad
+            raw = os.read(fd, 33)
+        except OSError:
+            raise bad from None
+        finally:
+            os.close(fd)
+        value = raw.decode("ascii", "replace").strip() if len(raw) <= 32 else ""
+        if not _WEEK.fullmatch(value):
+            raise bad
+        return value
 
     def mark_sent(self):
         tmp = f".marker-{os.getpid()}"

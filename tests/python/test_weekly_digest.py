@@ -410,3 +410,124 @@ def test_the_whole_encoded_message_is_bounded(tmp_path, smtp_plain):
     (s,) = smtp_plain.sessions
     assert len(s["data"].encode("utf-8", "surrogateescape")) <= 20000
     assert "truncated" in s["data"]
+
+
+# --- Daybreak round 2 ----------------------------------------------------------------------
+
+LONE = "safe\ud800name\udfff"
+
+
+def test_clean_replaces_lone_surrogates_and_stays_encodable():
+    out = wd.clean(LONE)
+    assert "\ud800" not in out and "\udfff" not in out
+    out.encode("utf-8")
+
+
+def test_lone_surrogates_from_grafana_do_not_stop_the_digest(tmp_path, grafana, smtp_plain):
+    ms = int(NOW.timestamp() * 1000)
+    # json.loads accepts an escaped lone surrogate, so this reaches the renderer from the API.
+    _Grafana.body = ('[{"time": %d, "alertName": "update safe\\ud800name", "newState": "Alerting"}]' % (ms - 1000)).encode()
+    cfg = _write(tmp_path, smtp_plain.server_address[1], grafana=grafana)
+    code, _, _ = _run(cfg, send=True, env={"DIGEST_GRAFANA_TOKEN": GRAFANA_TOKEN})
+    assert code == 0 and "update safe name: still Alerting" in smtp_plain.sessions[0]["data"]
+
+
+def test_lone_surrogates_in_an_expiry_item_name_do_not_stop_the_digest(tmp_path, smtp_plain):
+    state = {"key\ud800x": {"expires": "2026-11-10", "threshold": 7, "daily": None, "expired": True}}
+    cfg = _write(tmp_path, smtp_plain.server_address[1])
+    (tmp_path / "state.json").write_text(json.dumps(state, ensure_ascii=True))
+    code, _, _ = _run(cfg, send=True, providers={"patched": _fakes()["patched"]})
+    assert code in (0, 1) and len(smtp_plain.sessions) == 1
+
+
+def test_lone_surrogates_in_providers_notes_and_titles_are_survivable(tmp_path):
+    cfg = _write(tmp_path)
+    evil = _fakes(patched=lambda c: _sec(LONE, [LONE], LONE), expiry=lambda c: _sec("Stale", [LONE]))
+    code, out, _ = _run(cfg, providers=evil)
+    assert code == 0 and "\ud800" not in out
+
+
+def test_a_lone_surrogate_in_a_config_string_is_a_clean_config_error(tmp_path):
+    cfg = _write(tmp_path, extra='\n[grafana]\nurl = "https://g.example.com"\ntoken_env = "T"\n')
+    cfg.write_text(cfg.read_text().replace('state_file = "state.json"', 'state_file = "st\\ud800.json"'))
+    assert _run(cfg)[0] == 2
+
+
+def test_non_numeric_times_are_counted_in_the_source_note(tmp_path, grafana, smtp_plain):
+    ms = int(NOW.timestamp() * 1000)
+    _Grafana.body = json.dumps([{"time": "12345", "alertName": "x", "newState": "Alerting"},
+                                {"time": ms - 5, "alertName": "update y", "newState": "Alerting"}]).encode()
+    cfg = _write(tmp_path, smtp_plain.server_address[1], grafana=grafana)
+    _run(cfg, send=True, env={"DIGEST_GRAFANA_TOKEN": GRAFANA_TOKEN})
+    assert "1 record(s) skipped" in smtp_plain.sessions[0]["data"]
+
+
+def _marker(tmp_path, smtp_plain):
+    cfg = _write(tmp_path, smtp_plain.server_address[1])
+    d = tmp_path / "weekly-digest-state"
+    d.mkdir(mode=0o700)
+    return cfg, d / "last-sent"
+
+
+@pytest.mark.parametrize("kind", ["empty", "garbage", "partial", "directory", "symlink", "unreadable", "binary"])
+def test_a_damaged_last_sent_marker_fails_closed(tmp_path, smtp_plain, kind):
+    import os
+    cfg, marker = _marker(tmp_path, smtp_plain)
+    if kind == "empty":
+        marker.write_text("")
+    elif kind == "garbage":
+        marker.write_text("2026-W47-corrupt\n")
+    elif kind == "partial":
+        marker.write_text("2026-W4")
+    elif kind == "binary":
+        marker.write_bytes(b"\xff\xfe\x00junk")
+    elif kind == "directory":
+        marker.mkdir()
+    elif kind == "symlink":
+        other = tmp_path / "other"
+        other.write_text("2026-W01\n")
+        marker.symlink_to(other)
+    else:
+        marker.write_text("2026-W01\n")
+        marker.chmod(0)
+        if os.access(marker, os.R_OK):
+            pytest.skip("running as a user that ignores file modes")
+    code, _, err = _run(cfg, send=True, providers=_fakes())
+    assert code == 4 and "last-sent" in err and not smtp_plain.sessions
+    assert not (marker.parent / "lock").exists()
+
+
+def test_a_refusal_releases_the_lock_so_the_next_run_is_refused_for_the_right_reason(tmp_path, smtp_plain):
+    cfg = _write(tmp_path, smtp_plain.server_address[1])
+    assert _send(cfg) == 0 and _send(cfg) == 4
+    assert not (tmp_path / "weekly-digest-state" / "lock").exists()
+    assert _send(cfg, force=True) == 0  # would be refused by a leaked lock
+
+
+def test_force_overrides_a_damaged_marker_and_a_missing_marker_allows_the_first_send(tmp_path, smtp_plain):
+    cfg, marker = _marker(tmp_path, smtp_plain)
+    assert _run(cfg, send=True, providers=_fakes())[0] == 0  # missing marker: first send
+    marker.write_text("garbage")
+    assert wd.run(cfg, NOW, env={}, out=lambda m: None, err=lambda m: None, send=True, providers=_fakes(),
+                  force=True) == 0
+    assert marker.read_text().strip() == "2026-W47"
+
+
+def test_wire_size_counts_dot_stuffing_and_the_terminator_exactly(tmp_path, smtp_plain):
+    cfg = _write(tmp_path, smtp_plain.server_address[1])
+    parsed = wd.parse_config(__import__("tomllib").loads(cfg.read_text()))
+    body = "\n".join("." * 5 for _ in range(100)) + "\n"
+    msg = wd.build_message(parsed, "subject", body, NOW)
+    ew.smtp_deliver(parsed.email, {}, msg)
+    (s,) = smtp_plain.sessions
+    assert wd.wire_size(msg) == len(s["data"].encode("latin-1")) + len(b".\r\n")
+
+
+def test_the_cap_holds_for_a_dot_heavy_body_at_the_boundary(tmp_path, smtp_plain):
+    cfg = _write(tmp_path, smtp_plain.server_address[1],
+                 digest="max_message_bytes = 4096\nmax_entries_per_section = 200")
+    dots = _fakes(expiry=lambda c: _sec("Stale", ["." * 3 for _ in range(200)]))
+    parsed = wd.parse_config(__import__("tomllib").loads(cfg.read_text()))
+    assert _run(cfg, send=True, providers=dots)[0] == 0
+    (s,) = smtp_plain.sessions
+    assert len(s["data"].encode("latin-1")) + 3 <= parsed.max_message_bytes

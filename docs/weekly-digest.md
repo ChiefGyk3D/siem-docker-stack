@@ -33,7 +33,11 @@ refused, the answer is size capped, and each record is shape-checked.
 - A Grafana record whose time is outside the requested window (plus 5 minutes of clock skew), or is not a plain integer, is skipped on its own and reported once as a `SOURCE NOTE` line. It never costs the other records.
 - One digest per ISO week, and no overlapping runs: a send takes a lock file (created with O_EXCL) in a private state folder (`state_dir`, default `weekly-digest-state` next to the config file, mode 0700), and writes the ISO week into `last-sent` after the server accepted the message. A second `--send` in the same week is refused (exit 4) unless you add `--force`. A run that was killed leaves `lock` behind; the next run refuses and names it: check that no digest run is alive, then remove the file. A dry run touches none of this. SMTP cannot give exactly-once delivery: if the connection fails right at final acceptance the digest may or may not have arrived, and the marker is then not written, so a retry may send a duplicate (the message id is stable for identical content, which helps a receiver recognize it).
 
-Exit codes: 0 done; 1 done but a source failed (or the sent marker could not be written); 2 config error; 3 not delivered; 4 not sent on purpose (lock held, or already sent this week).
+A missing `last-sent` is the only state that allows the first send. A marker that exists but is empty, garbled, unreadable, a link or not a regular file fails closed: the run is refused (exit 4) and names the file; repair or remove it, or use `--force`.
+
+`max_message_bytes` counts exactly what the DATA command transmits: headers, MIME framing, transfer encoding, SMTP dot-stuffing and the final terminator line. Lone Unicode surrogates (category Cs) are also replaced in provider text, so a hostile record cannot stop the digest from rendering.
+
+Exit codes: 0 done; 1 done but a source failed (or the sent marker could not be written); 2 config error; 3 not delivered; 4 not sent on purpose (lock held, already sent this week, or a damaged `last-sent` marker).
 
 ## Setup
 
