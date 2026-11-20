@@ -701,9 +701,10 @@ def _expr(value):
 
 
 def _run_code_node(node, item, ctx=None):
-    harness = (_ctx_js(ctx) + "const f=new Function('$input','$','$prevNode','$env',"
+    harness = (_ctx_js(ctx) + "const $getWorkflowStaticData=(t)=>({});"  # fresh, empty workflow static data per run
+               "const f=new Function('$input','$','$prevNode','$env','$getWorkflowStaticData',"
                + json.dumps(node["parameters"]["jsCode"]) + ");"
-               "const r=f({first:()=>({json:" + json.dumps(item) + "})},$,$prevNode,$env);"
+               "const r=f({first:()=>({json:" + json.dumps(item) + "})},$,$prevNode,$env,$getWorkflowStaticData);"
                "console.log(JSON.stringify(r.map(x=>x.json)));")
     r = subprocess.run([_node_bin(), "-"], input=harness, capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, "Code node threw: " + r.stderr[-300:]

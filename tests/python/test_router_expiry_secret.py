@@ -493,7 +493,7 @@ def test_the_comparison_has_no_early_exit_on_the_secret():
     """Guard (static): the loop visits every position and ORs the differences; no built-in string
     equality or search is applied to the secret or the header."""
     whole = _by_name()[CHECK]["parameters"]["jsCode"]
-    code = whole[whole.index("const expected"):whole.index("if (diff === 0)")]
+    code = whole[whole.index("const expected"):whole.index("if (diff === 0")]
     assert not re.search(r"\.(startsWith|endsWith|includes|indexOf|localeCompare|match|test|split)\(", code)
     assert not re.search(r"\b(cfg|hdr)\b\s*[!=]==?", code) and not re.search(r"[!=]==?\s*\b(cfg|hdr)\b", code)
     assert "|=" in code and "^" in code, "a difference accumulator is expected"
