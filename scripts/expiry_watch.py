@@ -29,6 +29,7 @@ import ipaddress
 import json
 import os
 import re
+import signal
 import smtplib
 import socket
 import ssl
@@ -1835,7 +1836,10 @@ def save_state(path, state, root=None, seen=None, pending=None):
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 os.fchmod(fh.fileno(), 0o600)
                 fh.write(text)
+                fh.flush()
+                os.fsync(fh.fileno())
             os.replace(tmp, leaf, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+            os.fsync(dirfd)
         except BaseException:
             try:
                 os.unlink(tmp, dir_fd=dirfd)
@@ -1847,6 +1851,43 @@ def save_state(path, state, root=None, seen=None, pending=None):
 
 
 # --- the runner -------------------------------------------------------------------------------------
+
+def _commit_state(save):
+    """Run save() (the write that records what was delivered) shielded from interruption. The
+    handlers of SIGINT, SIGTERM and SIGHUP are swapped for a recorder until it is done (a signal
+    mask would not do: the C handler may run in any thread, but the Python handler runs in the main
+    one), then restored, and a recorded signal is re-delivered to the restored handler. An exception
+    that still gets through is retried once. Returns the interrupt that was held or retried, for
+    the caller to raise AFTER the state is on disk; OSError and ExpiryWatchError propagate as before."""
+    held = []
+    old = {}
+    if threading.current_thread() is threading.main_thread():
+        for name in ("SIGINT", "SIGTERM", "SIGHUP"):
+            sig = getattr(signal, name, None)
+            if sig is not None:
+                old[sig] = signal.signal(sig, lambda signum, frame: held.append(signum))
+    interrupted = None
+    try:
+        for attempt in (0, 1):
+            try:
+                save()
+                break
+            except (OSError, ExpiryWatchError):
+                raise
+            except BaseException as e:  # SystemExit, KeyboardInterrupt: the commit is tried again
+                if attempt:
+                    raise
+                interrupted = e
+    finally:
+        try:
+            for sig, handler in old.items():
+                signal.signal(sig, handler if handler is not None else signal.SIG_DFL)
+            if held:
+                signal.raise_signal(held[0])  # the restored handler decides: KeyboardInterrupt, exit
+        except BaseException as e:  # the commit is done: hand the interrupt on, do not lose it
+            interrupted = interrupted or e
+    return interrupted
+
 
 def _keep_prior(new_state, state, name):
     """Undo one item's state change because its notice was not delivered."""
@@ -2097,7 +2138,9 @@ def _run_pass(root, leaf, now, env, out, err, dry_run, opener):
 
     if not dry_run:
         try:
-            save_state(state_path, new_state, root, seen=new_seen, pending=new_pending)
+            held = _commit_state(lambda: save_state(state_path, new_state, root, seen=new_seen, pending=new_pending))
+            if deferred is None:
+                deferred = held  # the delivery fatal, when there is one, keeps its exit code
         except OSError as e:
             err(f"state error: cannot write {state_path}: {e.strerror}")
             if deferred is not None:
