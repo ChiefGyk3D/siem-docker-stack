@@ -325,7 +325,11 @@ def _open_state_dir(root, name):
         fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root.fd)
     except OSError as e:
         raise DigestError(f"state_dir {name}: cannot open ({e.strerror}); a link is refused") from None
-    os.fchmod(fd, 0o700)
+    st = os.fstat(fd)
+    if st.st_uid != os.geteuid() or st.st_mode & 0o077:
+        os.close(fd)
+        raise DigestError(f"state_dir {name}: must be owned by you and private (mode 0700); "
+                          "fix it with chmod 700 and re-run")
     return fd
 
 

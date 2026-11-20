@@ -400,6 +400,16 @@ def test_a_held_lock_refuses_the_send_and_is_released_after_a_run(tmp_path, smtp
     assert oct(d.stat().st_mode & 0o777) == "0o700" and (d / "last-sent").read_text().strip() == "2026-W47"
 
 
+def test_a_state_folder_open_to_group_or_others_is_refused_not_loosened(tmp_path, smtp_plain):
+    cfg = _write(tmp_path, smtp_plain.server_address[1])
+    d = tmp_path / "weekly-digest-state"
+    d.mkdir()
+    d.chmod(0o755)
+    code, _, err = _run(cfg, send=True, providers=_fakes())
+    assert code == 2 and "state_dir" in err and "0700" in err and not smtp_plain.sessions
+    assert oct(d.stat().st_mode & 0o777) == "0o755"  # refused, never silently changed
+
+
 def test_a_leftover_lock_file_from_a_dead_run_does_not_block(tmp_path, smtp_plain):
     cfg = _write(tmp_path, smtp_plain.server_address[1])
     d = tmp_path / "weekly-digest-state"
