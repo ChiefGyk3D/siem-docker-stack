@@ -145,6 +145,11 @@ ce_mkhome() { # set _ce_home to a fresh private home; fail closed when no safe b
 }
 
 ce_stop() { # N: stop the engine child promptly (TERM, then KILL after 5 s), then leave with status N
+    # a signal between the fork and the PID assignment is remembered; the caller acts on it right after
+    if [ -z "${_ce_child-}" ] && [ -n "${_ce_sp-}" ]; then
+        _ce_pend=$1
+        return 0
+    fi
     if [ -n "${_ce_child-}" ]; then
         kill -TERM "$_ce_child" 2>/dev/null
         ( /bin/sleep 5; kill -KILL "$_ce_child" 2>/dev/null ) >/dev/null 2>&1 </dev/null &  # holds no pipe of ours
@@ -152,10 +157,15 @@ ce_stop() { # N: stop the engine child promptly (TERM, then KILL after 5 s), the
         wait "$_ce_child" 2>/dev/null
         kill "$_ce_dog" 2>/dev/null
     fi
+    trap '' HUP INT TERM  # nothing interrupts the cleanup that follows
     exit "$1"  # the EXIT trap removes the private home
 }
 
 ce_fwd() { # N: a signal reached the invoking shell: stop the runner (its trap stops the engine), then leave with N
+    if [ -z "${_ce_runner-}" ] && [ -n "${_ce_sp-}" ]; then  # between the fork and the PID assignment
+        _ce_pend=$1
+        return 0
+    fi
     if [ -n "${_ce_runner-}" ]; then
         kill -TERM "$_ce_runner" 2>/dev/null
         wait "$_ce_runner" 2>/dev/null
@@ -171,18 +181,27 @@ ce_run() {
     # back to their defaults afterwards (EXIT traps are never touched; no script of ours sets the
     # others). A script that calls ce_run inside $(...) or a pipeline relies on the signal reaching
     # the process group, which every terminal and supervisor kill does.
+    # The caller's own HUP, INT and TERM traps are saved first and put back afterwards.
+    # (bash lists them with `trap -p`; the shells that cannot, such as dash, leave the three at their defaults)
+    _ce_saved=$(trap -p HUP INT TERM 2>/dev/null) || _ce_saved=
     _ce_runner=
+    _ce_pend=
     trap 'ce_fwd 129' HUP
     trap 'ce_fwd 130' INT
     trap 'ce_fwd 143' TERM
     exec 4<&0  # an async command gets /dev/null as stdin unless it is redirected from another descriptor
+    _ce_sp=1  # from here until the PID is recorded a signal is remembered, not lost
     ce_runner "$@" <&4 4<&- &
     _ce_runner=$!
+    _ce_sp=
     exec 4<&-
+    [ -z "$_ce_pend" ] || ce_fwd "$_ce_pend"
     _ce_rc=0
     wait "$_ce_runner" || _ce_rc=$?
     _ce_runner=
     trap - HUP INT TERM
+    # the only eval in this file: it replays the shell's own quoted `trap -p` listing of the caller's traps
+    eval "$_ce_saved"
     return "$_ce_rc"
 }
 
@@ -190,8 +209,11 @@ ce_runner() {
     _ce_n=$#
     {  # always called as an async command by ce_run, so this is already its own shell process
         # the EXIT and signal traps exist before the home does, so a signal at any point removes it
+        _ce_sp=  # these were set in the invoking shell when this process was forked
+        _ce_pend=
         _ce_home=
-        trap '[ -z "$_ce_home" ] || /usr/bin/rm -rf -- "$_ce_home"' EXIT
+        # signals are ignored while the home is deleted, so a late forwarded TERM cannot abort the deletion
+        trap 'trap "" HUP INT TERM; [ -z "$_ce_home" ] || /usr/bin/rm -rf -- "$_ce_home"' EXIT
         _ce_child=
         # the engine runs as a tracked child and the shell waits for it, so a signal is handled at once
         # (a trap does not run while a foreground command is executing); the status is 128 + signal
@@ -214,11 +236,15 @@ ce_runner() {
             _ce_n=$((_ce_n - 1))
         done
         exec 3<&0  # an async command gets /dev/null as stdin unless it is redirected from another descriptor
+        _ce_sp=1  # from here until the PID is recorded a signal is remembered, not lost
         "$@" <&3 3<&- &
-        exec 3<&-
         _ce_child=$!
+        _ce_sp=
+        exec 3<&-
+        [ -z "$_ce_pend" ] || ce_stop "$_ce_pend"
         _ce_rc=0
         wait "$_ce_child" || _ce_rc=$?
+        trap '' HUP INT TERM
         exit "$_ce_rc"
     }
 }

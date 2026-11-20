@@ -159,7 +159,7 @@ def private_home():
     whose current disposition is SIG_IGN is left ignored (nohup keeps working), and a previous handler
     Python cannot report (None) is restored as SIG_DFL. A worker thread cannot be protected (Python
     allows signal handlers only in the main thread), so it is refused with ContainerEngineError rather
-    than run without protection. While the directory is being deleted TERM and HUP are blocked, so a
+    than run without protection. While the directory is being deleted TERM, HUP and INT are blocked, so a
     signal cannot interrupt the deletion; it is held and delivered to the restored handler afterwards.
     SIGKILL cannot be handled."""
     if threading.current_thread() is not threading.main_thread():
@@ -187,7 +187,8 @@ def private_home():
     try:
         yield d
     finally:
-        mask = signal.pthread_sigmask(signal.SIG_BLOCK, set(sigs))
+        # INT is held too (its handler is not replaced; only its delivery waits until the home is gone)
+        mask = signal.pthread_sigmask(signal.SIG_BLOCK, {*sigs, signal.SIGINT})
         try:
             shutil.rmtree(d, ignore_errors=True)
             for sig, handler in old.items():

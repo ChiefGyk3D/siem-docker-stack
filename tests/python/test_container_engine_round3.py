@@ -107,7 +107,8 @@ def test_shell_ce_run_passes_valid_values_and_not_user(shell, tmp_path):
 def test_the_shell_helper_never_expands_the_environment_unquoted():  # guard
     code = [ln for ln in HELPER.read_text().splitlines() if not ln.lstrip().startswith("#")]
     assert not [ln for ln in code if "${LANG+" in ln or "${TERM+" in ln or "${USER+" in ln]
-    assert not [ln for ln in code if " eval " in ln or ln.strip().startswith("eval")]
+    assert not [ln for ln in code if (" eval " in ln or ln.strip().startswith("eval"))
+                and ln.strip() != 'eval "$_ce_saved"']  # the one replay of the caller's own trap listing
 
 
 # ------------------------------------------------------------------ 2. TMPDIR and the home base
