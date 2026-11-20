@@ -27,6 +27,13 @@ failure reporting in #78 and the alert path heartbeat in #80 (`docs/heartbeat.md
 - States: `noDataState: OK` (the counter does not exist until a first failure)
   and `execErrState: Alerting` (a failing query must not hide failures).
 
+## Deploying the rule
+
+`scripts/live-deploy/grafana-deploy.py` deploys `notification-failure-alert-rule.yml`
+with the other alerting files: stage it, run the script without flags for a dry
+run, then with `--apply` ([live-deploy-runbook.md](live-deploy-runbook.md), step 5).
+The `.example` contact point and policy files here are not part of that deploy.
+
 ## Routing: a different path on purpose
 
 An alert about failed webhook deliveries must not use that webhook. The shipped
