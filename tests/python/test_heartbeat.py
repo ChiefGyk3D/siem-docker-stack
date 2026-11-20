@@ -302,7 +302,8 @@ def test_the_heartbeat_rule_always_fires_from_a_constant_and_is_not_an_update_ru
 
 def test_the_heartbeat_rule_labels_keep_it_off_the_phone_and_out_of_the_update_rules():
     _, rule = _rule()
-    assert rule["labels"] == {"severity": "info", "heartbeat": "true", "phone": "false", "alert_group": "heartbeat"}
+    assert rule["labels"] == {"severity": "info", "tier": "none", "heartbeat": "true", "phone": "false",
+                              "alert_group": "heartbeat"}
     assert "update_alert" not in rule["labels"]
     # the update-rule files are untouched by this rule, and no other rule carries the label
     for path in ALERTING.glob("*rules*.yml"):
