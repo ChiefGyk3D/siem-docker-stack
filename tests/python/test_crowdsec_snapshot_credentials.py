@@ -87,8 +87,21 @@ def _exe(path, text):
     path.chmod(0o755)
 
 
+def ansi_quote(value):
+    """The value as one bash ANSI-C quoted word ($'...'), whatever it holds."""
+    out = []
+    for ch in value:
+        if ch in "\\'":
+            out.append("\\" + ch)
+        elif ord(ch) < 32:
+            out.append(f"\\x{ord(ch):02x}")
+        else:
+            out.append(ch)
+    return "$'" + "".join(out) + "'"
+
+
 class Box:
-    def __init__(self, tmp_path, spec):
+    def __init__(self, tmp_path, spec, repo=None, indices=None):
         self.spec = spec
         self.script = spec["script"]
         self.root = tmp_path / "box"
@@ -110,6 +123,13 @@ class Box:
         self.bindir = bindir
         text = (SCRIPTS / self.script).read_text(encoding="utf-8")
         text = text.replace("/opt/siem/.env", str(tmp_path / "no-such-env"))
+        if repo is not None:
+            assert 'REPO_NAME="siem-snapshots"\n' in text
+            text = text.replace('REPO_NAME="siem-snapshots"\n', f"REPO_NAME={ansi_quote(repo)}\n", 1)
+        if indices is not None:
+            text, n = re.subn(r'^SNAPSHOT_INDICES=".*"$', lambda m: f"SNAPSHOT_INDICES={ansi_quote(indices)}", text,
+                              count=1, flags=re.M)
+            assert n == 1
         if PATH_LINE in text:
             text = text.replace(PATH_LINE, f"PATH={bindir}:/usr/local/sbin:", 1)
         text = self._probe_absolute(text)
@@ -481,9 +501,9 @@ PASTE_BEGIN = "# --- paste begin"
 PASTE_END = "# --- paste end"
 
 
-def printed_hint(tmp_path, url="https://localhost:9200"):
+def printed_hint(tmp_path, url="https://localhost:9200", repo=None, indices=None):
     spec = dict(SNAPSHOT, args=[url])
-    box = Box(tmp_path, spec)
+    box = Box(tmp_path, spec, repo=repo, indices=indices)
     out = ran(box.run(), spec).stdout
     assert PASTE_BEGIN in out and PASTE_END in out, out
     return out.split(PASTE_BEGIN, 1)[1].split(PASTE_END, 1)[0]
@@ -541,9 +561,48 @@ def test_the_printed_manual_snapshot_hint_never_traces_the_password(tmp_path, ho
     else:
         kw["prefix"] = "PS4='+ ${OPENSEARCH_ADMIN_PASSWORD} '\nset -x\n"
     box, proc = run_hint(tmp_path, hint, SENTINEL, **kw)
+    assert proc.returncode != 0, "the hint ran while tracing was on"
+    assert not box.curl_calls(), "curl ran while tracing was on"
+    assert "tracing" in proc.stderr, proc.stderr
+    assert SENTINEL not in proc.stdout + proc.stderr, "the password in a trace"
+
+
+@pytest.mark.parametrize("how", ["xtracefd_with_set_x", "xtracefd_alone", "xtracefd_static_ps4",
+                                 "debug_trap_functrace", "debug_trap_alone", "return_trap_functrace",
+                                 "err_trap"])
+def test_the_printed_manual_snapshot_hint_refuses_alternate_trace_channels(tmp_path, how):
+    """The stderr containment does not cover BASH_XTRACEFD, a DEBUG trap with functrace or a RETURN trap. The
+    hint refuses to start while any of them is active, before it reads the password."""
+    hint = printed_hint(tmp_path / "p")
+    cap = tmp_path / "capture"
+    cap.write_text("", encoding="utf-8")
+    prefix = f"exec 5>>'{cap}'\n"
+    if how == "xtracefd_with_set_x":
+        prefix += "BASH_XTRACEFD=5\nset -x\n"
+    elif how == "xtracefd_alone":
+        prefix += "BASH_XTRACEFD=5\n"
+    elif how == "xtracefd_static_ps4":
+        prefix += "BASH_XTRACEFD=5\nPS4='TRACE '\nset -x\n"
+    elif how == "debug_trap_functrace":
+        prefix += f"set -T\ntrap 'printf \"%s|%s\\n\" \"${{cred-}}\" \"$BASH_COMMAND\" >&5' DEBUG\n"
+    elif how == "debug_trap_alone":
+        prefix += "trap 'printf \"%s\\n\" \"${cred-}\" >&5' DEBUG\n"
+    elif how == "return_trap_functrace":
+        prefix += f"set -T\ntrap 'printf \"%s\\n\" \"${{cred-}}\" >&5' RETURN\n"
+    else:
+        prefix += "trap 'printf \"%s\\n\" \"${cred-}\" >&5' ERR\n"
+    box, proc = run_hint(tmp_path, hint, SENTINEL, prefix=prefix)
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert not box.curl_calls(), "curl ran while a trace channel was active"
+    for channel in (proc.stdout, proc.stderr, cap.read_text(encoding="utf-8")):
+        assert SENTINEL not in channel, "the password reached a trace channel"
+
+
+def test_the_printed_manual_snapshot_hint_still_works_in_a_clean_shell(tmp_path):
+    hint = printed_hint(tmp_path / "p")
+    box, proc = run_hint(tmp_path, hint, SENTINEL)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert box.curl_stdins() == [f'user = "admin:{SENTINEL}"\n']
-    assert SENTINEL not in proc.stdout + proc.stderr, "the password in a trace"
 
 
 @pytest.mark.parametrize("arg_kind", ["quote_and_commands", "newline"])
@@ -563,6 +622,53 @@ def test_the_printed_manual_snapshot_call_line_cannot_inject_a_command(tmp_path,
         assert proc.returncode == 0, proc.stdout + proc.stderr
         argv = next(v for k, v in box.recorded("-argv").items() if k.startswith("curl-"))
         assert url in argv
+
+
+HOSTILE = ["a b", "x';touch MARK;'", "$(touch MARK)", "`touch MARK`", "a\"b\\c", "!!", "a!b", "été-日本", "a*?[b]",
+           "x;touch MARK", "--flag", ""]
+CONTROL = ["a\nb", "a\tb", "a\rb", "a\x1bb"]
+
+
+def _exercise_position(tmp_path, position, value):
+    marker = tmp_path / "MARK"
+    value = value.replace("MARK", str(marker))
+    kwargs = {"url": "https://localhost:9200", "repo": None, "indices": None}
+    if position == "url":
+        kwargs["url"] = "https://h/" + value
+    else:
+        kwargs[position] = value
+    hint = printed_hint(tmp_path / "p", **kwargs)
+    box, proc = run_hint(tmp_path, hint, SENTINEL)
+    assert not marker.exists(), f"a command from the {position} argument ran"
+    return box, proc, value, kwargs
+
+
+@pytest.mark.parametrize("position", ["url", "repo", "indices"])
+@pytest.mark.parametrize("value", HOSTILE)
+def test_the_call_line_passes_every_argument_through_exactly(tmp_path, position, value):
+    if position == "url" and value == "":
+        value = "plain"
+    box, proc, value, kwargs = _exercise_position(tmp_path, position, value)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    argv = [v for k, v in box.recorded("-argv").items() if k.startswith("curl-")]
+    assert len(argv) == 1
+    lines = argv[0].split("\n")
+    url_arg = next(x for x in lines if x.startswith("https://"))
+    body = lines[lines.index("-d") + 1]
+    expect_url = kwargs["url"]
+    expect_repo = kwargs["repo"] if kwargs["repo"] is not None else "siem-snapshots"
+    expect_indices = kwargs["indices"] if kwargs["indices"] is not None else (
+        "suricata-*,syslog-*,pfsense-*,pfblockerng-*,unifi-syslog-*,crowdsec-events-*")
+    assert url_arg.startswith(f"{expect_url}/_snapshot/{expect_repo}/manual-"), url_arg
+    assert body == '{"indices":"' + expect_indices + '","include_global_state":false}', body
+
+
+@pytest.mark.parametrize("position", ["url", "repo", "indices"])
+@pytest.mark.parametrize("value", CONTROL)
+def test_the_call_line_refuses_a_control_character_in_any_argument(tmp_path, position, value):
+    box, proc, _, _ = _exercise_position(tmp_path, position, value)
+    assert proc.returncode != 0
+    assert not box.curl_calls(), "curl ran with a control character in an argument"
 
 
 @pytest.mark.parametrize("shadow", ["empty", "garbage"])

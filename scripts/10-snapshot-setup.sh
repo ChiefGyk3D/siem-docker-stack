@@ -268,13 +268,24 @@ echo ""
 # The hint is a function, printed by declare -f so the text shown is the text tested: it refuses a
 # control character (CR or LF would start a new curl config directive), escapes backslash and double
 # quote, and sends the credentials to curl on stdin as a config, never on the command line.
-# The whole body runs with standard error sent to /dev/null, so a caller's `set -x` (or SHELLOPTS=xtrace,
-# or a PS4 built from the password) cannot print the password; messages and curl's own errors go to
-# descriptor 3, which the printed call line opens as a copy of the real standard error. The call line is
-# built with printf %q, so no argument (the URL comes from the command line) can inject shell when pasted.
+# The function REFUSES to run while the calling shell traces or debugs: xtrace on (set -x, SHELLOPTS),
+# BASH_XTRACEFD set, functrace on (set -T), or a DEBUG, RETURN or ERR trap set. Those can print the
+# password through channels no redirection here can close, so the check comes before the password is read.
+# Start a fresh `bash --norc` to run it. As defense in depth the body also runs with standard error sent
+# to /dev/null; messages and curl's own errors go to descriptor 3, which the printed call line opens as a
+# copy of the real standard error. The call line is built with printf %q, so no argument (the URL comes
+# from the command line) can inject shell when pasted.
 manual_snapshot() {
     {
-        local cred ts rc=0
+        local cred ts rc=0 traps
+        # the traps of the CALLING shell come in as the first argument (a function does not see a DEBUG,
+        # RETURN or ERR trap that is not inherited); the ones visible here count too
+        traps="${1-}$(trap -p DEBUG RETURN ERR)"
+        shift
+        if [[ "$-" == *[xT]* || -n "${BASH_XTRACEFD-}" || -n "$traps" ]]; then
+            echo "manual_snapshot refuses to run while tracing or a DEBUG, RETURN or ERR trap is active (start a fresh bash --norc)" >&3
+            return 1
+        fi
         if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 2))); then
             echo "manual_snapshot needs bash 4.2 or newer, refused" >&3
             return 1
@@ -301,10 +312,10 @@ manual_snapshot() {
         return "$rc"
     } 2>/dev/null
 }
-echo "Manual snapshot now (paste into bash 4.2 or newer, in a shell where OPENSEARCH_ADMIN_PASSWORD is set and not exported):"
+echo "Manual snapshot now (paste into a fresh bash 4.2 or newer with no tracing or DEBUG/RETURN/ERR trap, where OPENSEARCH_ADMIN_PASSWORD is set and not exported):"
 echo "# --- paste begin"
 declare -f manual_snapshot
-printf '{ manual_snapshot %q %q %q; } 3>&2 2>/dev/null\n' "${OPENSEARCH_URL}" "${REPO_NAME}" "${SNAPSHOT_INDICES}"
+printf '{ manual_snapshot "$(trap -p DEBUG RETURN ERR)" %q %q %q; } 3>&2 2>/dev/null\n' "${OPENSEARCH_URL}" "${REPO_NAME}" "${SNAPSHOT_INDICES}"
 echo "# --- paste end"
 echo ""
 echo "Restore drill + offsite copy guidance: docs/backup-restore.md"
