@@ -38,6 +38,7 @@ import json
 import os
 import re
 import secrets
+import stat
 import subprocess
 import sys
 import uuid
@@ -116,12 +117,72 @@ def credential_id_map():
     }
 
 
-def choose_webhook_path(existing, token_fn=None, prefix=PATH_PREFIX):
-    """Reuse the saved private path when it looks right, else make a new one."""
+def choose_webhook_path(existing, token_fn=None, prefix=PATH_PREFIX, token_len=None):
+    """Reuse the saved private path when it looks right, else make a new one.
+
+    With token_len the saved path must be the prefix plus exactly that many URL-safe characters (the
+    shape token_urlsafe(18) makes, 24), so a known or short suffix is never reused."""
     existing = (existing or "").strip()
-    if existing.startswith(prefix) and len(existing) >= 20:
+    if token_len is not None:
+        ok = re.fullmatch(re.escape(prefix) + "[A-Za-z0-9_-]{%d}" % token_len, existing) is not None
+    else:
+        ok = existing.startswith(prefix) and len(existing) >= 20
+    if ok:
         return existing
     return prefix + (token_fn or (lambda: secrets.token_urlsafe(18)))()
+
+
+EXPIRY_TOKEN_LEN = 24
+
+
+def valid_expiry_path(path):
+    return re.fullmatch(re.escape(EXPIRY_PATH_PREFIX) + "[A-Za-z0-9_-]{%d}" % EXPIRY_TOKEN_LEN, path or "") is not None
+
+
+def _open_private(path, flags):
+    """Open path without following a symlink; refuse anything but a regular file we own."""
+    try:
+        fd = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    except OSError as err:
+        sys.exit("cannot open %s safely (%s): refusing" % (path, err.strerror))
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        os.close(fd)
+        sys.exit("%s is not a regular file: refusing" % path)
+    if st.st_uid != os.geteuid():
+        os.close(fd)
+        sys.exit("%s has the wrong owner: refusing" % path)
+    return fd, st
+
+
+def read_private_file(path):
+    """Contents of a private file, or "" when it does not exist. Refuses a symlink, a file that is not a
+    regular file owned by this user, and any group or other permission bit (the path inside may have been
+    read by others: rotate it by deleting the file)."""
+    if not os.path.lexists(path):
+        return ""
+    fd, st = _open_private(path, os.O_RDONLY)
+    try:
+        if st.st_mode & 0o077:
+            sys.exit("%s has mode %o, looser than 600: refusing to trust it; delete it to make a new path"
+                     % (path, st.st_mode & 0o777))
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            fd = -1
+            return handle.read()
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def write_private_file(path, value):
+    """Write value to path with mode 600 enforced on the opened file, over an existing file too."""
+    fd, _ = _open_private(path, os.O_WRONLY | os.O_CREAT)
+    try:
+        os.fchmod(fd, 0o600)
+        os.ftruncate(fd, 0)
+        os.write(fd, value.encode("utf-8"))
+    finally:
+        os.close(fd)
 
 
 def valid_origin(text):
@@ -197,8 +258,13 @@ def patch_workflow(wf, reuse_id="", pushover_on=False, origin="", webhook_path="
         if node["type"].endswith(".webhook") and node["name"] == "Expiry Watch Webhook":
             # the expiry watch's entry gets its own private path (never the committed placeholder),
             # so an anonymous caller cannot find it and start executions
-            node["parameters"]["path"] = expiry_path or choose_webhook_path("", prefix=EXPIRY_PATH_PREFIX)
+            path = expiry_path or choose_webhook_path("", prefix=EXPIRY_PATH_PREFIX, token_len=EXPIRY_TOKEN_LEN)
+            if not valid_expiry_path(path):
+                raise ValueError("the expiry webhook path must be %s plus %d URL-safe characters"
+                                 % (EXPIRY_PATH_PREFIX, EXPIRY_TOKEN_LEN))
+            node["parameters"]["path"] = path
             node["webhookId"] = str(uuid.uuid4())
+            node.pop("disabled", None)  # the committed node ships disabled; only a private path enables it
         elif node["type"].endswith(".webhook"):
             node["parameters"]["path"] = webhook_path
             # With a webhookId the production URL is /webhook/<path>; without one n8n
@@ -272,19 +338,16 @@ def workflow(path, reuse_id="", pushover_on=False, error_workflow_id=""):
         with open(PATH_FILE, encoding="utf-8") as handle:
             existing = handle.read()
     new_path = choose_webhook_path(existing)
-    expiry_existing = ""
-    if os.path.isfile(EXPIRY_PATH_FILE):
-        with open(EXPIRY_PATH_FILE, encoding="utf-8") as handle:
-            expiry_existing = handle.read()
-    expiry_path = choose_webhook_path(expiry_existing, prefix=EXPIRY_PATH_PREFIX)
+    expiry_existing = read_private_file(EXPIRY_PATH_FILE)
+    expiry_path = choose_webhook_path(expiry_existing, prefix=EXPIRY_PATH_PREFIX, token_len=EXPIRY_TOKEN_LEN)
     origin = grafana_origin()
     wf = patch_workflow(wf, reuse_id, pushover_on, origin, new_path, error_workflow_id=error_workflow_id,
                         expiry_path=expiry_path)
     old = os.umask(0o077)
     try:
-        for target, value in ((PATH_FILE, new_path), (EXPIRY_PATH_FILE, expiry_path)):
-            with open(target, "w", encoding="utf-8") as handle:
-                handle.write(value)
+        with open(PATH_FILE, "w", encoding="utf-8") as handle:
+            handle.write(new_path)
+        write_private_file(EXPIRY_PATH_FILE, expiry_path)
     finally:
         os.umask(old)
     script = "cat > /tmp/wf.json && n8n import:workflow --input=/tmp/wf.json; rc=$?; rm -f /tmp/wf.json; exit $rc"

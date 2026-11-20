@@ -301,7 +301,7 @@ decision, runbook Q11, issue #127.
 | | Grafana | Expiry watch |
 |---|---|---|
 | Router node | `Grafana Webhook` (unchanged) | `Expiry Watch Webhook` |
-| URL path | the private `grafana-alerts-<opaque>` path | the private `expiry-watch-alerts-<opaque>` path (file `expiry-path`) |
+| URL path | the private `grafana-alerts-<opaque>` path | the private `expiry-watch-alerts-<opaque>` path (file `expiry-path`); the committed node is DISABLED with a placeholder path, so importing the file directly serves nothing |
 | Header check | n8n Header Auth, credential `grafana-webhook-auth` | the `Check Expiry Secret` Code node |
 | Secret lives in | the n8n credential and `GRAFANA_WEBHOOK_SECRET` (Grafana side) | `EXPIRY_WATCH_ROUTER_SECRET` in the n8n container's environment |
 | The watch's side | | `EXPIRY_WATCH_ROUTER_TOKEN`, the same value, named in `[router].token_env` |
@@ -336,8 +336,10 @@ The check, in the `Check Expiry Secret` Code node:
   no message. Only a new body leaves the check node, never the header.
 - It reads no other variable, and Grafana's variable is not consulted.
 - An `Authorization` header over 512 characters is denied before the comparison
-  loop runs, so the secret (the part after `Bearer `) must be at most 400
-  characters; the 44 character `openssl rand -base64 32` value is far below it.
+  loop runs, and so is a configured secret over 400 characters (checked before
+  the loop, so an oversized value never costs work per request: the watch then
+  gets 403 on every call, which is loud). The 44 character
+  `openssl rand -base64 32` value is far below both.
 
 What the expiry secret may send (authorization, not only authentication). The
 secret proves the caller is the expiry watch, so the check also limits what that
@@ -349,11 +351,23 @@ same 403, not passed on:
   a repeat);
 - labels exactly `alertname` (`Expiry watch: <item>`, equal to the `item` label),
   `severity` (`critical`, `warning` or `info`), `expiry_watch=true`, `item`
-  (1 to 100 characters), `kind` (1 to 40), `stage` (a day count, `daily`,
+  (1 to 100 characters: letters, digits, space, dot, colon and hyphen only,
+  starting with a letter or digit), `kind` (1 to 40 letters, digits and hyphens),
+  `stage` (a day count, `daily`,
   `expired` or `disappeared`) and optionally `phone=true`; any other label
   (`heartbeat`, `update_security`, `team`, `source`) is denied;
-- annotations only `summary` (300 characters) and `description` (1000), a
-  32 character lowercase hex `fingerprint`, an optional UTC `startsAt`; no URLs;
+- annotations may only be the keys `summary` and `description` (300 and 1000
+  characters at most), but their text is DROPPED: the router builds the summary
+  and description itself from `item`, `kind` and `stage` (for example "deploy-key
+  (ssh-key): expires within 14 days", "has expired", "is no longer listed by its
+  provider") and a fixed description. No free text from the caller reaches Discord
+  or the phone, so a holder of this secret cannot send a misleading message, a
+  link or a mention. Item names with an underscore, slash, `@`, backtick, angle
+  bracket, asterisk or any non-ASCII character are denied with the 403, so the
+  watch fails loudly; rename such an item in the registry or the provider. The
+  dates, owner and runbook of the full notice stay in the watch's own output
+  and its Matrix and email channels;
+- a 32 character lowercase hex `fingerprint`, an optional UTC `startsAt`; no URLs;
 - the handed-on body carries the label `source=expiry-watch`, set by the router,
   never by the caller.
 
@@ -395,9 +409,17 @@ Owner steps (nothing here runs from the repo; each is a live change):
 2. Re-import `n8n/grafana-alert-router.json` with the live import helper
    (`scripts/live-deploy/n8n-setup-alert-router.py --workflow ...`), then restart or
    activate the workflow as the live-deploy runbook describes. The helper makes a
-   private path for each webhook and saves them (mode 600) in `router-path` (Grafana)
-   and `expiry-path` (the watch) in its config directory; the committed
-   `expiry-watch-alerts` is only a placeholder and is never served.
+   private path for each webhook and saves them in `router-path` (Grafana) and
+   `expiry-path` (the watch) in its config directory. The committed
+   `Expiry Watch Webhook` node ships `disabled` with a placeholder path (n8n
+   does not register a webhook for a disabled trigger node: UNVERIFIED against
+   a live n8n, check after the first import that the placeholder path answers
+   404); only the helper enables it, and only with a path of the form
+   `expiry-watch-alerts-` plus 24 URL-safe characters. The helper writes
+   `expiry-path` with mode 600 enforced on the opened file, reads it only if it
+   is a regular file you own with no group or other permission bits (a looser
+   file is refused with a message: delete it to get a new path), refuses
+   symlinks, and replaces a saved path that does not have the generated shape.
 3. Read the path from `expiry-path`, point `[router].url` in the watch's config at
    `<n8n base>/webhook/<contents of expiry-path>` (never commit it), and keep the
    watch's variable `EXPIRY_WATCH_ROUTER_TOKEN` equal to the router's.
