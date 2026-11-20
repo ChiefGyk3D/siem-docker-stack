@@ -12,10 +12,13 @@ No shell string is ever built from the setting: callers pass argument lists.
 """
 import contextlib
 import os
+import re
 import shutil
+import signal
 import stat
 import subprocess
 import tempfile
+import threading
 
 ENGINES = ("docker", "podman")
 DEFAULT_ENGINE = "docker"
@@ -28,7 +31,12 @@ TRUSTED_ROOT = "/"  # ownership is checked on every directory from here down to 
 # DOCKER_CONFIG, CONTAINER_HOST, CONTAINER_CONNECTION, HOME, XDG_*, LD_*, BASH_ENV, ENV and proxy
 # variables, is dropped, so a trusted binary cannot be pointed at another daemon, a per-user
 # config file, a plugin, a credential helper or a loader hook through the caller's environment.
-ENV_KEEP = ("USER", "LOGNAME", "LANG", "LC_ALL", "TERM", "TZ")
+ENV_KEEP = ("LANG", "LC_ALL", "TERM", "TZ")
+ENV_VALUE_RE = re.compile(r"[A-Za-z0-9_.@:/+-]{1,64}")  # a kept value must match fully, else it is dropped
+# Where private homes are made. TMPDIR is never consulted. A base must be owned by HOME_BASE_UID and
+# either not writable by others or sticky (so nobody else can rename our entry); the first usable one wins.
+HOME_BASES = ("/run", "/var/tmp", "/tmp")
+HOME_BASE_UID = 0
 
 
 class ContainerEngineError(Exception):
@@ -109,13 +117,47 @@ def engine_exe(name):
     return exe
 
 
+def _base_ok(base):
+    try:
+        st = os.lstat(base)
+    except OSError:
+        return False
+    return (stat.S_ISDIR(st.st_mode) and st.st_uid == HOME_BASE_UID
+            and (not st.st_mode & 0o022 or bool(st.st_mode & 0o1000)))
+
+
+def _make_home():
+    for base in HOME_BASES:
+        if not _base_ok(base):
+            continue
+        try:
+            cand = tempfile.mkdtemp(prefix="engine-home-", dir=base)  # explicit dir: TMPDIR is ignored
+        except OSError:
+            continue
+        st = os.lstat(cand)
+        if stat.S_ISDIR(st.st_mode) and st.st_uid == os.geteuid() and stat.S_IMODE(st.st_mode) == 0o700:
+            return cand
+        shutil.rmtree(cand, ignore_errors=True)
+    raise ContainerEngineError("no safe base directory for a private engine home (" + ", ".join(HOME_BASES) + ")")
+
+
 @contextlib.contextmanager
 def private_home():
-    """A fresh private (mode 0700) empty directory, removed afterwards, to serve as the engine's HOME."""
-    d = tempfile.mkdtemp(prefix="engine-home-")
+    """A fresh private (mode 0700, checked after creation) empty directory under a validated fixed base,
+    removed afterwards, to serve as the engine's HOME. SIGTERM and SIGHUP raise SystemExit while it
+    exists so the cleanup still runs (SIGKILL cannot be handled)."""
+    d = _make_home()
+    old = {}
+    if threading.current_thread() is threading.main_thread():
+        def _stop(signum, frame):
+            raise SystemExit(128 + signum)
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            old[sig] = signal.signal(sig, _stop)
     try:
         yield d
     finally:
+        for sig, handler in old.items():
+            signal.signal(sig, handler)
         shutil.rmtree(d, ignore_errors=True)
 
 
@@ -127,7 +169,7 @@ def engine_env(home, path=None, environ=None):
     if path is None:
         good = [d for d in TRUSTED_DIRS if os.path.isdir(d) and _dirs_ok(os.path.realpath(d), TRUSTED_UID, TRUSTED_ROOT)]
         path = ":".join(good) or "/usr/bin:/bin"
-    env = {k: environ[k] for k in ENV_KEEP if k in environ}
+    env = {k: environ[k] for k in ENV_KEEP if k in environ and ENV_VALUE_RE.fullmatch(environ[k])}
     env["PATH"] = path
     env["HOME"] = home
     env["DOCKER_CONFIG"] = os.path.join(home, "docker")

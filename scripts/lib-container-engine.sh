@@ -83,25 +83,70 @@ ce_resolve() {
 
 # ce_run ARGS...: run the resolved engine ($CE_BIN) with an explicit minimal environment and a
 # fresh private EMPTY home: HOME, DOCKER_CONFIG and the XDG_* directories all point into a mode 0700
-# directory made for this one call and removed after it, so no per-user engine configuration (docker
-# config.json and contexts, CLI plugins, credential helpers, podman containers.conf and connections)
-# and no caller runtime directory is ever read. PATH is fixed; only USER LOGNAME LANG LC_ALL TERM TZ
-# are passed through. Everything else (DOCKER_HOST, CONTAINER_HOST, LD_*, BASH_ENV, proxies, ...) is
-# dropped. Same rules as engine_env in container_engine.py. Standard input and output pass through.
-# Consequence: rootless podman (its storage lives under HOME) is not supported; use rootful.
+# directory made for this one call and removed after it (also on failure, HUP, INT and TERM), so no
+# per-user engine configuration (docker config.json and contexts, CLI plugins, credential helpers,
+# podman containers.conf and connections) and no caller runtime directory is ever read. The home is
+# made under a validated fixed base (CE_HOME_BASES); TMPDIR is never consulted. PATH is fixed; only
+# LANG LC_ALL TERM TZ are passed through, and only when the value is 1 to 64 characters from
+# A-Z a-z 0-9 _ . @ : / + - (anything else is dropped). The environment is built as separate
+# arguments, never by splitting a string. Everything else (DOCKER_HOST, CONTAINER_HOST, LD_*,
+# BASH_ENV, proxies, ...) is dropped. Same rules as engine_env in container_engine.py. Standard
+# input and output pass through. Consequence: rootless podman (its storage lives under HOME) is
+# not supported; use rootful.
 CE_SAFE_PATH="/usr/bin:/usr/local/bin:/bin:/snap/bin"
+CE_HOME_BASES="/run /var/tmp /tmp"  # assigned, never read from the environment
+CE_HOME_BASE_UID=0
+
+ce_ok_val() { # 1 to 64 characters from a fixed set, nothing else (no space, newline, glob or "=" tricks)
+    case "$1" in
+        "" | *[!A-Za-z0-9_.@:/+-]*) return 1 ;;
+    esac
+    [ "${#1}" -le 64 ]
+}
+
+ce_mkhome() { # print a fresh private home; fail closed when no safe base exists
+    for _ce_b in $CE_HOME_BASES; do
+        [ -d "$_ce_b" ] && [ ! -L "$_ce_b" ] || continue
+        _ce_bs=$(/usr/bin/stat -c '%u %a' -- "$_ce_b") || continue
+        [ "${_ce_bs%% *}" = "$CE_HOME_BASE_UID" ] || continue
+        _ce_bm=${_ce_bs#* }
+        # usable when nobody else can write it, or when it is sticky (others cannot rename our entry)
+        if [ $((0$_ce_bm & 022)) -ne 0 ] && [ $((0$_ce_bm & 01000)) -eq 0 ]; then continue; fi
+        _ce_h=$(TMPDIR= /usr/bin/mktemp -d -p "$_ce_b" engine-home.XXXXXXXX 2>/dev/null) || continue
+        if [ -d "$_ce_h" ] && [ ! -L "$_ce_h" ] &&
+            [ "$(/usr/bin/stat -c '%u %a' -- "$_ce_h")" = "$(/usr/bin/id -u) 700" ]; then
+            printf '%s' "$_ce_h"
+            return 0
+        fi
+        /usr/bin/rm -rf -- "$_ce_h"
+    done
+    echo "ce_run: no safe base directory for a private engine home ($CE_HOME_BASES)" >&2
+    return 1
+}
+
 ce_run() {
     [ -n "${CE_BIN-}" ] || { echo "ce_run: no engine resolved (call ce_init first)" >&2; return 1; }
-    _ce_home=$(/usr/bin/mktemp -d) || return 1
-    /usr/bin/env -i "PATH=$CE_SAFE_PATH" "HOME=$_ce_home" "DOCKER_CONFIG=$_ce_home/docker" \
-        "XDG_CONFIG_HOME=$_ce_home/config" "XDG_DATA_HOME=$_ce_home/data" "XDG_CACHE_HOME=$_ce_home/cache" \
-        "XDG_STATE_HOME=$_ce_home/state" \
-        ${USER+"USER=$USER"} ${LOGNAME+"LOGNAME=$LOGNAME"} \
-        ${LANG+"LANG=$LANG"} ${LC_ALL+"LC_ALL=$LC_ALL"} ${TERM+"TERM=$TERM"} ${TZ+"TZ=$TZ"} \
-        "$CE_BIN" "$@"
-    _ce_rc=$?
-    /usr/bin/rm -rf -- "$_ce_home"
-    return $_ce_rc
+    _ce_n=$#
+    (
+        _ce_home=$(ce_mkhome) || exit 1
+        trap '/usr/bin/rm -rf -- "$_ce_home"' EXIT
+        trap 'exit 143' HUP INT TERM
+        # engine arguments are "$@"; append the env command after them, then rotate them to the end
+        set -- "$@" /usr/bin/env -i "PATH=$CE_SAFE_PATH" "HOME=$_ce_home" "DOCKER_CONFIG=$_ce_home/docker" \
+            "XDG_CONFIG_HOME=$_ce_home/config" "XDG_DATA_HOME=$_ce_home/data" "XDG_CACHE_HOME=$_ce_home/cache" \
+            "XDG_STATE_HOME=$_ce_home/state"
+        if [ -n "${LANG-}" ] && ce_ok_val "$LANG"; then set -- "$@" "LANG=$LANG"; fi
+        if [ -n "${LC_ALL-}" ] && ce_ok_val "$LC_ALL"; then set -- "$@" "LC_ALL=$LC_ALL"; fi
+        if [ -n "${TERM-}" ] && ce_ok_val "$TERM"; then set -- "$@" "TERM=$TERM"; fi
+        if [ -n "${TZ-}" ] && ce_ok_val "$TZ"; then set -- "$@" "TZ=$TZ"; fi
+        set -- "$@" "$CE_BIN"
+        while [ "$_ce_n" -gt 0 ]; do
+            set -- "$@" "$1"
+            shift
+            _ce_n=$((_ce_n - 1))
+        done
+        "$@"
+    )
 }
 
 ce_init_name() {

@@ -71,9 +71,23 @@ host's own shell and keeps that host's environment. The lookup in
 `deploy-n8n-soar.sh` runs the trusted-directory rule on the host through the
 streamed Python helper.
 
+## Running the scripts as root
+
+The seven scripts use the shebang `#!/bin/bash -p`. Privileged mode makes bash ignore
+`BASH_ENV` and `ENV`, skip exported shell functions, and ignore `SHELLOPTS` and
+`BASHOPTS`, so none of them can run as root before the first line. As root, run a
+script by its path (`sudo scripts/06-generate-wazuh-certs.sh`), never as
+`bash script`: an explicit interpreter bypasses the shebang, and a root run that
+finds privileged mode off stops with a message saying so (it cannot undo what the
+environment already ran, which is why the path form is required). Each script
+then clears `set -x` state and `BASH_ENV ENV CDPATH GLOBIGNORE PS4`, fixes `PATH`
+as its first command, and learns whether it is root from the kernel through the
+absolute `/usr/bin/id` (or `/bin/id`), never from `EUID` or `UID`, and stops if the
+answer is not a number.
+
 ## Sourcing the helper
 
-Each script sets a fixed `PATH` as its first command when it runs as root, calls
+Each script sets a fixed `PATH` as its first command (root or not), calls
 `stat`, `readlink`, `dirname` and `id` by absolute path while it bootstraps, and
 finds its own real directory (symlinks resolved). It sources
 `lib-container-engine.sh` from there, never from a directory next to a link that

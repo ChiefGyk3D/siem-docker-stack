@@ -299,7 +299,7 @@ def fw_root(fw, tmp_path):
                "IPT_STATE": str(tmp_path / "ipt.state"),
                "IPTABLES": str(fw.stubs / "iptables"), "DOCKER": str(fw.stubs / "docker")}
         fw.log.write_text("", encoding="utf-8")
-        proc = subprocess.run([BASH, str(sandbox / FIREWALL.name), *(args or GOOD)], env=env, text=True,
+        proc = subprocess.run([BASH, "-p", str(sandbox / FIREWALL.name), *(args or GOOD)], env=env, text=True,
                               capture_output=True, stdin=subprocess.DEVNULL, timeout=30)
         proc.calls = [x for x in fw.log.read_text(encoding="utf-8").splitlines() if x]
         return proc

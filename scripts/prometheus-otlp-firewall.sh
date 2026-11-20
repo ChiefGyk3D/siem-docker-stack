@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -p
 # =============================================================================
 # prometheus-otlp-firewall.sh - Allow-list for the Prometheus OTLP receiver
 # =============================================================================
@@ -6,7 +6,9 @@
 # DOCKER-USER chain: only the approved senders may open a connection to the
 # receiver's published address and port; everything else is dropped.
 #
-# Usage (as root):
+# Usage (as root; run the script by its path, never as `bash script`: the privileged-mode
+# shebang is what keeps BASH_ENV and exported functions from running as root before the
+# first line, and as root the script refuses to continue when it was bypassed):
 #   sudo bash scripts/prometheus-otlp-firewall.sh apply <bind-ipv4> <sender> [<sender>...]
 #   sudo bash scripts/prometheus-otlp-firewall.sh remove
 #
@@ -24,9 +26,12 @@
 # between PROM-OTLP-A and PROM-OTLP-B. IPv4 and iptables only (docs).
 # =============================================================================
 
+set +x
+# SHELLOPTS and BASHOPTS are readonly in bash and are ignored in privileged mode (the -p shebang).
+unset BASH_ENV ENV CDPATH GLOBIGNORE PS4
 set -euo pipefail
 
-[ "${EUID:-1}" -ne 0 ] || { PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH; }  # root: fixed PATH before any command runs
+PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH  # fixed PATH before any command runs
 
 CHAIN_A=PROM-OTLP-A
 CHAIN_B=PROM-OTLP-B
@@ -50,20 +55,16 @@ chain_ok() { # <path>: root-owned and not group or world writable, the path and 
 # link someone else placed.
 SELF="$(/usr/bin/readlink -f -- "${BASH_SOURCE[0]}")" || die "cannot resolve this script's real path"
 SCRIPT_DIR="$(/usr/bin/dirname -- "$SELF")"
-if [ "${EUID:-1}" -eq 0 ]; then
-    # As root: no IPTABLES/DOCKER overrides, and only code nobody else can edit (the script, its
-    # helper and every directory above them are checked). Run the root-owned copy (docs).
-    IPT=iptables
-    chain_ok "$SELF" ||
-        die "${SELF} (or a directory above it) is not root-owned or is group or world writable; run the root-owned copy of the script and its ${LIB_NAME} (docs/prometheus-otlp.md)"
-else
-    [ "${PROM_FW_NO_SUDO:-}" = 1 ] || die "run as root (sudo)"
-    IPT="${IPTABLES:-iptables}"
-fi
 CE_LIB="${SCRIPT_DIR}/${LIB_NAME}"
 ce_boot_fail() { echo "refusing to source ${CE_LIB}: $1" >&2; exit 1; }
+CE_UID="$(/usr/bin/id -u 2>/dev/null || /bin/id -u 2>/dev/null)" || CE_UID=
+case "$CE_UID" in '' | *[!0-9]*) ce_boot_fail "cannot tell who is running (no numeric user number)" ;; esac
+CE_UID=$((10#$CE_UID))  # asked of the kernel through id, never taken from an environment variable
 CE_STRICT=0
-[ "${EUID:-1}" -ne 0 ] || CE_STRICT=1
+[ "$CE_UID" != 0 ] || CE_STRICT=1
+if [ "$CE_STRICT" = 1 ] && ! [[ "$-" == *p* ]]; then  # as root the privileged shebang must be in force
+    ce_boot_fail "as root, run this script by its path (not as 'bash script'): the privileged shebang that keeps BASH_ENV and exported functions out is bypassed otherwise"
+fi
 if [ "$CE_STRICT" = 1 ]; then  # as root: the helper and every directory above it must be root-owned and not writable
     CE_P="$CE_LIB"
     while :; do
@@ -81,17 +82,24 @@ CE_OWNER="$(/usr/bin/stat -L -c %u -- /proc/self/fd/9)"
 CE_MODE="$(/usr/bin/stat -L -c %a -- /proc/self/fd/9)"
 CE_MASK=002  # world write is never allowed; group write too when running as root
 [ "$CE_STRICT" != 1 ] || CE_MASK=022
-if [ ! -f /proc/self/fd/9 ] || { [ "$CE_OWNER" != 0 ] && [ "$CE_OWNER" != "$(/usr/bin/id -u)" ]; } ||
+if [ ! -f /proc/self/fd/9 ] || { [ "$CE_OWNER" != 0 ] && [ "$CE_OWNER" != "$CE_UID" ]; } ||
     [ $((8#$CE_MODE & 8#$CE_MASK)) -ne 0 ]; then
     ce_boot_fail "it must be a regular file owned by root or by you, not world writable (and not group writable when run as root)"
 fi
 # shellcheck source=scripts/lib-container-engine.sh
 source /proc/self/fd/9
 exec 9<&-
-if [ "${EUID:-1}" -eq 0 ]; then
+if [ "$CE_STRICT" = 1 ]; then
+    # As root: no IPTABLES/DOCKER overrides, and only code nobody else can edit (the script, its
+    # helper and every directory above them are checked). Run the root-owned copy (docs).
+    IPT=iptables
+    chain_ok "$SELF" ||
+        die "${SELF} (or a directory above it) is not root-owned or is group or world writable; run the root-owned copy of the script and its ${LIB_NAME} (docs/prometheus-otlp.md)"
     ce_init || exit 1
     DOCKER_BIN="$CE_BIN"
 else
+    [ "${PROM_FW_NO_SUDO:-}" = 1 ] || die "run as root (sudo)"
+    IPT="${IPTABLES:-iptables}"
     ce_init_name || exit 1
     # Test mode only (root ignores this): DOCKER may name a stub engine binary.
     CE_BIN="${DOCKER:-}"

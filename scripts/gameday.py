@@ -469,6 +469,8 @@ def real_runner(argv):
                                   timeout=120, env=env)
     except FileNotFoundError:
         return 127, f"command not found: {argv[0]}"
+    except container_engine.ContainerEngineError as err:
+        return 127, str(err)
     except subprocess.TimeoutExpired:
         return 124, "timed out after 120 seconds"
     return proc.returncode, ((proc.stdout or "") + (proc.stderr or "")).strip()[:300]

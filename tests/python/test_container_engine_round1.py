@@ -275,7 +275,7 @@ def _retarget(d, stubs):
 def _run_fw(d, stubs, tmp_path, *args):
     _retarget(d, stubs)
     env = {"PATH": "/usr/bin:/bin", "EVIL_MARKER": str(tmp_path / "marker"), "HOME": str(tmp_path)}
-    return subprocess.run(["bash", str(d / "prometheus-otlp-firewall.sh"), *args], env=env, text=True,
+    return subprocess.run(["bash", "-p", str(d / "prometheus-otlp-firewall.sh"), *args], env=env, text=True,
                           capture_output=True, stdin=subprocess.DEVNULL, timeout=30, cwd=str(tmp_path))
 
 
@@ -288,7 +288,7 @@ def test_firewall_root_via_a_symlink_never_sources_a_helper_beside_the_link(tmp_
     (launch / "prometheus-otlp-firewall.sh").symlink_to(d / "prometheus-otlp-firewall.sh")
     (launch / "lib-container-engine.sh").write_text(EVIL_LIB, encoding="utf-8")
     env = {"PATH": "/usr/bin:/bin", "EVIL_MARKER": str(tmp_path / "marker"), "HOME": str(tmp_path)}
-    proc = subprocess.run(["bash", str(launch / "prometheus-otlp-firewall.sh")], env=env, text=True,
+    proc = subprocess.run(["bash", "-p", str(launch / "prometheus-otlp-firewall.sh")], env=env, text=True,
                           capture_output=True, stdin=subprocess.DEVNULL, timeout=30, cwd=str(tmp_path))
     assert not (tmp_path / "marker").exists()
     assert "usage" in proc.stderr  # the real helper was used and the script went on to its own checks

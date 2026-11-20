@@ -5,7 +5,7 @@
 3. Every sourcing script reads the helper once through an open descriptor and sources that descriptor.
 
 The tests are not root. A "simulated root" is a copy of the real script text in which the EUID test is
-forced true (see conftest.root_copy); the stat and id programs are stubbed by absolute path where a
+made to see a stub id that answers 0 (see conftest.root_copy); stat is stubbed by absolute path where a
 test needs to control ownership.
 """
 import os
@@ -15,7 +15,7 @@ import subprocess
 
 import pytest
 
-from conftest import REPO_ROOT, import_module_from_path, root_copy, write_stat_stub
+from conftest import REPO_ROOT, import_module_from_path, root_copy, write_id_stub, write_stat_stub
 
 SCRIPTS = REPO_ROOT / "scripts"
 ce = import_module_from_path("container_engine", SCRIPTS / "container_engine.py")
@@ -60,12 +60,17 @@ def run_script(path, tmp_path, env_extra=None, args=()):
            "SIEM_HOST": "localhost", "N8N_API_KEY": "Zx9-api-key-test-value", "GRAFANA_PASS": "Zx9-graf-pass-test-value",
            "EVIL_MARKER": str(tmp_path / "marker")}
     env.update(env_extra or {})
-    return subprocess.run(["bash", str(path), *args], env=env, text=True, capture_output=True,
+    return subprocess.run(["bash", "-p", str(path), *args], env=env, text=True, capture_output=True,
                           stdin=subprocess.DEVNULL, timeout=30, cwd=str(tmp_path))
 
 
 def sandbox(tmp_path, name, stubs=None):
-    d = root_copy(tmp_path / "root-sb" / "scripts", [name, "lib-container-engine.sh", "lib-secrets.sh"], SCRIPTS, stubs)
+    stat_stub = stubs is not None
+    if stubs is None:  # a stub id only: the script believes it is root, and uses the real stat
+        stubs = tmp_path / "idstub"
+        write_id_stub(stubs)
+    d = root_copy(tmp_path / "root-sb" / "scripts", [name, "lib-container-engine.sh", "lib-secrets.sh"], SCRIPTS, stubs,
+                  stat_stub=stat_stub)
     for extra in ("container_engine.py", "n8n_address.py"):
         shutil.copy(SCRIPTS / extra, d / extra)
     return d
@@ -84,8 +89,7 @@ def test_the_hostile_path_control_the_fake_utilities_do_get_called_without_the_r
     # control: with the reset removed from a copy, the same hostile PATH does reach a fake utility
     d = sandbox(tmp_path, "05-verify.sh")
     text = (d / "05-verify.sh").read_text()
-    text = re.sub(r'(?m)^\[ "\$\{EUID:-1\}" -ne 0 \].*PATH=.*\n', "", text.replace("0 -ne 0", "0 -ne 0"))
-    text = re.sub(r'(?m)^\[ 0 -ne 0 \] \|\| \{ PATH=.*\n', "", text)
+    text = re.sub(r'(?m)^PATH=.*export PATH.*\n', "", text)
     (d / "05-verify.sh").write_text(text)
     run_script(d / "05-verify.sh", tmp_path)
     assert (tmp_path / "path-marker").exists()
@@ -113,8 +117,8 @@ def _code(text):
 @pytest.mark.parametrize("name", ROOT_CAPABLE)
 def test_the_first_command_of_each_script_fixes_path(name):  # guard
     code = [ln for ln in _code((SCRIPTS / name).read_text()) if ln.strip()]
-    first = next(i for i, ln in enumerate(code) if not ln.startswith("set "))
-    assert 'PATH=/usr/sbin:/usr/bin:/sbin:/bin' in code[first], code[first]
+    first = next(i for i, ln in enumerate(code) if not ln.startswith(("set ", "unset ")))
+    assert re.search(r"PATH=(/usr/local/sbin:/usr/local/bin:)?/usr/sbin:/usr/bin:/sbin:/bin; export PATH", code[first]), code[first]
 
 
 @pytest.mark.parametrize("name", ROOT_CAPABLE)
