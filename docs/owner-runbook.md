@@ -53,7 +53,7 @@ Rules every step follows:
 | Q1 | What is the exact name of the `homelab` dev config? `docs/channel-redundancy.md` calls it "a guess". List it with `doppler configs --project homelab` (INFERRED command; check `doppler configs --help`). | Steps 0b, 4, 5, 6 |
 | Q4 | The names `FAILTEST` (workflow and credential) appear in no repo doc. The closest text is the failure-path test copy in `docs/live-deploy-runbook.md`, section 4, items 1 to 6 ("the copy", "a wrong credential in the copy"). Read the exact names in the n8n UI. | Step 3 |
 | Q5 | What is the live name of the old router workflow? The repo workflow is named "Grafana SOAR - Alert Router" and the runbook calls the new one "Grafana SOAR - Alert Router (authenticated)". Which one is live and old is not in a doc. | Step 9 |
-| Q7 | `scripts/live-deploy/grafana-deploy.py` copies only four alert files (`contact-points.yml`, the two update rule files, `heartbeat-alert-rule.yml`; VERIFIED: the `FILES` tuple). It does not copy the notification failure rule or the example contact points, and it rewrites `contact-points.yml` on every run. Steps 4 and 5 therefore copy files by hand into their own files. Should the deploy script take over that job (a code change, not part of this doc)? Issue #126 (an open PR, not merged) is the deploy script change that will later replace the manual file copies in steps 4 and 5; until it merges, copy by hand as written. | Steps 4, 5 |
+| Q7 | RESOLVED by the deploy script change (PR #126, issue #125). `scripts/live-deploy/grafana-deploy.py` now deploys the notification failure rule and, only when you name them with `--include-example`, the P1 email contact point and policy examples. It defaults to a dry run, needs `--apply`, and backs up every file it replaces. It never starts docker and never reads the compose file, so the compose line and the restart stay manual (step 4b and 4d, and 4g below). Until the PR is merged and the script is on the host, copy by hand as written in steps 4 and 5. | Steps 4, 5 |
 | Q8 | The Grafana group id for `grafana_uid`/`grafana_gid` in the backup config is not stated. The compose file sets `user: "472"` (VERIFIED) and the example says `grafana_gid = 0`. Read it with `docker exec grafana id`. | Step 2 |
 | Q9 | Which account runs the scheduled backup? The example unit uses a dedicated user and warns that docker group membership is root-equivalent (VERIFIED: `docs/examples/siem-state-backup.service`). The account and its container access are the owner's decision. | Step 2 |
 | Q10 | How is a P1 produced on demand to test the email route end to end? No doc says. | Step 5 |
@@ -573,6 +573,42 @@ Rollback (VERIFIED approach, same as `docs/live-deploy-runbook.md` section 5):
 delete the policy route; delete the two files from the live alerting folder;
 restore `docker-compose.yml.bak-<date>` over the compose file; run the restart
 in 4d. n8n and the heartbeat are untouched by this change.
+
+### 4g. Optional: copy the files with the deploy script instead of 4c
+
+Use this only after PR #126 is merged and the script is on LOGGING_BOX. The script
+copies files and nothing else: it never starts docker and never reads the compose
+file. Stage the repo files into `SIEM_STAGE_DIR`, look at the plan, then apply:
+
+```
+siem-run python3 -I scripts/live-deploy/grafana-deploy.py
+siem-run python3 -I scripts/live-deploy/grafana-deploy.py --apply
+```
+
+The first command is a dry run (the default) and changes nothing. `--apply`
+backs up each file it replaces as `NAME.bak-<UTC timestamp>`, replaces the files
+one at a time and prints a `manifest:` line for each. It is not atomic: if it
+stops on an error it lists the files already replaced and the backup for each
+(`cp -p BACKUP FILE` restores one). Details: `docs/live-deploy-runbook.md`,
+section 5.
+
+The compose line stays manual and goes to the grafana service only. If your
+compose file does not already list `GRAFANA_WEBHOOK_SECRET` in the grafana service
+environment, follow `docs/live-deploy-runbook.md`, section 5, step 4: it makes the
+compose backup mode 600 and no-clobber (`umask 077`, `cp --no-clobber`), shows the
+item `      - GRAFANA_WEBHOOK_SECRET` to add by hand after the `GF_SERVER_ROOT_URL`
+line, and gives an `awk` check that only `grafana:` mentions the variable (the
+value stays in Doppler; never run `docker compose config` for the check, it
+prints resolved values). Then restart, as in 4d:
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd /opt/siem && doppler run --project homelab --config DEV_CONFIG -- docker compose up -d grafana; echo "exit code: $?"'
+```
+
+Check: `docker compose ls` lists the project as running, the grafana container shows
+`Up` (and `healthy` if it defines a healthcheck), and the checks of 4d pass.
+Rollback: restore the compose backup `docker-compose.yml.bak-<UTC timestamp>`
+and each replaced file from its `.bak-` copy, then run the restart above.
 
 ## Step 5. P1 email contact point (LIVE)
 
