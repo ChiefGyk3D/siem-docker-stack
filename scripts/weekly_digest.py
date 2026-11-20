@@ -20,6 +20,7 @@ import datetime as dt
 import email.message
 import email.policy
 import email.utils
+import fcntl
 import hashlib
 import os
 import re
@@ -345,10 +346,11 @@ def _valid_week(value):
 class SendGuard:
     """Holds the lock for one whole gather-and-send and knows what was already sent.
 
-    Lock: a file created with O_EXCL, so two runs cannot both hold it. Its device and inode are
-    remembered and it is removed only if the path still names that same file, so a lock someone
-    replaced is never deleted by the wrong run. A killed run leaves the lock behind: the next run
-    refuses and names it (remove it by hand after checking no digest run is alive).
+    Lock: an flock on a file held open for the whole run, so ownership is the open descriptor, not a
+    pathname. The kernel drops it when the run ends or dies, so there is no stale lock to clear by
+    hand. The file `lock` stays on disk and is never unlinked (no pathname race, no inode reuse).
+    After locking, the path is checked to still name the locked file; if not, the run is refused.
+    The state folder must be on a local filesystem (flock is not dependable over NFS).
 
     Sent state, in two phases: begin_send() durably writes a `pending` file BEFORE the message is
     handed to the server; mark_sent() durably writes `last-sent` (the ISO week) after the server
@@ -358,25 +360,34 @@ class SendGuard:
 
     def __init__(self, root, name, now, force):
         self.fd, self.week, self.force = _open_state_dir(root, name), f"{now:%G-W%V}", force
-        self.lock_id = None
+        self.lockfd = None
         self.closed = False
 
     def __enter__(self):
+        refused = _Refused("another digest run holds the lock (state folder file 'lock')")
         try:
-            lockfd = os.open("lock", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=self.fd)
-        except FileExistsError:
-            self.__exit__()
-            raise _Refused("another digest run holds the lock (state folder file 'lock'); if no run is "
-                           "alive, remove that file") from None
+            for _ in range(3):
+                fd = os.open("lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=self.fd)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    os.close(fd)
+                    raise refused from None
+                try:
+                    now_path = os.stat("lock", dir_fd=self.fd, follow_symlinks=False)
+                    mine = os.fstat(fd)
+                    same = (now_path.st_dev, now_path.st_ino) == (mine.st_dev, mine.st_ino)
+                except OSError:
+                    same = False
+                if same:
+                    self.lockfd = fd
+                    break
+                os.close(fd)  # the file was replaced between open and lock: try the new one
+            else:
+                raise _Refused("the lock file keeps being replaced; another digest run is starting")
         except BaseException:
             self.__exit__()
             raise
-        try:
-            st = os.fstat(lockfd)
-            self.lock_id = (st.st_dev, st.st_ino)
-            os.write(lockfd, f"{os.getpid()} {os.urandom(8).hex()}\n".encode())
-        finally:
-            os.close(lockfd)
         try:  # __exit__ does not run when __enter__ raises: release here
             self.check_state()
         except BaseException:
@@ -471,13 +482,10 @@ class SendGuard:
             return
         self.closed = True
         try:
-            if self.lock_id is not None:
-                try:
-                    st = os.stat("lock", dir_fd=self.fd, follow_symlinks=False)
-                    if (st.st_dev, st.st_ino) == self.lock_id:
-                        os.unlink("lock", dir_fd=self.fd)
-                except OSError:
-                    pass
+            if self.lockfd is not None:
+                os.close(self.lockfd)  # closing the descriptor releases the flock
+        except OSError:
+            pass
         finally:
             try:
                 os.close(self.fd)
@@ -584,7 +592,13 @@ def _once(cfg, root, now, env, out, err, send, providers, guard):
         try:
             ew.smtp_deliver(cfg.email, env, msg, root=root, budget=cfg.delivery_budget_seconds)
         except DigestError as e:
-            guard.clear_pending()
+            if getattr(e, "uncertain", False):
+                # The server may have accepted it (no reply, lost connection, timeout, TLS error after
+                # the data went out): `pending` stays, so the next run refuses instead of duplicating.
+                err(f"delivery outcome uncertain: {e}; the state folder file 'pending' stays, so the next "
+                    "run refuses until you have checked the inbox and removed it")
+                return 3
+            guard.clear_pending()  # an explicit rejection, or a failure before any data went out
             err(f"delivery failed: {e}")
             return 3
         out(f"sent one digest to {len(cfg.email.to)} recipient(s)")

@@ -368,16 +368,56 @@ def test_force_sends_again_and_a_new_week_does_not_need_it(tmp_path, smtp_plain)
     assert _send(cfg, now=NOW + dt.timedelta(days=7)) == 0 and len(smtp_plain.sessions) == 3
 
 
-def test_an_existing_lock_refuses_the_send_and_is_released_after_a_run(tmp_path, smtp_plain):
+def _lock_is_free(d):
+    """True when nobody holds the digest lock (the lock is an flock on the open file)."""
+    import fcntl
+    import os
+    try:
+        fd = os.open(d / "lock", os.O_RDWR)
+    except FileNotFoundError:
+        return True
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def test_a_held_lock_refuses_the_send_and_is_released_after_a_run(tmp_path, smtp_plain):
+    import fcntl
+    import os
     cfg = _write(tmp_path, smtp_plain.server_address[1])
     d = tmp_path / "weekly-digest-state"
     d.mkdir(mode=0o700)
-    (d / "lock").write_text("1")
+    held = os.open(d / "lock", os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(held, fcntl.LOCK_EX)
     code, _, err = _run(cfg, send=True, providers=_fakes())
     assert code == 4 and "lock" in err and not smtp_plain.sessions
-    (d / "lock").unlink()
-    assert _run(cfg, send=True, providers=_fakes())[0] == 0 and not (d / "lock").exists()
+    os.close(held)  # the holder ends: the kernel releases the lock, no stale file to clean up
+    assert _run(cfg, send=True, providers=_fakes())[0] == 0 and _lock_is_free(d)
     assert oct(d.stat().st_mode & 0o777) == "0o700" and (d / "last-sent").read_text().strip() == "2026-W47"
+
+
+def test_a_leftover_lock_file_from_a_dead_run_does_not_block(tmp_path, smtp_plain):
+    cfg = _write(tmp_path, smtp_plain.server_address[1])
+    d = tmp_path / "weekly-digest-state"
+    d.mkdir(mode=0o700)
+    (d / "lock").write_text("pid of a dead run")
+    assert _run(cfg, send=True, providers=_fakes())[0] == 0
+
+
+def test_two_overlapping_runs_cannot_both_send(tmp_path, smtp_plain):
+    cfg = _write(tmp_path, smtp_plain.server_address[1])
+    inner = []
+
+    def overlap(ctx):
+        inner.append(_send(cfg, force=True))  # a second run starts while the first holds the lock
+        return _sec("Patched automatically", ["x"])
+    assert wd.run(cfg, NOW, env={}, out=lambda m: None, err=lambda m: None, send=True,
+                  providers=_fakes(patched=overlap)) == 0
+    assert inner == [4] and len(smtp_plain.sessions) == 1
 
 
 def test_a_failed_delivery_leaves_no_marker_and_releases_the_lock(tmp_path, smtp_plain):
@@ -385,7 +425,7 @@ def test_a_failed_delivery_leaves_no_marker_and_releases_the_lock(tmp_path, smtp
     cfg = _write(tmp_path, smtp_plain.server_address[1])
     assert _run(cfg, send=True, providers=_fakes())[0] == 3
     d = tmp_path / "weekly-digest-state"
-    assert not (d / "last-sent").exists() and not (d / "lock").exists()
+    assert not (d / "last-sent").exists() and _lock_is_free(d)
 
 
 def test_dry_run_touches_no_state(tmp_path):
@@ -494,7 +534,7 @@ def test_a_damaged_last_sent_marker_fails_closed(tmp_path, smtp_plain, kind):
             pytest.skip("running as a user that ignores file modes")
     code, _, err = _run(cfg, send=True, providers=_fakes())
     assert code == 4 and "last-sent" in err and not smtp_plain.sessions
-    assert not (marker.parent / "lock").exists()
+    assert _lock_is_free(marker.parent)
 
 
 # --- Daybreak round 3 ----------------------------------------------------------------------
@@ -531,7 +571,7 @@ def test_a_failure_after_acceptance_leaves_a_fail_closed_sentinel(tmp_path, smtp
             assert e is exc
             first = None
     assert first in (None, 1) and len(smtp_plain.sessions) == 1
-    assert not (tmp_path / "weekly-digest-state" / "lock").exists()
+    assert _lock_is_free(tmp_path / "weekly-digest-state")
     code, _, err = _run(cfg, send=True, providers=_fakes())
     assert code == 4 and "pending" in err and len(smtp_plain.sessions) == 1
     assert _send(cfg, force=True) == 0 and len(smtp_plain.sessions) == 2
@@ -558,6 +598,66 @@ def test_a_rejected_delivery_clears_the_pending_state_so_a_retry_is_allowed(tmp_
     assert _send(cfg) == 0
 
 
+# --- Daybreak round 4: ambiguous outcomes keep `pending` ----------------------------------------
+
+def _pending(tmp_path):
+    return tmp_path / "weekly-digest-state" / "pending"
+
+
+def test_a_connection_lost_after_the_data_keeps_pending_and_the_next_run_refuses(tmp_path, smtp_plain):
+    smtp_plain.drop_after_data = True  # the server queued the message, then closed without replying
+    cfg = _write(tmp_path, smtp_plain.server_address[1])
+    code, _, err = _run(cfg, send=True, providers=_fakes())
+    assert code == 3 and "uncertain" in err and len(smtp_plain.sessions) == 1
+    assert smtp_plain.sessions[0]["data"] is not None and _pending(tmp_path).exists()
+    smtp_plain.drop_after_data = False
+    code, _, err = _run(cfg, send=True, providers=_fakes())
+    assert code == 4 and "pending" in err and len(smtp_plain.sessions) == 1
+
+
+def test_a_timeout_after_the_data_keeps_pending(tmp_path, smtp_plain):
+    smtp_plain.hang_after_data = 3
+    cfg = _write(tmp_path, smtp_plain.server_address[1])
+    cfg.write_text(cfg.read_text().replace('to = ["ops@example.com"]', 'to = ["ops@example.com"]\ntimeout_seconds = 1'))
+    code, _, err = _run(cfg, send=True, providers=_fakes())
+    assert code == 3 and "uncertain" in err and _pending(tmp_path).exists()
+    assert _run(cfg, send=True, providers=_fakes())[0] == 4
+
+
+@pytest.mark.parametrize("attr,reply", [("rcpt_reply", "550 no such user"), ("rcpt_reply", "450 try later"),
+                                        ("data_reply", "554 rejected"), ("data_reply", "451 later")])
+def test_an_explicit_server_rejection_clears_pending(tmp_path, smtp_plain, attr, reply):
+    setattr(smtp_plain, attr, reply)
+    cfg = _write(tmp_path, smtp_plain.server_address[1])
+    code, _, err = _run(cfg, send=True, providers=_fakes())
+    assert code == 3 and "uncertain" not in err and not _pending(tmp_path).exists()
+
+
+def test_a_connection_that_never_opened_clears_pending(tmp_path):
+    cfg = _write(tmp_path, 1)  # nothing listens on port 1
+    code, _, err = _run(cfg, send=True, providers=_fakes())
+    assert code == 3 and "uncertain" not in err and not _pending(tmp_path).exists()
+
+
+def test_the_transport_marks_uncertain_outcomes(smtp_plain):
+    import email.message
+    cfg = ew_cfg = None
+    from test_expiry_watch_channels import _ecfg
+    msg = email.message.EmailMessage()
+    msg["From"], msg["To"], msg["Subject"] = "a@example.com", "ops@example.com", "x"
+    msg.set_content("b")
+    smtp_plain.drop_after_data = True
+    cfg = _ecfg(smtp_plain.server_address[1], security="plaintext", allow_plaintext=True)
+    with pytest.raises(wd.ew.ExpiryWatchError) as dropped:
+        wd.ew.smtp_deliver(cfg, {}, msg)
+    assert dropped.value.uncertain is True
+    smtp_plain.drop_after_data = False
+    smtp_plain.data_reply = "554 no"
+    with pytest.raises(wd.ew.ExpiryWatchError) as refused:
+        wd.ew.smtp_deliver(cfg, {}, msg)
+    assert refused.value.uncertain is False
+
+
 def test_a_marker_write_failure_cleans_its_temp_file(tmp_path, smtp_plain, monkeypatch):
     import os
     cfg = _write(tmp_path, smtp_plain.server_address[1])
@@ -570,7 +670,7 @@ def test_a_marker_write_failure_cleans_its_temp_file(tmp_path, smtp_plain, monke
     monkeypatch.setattr(os, "replace", failing)
     assert _send(cfg) == 1
     names = sorted(p.name for p in (tmp_path / "weekly-digest-state").iterdir())
-    assert names == ["pending"]
+    assert names == ["lock", "pending"]  # the lock file stays (never unlinked); no temp file is left
 
 
 def test_the_state_is_made_durable_with_fsync_of_files_and_the_folder(tmp_path, smtp_plain, monkeypatch):
@@ -588,7 +688,8 @@ def test_the_state_is_made_durable_with_fsync_of_files_and_the_folder(tmp_path, 
     assert kinds.count("file") >= 2 and kinds.count("dir") >= 2  # pending and marker, each file then folder
 
 
-def test_the_lock_is_only_removed_by_the_run_that_made_it(tmp_path, smtp_plain):
+def test_release_never_deletes_a_lock_file_it_did_not_make(tmp_path, smtp_plain):
+    """Ownership is the open, locked descriptor, not the pathname: release never unlinks."""
     cfg = _write(tmp_path, smtp_plain.server_address[1])
     lock = tmp_path / "weekly-digest-state" / "lock"
 
@@ -599,6 +700,20 @@ def test_the_lock_is_only_removed_by_the_run_that_made_it(tmp_path, smtp_plain):
     assert wd.run(cfg, NOW, env={}, out=lambda m: None, err=lambda m: None, send=True,
                   providers=_fakes(patched=swap)) == 0
     assert lock.read_text() == "another run"
+
+
+def test_the_guard_never_unlinks_the_lock_pathname(tmp_path, monkeypatch):
+    import os
+    root = wd.ew.Root(str(tmp_path))
+    unlinked = []
+    real = os.unlink
+    monkeypatch.setattr(os, "unlink", lambda p, **kw: (unlinked.append(p), real(p, **kw))[1])
+    try:
+        with wd.SendGuard(root, "weekly-digest-state", NOW, False):
+            pass
+    finally:
+        root.close()
+    assert "lock" not in unlinked
 
 
 def test_releasing_twice_or_after_the_lock_vanished_never_raises(tmp_path):
@@ -616,7 +731,7 @@ def test_releasing_twice_or_after_the_lock_vanished_never_raises(tmp_path):
 def test_a_refusal_releases_the_lock_so_the_next_run_is_refused_for_the_right_reason(tmp_path, smtp_plain):
     cfg = _write(tmp_path, smtp_plain.server_address[1])
     assert _send(cfg) == 0 and _send(cfg) == 4
-    assert not (tmp_path / "weekly-digest-state" / "lock").exists()
+    assert _lock_is_free(tmp_path / "weekly-digest-state")
     assert _send(cfg, force=True) == 0  # would be refused by a leaked lock
 
 

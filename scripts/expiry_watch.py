@@ -1286,6 +1286,7 @@ class _Deadline:
         self.end = time.monotonic() + seconds
         self.seconds = seconds
         self.sock = None
+        self.data_started = False  # set by the worker just before MAIL FROM, RCPT TO and DATA begin
         self.delivered = False  # set by the worker once the server has accepted the message
         self.aborted = threading.Event()
 
@@ -1560,6 +1561,7 @@ def smtp_deliver(cfg, env, msg, root=None, budget=None):
                 conn.starttls(context=context)
             if login:
                 conn.login(*login)
+            dl.data_started = True  # from here a failure without a server reply is uncertain
             conn.send_message(msg, from_addr=cfg.sender, to_addrs=list(cfg.to))
             dl.delivered = True  # accepted by the server: a slow QUIT below cannot turn it into a failure
         except BaseException:
@@ -1572,23 +1574,35 @@ def smtp_deliver(cfg, env, msg, root=None, budget=None):
         finally:
             conn.close()
 
+    def failed(exc, uncertain):
+        """Tag the error with what the caller must know: `uncertain` is True when the server MAY
+        have accepted the message (a failure without a server reply after the message data began
+        to go out: timeout, lost connection, TLS error, deadline). An explicit reply code from the
+        server, or a failure before the data began, is a certain "not accepted"."""
+        exc.uncertain = bool(uncertain)
+        return exc
+
     where = f"email {cfg.host}"
     try:
         _run_deadline(dl, send)
     except _Overrun as e:
-        raise _Overrun(f"{where}: {e}") from None
-    except ExpiryWatchError:
-        raise
+        raise failed(_Overrun(f"{where}: {e}"), dl.data_started) from None
+    except ExpiryWatchError as e:
+        raise failed(e, False)
     except smtplib.SMTPNotSupportedError:
-        raise ExpiryWatchError(f"{where}: the server does not offer the required TLS or login; nothing sent") from None
+        raise failed(ExpiryWatchError(f"{where}: the server does not offer the required TLS or login; nothing sent"),
+                     False) from None
     except smtplib.SMTPResponseException as e:
-        raise ExpiryWatchError(f"{where} rejected: SMTP {e.smtp_code}") from None
+        raise failed(ExpiryWatchError(f"{where} rejected: SMTP {e.smtp_code}"), False) from None
+    except smtplib.SMTPRecipientsRefused as e:
+        raise failed(ExpiryWatchError(f"{where} failed: {type(e).__name__}"), False) from None
     except smtplib.SMTPException as e:
-        raise ExpiryWatchError(f"{where} failed: {type(e).__name__}") from None
+        raise failed(ExpiryWatchError(f"{where} failed: {type(e).__name__}"), dl.data_started) from None
     except ssl.SSLError as e:
-        raise ExpiryWatchError(f"{where}: TLS failed: {e.reason or type(e).__name__}") from None
+        raise failed(ExpiryWatchError(f"{where}: TLS failed: {e.reason or type(e).__name__}"), dl.data_started) from None
     except (OSError, ValueError) as e:
-        raise ExpiryWatchError(f"{where} unreachable: {getattr(e, 'strerror', None) or type(e).__name__}") from None
+        raise failed(ExpiryWatchError(f"{where} unreachable: {getattr(e, 'strerror', None) or type(e).__name__}"),
+                     dl.data_started) from None
 
 
 # --- state file ----------------------------------------------------------------------------------
