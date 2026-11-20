@@ -156,6 +156,38 @@ file is checked, and that same open descriptor is sourced, so replacing the path
 after the check changes nothing. All scripts carry the same bootstrap block; a test
 keeps the copies identical.
 
+`lib-secrets.sh` (the placeholder rule) is loaded the same way by `check-env.sh`,
+`deploy-n8n-soar.sh`, `08-crowdsec-smoketest.sh` and
+`render-prometheus-web-config.sh`: no script sources it by pathname. Each one opens it
+once on a descriptor, checks the open file (a regular file with one link, owned by root
+or by the running user, and neither group nor world writable, for root and non-root
+runs alike) and every directory above it (no symlink; as root, root-owned and closed to
+group and others; otherwise owned by root or by you and not world writable, except a
+sticky directory such as `/tmp`), then sources that same descriptor. A group-writable
+helper is refused because a group peer could edit the very inode that was opened, after
+the check and before the source (the refusal says `chmod g-w,o-w <helper>`). A
+group-writable ancestor directory is acceptable for a non-root run only because the
+check happens after the open: replacing a directory entry cannot change the inode the
+descriptor already holds.
+
+What the checks cannot do: a mode check does not revoke a writable descriptor that
+another process already holds on the same inode (it opened the helper for writing
+before the mode was closed). It protects against new opens and against replacement of
+the path, not against such an earlier writer. To narrow that window, each script reads
+the whole helper twice from the open inode (the second time through a fresh open of the
+same descriptor, from offset 0) into private variables. It compares size, mtime, ctime
+(nanosecond precision, GNU `stat` `%.9Y` and `%.9Z`) and device:inode before and after,
+requires the two reads to match byte for byte and the byte count to equal the size, and
+refuses an empty file or a failed read (a change refuses the load with "changed while it
+was being read"). It sources the first copy, never the live inode. This narrows the
+window; it does not close it. It cannot detect a write that lands before the first read,
+or a write between the reads that is put back before the second, so the content that
+runs is not guaranteed to be the content that was checked. The real protection is a root-owned release tree, as
+step 0a of [owner-runbook.md](owner-runbook.md) makes it; whoever runs these scripts
+from a group-shared checkout accepts the residual risk. The check stays inline in
+each script on purpose: a shared loader file would itself have to be sourced unchecked
+first. Tests: `tests/python/test_secrets_helper_bootstrap.py`.
+
 ## The root-owned firewall script
 
 `prometheus-otlp-firewall.sh` uses the same bootstrap and, as root, also requires

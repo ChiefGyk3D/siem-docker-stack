@@ -114,15 +114,37 @@ fi
 exec 9<"$LIB_PATH" || lib_fail "it cannot be opened"
 LIB_OWNER="$(/usr/bin/stat -L -c %u -- /proc/self/fd/9)"
 LIB_MODE="$(/usr/bin/stat -L -c %a -- /proc/self/fd/9)"
-LIB_MASK=002  # world write is never allowed; group write too when running as root
-[ "$RUN_UID" -ne 0 ] || LIB_MASK=022
+LIB_LINKS="$(/usr/bin/stat -L -c %h -- /proc/self/fd/9)"
+LIB_MASK=022  # group or world write on the opened file is never allowed, root or not: a peer could edit the open inode before it is sourced
 if [ ! -f /proc/self/fd/9 ] || { [ "$LIB_OWNER" != 0 ] && [ "$LIB_OWNER" != "$RUN_UID" ]; } ||
-    [ $((8#$LIB_MODE & 8#$LIB_MASK)) -ne 0 ]; then
-    lib_fail "it must be a regular file owned by root or by you, not world writable (and not group writable when run as root)"
+    [ $((8#$LIB_MODE & 8#$LIB_MASK)) -ne 0 ] || [ "$LIB_LINKS" != 1 ]; then
+    lib_fail "it must be a regular file with one link, owned by root or by you, and not group or world writable (fix: chmod g-w,o-w ${LIB_PATH})"
 fi
-# shellcheck source=scripts/lib-secrets.sh
-source /proc/self/fd/9
+# The checks above protect against a new open for writing (mode), a replaced or swapped path (the
+# descriptor) and a planted ancestor. They cannot revoke a descriptor a peer already holds open for
+# writing on this inode, and nothing here can: this only NARROWS that window. The file is read twice
+# from the open inode (the second time through a fresh open of the same descriptor, from offset 0),
+# size, mtime and ctime (nanoseconds) and device:inode are compared before and after, the two reads
+# must match byte for byte, the byte count must equal the size, and the first copy is sourced, never
+# the live inode. Not detected: a write before the first read, or a write between the reads that is
+# put back before the second. The real protection is a root-owned release tree (docs/prometheus-otlp.md);
+# running from a group-shared checkout accepts that residual risk.
+# stat's %.9Y is GNU coreutils precision syntax (VERIFIED by running stat 9.7 here; INFERRED for the box).
+LIB_FMT='%s %.9Y %.9Z %d:%i'
+LIB_ST1="$(/usr/bin/stat -L -c "$LIB_FMT" -- /proc/self/fd/9)" || lib_fail "it cannot be examined"
+LIB_SNAP="$(/bin/cat <&9 && printf x)" || lib_fail "it cannot be read"
+LIB_SNAP2="$(/bin/cat < /proc/self/fd/9 && printf x)" || lib_fail "it cannot be read a second time"
+LIB_ST2="$(/usr/bin/stat -L -c "$LIB_FMT" -- /proc/self/fd/9)" || lib_fail "it cannot be examined"
 exec 9<&-
+LIB_SNAP="${LIB_SNAP%x}"
+LIB_SNAP2="${LIB_SNAP2%x}"
+{ [ "$LIB_ST1" = "$LIB_ST2" ] && [ "$LIB_SNAP" = "$LIB_SNAP2" ]; } || lib_fail "it changed while it was being read"
+LIB_SIZE="${LIB_ST1%% *}"
+LIB_LEN="$(LC_ALL=C; echo "${#LIB_SNAP}")"  # bytes, not characters
+{ [ "$LIB_SIZE" -gt 0 ] && [ "$LIB_LEN" = "$LIB_SIZE" ]; } ||
+    lib_fail "it is empty or its content length (${LIB_LEN} bytes) differs from its size (${LIB_SIZE} bytes)"
+# shellcheck source=scripts/lib-secrets.sh
+source <(printf '%s' "$LIB_SNAP")
 
 if [ "$RUN_UID" -ne 0 ] && [ "$RUN_UID" -ne "$OWNER_UID" ]; then
     die "run as root (sudo) so the files can be owned by uid ${OWNER_UID} with mode 0400; refusing to write a readable secret"
