@@ -1,0 +1,153 @@
+# Patch Gremlin update alerts (issue #65, epic #62). DRAFT, INACTIVE.
+#
+# This file ends in .example, so Grafana never loads it (it provisions only
+# *.yml and *.yaml) and the alert taxonomy test does not scan it. To enable it,
+# follow docs/patch-gremlin-alerts.md: that is an owner step.
+#
+# Data: Prometheus (datasource uid `prometheus`), series from the Patch Gremlin
+# exporter through node_exporter's textfile collector. Metric names VERIFIED
+# against monitoring/prometheus-exporter.sh in ChiefGyk3D/Patch-Gremlin (commit
+# in the doc). node_reboot_required is NOT emitted by Patch Gremlin or by stock
+# node_exporter; the reboot rule that uses it is INFERRED and ships paused.
+#
+# Design, same as the UniFi and pfSense update rules:
+# - `for: 0s` and the clock inside the query (min_over_time over 24h), because a
+#   `for` clock restarts on every data gap.
+# - Every query aggregates with `max by (instance)`, so a host seen through two
+#   scrape jobs counts once.
+# - execErrState Alerting: a rule that cannot evaluate must be loud, not silent.
+# - Labels follow the alert taxonomy (docs/alert-taxonomy.md, PR #142): all
+#   three are tier P2, severity warning, phone "false" (Discord, no phone push).
+#   `source: patch-gremlin` is a new source value: when this file is promoted to
+#   .yml, add it to SOURCES in tests/python/test_alert_taxonomy.py and to the
+#   taxonomy doc in the same change. update_alert routes them through the
+#   update notification policy (4h repeat for warning).
+# - Security updates are applied automatically by Patch Gremlin, so no rule here
+#   pages on them; the pending rule subtracts them.
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: Update pending - Patch Gremlin
+    folder: Update Alerts
+    interval: 5m
+    rules:
+      - uid: update-patch-gremlin-pending-24h
+        title: "Patch Gremlin non-security updates pending over 24h"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 86400, to: 0}
+            datasourceUid: prometheus
+            model:
+              refId: A
+              datasource: {type: prometheus, uid: prometheus}
+              expr: 'max by (instance) (clamp_min(min_over_time((patch_gremlin_pending_updates - patch_gremlin_pending_security_updates)[24h:5m]), 0))'
+              instant: true
+              range: false
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: B, type: reduce, expression: A, reducer: last, settings: {mode: dropNN}}
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: C, type: threshold, expression: B, conditions: [{evaluator: {type: gt, params: [0]}}]}
+        # noDataState OK: no series means no host reports pending updates or the exporter is gone; the
+        # stale rule below covers a vanished exporter, so this rule stays quiet instead of double alerting.
+        noDataState: OK
+        execErrState: Alerting
+        for: 0s
+        isPaused: false
+        annotations:
+          summary: "Host {{ $labels.instance }} has had non-security updates pending for over 24 hours"
+          description: "Patch Gremlin reports packages still awaiting upgrade that are not security updates (pending total minus pending security), continuously for 24 hours. Apply them at the next maintenance window. Clears when the count reaches zero."
+        labels:
+          severity: "warning"
+          tier: "P2"
+          phone: "false"
+          alert_group: "updates"
+          source: "patch-gremlin"
+          update_alert: "true"
+
+      # PAUSED: the metric node_reboot_required is INFERRED. Patch Gremlin does not
+      # export it. Supply it first (docs/patch-gremlin-alerts.md, owner steps),
+      # confirm it in Prometheus, then unpause. role="critical" is a placeholder:
+      # use the label your target files set on critical systems.
+      - uid: update-patch-gremlin-reboot-required
+        title: "Patch Gremlin reboot required on a critical system"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 86400, to: 0}
+            datasourceUid: prometheus
+            model:
+              refId: A
+              datasource: {type: prometheus, uid: prometheus}
+              expr: 'max by (instance) (min_over_time(node_reboot_required{role="critical"}[24h]))'
+              instant: true
+              range: false
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: B, type: reduce, expression: A, reducer: last, settings: {mode: dropNN}}
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: C, type: threshold, expression: B, conditions: [{evaluator: {type: gt, params: [0]}}]}
+        # noDataState OK: most hosts do not emit this gauge, so no data is the normal state and must not alert.
+        noDataState: OK
+        execErrState: Alerting
+        for: 0s
+        isPaused: true
+        annotations:
+          summary: "Host {{ $labels.instance }} has needed a reboot for over 24 hours"
+          description: "A reboot has been required for 24 hours on a host labeled role=critical. Reboot it in a maintenance window. Clears when the gauge returns to 0."
+        labels:
+          severity: "warning"
+          tier: "P2"
+          phone: "false"
+          alert_group: "updates"
+          source: "patch-gremlin"
+          update_alert: "true"
+
+      # The 172800 s (48 h) threshold is INFERRED: the run schedule is set on each
+      # host (daily timer assumed). Raise it for a weekly schedule.
+      - uid: update-patch-gremlin-stale-or-failed
+        title: "Patch Gremlin last run stale or failed"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 300, to: 0}
+            datasourceUid: prometheus
+            model:
+              refId: A
+              datasource: {type: prometheus, uid: prometheus}
+              expr: 'max by (instance) ((time() - patch_gremlin_last_run_timestamp_seconds > 172800) or patch_gremlin_status_info{status="error"})'
+              instant: true
+              range: false
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: B, type: reduce, expression: A, reducer: last, settings: {mode: dropNN}}
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: C, type: threshold, expression: B, conditions: [{evaluator: {type: gt, params: [0]}}]}
+        # noDataState Alerting: this is the watchdog for the whole set. No data at all means every exporter
+        # stopped reporting, which would silence the two rules above, so it must alert.
+        # (A single missing host cannot be seen here: Prometheus has no series for it.)
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 0s
+        isPaused: false
+        annotations:
+          summary: "Patch Gremlin on {{ $labels.instance }} has not run for over 48 hours or its last run failed"
+          description: "Either the last notifier run was more than 48 hours ago (a missing state file reads as epoch 0, so it also fires), or the last run status was error. Check the patch-gremlin timer and its log on the host."
+        labels:
+          severity: "warning"
+          tier: "P2"
+          phone: "false"
+          alert_group: "updates"
+          source: "patch-gremlin"
+          update_alert: "true"

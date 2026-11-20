@@ -1,0 +1,16 @@
+[
+  {
+    "targets": ["192.0.2.30:9100"],
+    "labels": {
+      "instance_name": "linux-host-01",
+      "role": "critical"
+    }
+  },
+  {
+    "targets": ["192.0.2.31:9100"],
+    "labels": {
+      "instance_name": "linux-host-02",
+      "role": "standard"
+    }
+  }
+]
