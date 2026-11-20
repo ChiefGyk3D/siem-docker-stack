@@ -51,10 +51,9 @@ Rules every step follows:
 | # | Question | Where it bites |
 |---|----------|----------------|
 | Q1 | What is the exact name of the `homelab` dev config? `docs/channel-redundancy.md` calls it "a guess". List it with `doppler configs --project homelab` (INFERRED command; check `doppler configs --help`). | Steps 0b, 4, 5, 6 |
-| Q3 | `docs/expiry-watch.md` requires `[router].url` to be https (plain http only for localhost). The n8n router is reached over plain http on the siem network (`docs/live-deploy-runbook.md`, section 4). How will the expiry watch reach it? | Step 6 |
 | Q4 | The names `FAILTEST` (workflow and credential) appear in no repo doc. The closest text is the failure-path test copy in `docs/live-deploy-runbook.md`, section 4, items 1 to 6 ("the copy", "a wrong credential in the copy"). Read the exact names in the n8n UI. | Step 3 |
 | Q5 | What is the live name of the old router workflow? The repo workflow is named "Grafana SOAR - Alert Router" and the runbook calls the new one "Grafana SOAR - Alert Router (authenticated)". Which one is live and old is not in a doc. | Step 9 |
-| Q7 | `scripts/live-deploy/grafana-deploy.py` copies only four alert files (`contact-points.yml`, the two update rule files, `heartbeat-alert-rule.yml`; VERIFIED: the `FILES` tuple). It does not copy the notification failure rule or the example contact points, and it rewrites `contact-points.yml` on every run. Steps 4 and 5 therefore copy files by hand into their own files. Should the deploy script take over that job (a code change, not part of this doc)? | Steps 4, 5 |
+| Q7 | `scripts/live-deploy/grafana-deploy.py` copies only four alert files (`contact-points.yml`, the two update rule files, `heartbeat-alert-rule.yml`; VERIFIED: the `FILES` tuple). It does not copy the notification failure rule or the example contact points, and it rewrites `contact-points.yml` on every run. Steps 4 and 5 therefore copy files by hand into their own files. Should the deploy script take over that job (a code change, not part of this doc)? Issue #126 (an open PR, not merged) is the deploy script change that will later replace the manual file copies in steps 4 and 5; until it merges, copy by hand as written. | Steps 4, 5 |
 | Q8 | The Grafana group id for `grafana_uid`/`grafana_gid` in the backup config is not stated. The compose file sets `user: "472"` (VERIFIED) and the example says `grafana_gid = 0`. Read it with `docker exec grafana id`. | Step 2 |
 | Q9 | Which account runs the scheduled backup? The example unit uses a dedicated user and warns that docker group membership is root-equivalent (VERIFIED: `docs/examples/siem-state-backup.service`). The account and its container access are the owner's decision. | Step 2 |
 | Q10 | How is a P1 produced on demand to test the email route end to end? No doc says. | Step 5 |
@@ -707,9 +706,11 @@ Prerequisites:
 
 - Python 3.11 or newer on LOGGING_BOX (VERIFIED: "You need Python 3.11 or
   newer").
-- The router is live and healthy (step 1), and Q3 is solved: the router URL must
-  be https, or plain http only for localhost (VERIFIED). Until then the watch
-  cannot reach the router.
+- The router is live and healthy (step 1). Owner decision: the watch runs ON
+  LOGGING_BOX and posts to n8n through a localhost port, because the watch
+  requires an https router URL and allows plain http only for localhost
+  (VERIFIED: `docs/expiry-watch.md`, config reference), so no plaintext path
+  crosses the network. Section 6.0 sets that up.
 - For email delivery from the watch itself: SMTP login values (step 5 provider).
 - For the two token providers: throwaway read-only tokens to test with. The
   secret manager list permission is undocumented by the vendor; test with a
@@ -722,6 +723,87 @@ Prerequisites:
   quick start). That value lives in `prd_network` today. Copying it to dev
   reuses a shared secret; the alternative is a second header credential for the
   watch (a router change). OPEN QUESTION, Q11, the owner decides.
+
+### 6.0 A localhost URL for n8n (on LOGGING_BOX)
+
+n8n is on the siem network and a macvlan network, and the docs reach it by the
+name `n8n` from other containers (VERIFIED: `docs/live-deploy-runbook.md`,
+section 4; `docs/examples/n8n-compose.example.yml`). A macvlan container cannot
+be reached from its own host (VERIFIED: same section), so the watch needs a
+port published on the host's loopback address.
+
+Check first whether one is already published (read only):
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'docker port n8n'
+```
+
+Expected if one exists: a line such as `PORT/tcp -> 127.0.0.1:HOST_PORT`. Empty
+output means no port is published. A mapping to `0.0.0.0` is not acceptable
+here, because it would expose the router webhook on every host address; handle it
+as "not published on 127.0.0.1 only" and fix it in the same edit below.
+
+If none is published on 127.0.0.1, publish one. n8n is deployed from its own
+compose file, separate from this repo's `docker/docker-compose.yml` (VERIFIED:
+header of `docs/examples/n8n-compose.example.yml`). Do not guess the internal
+port: read it from that compose file (its `N8N_PORT` setting, or the port the
+docs use). The docs reach n8n at `http://n8n/webhook/...`, which is port 80
+(VERIFIED: runbook section 4 and `scripts/n8n_address.py`, default 80), not
+n8n's own upstream default, so do not assume 5678. Find and note it:
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'grep -n -i -E "N8N_PORT|ports:|container_name: n8n" N8N_COMPOSE_FILE'
+```
+
+Replace `N8N_COMPOSE_FILE` with the path of the compose file that defines n8n.
+Back it up first, then edit it to add this under the `n8n` service, with
+`CONTAINER_PORT` the value you read and `HOST_PORT` any free port above 1024
+that you choose (INFERRED: the `127.0.0.1:HOST:CONTAINER` form is standard
+Compose syntax, not in a repo doc, and publishing on a container attached to
+a bridge network is assumed to work alongside the macvlan one):
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cp N8N_COMPOSE_FILE "N8N_COMPOSE_FILE.bak-$(date +%Y%m%d)"'
+```
+
+```
+    ports:
+      - "127.0.0.1:HOST_PORT:CONTAINER_PORT"
+```
+
+Apply it by recreating only n8n, then immediately re-check the siem network,
+because a recreate can drop it (VERIFIED: runbook, "Keep n8n on the siem
+network"):
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd N8N_COMPOSE_DIR && docker compose up -d n8n && docker port n8n && docker network inspect SIEM_NETWORK --format "{{range .Containers}}{{.Name}} {{end}}"'
+```
+
+`N8N_COMPOSE_DIR` is the folder of that file and `SIEM_NETWORK` the real network
+name from `docker network ls` (VERIFIED: runbook). Expect the new
+`127.0.0.1:HOST_PORT` line and `n8n` in the container list. Then send the
+baseline test alert (`n8n-test-router.py`, runbook section 4) and confirm the
+next heartbeat ping arrives within 6 minutes (step 1). A recreate restarts
+n8n, so do this in a quiet moment; the heartbeat and any firing alert wait for
+the restart.
+
+The URL for the watch config is then
+`http://127.0.0.1:HOST_PORT/webhook/PRIVATE_WEBHOOK_PATH` (plain http is allowed
+for localhost; VERIFIED: `docs/expiry-watch.md`). Prove it reaches the router
+without sending an alert, with a request that carries no secret and expects a
+401 or 403 (VERIFIED: runbook section 4, cases 1 to 3):
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'curl -s -o /dev/null -w "%{http_code}\n" -X POST -H "Content-Type: application/json" -d "{}" http://127.0.0.1:HOST_PORT/webhook/PRIVATE_WEBHOOK_PATH'
+```
+
+A `401` or `403` means the localhost URL reaches the authenticated router. A
+`404` means the path or port is wrong; `Connection refused` means no port is
+published.
+
+Rollback: restore `N8N_COMPOSE_FILE.bak-<date>` over the compose file, run the
+same recreate command, and re-check the siem network and the heartbeat. Nothing
+else changes; the siem network name `n8n` still serves Grafana.
 
 ### 6a. Private config folder and copies (on LOGGING_BOX)
 
@@ -738,8 +820,9 @@ cp REPO_DIR/docs/expiry-watch-registry.example.toml /etc/expiry-watch/expiry-wat
 
 Edit (the example values are placeholders and several will fail until replaced):
 
-- `[router].url`: the router webhook with its private path (see Q3 and the
-  `router-path` file in the secrets config directory, runbook section 7).
+- `[router].url`: the localhost URL from section 6.0,
+  `http://127.0.0.1:HOST_PORT/webhook/PRIVATE_WEBHOOK_PATH` (the private path is
+  in the `router-path` file in the secrets config directory, runbook section 7).
 - `path` of the registry provider: `expiry-watch-registry.toml`. List your real
   items in the registry file (`name`, `kind`, `expires` as `YYYY-MM-DD`,
   `owner`, `runbook`).
@@ -806,11 +889,18 @@ ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && doppler run
 ```
 
 Confirm the messages arrive and the state file `/etc/expiry-watch/expiry-watch-state.json`
-exists with mode 0600 (VERIFIED). Then schedule it with the systemd service and
-timer in `docs/expiry-watch.md`, "Scheduling". That doc's examples read the
-router secret from an `EnvironmentFile` (mode 0600, owned by the job user); in
-this setup you would instead wrap `ExecStart` in `doppler run` or decide Q11
-differently. The doc also warns that nothing alerts you if the schedule stops;
+exists with mode 0600 (VERIFIED). Then schedule it on LOGGING_BOX with either a
+systemd service and timer or a cron entry; both are given in
+`docs/expiry-watch.md`, "Scheduling", and the choice is yours. Whichever you
+pick, the job runs on the box, as the same user that owns the config folder, and
+reads its secrets only from the single dev config by wrapping the command in
+`doppler run --project homelab --config DEV_CONFIG --` (the secrets are named by
+variable only; no value goes in the unit, the cron line or the config). That
+doc's examples instead read the router secret from an `EnvironmentFile` (mode
+0600, owned by the job user); using `doppler run` in place of it is INFERRED, and
+needs the Doppler CLI logged in for that user (non-interactive login for a
+scheduled job is not covered by any repo doc). Decide Q11 on the router secret
+separately. The doc also warns that nothing alerts you if the schedule stops;
 use job monitoring (VERIFIED).
 
 Rollback: disable the timer or remove the cron line. Deleting the state file
