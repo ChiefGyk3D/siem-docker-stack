@@ -1195,3 +1195,65 @@ def test_issue179_round3_mutation_without_the_host_file_checks_a_symlink_is_pars
     mutated = REHEARSE.replace(check, "")
     rc2, out2, log2, _ = run_rehearsal(tmp_path / "b", dest="symlink", block=mutated)
     assert "docker run" in log2  # without the check the link was followed and the run went on
+
+
+# ---- issue 181: the teardown-failed flag and the freshness inventory ---------------------
+
+# The live removal fails only once; the final teardown then succeeds, so ONLY the flag can carry the failure to the status.
+FAIL_ONCE = '''
+eval "docker_real() $(declare -f docker | tail -n +2)"
+docker() {
+  if [[ "$*" == *"n8n rm -rf"* ]] && [ ! -e "$LOG.once" ]; then : > "$LOG.once"; echo "docker $*" >> "$LOG"; return 7; fi
+  docker_real "$@"
+}
+'''
+
+
+def test_issue181_the_teardown_failed_flag_is_what_makes_the_final_status_nonzero(tmp_path):
+    assert "TDFAIL=1" in REHEARSE
+    rc, out, log, scratch = run_rehearsal(tmp_path / "a", block=FAIL_ONCE + REHEARSE)
+    assert "LIVE LEFTOVER: /tmp/router-rehearsal.AbC123" in out, out  # the first removal failed
+    assert "teardown ok" in out and not scratch.exists()  # and the retry cleaned up, so nothing but the flag remains
+    assert rc != 0 and "rehearsal exit code: 1" in out, out
+    mutated = REHEARSE.replace("TDFAIL=1", ":")
+    assert mutated != REHEARSE
+    rc2, out2, log2, _ = run_rehearsal(tmp_path / "b", block=FAIL_ONCE + mutated)
+    assert "LIVE LEFTOVER" in out2 and "teardown ok" in out2, out2
+    assert rc2 == 0 and "rehearsal exit code: 0" in out2, out2  # without the flag the failure is lost, so the pin bites
+
+
+FRESH_LINE = re.compile(r"^OWNER_FRESH=1; for F in ([^;]*); do ", flags=re.M)
+
+
+def fresh_inventory(text):
+    found = FRESH_LINE.findall(text)
+    assert len(found) == 1, "the runbook must have exactly one OWNER_FRESH unset inventory line"
+    return found[0].split()
+
+
+def defined_owner_functions(text):
+    return sorted(set(re.findall(r"^(owner_[a-z0-9_]+)\(\) \{$", "\n".join(fences(text)), flags=re.M)))
+
+
+def inventory_problems(text):
+    inventory, defined = fresh_inventory(text), defined_owner_functions(text)
+    return ([n for n in defined if n not in inventory], [n for n in inventory if n not in defined],
+            [n for n in set(inventory) if inventory.count(n) > 1])
+
+
+def test_issue181_the_freshness_inventory_lists_every_owner_function_and_nothing_else():
+    assert len(defined_owner_functions(RUNBOOK)) >= 7
+    assert "owner_rehearse_down" in defined_owner_functions(RUNBOOK) and "owner_rehearse_router" in defined_owner_functions(RUNBOOK)
+    assert inventory_problems(RUNBOOK) == ([], [], [])
+
+
+def test_issue181_the_inventory_check_bites_on_a_missing_a_stale_and_a_duplicate_name():
+    inventory = fresh_inventory(RUNBOOK)
+    line = "for F in " + " ".join(inventory) + "; do"
+    assert line in RUNBOOK
+    missing = RUNBOOK.replace(line, line.replace(" owner_rehearse_down", ""))
+    assert inventory_problems(missing)[0] == ["owner_rehearse_down"]
+    stale = RUNBOOK.replace(line, line.replace("; do", " owner_gone; do"))
+    assert inventory_problems(stale)[1] == ["owner_gone"]
+    dup = RUNBOOK.replace(line, line.replace("; do", " owner_chk_vars; do"))
+    assert inventory_problems(dup)[2] == ["owner_chk_vars"]
