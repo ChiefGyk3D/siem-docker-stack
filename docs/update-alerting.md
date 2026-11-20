@@ -71,6 +71,41 @@ you turn it on.
   minus 160), so a short outage does not drop a critical back to a warning.
   pfSense rules keep the separate `for` durations.
 
+### Query errors
+
+Failure mode (found on a live stack): the UniFi rules once sat in an
+evaluation error state for about seven hours because every query failed, and
+nothing alerted. Grafana keeps two separate settings per rule: `noDataState`
+(the query worked and returned nothing) and `execErrState` (the query failed
+or timed out). Provisioning accepts `Error`, `Alerting` and `OK` for
+`execErrState` (Grafana file-provisioning docs, read 2026-11-19). With
+`OK` the failed evaluation reads as healthy, so a broken datasource looks the
+same as no pending update.
+
+Every update rule, in both files, sets `execErrState: Alerting`, so a failing
+query fires that rule's own alert with its own severity and routing. It is set
+explicitly even though Alerting is Grafana's default, so no edit can lean on
+a default. A test fails if any update rule has an `OK` or `Error` error state.
+The alternative, `Error`, was not used: it leaves the rule to raise a
+separate `DatasourceError` alert, which carries no `update_alert` or `phone`
+label and so would not use the update routes. Alerting directly instead of the
+default separate-alert behavior keeps one rule, one route and one place to look.
+The "UniFi poller data stale" rule remains the watchdog for a poller that is
+up but not writing.
+
+`noDataState` is unchanged: `OK` on the two UniFi pending rules (no data means
+no pending update) and `Alerting` everywhere else.
+
+A pending-rule alert caused by a query error shows the device label as empty,
+because no series came back. Check the rule's state history for the error text
+before assuming a device is behind on updates.
+
+The datasource address: the live UniFi datasource currently uses the InfluxDB
+container's own address instead of its service name, because another container
+advertises the same service name on the shared network. Replacing that with a
+stable alias is blocked on fixing the collision on the live box and is tracked
+in issue #61, not changed in this repository.
+
 ### UniFi data
 
 The UniFi poller (unpoller) writes InfluxDB database `unpoller`, one
