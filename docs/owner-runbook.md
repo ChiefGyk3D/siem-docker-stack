@@ -5,8 +5,10 @@ platform (epic #62). Nothing in this repository does these steps for you. Each
 step names the doc it comes from, what must be true first, the exact commands,
 what to watch, and how to undo it.
 
-Written 2026-11-19 against `origin/master` at commit `a503203`. Every fact is
-marked:
+Written 2026-11-19 against `origin/master` at commit `a503203`. Steps 0 to 6.3
+were audited again on 2026-11-20 against `origin/master` at commit `a4cdb72`
+(issue #174); `tests/python/test_owner_runbook.py` keeps the machine-checkable
+parts true. Every fact is marked:
 
 - VERIFIED: stated in a repo doc or file, and the doc is cited. VERIFIED means
   "a repo doc says so", not "seen on the live system". Most live behavior is
@@ -23,10 +25,61 @@ marked:
 |-------------|---------|
 | `LOGGING_BOX` | The SIEM host that runs the stack |
 | `KEY_FILE` | Path to the SSH private key for LOGGING_BOX |
-| `REPO_DIR` | Where this repository is checked out on LOGGING_BOX |
+| `REPO_DIR` | Absolute path of a copy of this repository's `scripts`, `n8n`, `docs` and alerting files on LOGGING_BOX, made by step 0a (for example `/home/YOU/siem-docker-stack`). It is NOT `/opt/siem`: that is the deployed stack and has no `n8n` folder and no `live-deploy` scripts |
 | `SIEM_DIR` | Live stack directory, default `/opt/siem` (`docs/live-deploy-runbook.md`, variable table) |
-| `dev_network` | The Doppler branch config under the `dev` environment of project `homelab` that holds every new alerting value (created in step 0b) |
-| `ROUTER_ID`, `HANDLER_ID` | The n8n workflow ids printed by the router import (`docs/live-deploy-runbook.md`, section 3) |
+| `dev_network`, `DEV_CONFIG` | The Doppler branch config under the `dev` environment of project `homelab` that holds every new alerting value (created in step 0b). `DEV_CONFIG` is the placeholder name the live deploy runbook uses for the same config; its value is `dev_network` |
+| `ROUTER_ID` | The n8n id (16 hex characters) of the LIVE router workflow "Grafana SOAR - Alert Router (authenticated)". The router import does NOT print it: read it with `docker exec n8n n8n list:workflow` or from the workflow's address in the n8n interface (the id is in the URL). Passing it makes the import overwrite that workflow; leaving it out makes a second copy with a new id |
+| `HANDLER_ID` | The n8n id of the live error handler workflow "Alert Router Error Handler". Printed as `error workflow id:` by the handler import (`docs/live-deploy-runbook.md`, section 3); on a live box read it the same way as `ROUTER_ID` |
+| `OLD_ROUTER_ID` | The n8n id of the old router that step 9 deactivates (Q5); read it the same way |
+| `SERVICE_ACCOUNT` | The dedicated non-login account of step 0c (suggested name `siem-ops`) |
+| `N8N_COMPOSE_FILE`, `N8N_COMPOSE_DIR` | The compose file that runs n8n and its folder. The live values are `/opt/n8n/docker-compose.yml` and `/opt/n8n` (VERIFIED by the lead 2026-11-20). INFERRED root owned, because the step 6.2 run used `sudo` for every touch of it; so copies, edits and `docker compose` runs against it below use `sudo` too |
+| `HOST_PORT`, `CONTAINER_PORT` | The loopback port you publish for n8n on the host and the port n8n listens on inside its container (section 6.0) |
+| `SIEM_NETWORK` | The real name of the Docker network the stack's containers share, from `docker network ls` (usually the compose project name plus `_siem-net`) |
+| `PRIVATE_WEBHOOK_PATH` | The Grafana router's private path, the content of the `router-path` file in the helper's config directory. An address, not a credential, but keep it out of git and chat |
+| `EXPIRY_WATCH_PRIVATE_PATH` | The expiry watch's private path, the content of the `expiry-path` file in the same directory |
+| `ARCHIVE_FILE` | The `.tar.gz.age` archive a backup run wrote (step 2d) |
+| `OBSERVER_HOSTNAME` | The host name inside the heartbeat observer's ping URL (step 7) |
+| `VARIABLE_NAME` | A variable name from the table in 6b |
+| `PREVIOUS_RELEASE_DIR` | The `previous:` release folder that step 0a printed when it flipped the repo link, an absolute path under `/opt/siem-repo-releases` |
+| `EXPECTED_SHA256` | The sha256 of the repo archive, printed on YOUR WORKSTATION by step 0a (never read from the box) |
+
+Session variables. The three multi-line session blocks below (the SAFE N8N
+RECREATE, the router chain and the router rollback) do not paste placeholders into
+command positions. Instead, you set five shell variables ONCE in the session, and
+the check function refuses to run anything if one of them has an unexpected shape,
+so a value with a space or a shell metacharacter can never become syntax. Every
+expansion in those blocks is quoted. Paste this at the start of the session, with
+your real values (`REPO_DIR` and the compose folder are paths, the ids are 16 hex
+characters, the network name is letters, digits, dot, dash and underscore). The
+blocks need `bash` (they use functions, `local` and `[[ ]]`): start the session with
+a clean one, `bash --noprofile --norc`. A function that is marked read-only in an
+older shell cannot be replaced; the blocks detect that and print `STALE FUNCTION`,
+and the answer is always a fresh shell:
+
+```
+OWNER_FRESH=1; for F in owner_chk_vars owner_recreate_n8n owner_router_chain owner_router_rollback owner_prune_releases; do unset -f "$F" 2> /dev/null; if declare -f "$F" > /dev/null 2>&1; then OWNER_FRESH=0; echo "STALE FUNCTION: $F cannot be removed (read-only or inherited): open a fresh bash shell"; fi; done
+REPO_DIR=/opt/siem-repo
+N8N_COMPOSE_DIR=/opt/n8n
+SIEM_NETWORK=siem_siem-net
+ROUTER_ID=0000000000000000
+HANDLER_ID=0000000000000000
+owner_chk_vars() {
+  : "runbook-block-chk-vars-v3"
+  local v re_path='^/[A-Za-z0-9._/-]+$' re_id='^[0-9a-f]{16}$' re_net='^[A-Za-z0-9._-]+$'
+  for v in "$REPO_DIR" "$N8N_COMPOSE_DIR"; do [[ "$v" =~ $re_path ]] || { echo "bad path variable"; return 1; }; done
+  for v in "$ROUTER_ID" "$HANDLER_ID"; do [[ "$v" =~ $re_id ]] || { echo "bad workflow id"; return 1; }; done
+  [[ "$SIEM_NETWORK" =~ $re_net ]] || { echo "bad network name"; return 1; }
+  return 0
+}
+OWNER_SUM_CHK="$(declare -f owner_chk_vars | sha256sum | cut -d' ' -f1)"
+if [ "$OWNER_FRESH" = 1 ] && [ "$(declare -f owner_chk_vars | sha256sum | cut -d' ' -f1)" = "$OWNER_SUM_CHK" ]; then owner_chk_vars && echo "variables ok"; else echo "STALE FUNCTION: open a fresh bash shell and paste again"; false; fi
+```
+
+The values above are examples only: replace the two ids with the live ones (`n8n
+list:workflow`) and the network with the one from `docker network ls`. `owner_chk_vars`
+must print `variables ok`. It checks every variable on its own with anchored patterns
+that cannot match across lines, so an empty value, a value with a newline, a carriage
+return, a space or a metacharacter is refused.
 
 Rules every step follows:
 
@@ -50,9 +103,10 @@ Rules every step follows:
 
 | # | Question | Where it bites |
 |---|----------|----------------|
-| Q4 | The names `FAILTEST` (workflow and credential) appear in no repo doc. The closest text is the failure-path test copy in `docs/live-deploy-runbook.md`, section 4, items 1 to 6 ("the copy", "a wrong credential in the copy"). Read the exact names in the n8n UI. | Step 3 |
-| Q5 | What is the live name of the old router workflow? The repo workflow is named "Grafana SOAR - Alert Router" and the runbook calls the new one "Grafana SOAR - Alert Router (authenticated)". Which one is live and old is not in a doc. | Step 9 |
-| Q7 | RESOLVED by the deploy script change (PR #126, issue #125). `scripts/live-deploy/grafana-deploy.py` now deploys the notification failure rule and, only when you name them with `--include-example`, the P1 email contact point and policy examples. It defaults to a dry run, needs `--apply`, and backs up every file it replaces. It never starts docker and never reads the compose file, so the compose line and the restart stay manual (step 4b and 4d, and 4g below). Until the PR is merged and the script is on the host, copy by hand as written in steps 4 and 5. | Steps 4, 5 |
+| Q1 | RESOLVED (2026-11-20). `docs/live-deploy-runbook.md` points here for `DEV_CONFIG`: it is the Doppler config `dev_network` (step 0b). | Steps 4g, 5 |
+| Q4 | The names `FAILTEST` (workflow and credential) appear in no repo doc. The closest text is the failure-path test copy in `docs/live-deploy-runbook.md`, section 4, items 1 to 6 ("the copy", "a wrong credential in the copy"). Read the exact names in the n8n UI and the ids with `docker exec n8n n8n list:workflow` (INFERRED command; check `n8n list:workflow --help`). | Step 3 |
+| Q5 | What is the live name of the old router workflow? The repo workflow is named "Grafana SOAR - Alert Router" and the runbook calls the new one "Grafana SOAR - Alert Router (authenticated)". Which one is live and old is not in a doc; tell them apart by id (`ROUTER_ID` versus `OLD_ROUTER_ID`), not by name. | Step 9 |
+| Q7 | RESOLVED by the deploy script change (PR #126, issue #125, merged: commit `862b687`). `scripts/live-deploy/grafana-deploy.py` deploys the notification failure rule and, only when you name them with `--include-example`, the P1 email contact point and policy examples. It does NOT deploy `notification-failure-contact-point.yml.example` (`discord-direct`): that one is always copied by hand (4c). It defaults to a dry run, needs `--apply`, and backs up every file it replaces. It never starts docker and never reads the compose file, so the compose line and the restart stay manual (step 4b and 4d, and 4g below). | Steps 4, 5 |
 | Q8 | The Grafana group id for `grafana_uid`/`grafana_gid` in the backup config is not stated. The compose file sets `user: "472"` (VERIFIED) and the example says `grafana_gid = 0`. Read it with `docker exec grafana id`. | Step 2 |
 | Q9a | How does the dedicated service account get Docker access for `docker cp` and `docker exec`? Docker group membership is root-equivalent; the safer option is a root-owned wrapper allowed by one exact `sudoers` rule. This doc does not choose. | Steps 0c, 2 |
 | Q10 | How is a P1 produced on demand to test the email route end to end? No doc says. | Step 5 |
@@ -66,7 +120,7 @@ item numbers are in the last column.
 
 | Step | What | Risk | Depends on | Request item |
 |------|------|------|-----------|--------------|
-| 0 | Preflight, then 0b: one dev config for every new Grafana value | low | nothing | |
+| 0 | Preflight, 0a: put the repo on the box, 0b: one dev config for every new Grafana value, 0c: the service account | low | nothing | |
 | 1 | Read the heartbeat ping log | none, read only | heartbeat deployed | 1 |
 | 2 | First live backup and restore rehearsal | low | step 0 | 4 |
 | 3 | Delete the FAILTEST workflow and credential | low, irreversible | step 2 (a backup exists) | 2 |
@@ -97,7 +151,9 @@ Why this order:
 Source: `docs/live-deploy-runbook.md`, sections 1 and 2.
 
 Prerequisites: the stack is running; `siem-run` and its token file exist
-(runbook section 2); this repo is checked out at `REPO_DIR` on LOGGING_BOX.
+(runbook section 2); a copy of this repo exists at `REPO_DIR` on LOGGING_BOX
+(step 0a, which you do first; every command below that says `cd REPO_DIR` fails
+without it).
 
 ```
 ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'docker ps --format "{{.Names}}" | sort'
@@ -117,6 +173,146 @@ runbook is incomplete.
 Then do step 0b before steps 4 and 5.
 
 Rollback: nothing changed.
+
+## Step 0a. Put the repo on the box (LIVE, do this first)
+
+Why: `/opt/siem` on LOGGING_BOX is the deployed stack. It has no `n8n` folder and
+no `scripts/live-deploy` folder, so the router import, the test script, the
+backup, the expiry watch and the example files named below do not exist there.
+`REPO_DIR` must be created. `scripts/live-deploy/*.py` import
+`scripts/container_engine.py` from the folder above them, so copying only
+`live-deploy` breaks them: copy the whole `scripts` folder.
+
+Pick `REPO_DIR`. The suggestion is `/opt/siem-repo`: root owned and readable by
+everyone, so the jobs of step 0c (which run as `SERVICE_ACCOUNT`) can read it and
+cannot change the code they run. A path under a home directory fails for that
+account when the home directory is mode 700. It holds no state and no secret.
+
+On your workstation, in a clone of this repository (the fetch makes sure
+`origin/master` is current; the last command prints the commit the archive was
+made from, so you can record it):
+
+```
+git fetch origin && git rev-parse --short origin/master
+git archive --format=tar.gz --prefix=siem-docker-stack/ -o "$HOME/siem-repo.tar.gz" origin/master scripts n8n docs docker/grafana/provisioning/alerting
+gzip -dc "$HOME/siem-repo.tar.gz" | git get-tar-commit-id
+sha256sum "$HOME/siem-repo.tar.gz"
+scp -i KEY_FILE -o IdentitiesOnly=yes "$HOME/siem-repo.tar.gz" LOGGING_BOX:
+rm -f "$HOME/siem-repo.tar.gz"
+```
+
+The `sha256sum` line prints the checksum of the archive ON YOUR WORKSTATION. That
+64-character value is `EXPECTED_SHA256`. It must come from the workstation, never
+from the box and never from a file that travelled with the archive: a checksum that
+travels with the archive proves nothing against whoever altered the archive. The
+commit id from the line above is the record of what it should contain.
+
+Then unpack it on LOGGING_BOX. The design is a release folder per upload and one
+symbolic link: `/opt/siem-repo` (this is `REPO_DIR`) is a symlink to
+`/opt/siem-repo-releases/TIMESTAMP`. Going live means replacing the symlink with ONE
+rename (`mv -T` of a new symlink onto the old one, a single `rename(2)`), so the path
+`/opt/siem-repo` always resolves to a complete tree, the old one or the new one, and
+a failure at any step leaves the old link untouched. Nothing is ever deleted or
+renamed aside, so there is no restore step that could itself fail. Paste
+`EXPECTED_SHA256` into the command by hand. `git archive` records group-writable
+modes (directories 775, files 664) and `tar` keeps them, so the steps below remove
+group and other write permission explicitly, refuse any symlink and any remaining
+writable entry, and only then flip the link. `--strip-components=1` drops the
+`siem-docker-stack/` prefix. If staging fails, only the new release folder (which has
+a unique name made in this command) is removed. If `/opt/siem-repo` is a real
+directory (from an earlier version of this runbook) the command stops without doing
+anything; migrate once by hand while nothing uses it:
+`sudo mkdir -p /opt/siem-repo-releases && sudo mv /opt/siem-repo /opt/siem-repo-releases/legacy`
+and then `sudo ln -s /opt/siem-repo-releases/legacy /opt/siem-repo` (that one-time
+migration is the only place with a window, and the unused first install has none). A
+leftover `/opt/siem-repo.new` directory from an earlier run is not used any more:
+`sudo rm -rf /opt/siem-repo.new` removes it.
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd "$HOME" && TS="$(date -u +%Y%m%dT%H%M%SZ)-$(od -An -N4 -tx1 /dev/urandom | tr -d " \n")" && RL=/opt/siem-repo-releases && NEW="$RL/$TS" && CREATED="" && printf "%s  siem-repo.tar.gz\n" EXPECTED_SHA256 | sha256sum -c - && { ! sudo test -e /opt/siem-repo || sudo test -L /opt/siem-repo || { echo "STOP: /opt/siem-repo is a real directory; migrate it once by hand (see the text above)"; false; }; } && sudo install -d -m 755 -o root -g root "$RL" && sudo test ! -e "$NEW" && sudo mkdir -m 755 "$NEW" && CREATED="$NEW" && { { sudo tar -xzf siem-repo.tar.gz -C "$RL/$TS" --strip-components=1 --no-same-owner --no-same-permissions && sudo chmod -R go-w "$RL/$TS" && test -z "$(sudo find "$RL/$TS" -perm /022 -o -type l)" && sudo test -f "$RL/$TS/scripts/live-deploy/siem-run"; } || { echo "STAGING FAILED: the live link is untouched"; if [ -n "$CREATED" ] && [ "$(sudo readlink -f "$CREATED")" != "$(sudo readlink -f /opt/siem-repo)" ]; then echo "removing only the release this run created: $CREATED"; sudo rm -rf "$CREATED"; else echo "not removing $CREATED (not created by this run, or it is the live release)"; fi; false; }; } && PREV="$(sudo readlink /opt/siem-repo || true)" && sudo rm -f /opt/siem-repo.next && sudo ln -s "$RL/$TS" /opt/siem-repo.next && sudo mv -T /opt/siem-repo.next /opt/siem-repo && [ "$(sudo readlink /opt/siem-repo)" = "$RL/$TS" ] && echo "LIVE: $RL/$TS (previous: ${PREV:-none})" && sudo find -L /opt/siem-repo -perm /022 | wc -l && ls /opt/siem-repo/scripts/live-deploy /opt/siem-repo/n8n'
+```
+
+Expected: `OK` from the checksum, then `LIVE: /opt/siem-repo-releases/TIMESTAMP
+(previous: ...)` (this line is the read-back that proves which tree is live: it is
+the link's own target), `0` (no entry is writable by group or others), and the
+listings of the `live-deploy` scripts (including `siem-run`) and of `n8n`
+(`grafana-alert-router.json`). Any other output means the link was not changed.
+Note the `previous:` value: that is the rollback target. Prove which tree is live at
+any time with `readlink /opt/siem-repo`. Delete the archive on the box
+(`rm -f "$HOME/siem-repo.tar.gz"`). A release folder is named
+`UTC-TIMESTAMP-RANDOMHEX` (seconds plus 8 random hex digits), is created with a plain
+`mkdir` that fails if the name exists, and the command refuses to go on in that case,
+so two runs in the same second can never share or clean up each other's folder; the
+cleanup after a failed staging removes only the folder this very run created and
+never the one the live link points to. Old releases accumulate: prune them with the
+step below, never by hand. Here `REPO_DIR` is `/opt/siem-repo`;
+substitute it in every command below. To update later, repeat both blocks.
+
+Rollback: flip the link back to the `previous:` release with the same single rename.
+The command validates the target BEFORE the rename, because a typo would otherwise
+install a dangling link: it must be a plain absolute path of safe characters, a real
+directory (not a symlink), directly under `/opt/siem-repo-releases` after
+`realpath`, not the current live release, and it must contain the repository marker
+files. It refuses with a message otherwise and changes nothing; after the rename it
+reads the link back and checks the tree is reachable. Put the path in the quotes
+(`PREVIOUS_RELEASE_DIR` is the `previous:` path printed above):
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'P="PREVIOUS_RELEASE_DIR" && RL=/opt/siem-repo-releases && case "$P" in ""|*[!A-Za-z0-9._/-]*) echo "REFUSING: the path is empty or has unsafe characters"; false;; esac && case "$P" in "$RL"/*) true;; *) echo "REFUSING: $P is not under $RL"; false;; esac && sudo test -d "$P" && ! sudo test -L "$P" && R="$(sudo realpath -e "$P")" && [ "$R" = "$P" ] && [ "$(dirname "$R")" = "$RL" ] && sudo test -f "$P/scripts/live-deploy/n8n-setup-alert-router.py" && sudo test -f "$P/n8n/grafana-alert-router.json" && [ "$(sudo readlink -f /opt/siem-repo)" != "$P" ] && sudo rm -f /opt/siem-repo.next && sudo ln -s "$P" /opt/siem-repo.next && sudo mv -T /opt/siem-repo.next /opt/siem-repo && [ "$(sudo readlink /opt/siem-repo)" = "$P" ] && sudo test -f /opt/siem-repo/scripts/live-deploy/n8n-setup-alert-router.py && echo "ROLLED BACK: live is now $(sudo readlink /opt/siem-repo)" || { echo "ROLLBACK NOT DONE: a check failed; the live link is unchanged unless it was the last read-back that failed, so run: readlink /opt/siem-repo"; false; }'
+```
+
+If it prints `ROLLBACK NOT DONE`, read which message came before it (`REFUSING`, or
+no message when the directory, a marker file or the not-current check failed) and fix
+the path; nothing was changed. On a first install there is nothing to go back to:
+`sudo rm -f /opt/siem-repo`. Nothing else changed. The archive holds only repository
+files, no secret value and no live address.
+
+Prune old releases (needed over time: every update adds a release and nothing else
+removes one). The function below keeps the live release, the previous release you
+give it, and the newest N other releases, and lists as candidates only folders under
+`/opt/siem-repo-releases` whose names have the release shape
+`YYYYMMDDTHHMMSSZ-8hex` (so `legacy` and anything else are never touched), that are
+real directories (not symlinks), and that are neither the live nor the previous
+release. The default is a dry run that only lists; `apply` removes the candidates,
+re-checking each one against the live link right before its removal. OWNER DECISION:
+the value of N (suggested 3, so at most live + previous + 3 releases stay; the size of
+one release is a few MB, so this is about safety margin, not disk). In a session (the
+session variables block has been pasted, and `OWNER_FRESH` is `1`):
+
+```
+owner_prune_releases() {
+  : "runbook-block-prune-v3"
+  local N="$1" PREV="$2" MODE="${3:-dry-run}" RL=/opt/siem-repo-releases LIVE D B KEPT=0 I
+  local -a L
+  case "$N" in ''|*[!0-9]*) echo "STOP: N must be a whole number"; return 1;; esac
+  LIVE="$(sudo readlink -f /opt/siem-repo)" && [ -n "$LIVE" ] && sudo test -d "$LIVE" || { echo "STOP: the live release cannot be resolved"; return 1; }
+  if [ -n "$PREV" ]; then PREV="$(sudo readlink -f "$PREV")" || { echo "STOP: the previous release cannot be resolved"; return 1; }; fi
+  L=("$RL"/*/)
+  for (( I=${#L[@]}-1; I>=0; I-- )); do
+    D="${L[$I]%/}"; B="${D##*/}"
+    [[ "$B" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$ ]] || continue
+    [ -L "$D" ] && continue
+    if [ "$D" = "$LIVE" ]; then echo "keep (live): $D"; continue; fi
+    if [ -n "$PREV" ] && [ "$D" = "$PREV" ]; then echo "keep (previous): $D"; continue; fi
+    KEPT=$((KEPT+1))
+    if [ $KEPT -le "$N" ]; then echo "keep (newest $N): $D"; continue; fi
+    echo "candidate: $D"
+    if [ "$MODE" = apply ]; then
+      if [ "$(sudo realpath -e "$D")" = "$D" ] && [ "$D" != "$(sudo readlink -f /opt/siem-repo)" ] && sudo rm -rf -- "$D"; then echo "removed: $D"; else echo "STOP: refused to remove $D"; return 1; fi
+    fi
+  done
+  return 0
+}
+OWNER_SUM_PRUNE="$(declare -f owner_prune_releases | sha256sum | cut -d' ' -f1)"
+```
+
+First the dry run (lists only; `PREVIOUS_RELEASE_DIR` as above, or an empty string if
+there is none), then, after reading the candidates, the apply:
+
+```
+if [ "$OWNER_FRESH" = 1 ] && [ "$(declare -f owner_prune_releases | sha256sum | cut -d' ' -f1)" = "$OWNER_SUM_PRUNE" ]; then owner_prune_releases 3 "PREVIOUS_RELEASE_DIR"; else echo "STALE FUNCTION: open a fresh bash shell, set the session variables and paste again"; false; fi
+if [ "$OWNER_FRESH" = 1 ] && [ "$(declare -f owner_prune_releases | sha256sum | cut -d' ' -f1)" = "$OWNER_SUM_PRUNE" ]; then owner_prune_releases 3 "PREVIOUS_RELEASE_DIR" apply; else echo "STALE FUNCTION: open a fresh bash shell, set the session variables and paste again"; false; fi
+```
 
 ## Step 0b. One dev config for every new Grafana value (LIVE)
 
@@ -152,7 +348,7 @@ doppler configs --project homelab
    five existing ones, and nothing existing changes. It holds no secrets yet.
 
    Rollback for this item: delete it only while it is empty. First confirm it is
-   empty (INFERRED flag; check `doppler secrets --help`):
+   empty (`--only-names` is VERIFIED from `doppler secrets --help`, 2026-11-20):
 
 ```
 doppler secrets --only-names --project homelab --config dev_network
@@ -192,13 +388,15 @@ doppler secrets get GRAFANA_WEBHOOK_SECRET --plain --project homelab --config pr
      authentication, step 1).
    - VERIFIED: `set` echoes the value by default and `--silent` suppresses it
      (setting-secrets). Every `doppler secrets set` in this runbook carries
-     `--silent` and ends in `> /dev/null`.
-   - INFERRED: `--project`/`-p` and `--config`/`-c` are documented as general
-     flags but the docs show them only on `doppler run`; their use on
-     `secrets get` and `secrets set` is not shown. The docs site has no
-     per-command reference page for these, so the authority is the CLI itself:
-     confirm with `doppler secrets get --help` and `doppler secrets set --help`
-     before running the commands.
+     `--silent` and ends in `> /dev/null`. The CLI's own help describes
+     `--silent` only as "disable output of info messages" (read from
+     `doppler secrets set --help` 2026-11-20), so the `> /dev/null` is the part
+     you rely on; keep both.
+   - VERIFIED (CLI help, run 2026-11-20): `doppler secrets get` and `doppler
+     secrets set` both take `--project/-p` and `--config/-c`; `get` has
+     `--plain`; `doppler secrets` has `--only-names`; `doppler configs create`
+     and `delete` take the flags used in item 1. Confirm again with `--help` if
+     your CLI version differs.
    - NOT DOCUMENTED: whether `--plain` prints a trailing newline, and how `set`
      treats a trailing newline on stdin. That is why the check in item 3 is
      required, not optional.
@@ -207,7 +405,7 @@ doppler secrets get GRAFANA_WEBHOOK_SECRET --plain --project homelab --config pr
    value.
 
 3. Required check of the copy, printing only `same` or `differs`, never a value
-   (flags are INFERRED per item 2, so confirm with `--help` first):
+   (flags are VERIFIED per item 2):
 
 ```
 test "$(doppler secrets get GRAFANA_WEBHOOK_SECRET --plain --project homelab --config prd_network | sha256sum | cut -d' ' -f1)" = "$(doppler secrets get GRAFANA_WEBHOOK_SECRET --plain --project homelab --config dev_network | sha256sum | cut -d' ' -f1)" && echo same || echo differs
@@ -219,7 +417,46 @@ copy, do not start the Grafana restart in steps 4 and 5 with it, and do not
 try to fix it by typing or printing the value. Delete the dev copy (see
 Rollback below) until it is resolved.
 
-Watch: the output of step 2 is empty, and no secret value appears anywhere in
+4. Find out which other variables the Grafana restart needs, BEFORE steps 4 and
+   5 restart it from this one config. `docker compose up -d grafana` reads the
+   whole compose file, and `docker/docker-compose.yml` requires, with no default,
+   `GRAFANA_ADMIN_PASS`, `WAZUH_GRAFANA_RO_PASSWORD`, `OPENSEARCH_READONLY_PASSWORD`,
+   `GRAFANA_INFLUX_PASSWORD`, `PROMETHEUS_GRAFANA_PASSWORD`,
+   `PROMETHEUS_OTLP_GRAFANA_PASSWORD`, `INFLUXDB_ADMIN_PASSWORD` and more (list them
+   all with the first command below, which prints names only). Variables that have a
+   default, such as `SIEM_HOST` (it sets `GF_SERVER_ROOT_URL`), `GRAFANA_ADMIN_USER`
+   and `BIND_ADDR`, silently fall back to the default when they are missing: a
+   restart that lacks `SIEM_HOST` changes Grafana's root URL. Where these values come
+   from today (an `.env` file in `/opt/siem` that Compose reads on its own, or the
+   shell) is not in a repo doc (OPEN QUESTION). Compose reads `/opt/siem/.env` in
+   addition to the shell, and a `doppler run` value wins over `.env`, so an `.env`
+   that already holds them is enough (INFERRED from Compose's precedence rules).
+   Read-only checks, names only, never a value. The `.env` file may be readable
+   by root only, so it is read with `sudo`; the `sed` prints a key only when a
+   line is an assignment, and replaces the whole line with that key, so no value
+   is ever printed. The three lists are: every name the compose file
+   interpolates, the names `.env` supplies, and the names Doppler holds:
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'grep -oE "[$][{][A-Za-z0-9_]+" /opt/siem/docker-compose.yml | cut -c3- | sort -u'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'ls -l /opt/siem/.env; sudo sed -n -E "s/^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=.*/\2/p" /opt/siem/.env | sort -u'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'comm -23 <(grep -oE "[$][{][A-Za-z0-9_]+" /opt/siem/docker-compose.yml | cut -c3- | sort -u) <(sudo sed -n -E "s/^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=.*/\2/p" /opt/siem/.env | sort -u)'
+doppler secrets --only-names --project homelab --config dev_network
+```
+
+   The third command prints the names the compose file uses that `.env` does NOT
+   supply (it needs `bash` as the remote login shell, INFERRED). Every name in
+   that output must appear in the fourth command's list (the Doppler output format
+   is NOT verified here, so compare by eye); any name missing from both must be
+   added to `dev_network` (copy it from `prd_network` the way item 2 does, one at
+   a time, with the item 3 check) before any Grafana restart. If the second command
+   shows no `.env` (`No such file`), every name in the first list must be in
+   Doppler. If you cannot establish this, do not restart Grafana: OWNER DECISION,
+   check each name by hand with the commands above and record the result in your ops
+   notes. If the restart fails with a `set NAME` message, the container is
+   unchanged: add that name and retry.
+
+Watch: the output of item 2 is empty, and no secret value appears anywhere in
 the terminal or scrollback.
 
 Note that the copy now holds a shared secret in two configs. `docs/update-alerting.md`
@@ -281,7 +518,11 @@ sudo chmod 0640 /etc/siem-state-backup.toml
 ```
 
 (Run the `chgrp` after step 2b creates the config, and set `destination_dir` to
-`/var/lib/SERVICE_ACCOUNT/backups`; both are INFERRED layout choices.)
+`/var/lib/SERVICE_ACCOUNT/backups` for the SCHEDULED run; both are INFERRED layout
+choices.) The backup refuses a `destination_dir` that is not owned by the user
+running it (VERIFIED: `scripts/state_backup_lib.py`, "destination_dir is not owned
+by the user running the backup"), so the by-hand `sudo` run of step 2c, which runs
+as root, cannot use this directory; step 2c says what to do.
 `ProtectSystem=strict` in the example unit also needs `ReadWritePaths` to name the
 archive directory; edit the unit in step 2e.
 
@@ -380,9 +621,12 @@ Watch:
 
 - Pings arrive every 5 to 6 minutes (VERIFIED: `docs/heartbeat.md`, "How it
   works"; Grafana repeats only at a `group_interval` tick). Over 30 minutes
-  expect 5 to 6 pings.
-- A gap over 6 minutes or two pings closer than 5 minutes is not expected; note
-  the times.
+  expect 5 to 6 pings. A failed ping is now retried up to 3 times, so one ping
+  can arrive up to 19 seconds late (VERIFIED: `docs/heartbeat.md`, "Failure
+  behavior"); that is not a fault.
+- A gap over about 6.5 minutes or two pings closer than 5 minutes is not
+  expected; note the times. The observer goes down only after about 20 minutes
+  of silence (period 5 plus grace 15), which tolerates about three missed pings.
 - No `/fail` pings: those mean a heartbeat with a wrong `phone` label (VERIFIED:
   "Contract failure sends /fail").
 
@@ -462,13 +706,28 @@ works; check the package source.) In the editor set:
 
 ### 2c. First run, by hand
 
+`sudo` runs the backup as root because it needs the container runtime, and the
+backup refuses a `destination_dir` that is not owned by the user running it
+(VERIFIED: `scripts/state_backup_lib.py`). So for this by-hand run `destination_dir`
+must be a root-owned folder, not the `SERVICE_ACCOUNT` folder of step 0c. Create
+it and set `destination_dir = "/var/backups/siem-state"` (the example's default)
+in the config first:
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo install -d -m 700 -o root -g root /var/backups/siem-state && ls -ld /var/backups/siem-state'
+```
+
+OWNER DECISION (with Q9a): the scheduled runs as `SERVICE_ACCOUNT` need
+`destination_dir` owned by that account (`/var/lib/SERVICE_ACCOUNT/backups`,
+step 0c), so the config's `destination_dir` changes again when step 2e is done.
+Until Q9a is answered, only the by-hand root run exists.
+
 ```
 ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && sudo python3 scripts/backup-state.py --config /etc/siem-state-backup.toml; echo "exit code: $?"'
 ```
 
-(`sudo` because the run needs the container runtime. The scheduled runs use the
-dedicated account from step 0c; its Docker access is Q9a. INFERRED.) Then look
-at the output directory:
+(The scheduled runs use the dedicated account from step 0c; its Docker access is
+Q9a. INFERRED.) Then look at the output directory:
 
 ```
 ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo ls -l /var/backups/siem-state'
@@ -506,13 +765,18 @@ prove it also decrypts. Record the date and result in your ops notes
 
 ### 2e. Schedule it
 
-Only after 2c and 2d pass. Install the example unit and timer (they carry
-placeholder paths and a placeholder user; edit them first: set `User=` to
-`SERVICE_ACCOUNT` and `ReadWritePaths` to the archive directory, per step 0c, and
-wait for the Docker access answer in 0c.5 before enabling the timer):
+Only after 2c and 2d pass, and after the Docker access answer in 0c.5 (do not
+enable the timer before it). The example unit carries placeholder paths and a
+placeholder user. Copy both files, then edit the unit with `sudoedit`: set
+`User=` to `SERVICE_ACCOUNT`, `ExecStart=` to
+`/usr/bin/python3 REPO_DIR/scripts/backup-state.py --config /etc/siem-state-backup.toml`
+(the example's `/opt/siem/scripts/backup-state.py` does not exist on the box),
+and `ReadWritePaths=` to the archive directory; set `destination_dir` in the
+config to `/var/lib/SERVICE_ACCOUNT/backups`. Then enable the timer:
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo cp REPO_DIR/docs/examples/siem-state-backup.service REPO_DIR/docs/examples/siem-state-backup.timer /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now siem-state-backup.timer && systemctl list-timers siem-state-backup.timer'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo cp REPO_DIR/docs/examples/siem-state-backup.service REPO_DIR/docs/examples/siem-state-backup.timer /etc/systemd/system/ && sudoedit /etc/systemd/system/siem-state-backup.service'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo systemctl daemon-reload && sudo systemctl enable --now siem-state-backup.timer && systemctl list-timers siem-state-backup.timer'
 ```
 
 Expect the timer listed with a next run near 02:30 (VERIFIED: the example timer).
@@ -545,15 +809,27 @@ Steps, in the n8n web interface (the docs name no menu paths; use the workflow
 list and the credentials list as you find them, and send a screenshot if
 unsure):
 
-1. Open the workflow list and find the test copy by its name. Confirm it is
-   inactive and that its webhook path differs from the live one.
-2. Delete the workflow.
+1. List the workflows with their ids (INFERRED command, check
+   `n8n list:workflow --help`) and write down the id of the test copy, of the
+   live router (`ROUTER_ID`) and of the error handler (`HANDLER_ID`). Tell them
+   apart by id, not by name: a duplicate of the router has a similar name.
+   Open the test copy in the interface by its id. Confirm it is inactive and that
+   its webhook path differs from the live one.
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'docker exec n8n n8n list:workflow'
+```
+
+2. Delete the workflow (the copy only).
 3. Open the credentials list and find the credential made for the failing test
    (for example the deliberately wrong Discord or Pushover credential from the
    test, runbook items 2 and 5). Confirm no other workflow uses it, then delete
    it.
 4. Do not touch `grafana-webhook-auth`, `pushover-api`, the Discord webhook
    credential, the router, or the error handler (VERIFIED: runbook section 3).
+
+Read back: run the same `list:workflow` command again. The copy is gone and
+`ROUTER_ID` and `HANDLER_ID` are still listed.
 
 Watch: the next heartbeat ping still arrives within 6 minutes (step 1), and no
 new error appears in `docker logs --since 10m n8n`.
@@ -598,8 +874,8 @@ unset VAL
 doppler secrets --project homelab --config dev_network --only-names | grep -c DISCORD_FAILURE_WEBHOOK_URL
 ```
 
-The last line prints `1` when the name exists (INFERRED: the `--only-names`
-flag; the check prints a count, never the value). The `read -rs` plus stdin
+The last line prints `1` when the name exists (the `--only-names` flag is
+VERIFIED; the check prints a count, never the value). The `read -rs` plus stdin
 approach follows the documented `openssl ... | doppler secrets set ... >
 /dev/null` form (VERIFIED: `docs/update-alerting.md`); reading from a prompt is
 INFERRED.
@@ -612,17 +888,23 @@ to the grafana service"). In a session, back up and add one line after the
 `GRAFANA_WEBHOOK_SECRET` line:
 
 ```
-cd /opt/siem
-cp docker-compose.yml "docker-compose.yml.bak-$(date +%Y%m%d)"
-grep -c 'DISCORD_FAILURE_WEBHOOK_URL' docker-compose.yml
-sed -i '/- GRAFANA_WEBHOOK_SECRET=/a\      - DISCORD_FAILURE_WEBHOOK_URL=${DISCORD_FAILURE_WEBHOOK_URL:-}' docker-compose.yml
-grep -n -B1 'DISCORD_FAILURE_WEBHOOK_URL' docker-compose.yml
+cd /opt/siem && B="docker-compose.yml.bak-$(date -u +%Y%m%dT%H%M%SZ)" && [ ! -e "$B" ] && ( umask 077 && cp docker-compose.yml "$B" ) && cmp docker-compose.yml "$B" && [ "$(stat -c %a "$B")" = 600 ] && echo "backup $B ok" && ! grep -q 'DISCORD_FAILURE_WEBHOOK_URL' docker-compose.yml && sed -i '/- GRAFANA_WEBHOOK_SECRET=/a\      - DISCORD_FAILURE_WEBHOOK_URL=${DISCORD_FAILURE_WEBHOOK_URL:-}' docker-compose.yml && grep -n -B1 'DISCORD_FAILURE_WEBHOOK_URL' docker-compose.yml
 ```
 
-The first `grep -c` must print `0` before the `sed` (else the line already
-exists; skip the `sed`). The last command shows the new line directly under
+The edit is gated in the same `&&` chain on a backup made by THIS run: the chain
+refuses if the backup name already exists, if the copy differs from the live file
+or if its mode is not 600, and it prints `backup ... ok` before it touches the
+file. It also refuses (and stops) if the line is already present; then skip the
+`sed`. The last command shows the new line directly under
 `GRAFANA_WEBHOOK_SECRET`. The path `/opt/siem` is the documented default
-(`SIEM_DIR`).
+(`SIEM_DIR`). The backup is mode 600 and never replaces an earlier one (the same
+form as `docs/live-deploy-runbook.md`, section 5, step 4); its `ls` line must start
+with `-rw-------`. If the last `grep` prints nothing, the live file spells the
+line without `=` (the form `      - GRAFANA_WEBHOOK_SECRET` that the live deploy
+runbook gives): the `sed` anchor found nothing, so add the line by hand under that
+one instead. If the `cp` or the `sed` says permission denied, `/opt/siem` is not
+yours to write (INFERRED; step 4c needs `sudo` for the folder below it): repeat
+with `sudo`, and keep the backup mode 600.
 
 ### 4c. Copy the rule and the contact point
 
@@ -654,7 +936,11 @@ ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd /opt/siem && doppler ru
 
 (That the Doppler CLI on LOGGING_BOX is logged in to project `homelab` with
 access to the dev config is INFERRED; the runbook's token file serves `siem-run`
-only.) Compose refusing to start with `GRAFANA_WEBHOOK_SECRET must be set and
+only, and that token is, per the repo's examples, scoped to `prd_network`, not to `dev_network`.
+OWNER DECISION: how the box reads `dev_network` for a Grafana or n8n restart, either
+a login of your own user on the box, or a read-only service token scoped to
+`dev_network` kept in a mode 600 file and used the way `siem-run` uses its token.
+The `SERVICE_ACCOUNT` token of step 0c is for that account's jobs only.) Compose refusing to start with `GRAFANA_WEBHOOK_SECRET must be set and
 non-empty` means the copy in step 0b is missing; the container stays on its old
 definition until it is fixed. Any other variable Grafana needs from the old
 `prd_network` setup, such as the Pushover or datasource values, must also be in
@@ -716,28 +1002,41 @@ Firing, and a Discord message arrives in the failure channel (VERIFIED: rule
 
 Rollback (VERIFIED approach, same as `docs/live-deploy-runbook.md` section 5):
 delete the policy route; delete the two files from the live alerting folder;
-restore `docker-compose.yml.bak-<date>` over the compose file; run the restart
+restore `docker-compose.yml.bak-<UTC timestamp>` over the compose file; run the restart
 in 4d. n8n and the heartbeat are untouched by this change.
 
-### 4g. Optional: copy the files with the deploy script instead of 4c
+### 4g. Optional: copy the rule file with the deploy script instead of the first line of 4c
 
-Use this only after PR #126 is merged and the script is on LOGGING_BOX. The script
-copies files and nothing else: it never starts docker and never reads the compose
-file. Stage the repo files into `SIEM_STAGE_DIR`, look at the plan, then apply:
+PR #126 is merged (commit `862b687`), so the script is in the repo; it reaches
+LOGGING_BOX through step 0a. It replaces only the FIRST line of 4c (the rule file):
+the `discord-direct` contact point file in the second line of 4c is not on the
+script's allowlist and is always copied by hand. The script copies files and
+nothing else: it never starts docker and never reads the compose file. It needs
+write access to `/opt/siem/grafana/provisioning` as the user who runs it; 4c uses
+`sudo` for that folder, so check `ls -ld /opt/siem/grafana/provisioning` first
+(INFERRED: if it is root owned, this route does not work as your user, and 4c is
+the way). It also needs the `router-path` file of step 6.1 in the helper's config
+directory, because it writes the private path into `contact-points.yml`.
+
+Stage the repo files into `SIEM_STAGE_DIR` (default `$HOME/bin/alerting`; the folder
+must not be writable by group or others and the files must be mode 644), look at
+the plan, then apply:
 
 ```
-siem-run python3 -I scripts/live-deploy/grafana-deploy.py
-siem-run python3 -I scripts/live-deploy/grafana-deploy.py --apply
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'mkdir -p "$HOME/bin/alerting" && cd REPO_DIR/docker/grafana/provisioning/alerting && install -m 644 contact-points.yml update-alert-rules-unifi.yml update-alert-rules-pfsense.yml heartbeat-alert-rule.yml notification-failure-alert-rule.yml "$HOME/bin/alerting/"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && "$HOME/bin/siem-run" python3 -I scripts/live-deploy/grafana-deploy.py'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && "$HOME/bin/siem-run" python3 -I scripts/live-deploy/grafana-deploy.py --apply'
 ```
 
-The first command is a dry run (the default) and changes nothing. `--apply`
+The second command is a dry run (the default) and changes nothing. `--apply`
 backs up each file it replaces as `NAME.bak-<UTC timestamp>`, replaces the files
 one at a time and prints a `manifest:` line for each. It is not atomic: if it
 stops on an error it lists the files already replaced and the backup for each
 (`cp -p BACKUP FILE` restores one). Details: `docs/live-deploy-runbook.md`,
 section 5.
 
-The compose line stays manual and goes to the grafana service only. If your
+The compose lines stay manual and go to the grafana service only: the
+`DISCORD_FAILURE_WEBHOOK_URL` line of 4b is still needed. If your
 compose file does not already list `GRAFANA_WEBHOOK_SECRET` in the grafana service
 environment, follow `docs/live-deploy-runbook.md`, section 5, step 4: it makes the
 compose backup mode 600 and no-clobber (`umask 077`, `cp --no-clobber`), shows the
@@ -817,17 +1116,12 @@ Same pattern as 4b, seven lines. The compose file does not carry them (VERIFIED:
 the doc says "the repo does not do this for you"). In a session:
 
 ```
-cd /opt/siem
-cp docker-compose.yml "docker-compose.yml.bak-$(date +%Y%m%d)-email"
-grep -c 'GF_SMTP_' docker-compose.yml
-for V in GF_SMTP_ENABLED GF_SMTP_HOST GF_SMTP_USER GF_SMTP_PASSWORD GF_SMTP_FROM_ADDRESS GF_SMTP_STARTTLS_POLICY P1_EMAIL_TO; do
-  sed -i "/- GRAFANA_WEBHOOK_SECRET=/a\\      - ${V}=\${${V}:-}" docker-compose.yml
-done
-grep -n -E 'GF_SMTP_|P1_EMAIL_TO' docker-compose.yml
+cd /opt/siem && B="docker-compose.yml.bak-$(date -u +%Y%m%dT%H%M%SZ)-email" && [ ! -e "$B" ] && ( umask 077 && cp docker-compose.yml "$B" ) && cmp docker-compose.yml "$B" && [ "$(stat -c %a "$B")" = 600 ] && echo "backup $B ok" && ! grep -q 'GF_SMTP_' docker-compose.yml && for V in GF_SMTP_ENABLED GF_SMTP_HOST GF_SMTP_USER GF_SMTP_PASSWORD GF_SMTP_FROM_ADDRESS GF_SMTP_STARTTLS_POLICY P1_EMAIL_TO; do sed -i "/- GRAFANA_WEBHOOK_SECRET=/a\\      - ${V}=\${${V}:-}" docker-compose.yml; done && grep -n -E 'GF_SMTP_|P1_EMAIL_TO' docker-compose.yml
 ```
 
-The first `grep -c` must print `0`. The last command lists seven lines. Empty
-defaults (`:-`) keep Compose from refusing to start when a value is unset.
+As in 4b, the edit is gated on a fresh, verified, mode 600 backup of this run and
+on the variables not being present already. The last command lists seven lines.
+Empty defaults (`:-`) keep Compose from refusing to start when a value is unset.
 
 ### 5c. Copy the contact point
 
@@ -932,18 +1226,24 @@ docs use). The docs reach n8n at `http://n8n/webhook/...`, which is port 80
 n8n's own upstream default, so do not assume 5678. Find and note it:
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'grep -n -i -E "N8N_PORT|ports:|container_name: n8n" N8N_COMPOSE_FILE'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo grep -n -i -E "N8N_PORT|ports:|container_name: n8n" N8N_COMPOSE_FILE'
 ```
 
-Replace `N8N_COMPOSE_FILE` with the path of the compose file that defines n8n.
-Back it up first, then edit it to add this under the `n8n` service, with
+`N8N_COMPOSE_FILE` is the compose file that defines n8n (`/opt/n8n/docker-compose.yml`
+live, root owned, so `sudo` is used for every touch of it, as step 6.2 did). Back it
+up first (`cp -p` keeps its mode, and the file may hold values), then edit it with
+`sudoedit` to add this under the `n8n` service, with
 `CONTAINER_PORT` the value you read and `HOST_PORT` any free port above 1024
 that you choose (INFERRED: the `127.0.0.1:HOST:CONTAINER` form is standard
 Compose syntax, not in a repo doc, and publishing on a container attached to
 a bridge network is assumed to work alongside the macvlan one):
 
+The edit is gated in the same `&&` chain on a backup made by this run: the name must
+not exist yet, the copy must match the live file byte for byte, and only then does
+`sudoedit` open the file:
+
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cp N8N_COMPOSE_FILE "N8N_COMPOSE_FILE.bak-$(date +%Y%m%d)"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'B="N8N_COMPOSE_FILE.bak-$(date -u +%Y%m%dT%H%M%SZ)" && sudo test ! -e "$B" && sudo cp -p N8N_COMPOSE_FILE "$B" && sudo cmp N8N_COMPOSE_FILE "$B" && echo "backup $B ok" && sudoedit N8N_COMPOSE_FILE'
 ```
 
 ```
@@ -953,36 +1253,108 @@ ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cp N8N_COMPOSE_FILE "N8N_C
 
 Apply it by recreating only n8n, then immediately re-check the siem network,
 because a recreate can drop it (VERIFIED: runbook, "Keep n8n on the siem
-network"):
+network").
+
+SAFE N8N RECREATE. This is the only n8n recreate command in this runbook: 6.0, 6.1
+and 6.2 and every rollback below use it. A plain `sudo docker compose up -d n8n`
+writes empty values for any variable the compose file takes from the environment
+(the heartbeat URL, and after 6.1 the expiry secret), and the outage would only show
+afterwards (INFERRED hazard; see the OWNER DECISION in 6.1, item 2, which this form
+implements as option (a)). So the form below (1) records which variables the RUNNING
+container holds, names only; (2) refuses to recreate unless every required variable
+is non-empty in the compose command's own environment, before anything is touched;
+(3) checks the new container and prints the exact recovery when a value is blank.
+`HEARTBEAT_PING_URL` (and `HEARTBEAT_KIND`) must exist in `dev_network`: copy them
+from where they live today the way step 0b item 2 copies a secret, with the item 3
+check, before the first recreate. The function below takes the required variable
+names and the preserve list as its two arguments, so there are two complete calls
+and nothing to rewrite by hand: the first (BEFORE 6.1 item 1 has created
+`EXPIRY_WATCH_ROUTER_TOKEN`) requires only the heartbeat variables, the second (from
+6.1 item 2 on) also requires the expiry token. It uses the session variables set at
+the top of this runbook (`owner_chk_vars` must have printed `variables ok`), quotes every
+expansion, and its exit status is the real status: `recreate exit code: N` is the
+last line it prints and it returns that N. In a session on LOGGING_BOX, define it:
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd N8N_COMPOSE_DIR && docker compose up -d n8n && docker port n8n && docker network inspect SIEM_NETWORK --format "{{range .Containers}}{{.Name}} {{end}}"'
+unset -f owner_recreate_n8n 2> /dev/null
+owner_recreate_n8n() {
+  : "runbook-block-recreate-v3"
+  local R
+  owner_chk_vars || return 1
+  if ! docker exec n8n true > /dev/null 2>&1; then echo "STOP: no running container named n8n; nothing recorded and nothing recreated"; echo "recreate exit code: 1"; return 1; fi
+  if ! ( umask 077 && docker exec n8n sh -c 'for V in HEARTBEAT_PING_URL HEARTBEAT_KIND EXPIRY_WATCH_ROUTER_SECRET; do if [ -n "$(printenv $V)" ]; then echo "$V set"; else echo "$V unset"; fi; done' > "$HOME/n8n-env-before.txt" ); then echo "STOP: could not read the running container; nothing recreated"; echo "recreate exit code: 1"; return 1; fi
+  cat "$HOME/n8n-env-before.txt"
+  ( cd "$N8N_COMPOSE_DIR" && REQ_VARS="$1" PRESERVE="$2" doppler run --project homelab --config dev_network -- sh -c 'for V in $REQ_VARS; do if [ -z "$(printenv $V)" ]; then echo "REFUSING: $V is empty in the compose environment; n8n was NOT recreated"; exit 1; fi; done; sudo --preserve-env="$PRESERVE" docker compose up -d n8n' )
+  R=$?
+  if [ $R -eq 0 ]; then docker port n8n && docker network inspect "$SIEM_NETWORK" --format "{{range .Containers}}{{.Name}} {{end}}" && docker exec n8n sh -c 'test -n "$(printenv HEARTBEAT_PING_URL)"'; R=$?; fi
+  if [ $R -eq 0 ]; then echo "n8n recreated, heartbeat variable set"; else echo "RECOVERY: the recreate failed or HEARTBEAT_PING_URL is blank in the new container. n8n data is on its volume and is unaffected. Put the value in dev_network (step 0b item 2 form), run the recreate call again, then the step 1 presence check. Until then the heartbeat is off and the observer alerts after about 20 minutes."; fi
+  echo "recreate exit code: $R"
+  return $R
+}
+OWNER_SUM_RECREATE="$(declare -f owner_recreate_n8n | sha256sum | cut -d' ' -f1)"
 ```
 
-`N8N_COMPOSE_DIR` is the folder of that file and `SIEM_NETWORK` the real network
-name from `docker network ls` (VERIFIED: runbook). Expect the new
+Then call it. Each call first checks two things (the same gate guards every function
+block in this runbook). `OWNER_FRESH=1`, set when the session variables were pasted,
+means none of the function names existed before the paste (an older read-only or
+inherited function cannot be removed, so it would be reported there as `STALE
+FUNCTION`). And the sha256 of the installed definition equals the one taken right
+after it was pasted, so it was not replaced or edited in between. This does NOT prove
+the pasted text matches the runbook character for character (a mistyped paste hashes
+to its own value); to check that, run `echo "$OWNER_SUM_RECREATE"` and compare it with
+the same value on a second shell you pasted the block into. Before 6.1
+item 1 (heartbeat variables only):
+
+```
+if [ "$OWNER_FRESH" = 1 ] && [ "$(declare -f owner_recreate_n8n | sha256sum | cut -d' ' -f1)" = "$OWNER_SUM_RECREATE" ]; then owner_recreate_n8n "HEARTBEAT_PING_URL" "HEARTBEAT_PING_URL,HEARTBEAT_KIND"; else echo "STALE FUNCTION: open a fresh bash shell, set the session variables and paste again"; false; fi
+```
+
+From 6.1 item 2 on (heartbeat variables and the expiry token):
+
+```
+if [ "$OWNER_FRESH" = 1 ] && [ "$(declare -f owner_recreate_n8n | sha256sum | cut -d' ' -f1)" = "$OWNER_SUM_RECREATE" ]; then owner_recreate_n8n "HEARTBEAT_PING_URL EXPIRY_WATCH_ROUTER_TOKEN" "HEARTBEAT_PING_URL,HEARTBEAT_KIND,EXPIRY_WATCH_ROUTER_TOKEN"; else echo "STALE FUNCTION: open a fresh bash shell, set the session variables and paste again"; false; fi
+```
+
+Check the status the call returned with `echo $?`: only `0` is success. If the running
+container is absent the function stops before recording anything or recreating.
+
+Compare the `$HOME/n8n-env-before.txt` lines with the step 1 presence check after
+the recreate: every variable that said `set` before must say `set` after. Delete the
+file when done (it holds names only). `--preserve-env=LIST` needs a sudoers rule that
+allows it and refuses with a clear message if not (INFERRED); then the refusal
+leaves the old container running and nothing is lost. Expect the new
 `127.0.0.1:HOST_PORT` line and `n8n` in the container list. Then send the
-baseline test alert (`n8n-test-router.py`, runbook section 4) and confirm the
-next heartbeat ping arrives within 6 minutes (step 1). A recreate restarts
-n8n, so do this in a quiet moment; the heartbeat and any firing alert wait for
-the restart.
-
-The URL for the watch config is then
-`http://127.0.0.1:HOST_PORT/webhook/PRIVATE_WEBHOOK_PATH` (plain http is allowed
-for localhost; VERIFIED: `docs/expiry-watch.md`). Prove it reaches the router
-without sending an alert, with a request that carries no secret and expects a
-401 or 403 (VERIFIED: runbook section 4, cases 1 to 3):
+baseline test alert and confirm the next heartbeat ping arrives within 6 minutes
+(step 1):
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'curl -s -o /dev/null -w "%{http_code}\n" -X POST -H "Content-Type: application/json" -d "{}" http://127.0.0.1:HOST_PORT/webhook/PRIVATE_WEBHOOK_PATH'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && "$HOME/bin/siem-run" python3 -I scripts/live-deploy/n8n-test-router.py; echo "exit code: $?"'
+```
+
+Expected: six lines ending `PASS` and `failed cases: 0` (VERIFIED: runbook section
+4); it posts three visible test messages to Discord. A recreate restarts n8n,
+so do this in a quiet moment; the heartbeat and any firing alert wait for the
+restart.
+
+Prove the loopback port reaches the Grafana router without sending an alert, with a
+request that carries no secret and expects a 401 or 403 (VERIFIED: runbook section
+4, cases 1 to 3). The private path is read on the box, so it never lands in your
+terminal or in the command text. This URL is for the probe only; the expiry watch
+uses its own path (6.1):
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'P=$(cat "$HOME/.config/doppler-siem/router-path") && curl -s -o /dev/null -w "%{http_code}\n" -X POST -H "Content-Type: application/json" -d "{}" "http://127.0.0.1:HOST_PORT/webhook/$P"'
 ```
 
 A `401` or `403` means the localhost URL reaches the authenticated router. A
 `404` means the path or port is wrong; `Connection refused` means no port is
-published.
+published. (`PRIVATE_WEBHOOK_PATH` in the placeholder table is the content of
+that `router-path` file.)
 
-Rollback: restore `N8N_COMPOSE_FILE.bak-<date>` over the compose file, run the
-same recreate command, and re-check the siem network and the heartbeat. Nothing
+Rollback: restore `N8N_COMPOSE_FILE.bak-<UTC timestamp>` over the compose file with
+`sudo cp -p`, run the
+SAFE N8N RECREATE above (never a plain `docker compose up`), and re-check the siem
+network and the heartbeat. Nothing
 else changes; the siem network name `n8n` still serves Grafana.
 
 ### 6.1 The router's own endpoint and secret (on LOGGING_BOX)
@@ -1017,14 +1389,22 @@ heartbeat healthy (step 1) so you can tell if the re-import disturbs the router.
 **1. Generate the new secret and store it (watch side).** A new random value, not
 the Grafana secret. It goes in on stdin, with `--silent` and `> /dev/null`, and is
 never printed. The `openssl rand -base64 32` form (44 characters) is the one the
-docs use (VERIFIED: `docs/update-alerting.md`, `docs/expiry-watch.md`):
+docs use (VERIFIED: `docs/update-alerting.md`, `docs/expiry-watch.md`). It prints a
+trailing newline. The watch refuses a token that holds anything but printable
+characters (VERIFIED: `scripts/expiry_watch.py`, the `_TOKEN` pattern allows 0x21 to
+0x7e), and the router compares the value byte for byte, so a stored newline would
+make every real run exit 2. Strip it, then read back only the length:
 
 ```
-openssl rand -base64 32 | doppler secrets set EXPIRY_WATCH_ROUTER_TOKEN --project homelab --config dev_network --silent > /dev/null
+openssl rand -base64 32 | tr -d '\n' | doppler secrets set EXPIRY_WATCH_ROUTER_TOKEN --project homelab --config dev_network --silent > /dev/null
+doppler secrets get EXPIRY_WATCH_ROUTER_TOKEN --plain --project homelab --config dev_network | wc -c
 ```
 
-Do not also run the "Value for EXPIRY_WATCH_ROUTER_TOKEN" prompt in 6b: this
-command is that step. The value is now only in Doppler.
+The second command prints a count, never the value. Expect `44`, or `45` if
+`--plain` adds its own newline (NOT DOCUMENTED, see step 0b item 2). Any other
+number: delete the secret in Doppler and redo this item. Do not also run the "Value
+for EXPIRY_WATCH_ROUTER_TOKEN" prompt in 6b: this command is that step. The value
+is now only in Doppler.
 
 **2. Give the n8n container the same value as `EXPIRY_WATCH_ROUTER_SECRET`.** The
 repo docs say: an environment entry in the n8n compose file with an empty
@@ -1033,31 +1413,45 @@ default, and `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` set there (VERIFIED:
 `- HEARTBEAT_PING_URL=${HEARTBEAT_PING_URL:-}`, and says the blocking setting is
 needed). That setting is already required for the heartbeat (VERIFIED:
 `docs/heartbeat.md`), so it should already be present; confirm it. Back up the
-n8n compose file first (N8N_COMPOSE_FILE and N8N_COMPOSE_DIR as in 6.0), and add
-this entry under the `n8n` service `environment:` list. The value comes from the
-watch-side name; mapping `_TOKEN` to `_SECRET` in the entry is an INFERRED
-choice that avoids storing the secret twice in Doppler (a second Doppler key with
-the `_SECRET` name is the alternative):
+n8n compose file first (N8N_COMPOSE_FILE and N8N_COMPOSE_DIR as in 6.0), then add
+this entry under the `n8n` service `environment:` list with `sudoedit`. The value
+comes from the watch-side name; mapping `_TOKEN` to `_SECRET` in the entry is an
+INFERRED choice that avoids storing the secret twice in Doppler (a second Doppler
+key with the `_SECRET` name is the alternative):
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cp N8N_COMPOSE_FILE "N8N_COMPOSE_FILE.bak-$(date +%Y%m%d)-expiry"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'B="N8N_COMPOSE_FILE.bak-$(date -u +%Y%m%dT%H%M%SZ)-expiry" && sudo test ! -e "$B" && sudo cp -p N8N_COMPOSE_FILE "$B" && sudo cmp N8N_COMPOSE_FILE "$B" && echo "backup $B ok" && sudoedit N8N_COMPOSE_FILE'
 ```
+
+(The edit opens only after the backup of this run exists and matches the live file.)
 
 ```
       - EXPIRY_WATCH_ROUTER_SECRET=${EXPIRY_WATCH_ROUTER_TOKEN:-}
       - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
 ```
 
-(Only add the second line if the file does not already carry it.) Recreate n8n
-with the dev_network values in the environment of the compose command, and
-re-check the siem network as in 6.0. How n8n's own variables, such as the
-heartbeat URL, reach its compose run today is not in a repo doc; run the compose
-command the way you already do and make the Doppler values present for it. The
-`doppler run` form below is INFERRED, by analogy with the Grafana restart:
+(Only add the second line if the file does not already carry it. Step 6.2 below
+adds `N8N_PAYLOAD_SIZE_MAX=1` after that line, so do 6.2 in this same edit and one
+recreate if you have not applied it yet: its `sed` needs the
+`N8N_BLOCK_ENV_ACCESS_IN_NODE=false` line to exist.) Recreate n8n with the SAFE N8N
+RECREATE of 6.0 using its SECOND call (the one that also requires
+`EXPIRY_WATCH_ROUTER_TOKEN`; it refuses, before touching n8n, when the value is
+empty), and read its `recreate exit code`; it re-checks the siem network itself.
 
-```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd N8N_COMPOSE_DIR && doppler run --project homelab --config dev_network -- docker compose up -d n8n; echo "exit code: $?"'
-```
+OWNER DECISION: how n8n's variables reach `docker compose` on EVERY recreate. The
+entries above take their values from the environment of the compose command. A
+recreate run without them (a plain `sudo docker compose up -d n8n`, as the
+2026-11-20 run of 6.2 was) writes empty values: `HEARTBEAT_PING_URL` and `HEARTBEAT_KIND` go blank (the
+heartbeat turns off, the observer reports down after about 20 minutes) and
+`EXPIRY_WATCH_ROUTER_SECRET` goes blank (the watch gets 403). INFERRED, because no
+repo doc says how the heartbeat variables reach the compose run today. Choose one:
+(a) always run n8n's compose through `doppler run` as below, and keep the heartbeat
+values in `dev_network` too; (b) an env file next to the compose file, root owned,
+mode 600, which writes secrets to disk and so conflicts with the Doppler-only rule.
+Recommended: (a). The SAFE N8N RECREATE block in 6.0 is option (a) written out and is
+the form used everywhere below; it is INFERRED (`sudo --preserve-env=LIST` needs the
+sudoers rule to allow it, and refuses with a clear message if not). If you choose
+(b) instead, replace that block's command consistently in 6.0, 6.1 and 6.2.
 
 Check presence only, never the value:
 
@@ -1072,27 +1466,168 @@ unaffected.
 **3. Re-import the router with the live import helper.** Use the existing router
 and handler ids, so the import overwrites the router in place (VERIFIED:
 `docs/live-deploy-runbook.md` section 3), and run it with the Doppler token the
-helper already uses:
+helper already uses. Order, from the helper's own docstring: the error handler is
+imported FIRST and its id passed to the router import, so the router's
+`errorWorkflow` setting points at a real workflow. The live handler already exists
+(`HANDLER_ID`), so only the router is re-imported here, with `--error-workflow-id
+HANDLER_ID`. On a fresh box, import the handler first (`docs/live-deploy-runbook.md`,
+section 3). Do not leave `--error-workflow-id` out: the router would then lose its
+error workflow setting.
+
+The import is an in-place overwrite of the live, active router, and the helper
+always writes the workflow INACTIVE (`active` is set to false in the script, and the
+live deploy runbook says "Both workflows import inactive"). So from the moment the
+import finishes until the publish and the n8n restart below have finished, the
+router receives nothing. That is the alert gap: Grafana's webhook calls fail (404
+or a refused connection), the heartbeat pings stop, and a real alert that fires
+inside the gap is delayed until Grafana retries or repeats it (INFERRED; the repeat
+interval is up to 4 hours for warnings). The gap is the restart time, about a minute.
+Keep it short: run import, publish and restart as ONE sequence in a quiet moment,
+right after a heartbeat ping arrived (step 1), and not while any game-day or test
+scenario runs. The observer tolerates about 20 minutes of silence, so one or two
+missed pings do not alert. MAXIMUM GAP: if the router is not active again 5
+minutes after the import started, stop troubleshooting and run the rollback below;
+that bounds the outage well inside the observer's 20 minutes.
+
+The sequence is not atomic. If the import succeeds and the publish fails, the live
+router stays overwritten and inactive; if the publish succeeds and the restart
+fails, n8n may be stopped. So the sequence below runs each stage on its own, stops
+at the first failure, prints which stage failed and what to run, and its exit status
+is real (it is run in a session, not in a one-line ssh with a trailing `echo` that
+would turn a failure into success).
+
+Before the import, read and save three things:
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && "$HOME/bin/siem-run" python3 -I scripts/live-deploy/n8n-setup-alert-router.py --workflow n8n/grafana-alert-router.json ROUTER_ID --error-workflow-id HANDLER_ID; echo "exit code: $?"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'ls -l "$HOME/.config/doppler-siem/router-path" && cut -c1-15 "$HOME/.config/doppler-siem/router-path"; echo'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'docker exec n8n n8n --help | grep -E "publish|update:workflow"'
 ```
 
-Expected output lines (VERIFIED: the script and runbook section 3):
-`workflow import exit code: 0`, `new webhook path saved (mode 600): ...` and
-`expiry watch webhook path saved (mode 600): ...`. The helper reuses the saved
+The saved copy is written to a private directory first, then installed with an
+explicit mode 600, and the chain refuses to go on unless the mode and the content
+check out (the container-side mode of the export is not under your control, so
+`umask` alone is not enough). In a session on LOGGING_BOX:
+
+```
+owner_chk_vars && umask 077 && D="$(mktemp -d)" && docker exec n8n n8n export:workflow --id="$ROUTER_ID" --output=/tmp/router-before.json && docker cp n8n:/tmp/router-before.json "$D/r.json" && docker exec n8n rm -f /tmp/router-before.json && [ ! -L "$HOME/router-before.json" ] && install -m 600 "$D/r.json" "$HOME/router-before.json" && rm -rf "$D" && [ "$(stat -c %a "$HOME/router-before.json")" = 600 ] && test -s "$HOME/router-before.json" && grep -q "$ROUTER_ID" "$HOME/router-before.json" && N="$(python3 -c 'import json,sys; d=json.load(sys.stdin); d=d[0] if isinstance(d,list) else d; print(len(d["nodes"]))' < "$HOME/router-before.json")" && [ "$N" -gt 0 ] && echo "saved copy ok: $HOME/router-before.json, $N nodes"
+```
+
+Write down the node count it prints: the rollback verification below compares
+against it. OWNER DECISION: the export-to-import round trip of this n8n version has
+never been run here, so the rollback is unproven. Before the first live import,
+rehearse it on a scratch n8n (the step 2d scratch setup): import the saved file there
+with `n8n import:workflow --input=...` and check it lists. If you do not rehearse it,
+the step 2 archive is the only proven restore, and the live import carries that risk.
+
+- The first must list the file as `-rw-------` and print `grafana-alerts-`: that file
+  is the live Grafana path. If it is missing, the import makes a NEW Grafana path and
+  Grafana's contact point (still on the old one) gets 404 on every alert: stop and
+  find the file (the helper reads it from `SIEM_CONFIG_DIR`, default
+  `$HOME/.config/doppler-siem`; the user running the import must be the user who owns
+  it) before going on.
+- The second must show `publish:workflow`. On an older n8n only `update:workflow`
+  exists: use `update:workflow --id=ROUTER_ID --active=true` in the command below
+  (VERIFIED: `docs/game-day.md` says the name differs between versions).
+- The saved copy (the `export:workflow` flags are INFERRED; check `n8n export:workflow
+  --help`) lives at `$HOME/router-before.json`, mode 600, because it holds the
+  private webhook path. It stays on the box; delete it with `rm -f
+  "$HOME/router-before.json"` after step 4 passes. The step 2 archive is the older
+  fallback.
+
+Now the import, publish and restart, in the same session (the session variables are
+set and `owner_chk_vars` printed `variables ok`). It is defined as one function so the
+status `R` cannot be lost between separately pasted lines. Each stage runs only if the
+one before it succeeded, a failure prints the stage, the recovery and the limit, and
+the function returns the real status after printing `chain exit code: N`:
+
+```
+unset -f owner_router_chain 2> /dev/null
+owner_router_chain() {
+  : "runbook-block-router-chain-v3"
+  local R
+  owner_chk_vars || return 1
+  ( cd "$REPO_DIR" && "$HOME/bin/siem-run" python3 -I scripts/live-deploy/n8n-setup-alert-router.py --workflow n8n/grafana-alert-router.json "$ROUTER_ID" --error-workflow-id "$HANDLER_ID" )
+  R=$?
+  [ $R -eq 0 ] || echo "FAILED stage 1 of 3 (import), exit $R: the live router may be unchanged or half written; run n8n list:workflow, and if it is not active use owner_router_rollback within 5 minutes"
+  if [ $R -eq 0 ]; then docker exec n8n n8n publish:workflow --id="$ROUTER_ID"; R=$?; [ $R -eq 0 ] || echo "FAILED stage 2 of 3 (publish), exit $R: the router is overwritten and INACTIVE. Retry this publish once, then docker restart n8n; if it fails again run owner_router_rollback within 5 minutes"; fi
+  if [ $R -eq 0 ]; then docker restart n8n; R=$?; [ $R -eq 0 ] || echo "FAILED stage 3 of 3 (restart), exit $R: the router is published but n8n may be stopped. Run docker start n8n, then docker ps --filter name=n8n; if it does not come up healthy within 5 minutes run owner_router_rollback"; fi
+  echo "chain exit code: $R"
+  return $R
+}
+OWNER_SUM_CHAIN="$(declare -f owner_router_chain | sha256sum | cut -d' ' -f1)"
+if [ "$OWNER_FRESH" = 1 ] && [ "$(declare -f owner_router_chain | sha256sum | cut -d' ' -f1)" = "$OWNER_SUM_CHAIN" ]; then owner_router_chain; else echo "STALE FUNCTION: a read-only or older owner_router_chain exists; open a fresh bash shell, set the session variables and paste again"; false; fi
+echo "owner_router_chain returned $?"
+```
+
+`chain exit code: 0` (and `owner_router_chain returned 0`) is the only success. Expected output lines (VERIFIED: the
+script and runbook section 3):
+`workflow import exit code: 0`, `new webhook path saved (mode 600): ...`,
+`expiry watch webhook path saved (mode 600): ...` and `error workflow set: True`,
+then the publish output and the container name from `docker restart`. The helper
+reuses the saved
 Grafana path (`router-path`) when it looks right and makes the expiry path
 (`expiry-watch-alerts-` plus 24 URL-safe characters) the first time, writing it mode
 600 to `expiry-path` in the same config directory (VERIFIED: script). The
 committed `Expiry Watch Webhook` node ships disabled with a placeholder path
 (`PLACEHOLDER-set-by-the-import-helper`); only the helper enables it, with the
-private path. Whether a re-import leaves the workflow active is not documented
-(the runbook says imports arrive inactive; INFERRED). Publish and restart as the
-runbook says, in a quiet moment, then watch the heartbeat (step 1):
+private path. Read back that there is still exactly one router (no duplicate made
+by a wrong id) and the heartbeat resumes (step 1):
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'docker exec n8n n8n publish:workflow --id=ROUTER_ID && docker restart n8n'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'docker exec n8n n8n list:workflow'
 ```
+
+ROLLBACK of this item (re-import the exported live router, publish it, restart,
+verify). Check the saved copy BEFORE the sequence above touches anything: the file
+exists, is mode 600 and names `ROUTER_ID` (the "saved copy ok" line). The saved file
+is a workflow array or one object depending on the n8n version; the first import
+format is NOT verified, so if the import below rejects it, restore from the step 2
+archive. Same session, same stop-at-the-first-failure shape:
+
+```
+unset -f owner_router_rollback 2> /dev/null
+owner_router_rollback() {
+  : "runbook-block-router-rollback-v3"
+  local R F T NODES_BEFORE NODES_AFTER COUNT_PY
+  COUNT_PY='import json,sys; d=json.load(sys.stdin); d=d[0] if isinstance(d,list) else d; print(len(d["nodes"]))'
+  owner_chk_vars || return 1
+  F="$HOME/router-before.json"
+  if [ ! -s "$F" ] || [ -L "$F" ] || [ "$(stat -c %a "$F")" != 600 ]; then echo "ROLLBACK STOP: the saved copy is missing, a symlink or not mode 600; restore from the step 2 archive"; echo "rollback exit code: 1"; return 1; fi
+  NODES_BEFORE="$(python3 -c "$COUNT_PY" < "$F")"; R=$?
+  case "$NODES_BEFORE" in ''|*[!0-9]*|0) R=1;; esac
+  if [ $R -ne 0 ]; then echo "ROLLBACK STOP: the saved copy is not a workflow with a positive node count (got '${NODES_BEFORE}'); nothing was touched; restore from the step 2 archive"; echo "rollback exit code: 1"; return 1; fi
+  R=0
+  docker cp "$F" n8n:/tmp/router-before.json; R=$?; [ $R -eq 0 ] || echo "ROLLBACK FAILED at: copy into the container (exit $R)"
+  if [ $R -eq 0 ]; then docker exec n8n n8n import:workflow --input=/tmp/router-before.json; R=$?; [ $R -eq 0 ] || echo "ROLLBACK FAILED at: import (exit $R): the saved file format was not accepted, restore from the step 2 archive"; fi
+  docker exec n8n rm -f /tmp/router-before.json /tmp/router-after.json > /dev/null 2>&1
+  if [ $R -eq 0 ]; then docker exec n8n n8n publish:workflow --id="$ROUTER_ID"; R=$?; [ $R -eq 0 ] || echo "ROLLBACK FAILED at: publish (exit $R)"; fi
+  if [ $R -eq 0 ]; then docker restart n8n; R=$?; [ $R -eq 0 ] || echo "ROLLBACK FAILED at: restart (exit $R): run docker start n8n"; fi
+  if [ $R -eq 0 ]; then sleep 30; [ "$(docker exec n8n n8n list:workflow | grep -c "^$ROUTER_ID")" = 1 ]; R=$?; [ $R -eq 0 ] || echo "ROLLBACK FAILED at: verify exists (the router id is not listed exactly once)"; fi
+  if [ $R -eq 0 ]; then docker exec n8n n8n list:workflow --active=true | grep -q "^$ROUTER_ID"; R=$?; [ $R -eq 0 ] || echo "ROLLBACK FAILED at: verify active (the router is not listed as active)"; fi
+  if [ $R -eq 0 ]; then T="$(mktemp -d)" && docker exec n8n n8n export:workflow --id="$ROUTER_ID" --output=/tmp/router-after.json > /dev/null && docker cp n8n:/tmp/router-after.json "$T/after.json" && NODES_AFTER="$(python3 -c "$COUNT_PY" < "$T/after.json")" && [ "$NODES_AFTER" = "$NODES_BEFORE" ]; R=$?; rm -rf "$T"; docker exec n8n rm -f /tmp/router-after.json > /dev/null 2>&1; [ $R -eq 0 ] || echo "ROLLBACK FAILED at: verify node count (expected $NODES_BEFORE, the live export gave '${NODES_AFTER:-nothing}' or a command failed)"; fi
+  if [ $R -eq 0 ]; then echo "rollback verified: router listed once, active, $NODES_BEFORE nodes; now run the step 1 presence check and wait for the next heartbeat ping"; else echo "do not leave n8n stopped (docker start n8n) and restore from the step 2 archive (docs/backup-restore.md)"; fi
+  echo "rollback exit code: $R"
+  return $R
+}
+OWNER_SUM_ROLLBACK="$(declare -f owner_router_rollback | sha256sum | cut -d' ' -f1)"
+if [ "$OWNER_FRESH" = 1 ] && [ "$(declare -f owner_router_rollback | sha256sum | cut -d' ' -f1)" = "$OWNER_SUM_ROLLBACK" ]; then owner_router_rollback; else echo "STALE FUNCTION: a read-only or older owner_router_rollback exists; open a fresh bash shell, set the session variables and paste again"; false; fi
+echo "owner_router_rollback returned $?"
+```
+
+Every stage stops the rest at the first failure, the failing stage is named, and the
+function returns that real status (`rollback exit code: N`; only `0` is success). The
+container-side temporary files are removed on every path. The checks after the restart
+are read only and print names and counts only: the router id listed once, listed as
+active, and the same node count as the saved file. The node count is the length of the
+`nodes` array, read with `python3` from the saved file and from a fresh export of the
+live router; each command's status is captured separately, an empty, non-numeric or
+zero count stops the rollback before anything is touched, and a failed live read can no
+longer look like a match. The `list:workflow --active=true` flag is INFERRED:
+check `n8n list:workflow --help`. If you cannot confirm them, OWNER DECISION: check by
+hand that the router is listed once, is active in the n8n interface and has the same
+number of nodes, then the heartbeat ping arrives (step 1), and record it. The
+rollback restores the workflow as it was exported. It does not undo the files
+`router-path` and `expiry-path` (they only hold paths).
 
 **4. Post-import checks.** First the placeholder path must serve nothing (the
 point is that the committed node is disabled). That n8n registers no webhook for
@@ -1104,26 +1639,28 @@ ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'curl -s -o /dev/null -w "%
 ```
 
 Expect `404`. Anything else: stop, deactivate the workflow and report; do not use
-the endpoint. Then read the private path (an address, not a credential, but keep
-it out of git and chat; VERIFIED: `docs/expiry-watch.md`) and confirm the real
-path rejects a call with no secret:
+the endpoint. Then confirm the real path rejects a call with no secret. The private
+path is an address, not a credential, but keep it out of git and chat (VERIFIED:
+`docs/expiry-watch.md`), so it is read on the box and never printed:
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cat "$HOME/.config/doppler-siem/expiry-path"; echo'
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'curl -s -o /dev/null -w "%{http_code}\n" -X POST -H "Content-Type: application/json" -d "{}" http://127.0.0.1:HOST_PORT/webhook/EXPIRY_WATCH_PRIVATE_PATH'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'P=$(cat "$HOME/.config/doppler-siem/expiry-path") && curl -s -o /dev/null -w "%{http_code}\n" -X POST -H "Content-Type: application/json" -d "{}" "http://127.0.0.1:HOST_PORT/webhook/$P"'
 ```
 
 (`$HOME/.config/doppler-siem` is the helper's default config directory, VERIFIED:
 runbook variable table; use yours if you changed it.) Expect `403` (VERIFIED: a
 denied call is answered 403 with a fixed body). A real accepted call comes only
-from the dry-run-then-real-run in 6c and 6d, which uses the real secret.
+from the real run in 6d and the limit test in 6.3, which use the real secret. The
+dry run in 6c never posts and never reads the secret.
 
 **5. Point the watch at it.** In `/etc/expiry-watch/expiry-watch.toml` set
 `[router].url` to `http://127.0.0.1:HOST_PORT/webhook/EXPIRY_WATCH_PRIVATE_PATH`
 (the path from `expiry-path`; plain http is allowed for localhost, VERIFIED) and
 keep `[router].token_env = "EXPIRY_WATCH_ROUTER_TOKEN"`. Never commit the path.
-The file `expiry-path` may belong to the user who ran the helper while the config
-belongs to SERVICE_ACCOUNT; copy the one line by hand.
+The config file is created in 6a, so this edit happens there, after the files exist.
+The file `expiry-path` belongs to the user who ran the helper while the config
+belongs to SERVICE_ACCOUNT; copy the one line by hand (read it with `cat` in a session
+and paste it into the `sudoedit` of 6a; it stays out of command lines you save).
 
 **6. Ingress limits (Q12, ANSWERED 2026-11-20, issue #157).** The watch posts
 to the loopback port in 6.0, which does not pass a reverse proxy, so a proxy
@@ -1148,8 +1685,10 @@ body, so that setting is the real body cap.
 replaces the old one), then restart the n8n container so it reads the new
 environment (VERIFIED: `docs/expiry-watch.md` owner step 5): recreate n8n with the
 same `doppler run` command as item 2. Both sides change together; between the
-n8n restart and the next watch run the watch must already hold the new value (the
-dry run in 6c confirms).
+n8n restart and the next watch run the watch must already hold the new value. The
+dry run in 6c does NOT confirm that: it never reads the secret (VERIFIED:
+`scripts/expiry_watch.py` reads the token only when it posts). The first real run
+or the 6.3 test does.
 
 **Revoke the watch alone.** Empty the router's variable (VERIFIED: `docs/expiry-watch.md`
 owner step 5): set the n8n entry to an empty value, or delete
@@ -1178,7 +1717,23 @@ the raw bytes. The owner applied this value live on 2026-11-20 with the command
 below; the section is the record and the command to repeat it on another host.
 
 Run it from a real terminal. `sudo` needs a tty, so do not run it with a `!`
-prefix or over a no-tty ssh. One line, as the whole command:
+prefix or over a no-tty ssh.
+
+To repeat it (a new host, or after a restore), do NOT reuse the one-line command
+below: it overwrites `.bak-payload` without looking and recreates n8n without
+`doppler run`. Use two steps instead. First the edit, which refuses unless this run's
+backup exists and matches (a name that already exists stops the chain):
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'B="/opt/n8n/docker-compose.yml.bak-payload-$(date -u +%Y%m%dT%H%M%SZ)" && sudo test ! -e "$B" && sudo cp -p /opt/n8n/docker-compose.yml "$B" && sudo cmp /opt/n8n/docker-compose.yml "$B" && echo "backup $B ok" && sudo grep -q "N8N_BLOCK_ENV_ACCESS_IN_NODE=false" /opt/n8n/docker-compose.yml && ! sudo grep -q "N8N_PAYLOAD_SIZE_MAX" /opt/n8n/docker-compose.yml && sudo sed -i "/- N8N_BLOCK_ENV_ACCESS_IN_NODE=false/a\      - N8N_PAYLOAD_SIZE_MAX=1" /opt/n8n/docker-compose.yml && cd /opt/n8n && sudo docker compose config -q && sudo grep -n N8N_PAYLOAD_SIZE_MAX /opt/n8n/docker-compose.yml'
+```
+
+Then recreate with the SAFE N8N RECREATE of 6.0 and read back
+`N8N_PAYLOAD_SIZE_MAX=1` with `docker inspect n8n --format "{{range .Config.Env}}{{println .}}{{end}}" | grep N8N_PAYLOAD`
+and the healthy status with `docker ps --filter name=n8n --format "{{.Status}}"`.
+The command as it was actually run on 2026-11-20, kept as the record (note its `;`
+before the last command hides a failure of the chain, which is another reason not to
+reuse it):
 
 ```
 ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo cp -p /opt/n8n/docker-compose.yml /opt/n8n/docker-compose.yml.bak-payload && sudo sed -i "/- N8N_BLOCK_ENV_ACCESS_IN_NODE=false/a\      - N8N_PAYLOAD_SIZE_MAX=1" /opt/n8n/docker-compose.yml && cd /opt/n8n && sudo docker compose config -q && sudo docker compose up -d n8n && sleep 15 && docker inspect n8n --format "{{range .Config.Env}}{{println .}}{{end}}" | grep N8N_PAYLOAD; docker ps --filter name=n8n --format "{{.Status}}"'
@@ -1187,7 +1742,26 @@ ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo cp -p /opt/n8n/docker
 Evidence (VERIFIED by the lead 2026-11-20 after the owner ran it): the read-back
 printed `N8N_PAYLOAD_SIZE_MAX=1` and `docker ps` showed a healthy container. On
 a new run, expect the same two lines; no `N8N_PAYLOAD_SIZE_MAX` line means the
-`sed` found no anchor line, so restore the backup (below) and edit by hand.
+`sed` found no anchor line, so restore the backup (below) and edit by hand. The
+backup name `.bak-payload` is fixed: if that file already exists, a second run
+overwrites the pre-change copy, so check with `ls` first and pick another name.
+
+That run recreated n8n WITHOUT `doppler run`, and its read-back did not check the
+two things a recreate can drop. Read them back now, and after any repeat of this
+section (INFERRED hazard, see the OWNER DECISION in 6.1 item 2). The heartbeat and
+(once 6.1 is done) expiry variables must still say `set`, and `n8n` must still be
+on the siem network:
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'docker exec n8n sh -c "if [ -n \"\$HEARTBEAT_PING_URL\" ]; then echo HEARTBEAT_PING_URL set; else echo HEARTBEAT_PING_URL unset; fi; echo HEARTBEAT_KIND=\${HEARTBEAT_KIND:-healthchecks}"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'docker network inspect SIEM_NETWORK --format "{{range .Containers}}{{.Name}} {{end}}"'
+```
+
+`HEARTBEAT_PING_URL unset` means the heartbeat is off: the observer reports down
+after about 20 minutes. Recreate n8n through the form chosen in the 6.1 OWNER
+DECISION and check again. `n8n` missing from the second list means Grafana cannot
+reach it: reattach it as in `docs/live-deploy-runbook.md`, "Keep n8n on the siem
+network". Also confirm the next heartbeat ping arrives (step 1).
 
 Blast radius: recreating n8n interrupts every webhook receiver for about 15
 seconds (Grafana, Wazuh and CrowdSec notices that arrive in that window are not
@@ -1195,10 +1769,12 @@ received). The limit is instance-wide, so a Wazuh or CrowdSec payload over 1 MiB
 would be refused. How large real payloads get is UNVERIFIED; if a sender starts
 failing with 413 after this change, raise the value.
 
-Rollback: copy the backup over the file and recreate:
+Rollback: copy the backup over the file (the 2026-11-20 backup is
+`.bak-payload`; a repeat run's is the `$B` it printed), then recreate with the SAFE
+N8N RECREATE of 6.0, never a plain `docker compose up`:
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo cp -p /opt/n8n/docker-compose.yml.bak-payload /opt/n8n/docker-compose.yml && cd /opt/n8n && sudo docker compose up -d n8n'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo cp -p /opt/n8n/docker-compose.yml.bak-payload /opt/n8n/docker-compose.yml && sudo cmp /opt/n8n/docker-compose.yml.bak-payload /opt/n8n/docker-compose.yml && echo "compose file restored"'
 ```
 
 ### 6.3 Test the router limits after the import (LIVE, UNVERIFIED)
@@ -1210,22 +1786,72 @@ denied call is answered 403 by design (VERIFIED: `docs/expiry-watch.md`).
 
 Target: the `Expiry Watch Webhook` endpoint on LOGGING_BOX. Change: none to the
 system, it sends test notices. Blast radius: each call starts one workflow
-execution; accepted notices post to the alert channels, so use the dry-run notice
-form the watch documents or accept one test message.
+execution, and every ACCEPTED call posts one message to Discord (no phone: the
+body below has no `phone` label). The window test in item 3 therefore posts about
+30 messages; the dry run of the watch does not post and cannot stand in for this
+test (it never calls the router).
 
-1. Send one authenticated, valid notice (the watch's own `--dry-run` does not
-   post, so use a single real run of the watch, 6d, or one `curl` with the
-   secret and a body built as `docs/expiry-watch.md` describes). Expect it
-   accepted and one message.
-2. Send a burst: repeat the same call more than once within one second, and then
-   more than 30 times within 10 minutes. Expect 403 for a call under 1 second
-   after the last accepted one, and 403 beyond 30 accepted calls in 10 minutes.
-3. Open the n8n executions list for the workflow and read the 403 results: one
-   execution per denied call, with the denial reason in the check node's output.
-4. Evidence to record: the count of accepted versus denied calls and the 403
-   status for each denied one. If every call is denied, the Code node cannot
-   read the static data (see the UNVERIFIED list in 6.1, item 6); if a fast burst
-   is not denied, two overlapping executions read the old counter.
+OWNER DECISION: run item 3 (about 30 Discord messages in a minute), or accept
+items 1 and 2 as the evidence for the 1 second rule and defer the 30-in-10-minutes
+rule to real use.
+
+The secret never goes on a command line: the commands below pass the header on
+standard input (`curl -H @-`, VERIFIED to read headers from stdin with curl 8.21,
+run 2026-11-20) from the `printf` built-in, inside `doppler run`, so the value is only
+in the environment of that one child process. Run them as yourself, in a session on
+LOGGING_BOX where the Doppler CLI is logged in with access to `dev_network` (the
+`SERVICE_ACCOUNT` files are not needed here). The body is exactly the shape the
+watch builds (VERIFIED: `tests/python/test_router_expiry_secret.py`, `_expiry_body`):
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX
+```
+
+In that session:
+
+```
+umask 077
+printf '%s' '{"receiver":"expiry-watch","status":"firing","alerts":[{"status":"firing","labels":{"alertname":"Expiry watch: limit-test","severity":"info","expiry_watch":"true","item":"limit-test","kind":"test","stage":"30"},"annotations":{"summary":"limit test","description":"limit test"},"fingerprint":"0123456789abcdef0123456789abcdef"}]}' > "$HOME/notice.json"
+```
+
+1. One authenticated, valid notice. Expect `200` and one message in Discord:
+
+```
+doppler run --project homelab --config dev_network -- sh -c 'printf "Authorization: Bearer %s\n" "$EXPIRY_WATCH_ROUTER_TOKEN" | curl -s -o /dev/null -w "%{http_code}\n" -X POST -H @- -H "Content-Type: application/json" --data-binary @"$HOME/notice.json" "http://127.0.0.1:HOST_PORT/webhook/$(cat "$HOME/.config/doppler-siem/expiry-path")"'
+```
+
+2. A fast burst: three calls started at the same moment. The router accepts one
+   call and denies a call under 1 second after it, so expect one `200` and two
+   `403` (a second `200` means two overlapping executions read the old counter, a
+   finding):
+
+```
+doppler run --project homelab --config dev_network -- sh -c 'for i in 1 2 3; do printf "Authorization: Bearer %s\n" "$EXPIRY_WATCH_ROUTER_TOKEN" | curl -s -o /dev/null -w "%{http_code}\n" -X POST -H @- -H "Content-Type: application/json" --data-binary @"$HOME/notice.json" "http://127.0.0.1:HOST_PORT/webhook/$(cat "$HOME/.config/doppler-siem/expiry-path")" & done; wait'
+```
+
+3. The window (only if you chose to run it): 32 calls, 2 seconds apart, then the
+   count per status. Calls accepted in items 1 and 2 count toward the 30, so
+   `200` appears 30 minus those times and the rest are `403`:
+
+```
+doppler run --project homelab --config dev_network -- sh -c 'for i in $(seq 1 32); do printf "Authorization: Bearer %s\n" "$EXPIRY_WATCH_ROUTER_TOKEN" | curl -s -o /dev/null -w "%{http_code}\n" -X POST -H @- -H "Content-Type: application/json" --data-binary @"$HOME/notice.json" "http://127.0.0.1:HOST_PORT/webhook/$(cat "$HOME/.config/doppler-siem/expiry-path")"; sleep 2; done | sort | uniq -c'
+```
+
+4. Evidence to record: the status code for every call and the number of messages
+   that reached Discord (it must equal the number of `200` results). n8n lists NO
+   execution for these calls: the router stores neither successful nor failed
+   executions by design (`saveDataSuccessExecution` and `saveDataErrorExecution`
+   are `none`; VERIFIED: `docs/update-alerting.md`), so there is nothing to read in
+   the executions list. If every call is `403`, the Code node cannot read the static
+   data or the secret does not match (compare with the presence check in 6.1 item
+   2, and see the UNVERIFIED list in 6.1, item 6); if the fast burst has more than
+   one `200`, the counter is not safe under overlap.
+
+Clean up the body file when you are done:
+
+```
+rm -f "$HOME/notice.json"
+```
 
 Rollback: nothing to undo; wait 10 minutes for the counter window to clear.
 
@@ -1288,17 +1914,30 @@ unset VAL
 
 ### 6c. Dry run first (changes nothing, posts nothing, saves nothing)
 
+The config folder is mode 700 and owned by `SERVICE_ACCOUNT` (6a), so your own
+user cannot read it: run the watch as that account with `sudo -u`. The account's
+read-only Doppler token (0c.3) goes into the environment of the one `doppler run`
+child process from its file, never onto a command line (the `cat` argument is only
+the file path). `REPO_DIR` must be readable by the account (step 0a makes it so):
+
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && doppler run --project homelab --config dev_network -- python3 scripts/expiry_watch.py --config /etc/expiry-watch/expiry-watch.toml --dry-run; echo "exit code: $?"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo -u SERVICE_ACCOUNT sh -c "cd REPO_DIR && DOPPLER_TOKEN=\$(cat /var/lib/SERVICE_ACCOUNT/doppler-token) doppler run --no-check-version --config-dir /var/lib/SERVICE_ACCOUNT/.doppler -- python3 scripts/expiry_watch.py --config /etc/expiry-watch/expiry-watch.toml --dry-run; echo \"exit code: \$?\""'
 ```
 
-(`doppler run` form VERIFIED in `docs/update-alerting.md`; its use with this
-script is INFERRED.)
+(`doppler run` form VERIFIED in `docs/update-alerting.md`; `--config-dir` and
+`--no-check-version` are VERIFIED in `scripts/live-deploy/siem-run`; the token
+variable and the use with this script are INFERRED, see 0c.3. The token is scoped to
+`dev_network`, so no `--project` or `--config` is needed.)
+
+The dry run never reads the router secret (VERIFIED: `scripts/expiry_watch.py` looks
+the token up only when it posts), so a clean dry run does not prove the secret or
+the router URL. Section 6.3 and the first real run in 6d do.
 
 Watch:
 
 - Exit code `0` ok, `1` a provider or delivery failed (details on stderr), `2` a
-  config or secret problem (VERIFIED).
+  config problem; a missing or malformed secret gives `2` only on a real run
+  (VERIFIED).
 - The output lists the notices that are due and the JSON it would post. Check the
   item names, dates and owner lines are the real ones.
 - A TLS provider error is a real finding, not a date (VERIFIED: "tls").
@@ -1311,8 +1950,14 @@ Only when the dry run is clean and the route is the one you want. A real run
 posts real messages to Discord, and an unwanted message cannot be recalled:
 
 ```
-ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && doppler run --project homelab --config dev_network -- python3 scripts/expiry_watch.py --config /etc/expiry-watch/expiry-watch.toml; echo "exit code: $?"'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo -u SERVICE_ACCOUNT sh -c "cd REPO_DIR && DOPPLER_TOKEN=\$(cat /var/lib/SERVICE_ACCOUNT/doppler-token) doppler run --no-check-version --config-dir /var/lib/SERVICE_ACCOUNT/.doppler -- python3 scripts/expiry_watch.py --config /etc/expiry-watch/expiry-watch.toml; echo \"exit code: \$?\""'
 ```
+
+An exit code `2` with `config error: set the environment variable
+EXPIRY_WATCH_ROUTER_TOKEN` means the token did not reach the process (check 6.1 item
+1 and the account's token file); a `403` from the router in the stderr text means the
+router's `EXPIRY_WATCH_ROUTER_SECRET` and the token differ or env access is blocked
+(6.1 item 2).
 
 Confirm the messages arrive and the state file `/etc/expiry-watch/expiry-watch-state.json`
 exists with mode 0600 (VERIFIED). Then schedule it on LOGGING_BOX with either a
@@ -1320,8 +1965,8 @@ systemd service and timer or a cron entry; both are given in
 `docs/expiry-watch.md`, "Scheduling", and the choice is yours. Whichever you
 pick, the job runs on the box, as the same user that owns the config folder, and
 reads its secrets only from the single dev config by wrapping the command in
-`doppler run --project homelab --config dev_network --` (the secrets are named by
-variable only; no value goes in the unit, the cron line or the config). That
+`doppler run` with the account's `dev_network` token, as in 6c (the secrets are
+named by variable only; no value goes in the unit, the cron line or the config). That
 doc's examples instead read the router secret from an `EnvironmentFile` (mode
 0600, owned by the job user); using `doppler run` in place of it is INFERRED, and
 needs the Doppler CLI logged in for that user (non-interactive login for a
