@@ -11,7 +11,9 @@ copied): TLS verified, STARTTLS required, one overall delivery deadline, login f
 variables named in the config. Secrets are only ever environment variable NAMES in the config.
 
 Exit codes: 0 done; 1 done, but a data source failed (named in the email); 2 config error;
-3 the email was not delivered.
+3 the email was not delivered; 4 not sent on purpose (lock held, already sent this week, damaged
+marker, or an earlier send that was not recorded: see docs/weekly-digest.md). Exit 1 also covers a
+sent digest whose state could not be recorded.
 """
 import argparse
 import datetime as dt
@@ -42,7 +44,7 @@ _SPACES = re.compile(r" {2,}")
 # line breaks), Cf format characters (bidi overrides and isolates, zero-width characters, the
 # byte order mark, soft hyphen), Zl and Zp line and paragraph separators.
 _DROP_CATEGORIES = frozenset(("Cc", "Cf", "Cs", "Zl", "Zp"))  # Cs: lone surrogates, which cannot be encoded
-_WEEK = re.compile(r"\d{4}-W\d{2}")
+_WEEK = re.compile(r"([0-9]{4})-W([0-9]{2})")
 _STATE_DIR = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 CLOCK_SKEW_MS = 5 * 60 * 1000
 
@@ -326,35 +328,81 @@ def _open_state_dir(root, name):
     return fd
 
 
+def _valid_week(value):
+    """True only for a real ISO week written canonically as YYYY-Www (week 53 only in a year that
+    has one, year 1 to 9999): the value must survive a round trip through the calendar."""
+    m = _WEEK.fullmatch(value)
+    if not m:
+        return False
+    year, week = int(m.group(1)), int(m.group(2))
+    try:
+        iso = dt.date.fromisocalendar(year, week, 1).isocalendar()
+    except ValueError:
+        return False
+    return (iso[0], iso[1]) == (year, week)
+
+
 class SendGuard:
-    """Holds the lock for one whole gather-and-send and knows the week already sent. The lock is a
-    file created with O_EXCL, so two runs cannot both hold it; it is removed when the run ends. A
-    run that was killed leaves the lock behind: the next run refuses and names the file (remove it
-    by hand after checking no digest run is alive). The last-sent marker holds the ISO week."""
+    """Holds the lock for one whole gather-and-send and knows what was already sent.
+
+    Lock: a file created with O_EXCL, so two runs cannot both hold it. Its device and inode are
+    remembered and it is removed only if the path still names that same file, so a lock someone
+    replaced is never deleted by the wrong run. A killed run leaves the lock behind: the next run
+    refuses and names it (remove it by hand after checking no digest run is alive).
+
+    Sent state, in two phases: begin_send() durably writes a `pending` file BEFORE the message is
+    handed to the server; mark_sent() durably writes `last-sent` (the ISO week) after the server
+    accepted it and only then removes `pending`. Whatever goes wrong in between (an exception, an
+    interrupt, a failed write, a crash) leaves `pending` behind, and the next run refuses until the
+    owner has checked the inbox and removed it (or uses --force)."""
 
     def __init__(self, root, name, now, force):
-        self.fd, self.week, self.force, self.locked = _open_state_dir(root, name), f"{now:%G-W%V}", force, False
+        self.fd, self.week, self.force = _open_state_dir(root, name), f"{now:%G-W%V}", force
+        self.lock_id = None
+        self.closed = False
 
     def __enter__(self):
         try:
-            os.close(os.open("lock", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=self.fd))
+            lockfd = os.open("lock", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=self.fd)
         except FileExistsError:
-            os.close(self.fd)
+            self.__exit__()
             raise _Refused("another digest run holds the lock (state folder file 'lock'); if no run is "
                            "alive, remove that file") from None
-        self.locked = True
+        except BaseException:
+            self.__exit__()
+            raise
+        try:
+            st = os.fstat(lockfd)
+            self.lock_id = (st.st_dev, st.st_ino)
+            os.write(lockfd, f"{os.getpid()} {os.urandom(8).hex()}\n".encode())
+        finally:
+            os.close(lockfd)
         try:  # __exit__ does not run when __enter__ raises: release here
-            if not self.force and self.last_sent() == self.week:
-                raise _Refused(f"a digest was already sent for {self.week}; use --force to send again")
+            self.check_state()
         except BaseException:
             self.__exit__()
             raise
         return self
 
+    def check_state(self):
+        if self.force:
+            return
+        if self.last_sent() == self.week:
+            raise _Refused(f"a digest was already sent for {self.week}; use --force to send again")
+        try:
+            os.stat("pending", dir_fd=self.fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        except OSError:
+            pass
+        raise _Refused("an earlier send may have been accepted by the server without being recorded (state "
+                       "folder file 'pending'): check the inbox, then remove 'pending' (or write the week "
+                       "into 'last-sent'), or use --force")
+
     def last_sent(self):
         """The ISO week of the last send, or None ONLY when the marker file does not exist. A marker
-        that exists but cannot be read, is not a regular file, or does not hold a week is a state
-        error: the run is refused (exit 4) until the owner repairs it or uses --force."""
+        that exists but cannot be read, is not a regular file, or does not hold a real ISO week is a
+        state error: the run is refused (exit 4) until the owner repairs it or uses --force."""
         bad = _Refused("the last-sent marker is damaged or unreadable; fix or remove the file "
                        "'last-sent' in the state folder, or use --force")
         try:
@@ -372,23 +420,69 @@ class SendGuard:
         finally:
             os.close(fd)
         value = raw.decode("ascii", "replace").strip() if len(raw) <= 32 else ""
-        if not _WEEK.fullmatch(value):
+        if not _valid_week(value):
             raise bad
         return value
 
+    def _write_durable(self, name, text):
+        """Write name atomically and durably: temp file, fsync, rename, fsync of the folder. The
+        temp file (named for this run only) is removed again if anything fails."""
+        tmp = f".tmp-{os.getpid()}-{os.urandom(6).hex()}"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=self.fd)
+        try:
+            try:
+                os.write(fd, text.encode("ascii"))
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.replace(tmp, name, src_dir_fd=self.fd, dst_dir_fd=self.fd)
+        except BaseException:
+            try:
+                os.unlink(tmp, dir_fd=self.fd)
+            except OSError:
+                pass
+            raise
+        os.fsync(self.fd)
+
+    def begin_send(self):
+        """Before the message goes out: record that a send is in flight (fail closed if it dies)."""
+        self._write_durable("pending", f"send started for {self.week}\n")
+
+    def clear_pending(self):
+        """The server did not take the message: nothing to remember."""
+        try:
+            os.unlink("pending", dir_fd=self.fd)
+            os.fsync(self.fd)
+        except OSError:
+            pass
+
     def mark_sent(self):
-        tmp = f".marker-{os.getpid()}"
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600, dir_fd=self.fd)
-        with os.fdopen(fd, "w", encoding="ascii") as fh:
-            fh.write(self.week + "\n")
-        os.replace(tmp, "last-sent", src_dir_fd=self.fd, dst_dir_fd=self.fd)
+        """After acceptance: the week is recorded durably first, then the pending note is removed."""
+        self._write_durable("last-sent", self.week + "\n")
+        try:
+            os.unlink("pending", dir_fd=self.fd)
+        except FileNotFoundError:
+            pass
+        os.fsync(self.fd)
 
     def __exit__(self, *exc):
+        """Release. Idempotent, and never raises over an exception already in flight."""
+        if self.closed:
+            return
+        self.closed = True
         try:
-            if self.locked:
-                os.unlink("lock", dir_fd=self.fd)
+            if self.lock_id is not None:
+                try:
+                    st = os.stat("lock", dir_fd=self.fd, follow_symlinks=False)
+                    if (st.st_dev, st.st_ino) == self.lock_id:
+                        os.unlink("lock", dir_fd=self.fd)
+                except OSError:
+                    pass
         finally:
-            os.close(self.fd)
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
 
 
 # --- the runner -----------------------------------------------------------------------------
@@ -480,15 +574,25 @@ def _once(cfg, root, now, env, out, err, send, providers, guard):
         err("dry run: nothing was sent (use --send to send)")
     else:
         try:
+            guard.begin_send()
+        except OSError as e:
+            err(f"not sent: the state folder cannot be written ({e.strerror})")
+            return 3
+        # From here until mark_sent() finishes, `pending` stays on disk. Only a plain refusal by the
+        # server (a DigestError: nothing was accepted) removes it; an interrupt, a crash or a failed
+        # write leaves it, so the next run refuses instead of sending a duplicate.
+        try:
             ew.smtp_deliver(cfg.email, env, msg, root=root, budget=cfg.delivery_budget_seconds)
         except DigestError as e:
+            guard.clear_pending()
             err(f"delivery failed: {e}")
             return 3
         out(f"sent one digest to {len(cfg.email.to)} recipient(s)")
         try:
             guard.mark_sent()
         except OSError as e:
-            err(f"the digest was sent but the last-sent marker could not be written ({e.strerror})")
+            err(f"the digest was sent but could not be recorded ({e.strerror}); the state folder file "
+                "'pending' stays, so the next run refuses until you remove it")
             return 1
     for f in failures:
         err(f"source failed: {clean(f, 300)}")

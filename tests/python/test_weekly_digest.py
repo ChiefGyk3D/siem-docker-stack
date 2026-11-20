@@ -497,6 +497,122 @@ def test_a_damaged_last_sent_marker_fails_closed(tmp_path, smtp_plain, kind):
     assert not (marker.parent / "lock").exists()
 
 
+# --- Daybreak round 3 ----------------------------------------------------------------------
+
+@pytest.mark.parametrize("value", ["2026-W00", "2026-W54", "2026-W99", "0000-W01", "2025-W53", "2026-w47",
+                                   "2026-W4", "02026-W47", " 2026-W47x"])
+def test_an_invalid_iso_week_marker_fails_closed(tmp_path, smtp_plain, value):
+    cfg, marker = _marker(tmp_path, smtp_plain)
+    marker.write_text(value + "\n")
+    code, _, err = _run(cfg, send=True, providers=_fakes())
+    assert code == 4 and "last-sent" in err and not smtp_plain.sessions
+
+
+def test_a_real_week_53_marker_is_a_valid_old_marker(tmp_path, smtp_plain):
+    cfg, marker = _marker(tmp_path, smtp_plain)
+    marker.write_text("2020-W53\n")  # 2020 has a week 53
+    assert _run(cfg, send=True, providers=_fakes())[0] == 0 and len(smtp_plain.sessions) == 1
+
+
+def _after_acceptance(monkeypatch, exc):
+    def boom(self):
+        raise exc
+    monkeypatch.setattr(wd.SendGuard, "mark_sent", boom)
+
+
+@pytest.mark.parametrize("exc", [OSError(28, "No space left"), KeyboardInterrupt(), SystemExit(1)])
+def test_a_failure_after_acceptance_leaves_a_fail_closed_sentinel(tmp_path, smtp_plain, monkeypatch, exc):
+    cfg = _write(tmp_path, smtp_plain.server_address[1])
+    with monkeypatch.context() as m:
+        _after_acceptance(m, exc)
+        try:
+            first = _send(cfg)
+        except BaseException as e:  # KeyboardInterrupt and SystemExit propagate by design
+            assert e is exc
+            first = None
+    assert first in (None, 1) and len(smtp_plain.sessions) == 1
+    assert not (tmp_path / "weekly-digest-state" / "lock").exists()
+    code, _, err = _run(cfg, send=True, providers=_fakes())
+    assert code == 4 and "pending" in err and len(smtp_plain.sessions) == 1
+    assert _send(cfg, force=True) == 0 and len(smtp_plain.sessions) == 2
+    assert not (tmp_path / "weekly-digest-state" / "pending").exists()
+
+
+def test_an_interrupt_during_delivery_also_fails_closed(tmp_path, smtp_plain, monkeypatch):
+    cfg = _write(tmp_path, smtp_plain.server_address[1])
+
+    def interrupted(*a, **k):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(wd.ew, "smtp_deliver", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        _send(cfg)
+    monkeypatch.undo()
+    assert _run(cfg, send=True, providers=_fakes())[0] == 4 and not smtp_plain.sessions
+
+
+def test_a_rejected_delivery_clears_the_pending_state_so_a_retry_is_allowed(tmp_path, smtp_plain):
+    smtp_plain.data_reply = "554 no"
+    cfg = _write(tmp_path, smtp_plain.server_address[1])
+    assert _send(cfg) == 3 and not (tmp_path / "weekly-digest-state" / "pending").exists()
+    smtp_plain.data_reply = "250 queued"
+    assert _send(cfg) == 0
+
+
+def test_a_marker_write_failure_cleans_its_temp_file(tmp_path, smtp_plain, monkeypatch):
+    import os
+    cfg = _write(tmp_path, smtp_plain.server_address[1])
+    real = os.replace
+
+    def failing(src, dst, **kw):
+        if dst == "last-sent":
+            raise OSError(5, "io error")
+        return real(src, dst, **kw)
+    monkeypatch.setattr(os, "replace", failing)
+    assert _send(cfg) == 1
+    names = sorted(p.name for p in (tmp_path / "weekly-digest-state").iterdir())
+    assert names == ["pending"]
+
+
+def test_the_state_is_made_durable_with_fsync_of_files_and_the_folder(tmp_path, smtp_plain, monkeypatch):
+    import os
+    import stat
+    kinds = []
+    real = os.fsync
+
+    def spy(fd):
+        kinds.append("dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file")
+        return real(fd)
+    monkeypatch.setattr(os, "fsync", spy)
+    cfg = _write(tmp_path, smtp_plain.server_address[1])
+    assert _send(cfg) == 0
+    assert kinds.count("file") >= 2 and kinds.count("dir") >= 2  # pending and marker, each file then folder
+
+
+def test_the_lock_is_only_removed_by_the_run_that_made_it(tmp_path, smtp_plain):
+    cfg = _write(tmp_path, smtp_plain.server_address[1])
+    lock = tmp_path / "weekly-digest-state" / "lock"
+
+    def swap(ctx):
+        lock.unlink()
+        lock.write_text("another run")
+        return _sec("Patched automatically", ["x"])
+    assert wd.run(cfg, NOW, env={}, out=lambda m: None, err=lambda m: None, send=True,
+                  providers=_fakes(patched=swap)) == 0
+    assert lock.read_text() == "another run"
+
+
+def test_releasing_twice_or_after_the_lock_vanished_never_raises(tmp_path):
+    root = wd.ew.Root(str(tmp_path))
+    try:
+        g = wd.SendGuard(root, "weekly-digest-state", NOW, False)
+        g.__enter__()
+        (tmp_path / "weekly-digest-state" / "lock").unlink()
+        g.__exit__(None, None, None)
+        g.__exit__(None, None, None)
+    finally:
+        root.close()
+
+
 def test_a_refusal_releases_the_lock_so_the_next_run_is_refused_for_the_right_reason(tmp_path, smtp_plain):
     cfg = _write(tmp_path, smtp_plain.server_address[1])
     assert _send(cfg) == 0 and _send(cfg) == 4
