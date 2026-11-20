@@ -124,7 +124,8 @@ def test_a_group_writable_script_is_refused_as_root(rr):
 def test_the_helper_is_sourced_from_the_checked_descriptor_only():
     code = "\n".join(ln for ln in RENDER.read_text(encoding="utf-8").splitlines()
                      if ln.strip() and not ln.lstrip().startswith("#"))
-    assert "source /proc/self/fd/" in code
+    assert "source <(printf '%s' \"$LIB_SNAP\")" in code  # a snapshot read from the checked descriptor
+    assert "<&9" in code
     assert not re.search(r'^\s*(\.|source)\s+"?\$\{?SCRIPT_DIR', code, re.M), \
         "the helper must not be sourced by pathname"
     assert "readlink -f" in code

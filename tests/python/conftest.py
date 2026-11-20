@@ -2,6 +2,7 @@
 import importlib.util
 import stat
 import sys
+import warnings
 from pathlib import Path
 
 import pytest
@@ -12,13 +13,25 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 @pytest.fixture(scope="session", autouse=True)
 def _helpers_are_not_group_or_world_writable():
     """The scripts refuse a sourced helper that is group or world writable. A checkout made with
-    umask 002 leaves these files group writable (git records only 644), so close them here, the
-    same fix the refusal message names (chmod g-w,o-w)."""
+    umask 002 leaves these files group writable (git records only 644), and the in-place tests run
+    the real scripts. So the helpers are closed for the session and the original modes are restored
+    at the end; a warning names each helper that was open and the fix (chmod g-w,o-w <helper>), so
+    the real checkout mode is reported, not hidden."""
+    original = {}
     for name in ("lib-secrets.sh", "lib-container-engine.sh"):
         path = REPO_ROOT / "scripts" / name
         if path.is_file():
-            path.chmod(path.stat().st_mode & ~(stat.S_IWGRP | stat.S_IWOTH) & 0o7777)
-    yield
+            mode = stat.S_IMODE(path.stat().st_mode)
+            if mode & (stat.S_IWGRP | stat.S_IWOTH):
+                original[path] = mode
+                warnings.warn(f"{path} is group or world writable (mode {mode:o}); the scripts refuse it. "
+                              f"Fix: chmod g-w,o-w {path}. The tests close it for this session only.")
+                path.chmod(mode & ~(stat.S_IWGRP | stat.S_IWOTH))
+    try:
+        yield
+    finally:
+        for path, mode in original.items():
+            path.chmod(mode)
 
 
 def skip_or_fail(reason, env=None):

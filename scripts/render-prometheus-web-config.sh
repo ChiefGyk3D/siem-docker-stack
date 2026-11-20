@@ -120,9 +120,20 @@ if [ ! -f /proc/self/fd/9 ] || { [ "$LIB_OWNER" != 0 ] && [ "$LIB_OWNER" != "$RU
     [ $((8#$LIB_MODE & 8#$LIB_MASK)) -ne 0 ] || [ "$LIB_LINKS" != 1 ]; then
     lib_fail "it must be a regular file with one link, owned by root or by you, and not group or world writable (fix: chmod g-w,o-w ${LIB_PATH})"
 fi
-# shellcheck source=scripts/lib-secrets.sh
-source /proc/self/fd/9
+# What the checks above protect against: a new open for writing (mode), a replaced or swapped path
+# (the descriptor), a planted ancestor. What they cannot do: revoke a descriptor a peer already holds
+# open for writing on this inode. So the whole file is read once from the descriptor into a variable,
+# its size and mtime are compared before and after the read, and the copy is sourced, never the live
+# inode. Still not covered: a write that lands before the read. The real protection is a root-owned
+# release tree (docs/prometheus-otlp.md); running from a group-shared checkout accepts that residual risk.
+LIB_ST1="$(/usr/bin/stat -L -c '%s %Y' -- /proc/self/fd/9)"
+LIB_SNAP="$(/bin/cat <&9; printf x)" || lib_fail "it cannot be read"
+LIB_ST2="$(/usr/bin/stat -L -c '%s %Y' -- /proc/self/fd/9)"
 exec 9<&-
+[ "$LIB_ST1" = "$LIB_ST2" ] || lib_fail "it changed while it was being read"
+LIB_SNAP="${LIB_SNAP%x}"
+# shellcheck source=scripts/lib-secrets.sh
+source <(printf '%s' "$LIB_SNAP")
 
 if [ "$RUN_UID" -ne 0 ] && [ "$RUN_UID" -ne "$OWNER_UID" ]; then
     die "run as root (sudo) so the files can be owned by uid ${OWNER_UID} with mode 0400; refusing to write a readable secret"

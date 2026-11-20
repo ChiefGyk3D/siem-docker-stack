@@ -100,9 +100,21 @@ while :; do
     [ "$SL_P" = / ] && break
     SL_P="$(/usr/bin/dirname -- "$SL_P")"
 done
-# shellcheck source=scripts/lib-secrets.sh
-source /proc/self/fd/7
+# What the checks above protect against: a new open for writing (mode), a replaced or swapped path
+# (the descriptor), a planted ancestor. What they cannot do: revoke a descriptor a peer already holds
+# open for writing on this inode. So the whole file is read once from the descriptor into a variable,
+# its size and mtime are compared before and after the read, and the copy is sourced, never the live
+# inode. Still not covered: a write that lands before the read. The real protection is a root-owned
+# release tree (docs/container-engine.md, runbook step 0a); running from a group-shared checkout
+# accepts that residual risk.
+SL_ST1="$(/usr/bin/stat -L -c '%s %Y' -- /proc/self/fd/7)"
+SL_SNAP="$(/bin/cat <&7; printf x)" || sl_fail "it cannot be read"
+SL_ST2="$(/usr/bin/stat -L -c '%s %Y' -- /proc/self/fd/7)"
 exec 7<&-
+[ "$SL_ST1" = "$SL_ST2" ] || sl_fail "it changed while it was being read"
+SL_SNAP="${SL_SNAP%x}"
+# shellcheck source=scripts/lib-secrets.sh
+source <(printf '%s' "$SL_SNAP")
 require_secret N8N_API_KEY "${N8N_API_KEY:-}" || {
   echo "Usage: N8N_API_KEY=<your n8n API key> GRAFANA_PASS=<grafana admin password> $0 [siem-server-ip]" >&2
   exit 1

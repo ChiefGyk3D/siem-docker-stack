@@ -168,7 +168,19 @@ helper is refused because a group peer could edit the very inode that was opened
 the check and before the source (the refusal says `chmod g-w,o-w <helper>`). A
 group-writable ancestor directory is acceptable for a non-root run only because the
 check happens after the open: replacing a directory entry cannot change the inode the
-descriptor already holds. The check stays inline in
+descriptor already holds.
+
+What the checks cannot do: a mode check does not revoke a writable descriptor that
+another process already holds on the same inode (it opened the helper for writing
+before the mode was closed). It protects against new opens and against replacement of
+the path, not against such an earlier writer. To narrow that window, each script reads
+the whole helper once from the checked descriptor into a private variable, compares the
+descriptor's size and mtime before and after the read (a change refuses the load with
+"changed while it was being read"), and sources that copy, never the live inode. A
+later write by a peer therefore cannot change what runs. The snapshot does not cover a
+write that lands before the read. The real protection is a root-owned release tree, as
+step 0a of [owner-runbook.md](owner-runbook.md) makes it; whoever runs these scripts
+from a group-shared checkout accepts the residual risk. The check stays inline in
 each script on purpose: a shared loader file would itself have to be sourced unchecked
 first. Tests: `tests/python/test_secrets_helper_bootstrap.py`.
 

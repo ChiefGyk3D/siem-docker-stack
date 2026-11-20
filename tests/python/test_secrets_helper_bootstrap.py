@@ -19,6 +19,7 @@ SCRIPTS = REPO_ROOT / "scripts"
 LIB_TEXT = (SCRIPTS / "lib-secrets.sh").read_text(encoding="utf-8")
 MARK = "SECRETS_HELPER_LOADED"
 EVIL = "EVIL_HELPER_LOADED"
+LATE = "LATE_WRITE_LOADED"
 
 # script name -> (needs lib-container-engine.sh beside it, extra arguments)
 CASES = {
@@ -32,7 +33,18 @@ ALL_SCRIPTS = sorted(CASES)
 def wrapper_text(tmp_path):
     return f"""#!/bin/sh
 fmt=; last=
-for a in "$@"; do case "$a" in %u|%a|%h|"%u %a") fmt=$a ;; esac; last=$a; done
+for a in "$@"; do case "$a" in %u|%a|%h|"%u %a"|"%s %Y") fmt=$a ;; esac; last=$a; done
+if [ "$last" = /proc/self/fd/7 ] && [ "$fmt" = "%s %Y" ] && [ -n "$HOOK" ]; then
+  n=$(/bin/cat "$HOOK_COUNT" 2>/dev/null || echo 0); n=$((n + 1)); echo $n > "$HOOK_COUNT"
+  out=$(/usr/bin/stat "$@") || exit $?
+  case "$HOOK:$n" in
+    grow:1) echo "# grown between the two stats" >> "$LIB_FILE" ;;
+    touch:1) /usr/bin/touch -d '2001-02-03 04:05:06' "$LIB_FILE" ;;
+    late:2) echo "echo $LATE_MARK >&2" >> "$LIB_FILE" ;;
+  esac
+  printf '%s\\n' "$out"
+  exit 0
+fi
 if [ "$last" = /proc/self/fd/7 ] && [ "$fmt" = %h ] && [ -n "$SWAP_FROM" ] && [ -e "$SWAP_FROM" ]; then
   out=$(/usr/bin/stat "$@") || exit $?
   /bin/mv -f "$SWAP_FROM" "$SWAP_TO"
@@ -74,7 +86,7 @@ def sandbox(tmp_path):
     envfile.chmod(0o600)
 
     def run(name, userns=False, lib_mode="644", lib_link=False, hard_link=False, dir_mode="755",
-            outer_mode="755", foreign=False, swap=False):
+            outer_mode="755", foreign=False, swap=False, hook=None):
         needs_ce, extra = CASES[name]
         script = scripts_dir / name
         script.write_text((SCRIPTS / name).read_text(encoding="utf-8").replace("/usr/bin/stat", str(wrap)),
@@ -113,6 +125,11 @@ def sandbox(tmp_path):
             evil = tmp_path / "evil.sh"
             evil.write_text(f"echo {EVIL} >&2\n", encoding="utf-8")
             env.update({"SWAP_FROM": str(evil), "SWAP_TO": str(lib), "SWAP_DONE": str(done)})
+        if hook:
+            count = tmp_path / "hook-count"
+            if count.exists():
+                count.unlink()
+            env.update({"HOOK": hook, "HOOK_COUNT": str(count), "LIB_FILE": str(lib), "LATE_MARK": LATE})
         args = [str(envfile) if a == "ENVFILE" else a for a in extra]
         launcher = ["unshare", "-r", str(script), *args] if userns else [str(script), *args]
         proc = subprocess.run(launcher, env=env, text=True, capture_output=True,
@@ -206,6 +223,24 @@ def test_a_helper_swapped_after_the_check_is_not_sourced(sandbox, name):
 
 
 @pytest.mark.parametrize("name", ALL_SCRIPTS)
+def test_a_write_to_an_old_descriptor_after_the_checks_does_not_change_what_is_sourced(sandbox, tmp_path, name):
+    # A peer that already held the file open for writing can still write after the checks. The
+    # script sources the snapshot it read, so that late write never runs.
+    proc = sandbox(name, hook="late")
+    assert (tmp_path / "hook-count").read_text(encoding="utf-8").strip() == "2", \
+        "the size and mtime of the open helper were not read before and after the snapshot"
+    assert MARK in proc.stderr and LATE not in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("hook", ["grow", "touch"])
+@pytest.mark.parametrize("name", ALL_SCRIPTS)
+def test_a_helper_whose_size_or_mtime_changes_during_the_read_is_refused(sandbox, name, hook):
+    proc = sandbox(name, hook=hook)
+    assert proc.returncode != 0 and "changed while it was being read" in proc.stderr, proc.stderr
+    assert MARK not in proc.stderr
+
+
+@pytest.mark.parametrize("name", ALL_SCRIPTS)
 def test_a_group_writable_helper_is_refused_as_root(sandbox, need_userns, name):
     assert refused(sandbox(name, userns=True, lib_mode="664"))
 
@@ -240,6 +275,41 @@ def test_a_writable_ancestor_directory_is_refused_as_root(sandbox, need_userns, 
     assert refused(sandbox(name, userns=True, outer_mode="775"))
 
 
+# --- the renderer, as a normal user ------------------------------------------------------------
+
+def run_renderer_as_user(tmp_path, lib_mode):
+    tree = tmp_path / "render-tree"
+    scripts_dir = tree / "scripts"
+    scripts_dir.mkdir(parents=True)
+    scripts_dir.chmod(0o755)
+    tree.chmod(0o755)
+    script = scripts_dir / "render-prometheus-web-config.sh"
+    script.write_text((SCRIPTS / "render-prometheus-web-config.sh").read_text(encoding="utf-8"), encoding="utf-8")
+    script.chmod(0o755)
+    lib = scripts_dir / "lib-secrets.sh"
+    lib.write_text(LIB_TEXT + f"\necho {MARK} >&2\n", encoding="utf-8")
+    lib.chmod(int(lib_mode, 8))
+    target = tmp_path / "render-target"
+    proc = subprocess.run([str(script), str(target)], env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
+                          text=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
+    return proc, target, tree
+
+
+@pytest.mark.parametrize("mode", ["664", "646"])
+def test_the_renderer_refuses_a_group_or_world_writable_helper_as_a_normal_user(tmp_path, mode):
+    proc, target, tree = run_renderer_as_user(tmp_path, mode)
+    assert proc.returncode != 0 and "refusing to source" in proc.stderr and MARK not in proc.stderr, proc.stderr
+    assert "chmod g-w,o-w" in proc.stderr
+    assert not target.exists(), "the renderer wrote output after refusing the helper"
+    assert sorted(p.name for p in tree.rglob("*") if p.is_file()) == [
+        "lib-secrets.sh", "render-prometheus-web-config.sh"]
+
+
+def test_the_renderer_loads_a_closed_helper_as_a_normal_user(tmp_path):
+    proc, _target, _tree = run_renderer_as_user(tmp_path, "644")
+    assert "refusing to source" not in proc.stderr and MARK in proc.stderr, proc.stderr
+
+
 # --- static: nothing sources the helper by pathname any more ---------------------------------------
 
 def code_lines(path):
@@ -264,11 +334,15 @@ def test_no_script_sources_the_helper_by_pathname():
 @pytest.mark.parametrize("name", ALL_SCRIPTS + ["render-prometheus-web-config.sh"])
 def test_every_user_of_the_helper_sources_a_descriptor(name):
     code = "\n".join(code_lines(SCRIPTS / name))
-    assert re.search(r"^source /proc/self/fd/\d$", code, re.M), name
+    assert re.search(r'^source <\(printf \'%s\' "\$\w+_SNAP"\)$', code, re.M), name
+    assert re.search(r"/bin/cat <&\d;", code), "the snapshot is not read from the checked descriptor"
     assert "%h" in code, "the link count of the open helper is not checked"
+    assert "%s %Y" in code, "size and mtime of the open helper are not compared across the read"
 
 
 def test_the_docs_describe_the_checked_helper_loading():
     text = re.sub(r"\s+", " ", (REPO_ROOT / "docs" / "container-engine.md").read_text(encoding="utf-8"))
     assert "no script sources it by pathname" in text
     assert "a shared loader file would itself have to be sourced unchecked first" in text
+    assert "does not revoke a writable descriptor" in text
+    assert "The snapshot does not cover a write that lands before the read" in text
