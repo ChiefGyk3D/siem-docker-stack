@@ -29,6 +29,7 @@ import ipaddress
 import json
 import os
 import re
+import signal
 import smtplib
 import socket
 import ssl
@@ -555,6 +556,70 @@ def _refuse_constant(name):
 _FETCH_SLOTS = threading.BoundedSemaphore(MAX_STUCK_FETCHES)
 
 
+class _SlotLease:
+    """One acquired fetch slot with explicit ownership. The acquirer owns it until the worker thread
+    has started; from then on the worker's finally owns it. release() is idempotent, so neither side
+    can release twice (a second release of a BoundedSemaphore raises ValueError)."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._held = True
+
+    def release(self):
+        with self._lock:
+            if not self._held:
+                return
+            self._held = False
+        _FETCH_SLOTS.release()
+
+
+# A fatal (SystemExit, KeyboardInterrupt) raised by a worker whose caller already gave up (the
+# deadline passed) has no caller to receive it. It is parked here and re-raised by the next
+# http_get_json or _run_deadline call in the process, before that call acquires a slot.
+_LATE_FATALS = []
+_LATE_LOCK = threading.Lock()
+
+
+def _raise_late_fatal():
+    with _LATE_LOCK:
+        late = _LATE_FATALS.pop(0) if _LATE_FATALS else None
+    if late is not None:
+        raise late
+
+
+def _record_fatal(box, gate, fatal):
+    """Called by a worker: hand a fatal to the waiting caller, or park it when the caller left."""
+    with gate:
+        if box.get("abandoned"):
+            with _LATE_LOCK:
+                _LATE_FATALS.append(fatal)
+        else:
+            box["fatal"] = fatal
+
+
+def _abandon(box, gate):
+    """Called by a caller that stops waiting: returns a fatal the worker recorded in the meantime."""
+    with gate:
+        box["abandoned"] = True
+        return box.get("fatal")
+
+
+def _launch(target, name, lease):
+    """Create and start the worker. Ownership of the lease passes to the worker once the thread has
+    started, even when start() then raises (an asynchronous KeyboardInterrupt can arrive after the
+    thread is running): the worker's finally releases it. The acquirer releases only when the thread
+    provably never started."""
+    worker = None
+    try:
+        worker = threading.Thread(target=target, daemon=True, name=name)
+        worker.start()
+    except BaseException:
+        if worker is None or not (worker.is_alive() or worker.ident is not None):
+            lease.release()
+        raise
+    return worker
+
+
 class _HttpStatus(Exception):
     def __init__(self, code):
         self.code = code
@@ -584,9 +649,13 @@ def http_get_json(url, token, timeout):
     target = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
     deadline = time.monotonic() + timeout
     box = {}
+    gate = threading.Lock()
+    _raise_late_fatal()
     if not _FETCH_SLOTS.acquire(blocking=False):
         raise ExpiryWatchError(f"{host}: not requested, earlier requests are still stuck (a name lookup cannot "
                                "be interrupted); fix name resolution")
+
+    lease = _SlotLease()
 
     def work():
         conn = None
@@ -617,8 +686,10 @@ def http_get_json(url, token, timeout):
                     raise _TooLarge
                 chunks.append(chunk)
             box["data"] = b"".join(chunks)
-        except Exception as e:  # reported below; process-control exceptions pass through
+        except Exception as e:  # reported below
             box["error"] = e
+        except BaseException as e:  # SystemExit, KeyboardInterrupt: re-raised in the caller below
+            _record_fatal(box, gate, e)
         finally:
             try:
                 if conn is not None:
@@ -626,14 +697,9 @@ def http_get_json(url, token, timeout):
             except Exception:  # cleanup only: it must neither replace the result nor keep the slot
                 pass
             finally:
-                _FETCH_SLOTS.release()
+                lease.release()
 
-    worker = threading.Thread(target=work, daemon=True, name=f"expiry-get-{host}")
-    try:
-        worker.start()
-    except BaseException:
-        _FETCH_SLOTS.release()
-        raise
+    worker = _launch(work, f"expiry-get-{host}", lease)
     worker.join(timeout)
     if worker.is_alive():
         conn = box.get("conn")
@@ -644,7 +710,12 @@ def http_get_json(url, token, timeout):
             except OSError:
                 pass
         worker.join(1.0)
+        fatal = _abandon(box, gate)  # a later fatal is parked and raised by the next call
+        if fatal is not None:
+            raise fatal
         raise ExpiryWatchError(f"{host} did not answer: timed out (overall deadline {timeout:g}s)")
+    if "fatal" in box:
+        raise box["fatal"]  # the worker has released the slot
     err = box.get("error")
     if isinstance(err, _HttpStatus):
         if 300 <= err.code < 400:
@@ -1327,30 +1398,38 @@ def _run_deadline(dl, fn):
     workers that may still be running is bounded (_FETCH_SLOTS, shared with the vendor reads): when
     they are all stuck, the delivery is refused and its notice stays due. Such a worker has not
     sent anything yet: it checks the deadline right after the lookup returns."""
+    _raise_late_fatal()
     if not _FETCH_SLOTS.acquire(blocking=False):
         raise _Overrun("not tried, earlier requests are still stuck (a name lookup cannot be interrupted)")
+    lease = _SlotLease()
     box = {}
+    gate = threading.Lock()
 
     def work():
         try:
             box["value"] = fn()
         except Exception as e:  # handed to the caller below
             box["error"] = e
+        except BaseException as e:  # SystemExit, KeyboardInterrupt: re-raised in the caller below
+            _record_fatal(box, gate, e)
         finally:
-            _FETCH_SLOTS.release()
+            lease.release()
 
-    worker = threading.Thread(target=work, daemon=True, name="expiry-delivery")
-    try:
-        worker.start()
-    except BaseException:
-        _FETCH_SLOTS.release()
-        raise
+    worker = _launch(work, "expiry-delivery", lease)
     worker.join(max(0.0, dl.end - time.monotonic()))
     if worker.is_alive():
         dl.abort()  # no further wait: the deadline is the deadline
-        if dl.delivered:
-            return None  # only the goodbye was slow
-        raise _Overrun(f"timed out (overall deadline {dl.seconds:g}s)")
+        fatal = _abandon(box, gate)  # a later fatal is parked and raised by the next call
+        if fatal is None:
+            if dl.delivered:
+                return None  # only the goodbye was slow
+            raise _Overrun(f"timed out (overall deadline {dl.seconds:g}s)")
+        box["fatal"] = fatal
+    if "fatal" in box:
+        # The caller must record the outcome before the fatal propagates: say whether the receiver
+        # had accepted the message (see _run_pass).
+        box["fatal"].delivery_accepted = bool(dl.delivered)
+        raise box["fatal"]  # the worker has released the slot
     err = box.get("error")
     if isinstance(err, TimeoutError):  # socket.timeout is TimeoutError
         raise _Overrun(f"timed out (overall deadline {dl.seconds:g}s)") from None
@@ -1757,7 +1836,10 @@ def save_state(path, state, root=None, seen=None, pending=None):
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 os.fchmod(fh.fileno(), 0o600)
                 fh.write(text)
+                fh.flush()
+                os.fsync(fh.fileno())
             os.replace(tmp, leaf, src_dir_fd=dirfd, dst_dir_fd=dirfd)
+            os.fsync(dirfd)
         except BaseException:
             try:
                 os.unlink(tmp, dir_fd=dirfd)
@@ -1769,6 +1851,78 @@ def save_state(path, state, root=None, seen=None, pending=None):
 
 
 # --- the runner -------------------------------------------------------------------------------------
+
+def _commit_state(save, warn=None):
+    """Run save() (the write that records what was delivered) shielded from interruption. The
+    handlers of SIGINT, SIGTERM and SIGHUP are swapped for a recorder until it is done (a signal
+    mask would not do: the C handler may run in any thread, but the Python handler runs in the main
+    one), then restored, and each distinct recorded signal is re-delivered to the restored handler
+    (SIGINT first, then the others in arrival order; repeats of one signal collapse, as the OS does).
+    An exception that still gets through is retried once. Returns the first interrupt that was held,
+    retried or raised on the way back, for the caller to raise AFTER the state is on disk; OSError
+    and ExpiryWatchError propagate as before.
+
+    The originals are read before anything is swapped, the recorder only appends, and the restore
+    loop gives every signal its own guarded attempts (up to three), so an interrupt that lands while
+    handlers are being put back cannot leave one of them replaced. The first such exception is
+    remembered and handed on once all handlers are back. Every handler is then checked with
+    getsignal; one that is still not the original makes this raise ExpiryWatchError naming the
+    signals ("could not be restored"), which the runner reports on stderr and turns into exit 1.
+
+    The shield needs the main thread (only it may install handlers) and handlers Python can
+    represent (getsignal returns None for a native one, which could not be put back faithfully).
+    Without either, no handler is touched and `warn` gets one line saying the shield is not active;
+    the save still runs. A replayed signal whose restored handler is the process default (SIGTERM,
+    SIGHUP) ends the process at once, so later held signals cannot be replayed after it and a
+    pending delivery exit code is not reached: replay is best effort, the state is already saved."""
+    held = []
+    sigs = [getattr(signal, n) for n in ("SIGINT", "SIGTERM", "SIGHUP") if hasattr(signal, n)]
+    originals = {s: signal.getsignal(s) for s in sigs}
+    if threading.current_thread() is not threading.main_thread() or None in originals.values():
+        sigs, originals = [], {}
+        if warn is not None:
+            warn("warning: the interruption shield is not active for the final state save "
+                 "(not the main thread, or a signal handler Python cannot restore)")
+    interrupted = None
+    try:
+        for s in sigs:
+            signal.signal(s, lambda signum, frame: held.append(signum))
+        for attempt in (0, 1):
+            try:
+                save()
+                break
+            except (OSError, ExpiryWatchError):
+                raise
+            except BaseException as e:  # SystemExit, KeyboardInterrupt: the commit is tried again
+                if attempt:
+                    raise
+                interrupted = e
+    finally:
+        failed = []
+        for s, handler in originals.items():
+            for _ in range(3):
+                try:
+                    signal.signal(s, handler)
+                except BaseException as e:  # an interrupt during the restore: remember it, try again
+                    interrupted = interrupted or e
+                if signal.getsignal(s) is handler:
+                    break
+            else:
+                failed.append(s)
+        # a signal whose restoration failed is not replayed: its handler is still the recorder
+        pending = sorted((n for n in dict.fromkeys(held) if n not in failed),
+                         key=lambda n: n != signal.SIGINT)  # SIGINT first, stable otherwise
+        for n in pending:
+            try:
+                signal.raise_signal(n)  # the restored handler decides: KeyboardInterrupt, exit, or its own work
+            except BaseException as e:  # the commit is done: hand the interrupt on, do not lose it
+                interrupted = interrupted or e
+        if failed:
+            names = ", ".join(signal.Signals(s).name for s in failed)
+            raise ExpiryWatchError(f"the signal handlers for {names} could not be restored after the state save; "
+                                   "stop this process and start it again")
+    return interrupted
+
 
 def _keep_prior(new_state, state, name):
     """Undo one item's state change because its notice was not delivered."""
@@ -1912,7 +2066,13 @@ def _run_pass(root, leaf, now, env, out, err, dry_run, opener):
         else:
             _keep_prior(new_state, state, n.item.name)
 
+    deferred = None  # a SystemExit or KeyboardInterrupt from a delivery, raised once the outcome is saved
     for n in notices:
+        if deferred is not None:  # nothing more is sent after a fatal: the notice stays due as it was
+            undo(n)
+            if notice_key(n) in pending:
+                new_pending[notice_key(n)] = pending[notice_key(n)]
+            continue
         if n.stage == "disappeared":
             tag = f"{n.item.name} [disappeared] last known expiry {n.item.expires.isoformat()}"
         else:
@@ -1944,6 +2104,7 @@ def _run_pass(root, leaf, now, env, out, err, dry_run, opener):
             sends.append(("email", lambda n=n, b=None: email_send(config.email, env, n, now, root, b,
                                                                   generation=generation)))
         delivered = True
+        fatal = None
         for chan, send in sends:
             left = budget_end - time.monotonic()
             if left <= 0:  # the whole pass has a budget: the rest stays due for the next run
@@ -1983,15 +2144,26 @@ def _run_pass(root, leaf, now, env, out, err, dry_run, opener):
             except ExpiryWatchError as e:
                 err(f"delivery error: {tag}: {e}")
                 delivered = False
+            except BaseException as e:  # SystemExit, KeyboardInterrupt: recorded below, raised after the save
+                fatal = e
+                if getattr(e, "delivery_accepted", False):
+                    out(f"{'posted' if chan == 'router' else 'sent ' + chan}: {tag}")
+                else:  # acceptance unknown: the notice stays due under the same generation
+                    delivered = False
+                break
             finally:
                 if chan == "router":
                     last_router_post = time.monotonic()
+        if fatal is not None and sends[-1][0] != chan:
+            delivered = False  # the channels after the fatal one were not tried
         if not delivered:  # one channel failing keeps the whole notice due: a retry may repeat the others
             failed = True
             undo(n)
             new_pending[notice_key(n)] = generation
         else:
             new_pending.pop(notice_key(n), None)
+        if fatal is not None:
+            deferred = fatal  # raised after the state is saved
     if router_capped:
         err(f"delivery error: the router post limit ({MAX_ROUTER_POSTS_PER_RUN} per run) was reached; "
             f"{router_capped} post(s) were not tried and stay due for the next run")
@@ -2001,13 +2173,22 @@ def _run_pass(root, leaf, now, env, out, err, dry_run, opener):
 
     if not dry_run:
         try:
-            save_state(state_path, new_state, root, seen=new_seen, pending=new_pending)
+            held = _commit_state(lambda: save_state(state_path, new_state, root, seen=new_seen, pending=new_pending),
+                                 warn=err)
+            if deferred is None:
+                deferred = held  # the delivery fatal, when there is one, keeps its exit code
         except OSError as e:
             err(f"state error: cannot write {state_path}: {e.strerror}")
+            if deferred is not None:
+                raise deferred
             return 1
         except ExpiryWatchError as e:
             err(f"state error: {e}")
+            if deferred is not None:
+                raise deferred
             return 1
+    if deferred is not None:
+        raise deferred
     return 1 if failed else 0
 
 
