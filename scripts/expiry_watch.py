@@ -1856,18 +1856,25 @@ def _commit_state(save):
     """Run save() (the write that records what was delivered) shielded from interruption. The
     handlers of SIGINT, SIGTERM and SIGHUP are swapped for a recorder until it is done (a signal
     mask would not do: the C handler may run in any thread, but the Python handler runs in the main
-    one), then restored, and a recorded signal is re-delivered to the restored handler. An exception
-    that still gets through is retried once. Returns the interrupt that was held or retried, for
-    the caller to raise AFTER the state is on disk; OSError and ExpiryWatchError propagate as before."""
+    one), then restored, and each distinct recorded signal is re-delivered to the restored handler
+    (SIGINT first, then the others in arrival order; repeats of one signal collapse, as the OS does).
+    An exception that still gets through is retried once. Returns the first interrupt that was held,
+    retried or raised on the way back, for the caller to raise AFTER the state is on disk; OSError
+    and ExpiryWatchError propagate as before.
+
+    The originals are read before anything is swapped, the recorder only appends, and the restore
+    loop gives every signal its own guarded attempts (up to three), so an interrupt that lands while
+    handlers are being put back cannot leave one of them replaced. The first such exception is
+    remembered and handed on once all handlers are back."""
     held = []
-    old = {}
+    sigs = []
     if threading.current_thread() is threading.main_thread():
-        for name in ("SIGINT", "SIGTERM", "SIGHUP"):
-            sig = getattr(signal, name, None)
-            if sig is not None:
-                old[sig] = signal.signal(sig, lambda signum, frame: held.append(signum))
+        sigs = [getattr(signal, n) for n in ("SIGINT", "SIGTERM", "SIGHUP") if hasattr(signal, n)]
+    originals = {s: (signal.getsignal(s) or signal.SIG_DFL) for s in sigs}
     interrupted = None
     try:
+        for s in sigs:
+            signal.signal(s, lambda signum, frame: held.append(signum))
         for attempt in (0, 1):
             try:
                 save()
@@ -1879,13 +1886,19 @@ def _commit_state(save):
                     raise
                 interrupted = e
     finally:
-        try:
-            for sig, handler in old.items():
-                signal.signal(sig, handler if handler is not None else signal.SIG_DFL)
-            if held:
-                signal.raise_signal(held[0])  # the restored handler decides: KeyboardInterrupt, exit
-        except BaseException as e:  # the commit is done: hand the interrupt on, do not lose it
-            interrupted = interrupted or e
+        for s, handler in originals.items():
+            for _ in range(3):
+                try:
+                    signal.signal(s, handler)
+                    break
+                except BaseException as e:  # an interrupt during the restore: remember it, try again
+                    interrupted = interrupted or e
+        pending = sorted(dict.fromkeys(held), key=lambda n: n != signal.SIGINT)  # SIGINT first, stable otherwise
+        for n in pending:
+            try:
+                signal.raise_signal(n)  # the restored handler decides: KeyboardInterrupt, exit, or its own work
+            except BaseException as e:  # the commit is done: hand the interrupt on, do not lose it
+                interrupted = interrupted or e
     return interrupted
 
 
