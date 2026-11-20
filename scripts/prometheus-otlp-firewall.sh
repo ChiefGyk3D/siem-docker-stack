@@ -31,13 +31,19 @@ CHAIN_B=PROM-OTLP-B
 
 die() { echo "prometheus-otlp-firewall: $*" >&2; exit 1; }
 
-if [ "$EUID" -eq 0 ]; then
-    # As root: the fixed PATH comes first, before any external program runs, and the
-    # root test uses bash's own numeric id, never a program found on PATH. Fixed
-    # program names (no IPTABLES/DOCKER overrides, PROM_FW_NO_SUDO ignored), and only
-    # code nobody else can edit. Run the root-owned copy (docs).
-    PATH=/usr/sbin:/usr/bin:/sbin:/bin
-    export PATH
+# The fixed PATH is set first, unconditionally, before any external program runs. The
+# root decision then comes from the kernel through an absolute id program, never from
+# the EUID or UID variables (bash imports those from the environment, so a caller
+# could set them to anything).
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+if [ -x /usr/bin/id ]; then ID_BIN=/usr/bin/id; elif [ -x /bin/id ]; then ID_BIN=/bin/id; else die "no id program found at /usr/bin/id or /bin/id"; fi
+real_uid="$("$ID_BIN" -u)" || die "could not determine the user id"
+[[ "$real_uid" =~ ^[0-9]+$ ]] || die "could not determine the user id"
+
+if [ "$real_uid" -eq 0 ]; then
+    # As root: fixed program names (no IPTABLES/DOCKER overrides, PROM_FW_NO_SUDO
+    # ignored), and only code nobody else can edit. Run the root-owned copy (docs).
     IPT=iptables
     DOCKER_BIN=docker
     SELF="${BASH_SOURCE[0]}"

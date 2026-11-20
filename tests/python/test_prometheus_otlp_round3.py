@@ -300,13 +300,14 @@ def fw_root(fw, tmp_path):
     copy_dir.mkdir()
     copy_dir.chmod(0o755)
 
-    def run(mode="755", *args):
+    def run(mode="755", *args, env_extra=None):
         script = copy_dir / "prometheus-otlp-firewall.sh"
         script.write_bytes(FIREWALL.read_bytes())
         script.chmod(int(mode, 8))
         env = {"PATH": f"{stubs}:{fw.stubs}:/usr/bin:/bin", "IPT_LOG": str(fw.log),
                "IPT_STATE": str(tmp_path / "ipt.state"), "PROM_FW_NO_SUDO": "1",
-               "IPTABLES": str(fw.stubs / "iptables"), "DOCKER": str(fw.stubs / "docker")}
+               "IPTABLES": str(fw.stubs / "iptables"), "DOCKER": str(fw.stubs / "docker"),
+               **(env_extra or {})}
         fw.log.write_text("", encoding="utf-8")
         proc = subprocess.run(["unshare", "-r", BASH, str(script), *(args or GOOD)], env=env,
                               text=True, capture_output=True, stdin=subprocess.DEVNULL, timeout=30)
@@ -334,6 +335,32 @@ def test_firewall_root_ignores_the_iptables_and_docker_overrides(fw_root):
     assert "run as root" not in proc.stderr and "root-owned" not in proc.stderr
     assert proc.calls == [], "the override stubs must not be used as root"
     assert not proc.marker.exists()
+
+
+@pytest.mark.parametrize("fake", ["1234", "0", "", "abc"])
+def test_a_caller_supplied_euid_cannot_move_a_real_root_off_the_root_path(fw_root, fake):
+    # Bash imports EUID from the environment; the decision must come from the kernel.
+    proc = fw_root("755", "remove", env_extra={"EUID": fake})
+    assert "run as root" not in proc.stderr
+    assert proc.calls == [], "an override program ran as root"
+    assert not proc.marker.exists()
+    refused = fw_root("775", env_extra={"EUID": fake})
+    assert refused.returncode != 0 and "root-owned" in refused.stderr
+
+
+def test_euid_zero_from_the_environment_does_not_make_a_normal_user_root(tmp_path):
+    env = {"PATH": "/usr/bin:/bin", "EUID": "0", "UID": "0"}
+    proc = subprocess.run([BASH, str(FIREWALL), "remove"], env=env, text=True, capture_output=True,
+                          stdin=subprocess.DEVNULL, timeout=30, cwd=tmp_path)
+    assert proc.returncode != 0 and "run as root" in proc.stderr
+
+
+def test_firewall_decides_root_from_the_kernel_after_resetting_path():
+    text = FIREWALL.read_text(encoding="utf-8")
+    code = [ln for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")]
+    first = next(i for i, ln in enumerate(code) if ln.startswith("PATH="))
+    assert "EUID" not in "\n".join(code), "the root decision must not read EUID"
+    assert first < next(i for i, ln in enumerate(code) if '"$ID_BIN" -u' in ln)
 
 
 def test_firewall_resets_path_for_real_root():
