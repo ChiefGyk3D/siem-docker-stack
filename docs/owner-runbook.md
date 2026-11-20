@@ -54,7 +54,7 @@ Rules every step follows:
 | Q5 | What is the live name of the old router workflow? The repo workflow is named "Grafana SOAR - Alert Router" and the runbook calls the new one "Grafana SOAR - Alert Router (authenticated)". Which one is live and old is not in a doc. | Step 9 |
 | Q7 | `scripts/live-deploy/grafana-deploy.py` copies only four alert files (`contact-points.yml`, the two update rule files, `heartbeat-alert-rule.yml`; VERIFIED: the `FILES` tuple). It does not copy the notification failure rule or the example contact points, and it rewrites `contact-points.yml` on every run. Steps 4 and 5 therefore copy files by hand into their own files. Should the deploy script take over that job (a code change, not part of this doc)? Issue #126 (an open PR, not merged) is the deploy script change that will later replace the manual file copies in steps 4 and 5; until it merges, copy by hand as written. | Steps 4, 5 |
 | Q8 | The Grafana group id for `grafana_uid`/`grafana_gid` in the backup config is not stated. The compose file sets `user: "472"` (VERIFIED) and the example says `grafana_gid = 0`. Read it with `docker exec grafana id`. | Step 2 |
-| Q9 | Which account runs the scheduled backup? The example unit uses a dedicated user and warns that docker group membership is root-equivalent (VERIFIED: `docs/examples/siem-state-backup.service`). The account and its container access are the owner's decision. | Step 2 |
+| Q9a | How does the dedicated service account get Docker access for `docker cp` and `docker exec`? Docker group membership is root-equivalent; the safer option is a root-owned wrapper allowed by one exact `sudoers` rule. This doc does not choose. | Steps 0c, 2 |
 | Q10 | How is a P1 produced on demand to test the email route end to end? No doc says. | Step 5 |
 | Q11 | Should the expiry watch reuse the router secret from `prd_network` (copied to dev) or get its own router credential? | Step 6 |
 
@@ -231,6 +231,124 @@ credential together"; add the dev copy to that list).
 Rollback: delete `GRAFANA_WEBHOOK_SECRET` from the dev config in Doppler. Nothing
 in `prd_network` was changed, and the live Grafana is unaffected until step 4d.
 
+## Step 0c. The dedicated service account for scheduled jobs (LIVE)
+
+Owner decision: a dedicated, non-login system account, placeholder
+`SERVICE_ACCOUNT` (suggested name `siem-ops`), runs both scheduled jobs: the state
+backup (step 2) and the expiry watch (step 6). Neither runs as a person or as
+root by default. Do this before step 2.
+
+Source for the shape: `docs/examples/siem-state-backup.service` (a dedicated
+user, `UMask=0077`, and the warning that docker group membership is
+root-equivalent) and `docs/expiry-watch.md` ("Scheduling": the job user owns the
+config, env file and state file, mode 0600).
+
+### 0c.1 Create the account and its state directory
+
+The flags below were checked against the local `useradd --help` on 2026-11-19
+(`--system`, `--no-create-home`, `--shell`, `--home-dir` all exist). That this
+combination suits your distribution is INFERRED. In a session on LOGGING_BOX:
+
+```
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin --home-dir /var/lib/SERVICE_ACCOUNT SERVICE_ACCOUNT
+sudo install -d -m 700 -o SERVICE_ACCOUNT -g SERVICE_ACCOUNT /var/lib/SERVICE_ACCOUNT
+id SERVICE_ACCOUNT
+ls -ld /var/lib/SERVICE_ACCOUNT
+```
+
+Expect a `uid=` line with no extra groups, and `drwx------` owned by the
+account. The nologin shell path may differ on your system (INFERRED; check
+`getent passwd` for what other system accounts use).
+
+### 0c.2 Where files live and who can read them
+
+| What | Where (examples, owner may change) | Who may read | Source |
+|------|------------------------------------|--------------|--------|
+| Backup archives and their `.manifest.json` | `destination_dir`, for example `/var/lib/SERVICE_ACCOUNT/backups` | root and `SERVICE_ACCOUNT` only (mode 700 directory, files written with `UMask=0077`) | example service unit; `docs/backup-restore.md` (directory must be owned by you and not group or world writable, VERIFIED) |
+| Backup config with the age PUBLIC recipients | `/etc/siem-state-backup.toml`, mode 0640 per the example, group `SERVICE_ACCOUNT` so only root and the account read it | root and `SERVICE_ACCOUNT` | example config |
+| Expiry watch config, registry and state file | `/etc/expiry-watch`, owned by `SERVICE_ACCOUNT`, mode 700 | `SERVICE_ACCOUNT` (and root) | `docs/expiry-watch.md` |
+| Doppler read-only token file | `/var/lib/SERVICE_ACCOUNT/doppler-token`, mode 600 | `SERVICE_ACCOUNT` only | this step |
+| The age PRIVATE keys | NOT on LOGGING_BOX | the owner, offline | `docs/backup-restore.md` secret material warning |
+
+The private age key is never on the box and the job never touches it: the backup
+uses public recipients only and cannot decrypt (VERIFIED: `docs/backup-restore.md`).
+Create the backup directory and set the group on the config:
+
+```
+sudo install -d -m 700 -o SERVICE_ACCOUNT -g SERVICE_ACCOUNT /var/lib/SERVICE_ACCOUNT/backups
+sudo chgrp SERVICE_ACCOUNT /etc/siem-state-backup.toml
+sudo chmod 0640 /etc/siem-state-backup.toml
+```
+
+(Run the `chgrp` after step 2b creates the config, and set `destination_dir` to
+`/var/lib/SERVICE_ACCOUNT/backups`; both are INFERRED layout choices.)
+`ProtectSystem=strict` in the example unit also needs `ReadWritePaths` to name the
+archive directory; edit the unit in step 2e.
+
+### 0c.3 How the account gets its secrets
+
+The owner creates a read-only Doppler service token scoped to the `dev_network`
+config only (project `homelab`), in the Doppler dashboard. This doc does not
+describe that screen (no repo doc verifies it; send a screenshot if unsure).
+Never type the token on a command line, never print it. Store it, read from a
+prompt, in a file only the account can read:
+
+```
+read -rs -p "Doppler service token: " TOK; echo
+printf '%s' "$TOK" | sudo install -m 600 -o SERVICE_ACCOUNT -g SERVICE_ACCOUNT /dev/stdin /var/lib/SERVICE_ACCOUNT/doppler-token
+unset TOK
+sudo ls -l /var/lib/SERVICE_ACCOUNT/doppler-token
+```
+
+Expect `-rw-------` owned by the account, and no token in the terminal
+(INFERRED: `install` from `/dev/stdin`; this mirrors the token-file pattern in
+`docs/live-deploy-runbook.md` section 2, which is VERIFIED for `siem-run`). A
+scheduled job then reads it through the Doppler CLI's token variable, for example
+`DOPPLER_TOKEN` set from that file inside the unit or wrapper, never written into
+the unit text (INFERRED: whether your CLI version takes the token that way;
+confirm with `doppler run --help`). A read-only token cannot be used to change
+secrets. Rotate it by creating a new token and replacing the file, then revoking
+the old one in the dashboard.
+
+### 0c.4 The timers run as this account
+
+The backup unit's `User=` is `SERVICE_ACCOUNT` (the example uses a placeholder
+user, VERIFIED). The expiry watch unit or cron entry runs as the same account, so
+the config folder in 6a is owned by it. Use whichever of systemd timers or cron
+you prefer; a cron entry goes in that account's crontab (`sudo crontab -u
+SERVICE_ACCOUNT -e`; INFERRED, a nologin account can still own a crontab).
+
+### 0c.5 Docker access: the owner decides (OPEN QUESTION Q9a)
+
+The backup uses `docker cp` and `docker exec` (VERIFIED: `docs/backup-restore.md`),
+so the account needs access to the Docker socket. Plainly: membership of the
+`docker` group is root-equivalent, since anyone who can start containers can
+mount the host's filesystem (VERIFIED: warning in
+`docs/examples/siem-state-backup.service`). Giving a service account that access
+means a flaw in the job or a leak of its files becomes a root-level problem.
+
+Two options. This doc does not choose:
+
+- Option 1: add `SERVICE_ACCOUNT` to the `docker` group. Simple, and the
+  root-equivalent risk above applies in full. The expiry watch does not need
+  Docker and can run without it only if it runs under a different account, which
+  contradicts the one-account decision.
+- Option 2: keep the account out of the `docker` group and let it run only the
+  exact backup command as root through a small root-owned wrapper script and a
+  `sudoers` entry that allows that one command and nothing else. Safer. Cost: the
+  wrapper and sudoers rule must be written, reviewed and tested (a code and
+  config change outside this doc), and the `restore` side is a separate
+  decision. The archives would then be written by root unless the wrapper
+  drops privileges, which is a design question for that change.
+
+Until the owner answers Q9a, do 0c.1 to 0c.4, and run step 2c by hand with `sudo`
+as written; do not schedule the backup (2e) and do not start the expiry watch
+timer under a docker-capable account.
+
+Rollback: `sudo userdel SERVICE_ACCOUNT` (INFERRED command name), then remove
+`/var/lib/SERVICE_ACCOUNT` once nothing needs the archives, and revoke the
+Doppler token in the dashboard. Archives you still need must be copied out first.
+
 ## Step 1. Read the Healthchecks ping log (LIVE, read only)
 
 Request item 1. Source: `docs/heartbeat.md` (sections "The three observers",
@@ -292,7 +410,7 @@ Prerequisites:
   offline").
 - A place for the archives on LOGGING_BOX (`destination_dir`, default in the
   example `/var/backups/siem-state`).
-- Q8 and Q9 answered.
+- Step 0c done, and Q8 answered.
 - The documented caveat: no live run of any of this has happened yet, including
   real `age`, `rclone` and the `docker exec` and `docker cp` calls (VERIFIED:
   "Not verified (no live run yet)"). Treat the first run as a test.
@@ -347,8 +465,9 @@ works; check the package source.) In the editor set:
 ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && sudo python3 scripts/backup-state.py --config /etc/siem-state-backup.toml; echo "exit code: $?"'
 ```
 
-(`sudo` because the run needs the container runtime; whether a non-root account
-should do this is Q9. INFERRED.) Then look at the output directory:
+(`sudo` because the run needs the container runtime. The scheduled runs use the
+dedicated account from step 0c; its Docker access is Q9a. INFERRED.) Then look
+at the output directory:
 
 ```
 ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo ls -l /var/backups/siem-state'
@@ -387,7 +506,9 @@ prove it also decrypts. Record the date and result in your ops notes
 ### 2e. Schedule it
 
 Only after 2c and 2d pass. Install the example unit and timer (they carry
-placeholder paths and a placeholder user; edit them first, Q9):
+placeholder paths and a placeholder user; edit them first: set `User=` to
+`SERVICE_ACCOUNT` and `ReadWritePaths` to the archive directory, per step 0c, and
+wait for the Docker access answer in 0c.5 before enabling the timer):
 
 ```
 ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'sudo cp REPO_DIR/docs/examples/siem-state-backup.service REPO_DIR/docs/examples/siem-state-backup.timer /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now siem-state-backup.timer && systemctl list-timers siem-state-backup.timer'
@@ -835,10 +956,10 @@ links"). Keep it outside the repo, since the router URL contains the private
 webhook path.
 
 ```
-sudo install -d -m 700 -o "$USER" /etc/expiry-watch
-cp REPO_DIR/docs/expiry-watch.example.toml /etc/expiry-watch/expiry-watch.toml
-cp REPO_DIR/docs/expiry-watch-registry.example.toml /etc/expiry-watch/expiry-watch-registry.toml
-"${EDITOR:-nano}" /etc/expiry-watch/expiry-watch.toml
+sudo install -d -m 700 -o SERVICE_ACCOUNT -g SERVICE_ACCOUNT /etc/expiry-watch
+sudo install -m 600 -o SERVICE_ACCOUNT -g SERVICE_ACCOUNT REPO_DIR/docs/expiry-watch.example.toml /etc/expiry-watch/expiry-watch.toml
+sudo install -m 600 -o SERVICE_ACCOUNT -g SERVICE_ACCOUNT REPO_DIR/docs/expiry-watch-registry.example.toml /etc/expiry-watch/expiry-watch-registry.toml
+sudoedit /etc/expiry-watch/expiry-watch.toml
 ```
 
 Edit (the example values are placeholders and several will fail until replaced):
