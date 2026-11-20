@@ -1852,7 +1852,7 @@ def save_state(path, state, root=None, seen=None, pending=None):
 
 # --- the runner -------------------------------------------------------------------------------------
 
-def _commit_state(save):
+def _commit_state(save, warn=None):
     """Run save() (the write that records what was delivered) shielded from interruption. The
     handlers of SIGINT, SIGTERM and SIGHUP are swapped for a recorder until it is done (a signal
     mask would not do: the C handler may run in any thread, but the Python handler runs in the main
@@ -1865,12 +1865,24 @@ def _commit_state(save):
     The originals are read before anything is swapped, the recorder only appends, and the restore
     loop gives every signal its own guarded attempts (up to three), so an interrupt that lands while
     handlers are being put back cannot leave one of them replaced. The first such exception is
-    remembered and handed on once all handlers are back."""
+    remembered and handed on once all handlers are back. Every handler is then checked with
+    getsignal; one that is still not the original makes this raise ExpiryWatchError naming the
+    signals ("could not be restored"), which the runner reports on stderr and turns into exit 1.
+
+    The shield needs the main thread (only it may install handlers) and handlers Python can
+    represent (getsignal returns None for a native one, which could not be put back faithfully).
+    Without either, no handler is touched and `warn` gets one line saying the shield is not active;
+    the save still runs. A replayed signal whose restored handler is the process default (SIGTERM,
+    SIGHUP) ends the process at once, so later held signals cannot be replayed after it and a
+    pending delivery exit code is not reached: replay is best effort, the state is already saved."""
     held = []
-    sigs = []
-    if threading.current_thread() is threading.main_thread():
-        sigs = [getattr(signal, n) for n in ("SIGINT", "SIGTERM", "SIGHUP") if hasattr(signal, n)]
-    originals = {s: (signal.getsignal(s) or signal.SIG_DFL) for s in sigs}
+    sigs = [getattr(signal, n) for n in ("SIGINT", "SIGTERM", "SIGHUP") if hasattr(signal, n)]
+    originals = {s: signal.getsignal(s) for s in sigs}
+    if threading.current_thread() is not threading.main_thread() or None in originals.values():
+        sigs, originals = [], {}
+        if warn is not None:
+            warn("warning: the interruption shield is not active for the final state save "
+                 "(not the main thread, or a signal handler Python cannot restore)")
     interrupted = None
     try:
         for s in sigs:
@@ -1886,19 +1898,29 @@ def _commit_state(save):
                     raise
                 interrupted = e
     finally:
+        failed = []
         for s, handler in originals.items():
             for _ in range(3):
                 try:
                     signal.signal(s, handler)
-                    break
                 except BaseException as e:  # an interrupt during the restore: remember it, try again
                     interrupted = interrupted or e
-        pending = sorted(dict.fromkeys(held), key=lambda n: n != signal.SIGINT)  # SIGINT first, stable otherwise
+                if signal.getsignal(s) is handler:
+                    break
+            else:
+                failed.append(s)
+        # a signal whose restoration failed is not replayed: its handler is still the recorder
+        pending = sorted((n for n in dict.fromkeys(held) if n not in failed),
+                         key=lambda n: n != signal.SIGINT)  # SIGINT first, stable otherwise
         for n in pending:
             try:
                 signal.raise_signal(n)  # the restored handler decides: KeyboardInterrupt, exit, or its own work
             except BaseException as e:  # the commit is done: hand the interrupt on, do not lose it
                 interrupted = interrupted or e
+        if failed:
+            names = ", ".join(signal.Signals(s).name for s in failed)
+            raise ExpiryWatchError(f"the signal handlers for {names} could not be restored after the state save; "
+                                   "stop this process and start it again")
     return interrupted
 
 
@@ -2151,7 +2173,8 @@ def _run_pass(root, leaf, now, env, out, err, dry_run, opener):
 
     if not dry_run:
         try:
-            held = _commit_state(lambda: save_state(state_path, new_state, root, seen=new_seen, pending=new_pending))
+            held = _commit_state(lambda: save_state(state_path, new_state, root, seen=new_seen, pending=new_pending),
+                                 warn=err)
             if deferred is None:
                 deferred = held  # the delivery fatal, when there is one, keeps its exit code
         except OSError as e:
