@@ -163,6 +163,22 @@ def test_a_world_writable_helper_is_refused_as_a_normal_user(sandbox, name):
 
 
 @pytest.mark.parametrize("name", ALL_SCRIPTS)
+def test_a_group_writable_helper_is_refused_as_a_normal_user(sandbox, name):
+    # A group peer could write the same inode after the check and before the source; the refusal
+    # comes first and names the exact fix, and the helper is never sourced.
+    proc = sandbox(name, lib_mode="664")
+    assert refused(proc)
+    assert "chmod g-w,o-w" in proc.stderr
+
+
+@pytest.mark.parametrize("name", ALL_SCRIPTS)
+def test_a_group_writable_ancestor_is_allowed_for_a_normal_user(sandbox, name):
+    # Replacing a directory entry after the open cannot change the opened inode.
+    proc = sandbox(name, outer_mode="775", dir_mode="775")
+    assert "refusing to source" not in proc.stderr and MARK in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("name", ALL_SCRIPTS)
 def test_a_symlinked_helper_is_refused_as_a_normal_user(sandbox, name):
     assert refused(sandbox(name, lib_link=True))
 

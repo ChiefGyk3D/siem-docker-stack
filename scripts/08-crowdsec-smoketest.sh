@@ -122,11 +122,10 @@ exec 7<"$SL_LIB" || sl_fail "it cannot be opened"
 SL_OWNER="$(/usr/bin/stat -L -c %u -- /proc/self/fd/7)"
 SL_MODE="$(/usr/bin/stat -L -c %a -- /proc/self/fd/7)"
 SL_LINKS="$(/usr/bin/stat -L -c %h -- /proc/self/fd/7)"
-SL_MASK=002  # world write is never allowed; group write too when running as root
-[ "$CE_STRICT" != 1 ] || SL_MASK=022
+SL_MASK=022  # group or world write on the opened file is never allowed, root or not: a peer could edit the open inode before it is sourced
 if [ ! -f /proc/self/fd/7 ] || { [ "$SL_OWNER" != 0 ] && [ "$SL_OWNER" != "$CE_UID" ]; } ||
     [ $((8#$SL_MODE & 8#$SL_MASK)) -ne 0 ] || [ "$SL_LINKS" != 1 ]; then
-    sl_fail "it must be a regular file with one link, owned by root or by you, not world writable (and not group writable when run as root)"
+    sl_fail "it must be a regular file with one link, owned by root or by you, and not group or world writable (fix: chmod g-w,o-w ${SL_LIB})"
 fi
 SL_P="$SCRIPT_DIR"
 while :; do

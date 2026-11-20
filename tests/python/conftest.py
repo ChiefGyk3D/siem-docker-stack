@@ -1,9 +1,24 @@
 """Shared helpers for the repo's Python tests."""
 import importlib.util
+import stat
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _helpers_are_not_group_or_world_writable():
+    """The scripts refuse a sourced helper that is group or world writable. A checkout made with
+    umask 002 leaves these files group writable (git records only 644), so close them here, the
+    same fix the refusal message names (chmod g-w,o-w)."""
+    for name in ("lib-secrets.sh", "lib-container-engine.sh"):
+        path = REPO_ROOT / "scripts" / name
+        if path.is_file():
+            path.chmod(path.stat().st_mode & ~(stat.S_IWGRP | stat.S_IWOTH) & 0o7777)
+    yield
 
 
 def skip_or_fail(reason, env=None):

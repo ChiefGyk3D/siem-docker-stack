@@ -160,10 +160,15 @@ keeps the copies identical.
 `deploy-n8n-soar.sh`, `08-crowdsec-smoketest.sh` and
 `render-prometheus-web-config.sh`: no script sources it by pathname. Each one opens it
 once on a descriptor, checks the open file (a regular file with one link, owned by root
-or by the running user, not world writable, and not group writable when running as
-root) and every directory above it (no symlink; as root, root-owned and closed to group
-and others; otherwise owned by root or by you and not world writable, except a sticky
-directory such as `/tmp`), then sources that same descriptor. The check stays inline in
+or by the running user, and neither group nor world writable, for root and non-root
+runs alike) and every directory above it (no symlink; as root, root-owned and closed to
+group and others; otherwise owned by root or by you and not world writable, except a
+sticky directory such as `/tmp`), then sources that same descriptor. A group-writable
+helper is refused because a group peer could edit the very inode that was opened, after
+the check and before the source (the refusal says `chmod g-w,o-w <helper>`). A
+group-writable ancestor directory is acceptable for a non-root run only because the
+check happens after the open: replacing a directory entry cannot change the inode the
+descriptor already holds. The check stays inline in
 each script on purpose: a shared loader file would itself have to be sourced unchecked
 first. Tests: `tests/python/test_secrets_helper_bootstrap.py`.
 

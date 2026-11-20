@@ -115,11 +115,10 @@ exec 9<"$LIB_PATH" || lib_fail "it cannot be opened"
 LIB_OWNER="$(/usr/bin/stat -L -c %u -- /proc/self/fd/9)"
 LIB_MODE="$(/usr/bin/stat -L -c %a -- /proc/self/fd/9)"
 LIB_LINKS="$(/usr/bin/stat -L -c %h -- /proc/self/fd/9)"
-LIB_MASK=002  # world write is never allowed; group write too when running as root
-[ "$RUN_UID" -ne 0 ] || LIB_MASK=022
+LIB_MASK=022  # group or world write on the opened file is never allowed, root or not: a peer could edit the open inode before it is sourced
 if [ ! -f /proc/self/fd/9 ] || { [ "$LIB_OWNER" != 0 ] && [ "$LIB_OWNER" != "$RUN_UID" ]; } ||
     [ $((8#$LIB_MODE & 8#$LIB_MASK)) -ne 0 ] || [ "$LIB_LINKS" != 1 ]; then
-    lib_fail "it must be a regular file with one link, owned by root or by you, not world writable (and not group writable when run as root)"
+    lib_fail "it must be a regular file with one link, owned by root or by you, and not group or world writable (fix: chmod g-w,o-w ${LIB_PATH})"
 fi
 # shellcheck source=scripts/lib-secrets.sh
 source /proc/self/fd/9
