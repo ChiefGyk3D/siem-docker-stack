@@ -56,7 +56,7 @@ Rules every step follows:
 | Q8 | The Grafana group id for `grafana_uid`/`grafana_gid` in the backup config is not stated. The compose file sets `user: "472"` (VERIFIED) and the example says `grafana_gid = 0`. Read it with `docker exec grafana id`. | Step 2 |
 | Q9a | How does the dedicated service account get Docker access for `docker cp` and `docker exec`? Docker group membership is root-equivalent; the safer option is a root-owned wrapper allowed by one exact `sudoers` rule. This doc does not choose. | Steps 0c, 2 |
 | Q10 | How is a P1 produced on demand to test the email route end to end? No doc says. | Step 5 |
-| Q11 | Should the expiry watch reuse the router secret from `prd_network` (copied to dev) or get its own router credential? | Step 6 |
+| Q12 | Where do the expiry endpoint's ingress limits (about 16 KB body, rate, timeouts, concurrency) live, when the watch posts to a loopback port that bypasses any reverse proxy? | Step 6 |
 
 ## Order and why
 
@@ -898,16 +898,10 @@ Prerequisites:
   token needs `serviceaccounts:read` on scope `serviceaccounts:id:*` (VERIFIED).
   Start with only the registry and TLS providers; add the token providers in a
   second pass.
-- The decision about the router token: the router secret is the same value as
-  `GRAFANA_WEBHOOK_SECRET`, without the word `Bearer` (VERIFIED: step 2 of the
-  quick start). That value lives in `prd_network` today. Copying it to dev
-  reuses a shared secret; the alternative is a second header credential for the
-  watch (a router change). DECIDED (Q11, 2026-11-19): the watch gets its own
-  credential. The repo side is issue #127: the router has a second endpoint,
-  `/webhook/expiry-watch-alerts-<opaque>` (private path in the helper's `expiry-path` file), checked against the n8n container variable
-  `EXPIRY_WATCH_ROUTER_SECRET`. Do not copy the Grafana secret. Owner steps are
-  in `docs/expiry-watch.md`, "The router credential", and need the changed
-  workflow imported live first.
+- The router side is done in section 6.1: the watch has its own endpoint and its
+  own secret on the router, separate from Grafana's (VERIFIED: `docs/expiry-watch.md`,
+  "The router credential"). It needs the merged router workflow imported live
+  first, which 6.1 does.
 
 ### 6.0 A localhost URL for n8n (on LOGGING_BOX)
 
@@ -990,6 +984,176 @@ Rollback: restore `N8N_COMPOSE_FILE.bak-<date>` over the compose file, run the
 same recreate command, and re-check the siem network and the heartbeat. Nothing
 else changes; the siem network name `n8n` still serves Grafana.
 
+### 6.1 The router's own endpoint and secret (on LOGGING_BOX)
+
+Source: `docs/expiry-watch.md`, "The router credential" and its owner steps;
+`docs/update-alerting.md` (the expiry watch paragraph); `docs/live-deploy-runbook.md`
+sections 3 and 4; `docs/heartbeat.md` (settings); the merged PR #128 text. Nothing
+runs from the repo; each step here is a live change.
+
+What exists (VERIFIED: `docs/expiry-watch.md`): the router has a second entry,
+the `Expiry Watch Webhook` node, with its own private path. A `Check Expiry
+Secret` node compares the `Authorization` header with `Bearer ` plus the n8n
+container variable `EXPIRY_WATCH_ROUTER_SECRET`. Grafana's webhook and its
+credential are untouched, and the Grafana secret is never used for the watch.
+Rotating or revoking one never touches the other. The watch's side of the same
+value is `EXPIRY_WATCH_ROUTER_TOKEN`.
+
+Cost to know before you start (VERIFIED: `docs/expiry-watch.md`): the router
+accepts only item names of letters, digits, space, dot, colon and hyphen,
+starting with a letter or digit, up to 100 characters. An item name with an
+underscore, slash, `@`, backtick, angle bracket, asterisk or any non-ASCII
+character gets a uniform 403 and the watch fails loudly. Rename such items in the
+registry or at their provider. Also, the notice text the router sends to Discord
+and the phone is built by the router from `item`, `kind` and `stage`; owner,
+dates and runbook links stay in the watch's own output and its Matrix and email
+channels.
+
+Prerequisites: step 0b (the `dev_network` config exists), section 6.0 (the
+localhost port), the Doppler CLI logged in where you run these commands, and the
+heartbeat healthy (step 1) so you can tell if the re-import disturbs the router.
+
+**1. Generate the new secret and store it (watch side).** A new random value, not
+the Grafana secret. It goes in on stdin, with `--silent` and `> /dev/null`, and is
+never printed. The `openssl rand -base64 32` form (44 characters) is the one the
+docs use (VERIFIED: `docs/update-alerting.md`, `docs/expiry-watch.md`):
+
+```
+openssl rand -base64 32 | doppler secrets set EXPIRY_WATCH_ROUTER_TOKEN --project homelab --config dev_network --silent > /dev/null
+```
+
+Do not also run the "Value for EXPIRY_WATCH_ROUTER_TOKEN" prompt in 6b: this
+command is that step. The value is now only in Doppler.
+
+**2. Give the n8n container the same value as `EXPIRY_WATCH_ROUTER_SECRET`.** The
+repo docs say: an environment entry in the n8n compose file with an empty
+default, and `N8N_BLOCK_ENV_ACCESS_IN_NODE=false` set there (VERIFIED:
+`docs/expiry-watch.md` owner step 1; the heartbeat doc shows the same shape,
+`- HEARTBEAT_PING_URL=${HEARTBEAT_PING_URL:-}`, and says the blocking setting is
+needed). That setting is already required for the heartbeat (VERIFIED:
+`docs/heartbeat.md`), so it should already be present; confirm it. Back up the
+n8n compose file first (N8N_COMPOSE_FILE and N8N_COMPOSE_DIR as in 6.0), and add
+this entry under the `n8n` service `environment:` list. The value comes from the
+watch-side name; mapping `_TOKEN` to `_SECRET` in the entry is an INFERRED
+choice that avoids storing the secret twice in Doppler (a second Doppler key with
+the `_SECRET` name is the alternative):
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cp N8N_COMPOSE_FILE "N8N_COMPOSE_FILE.bak-$(date +%Y%m%d)-expiry"'
+```
+
+```
+      - EXPIRY_WATCH_ROUTER_SECRET=${EXPIRY_WATCH_ROUTER_TOKEN:-}
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+```
+
+(Only add the second line if the file does not already carry it.) Recreate n8n
+with the dev_network values in the environment of the compose command, and
+re-check the siem network as in 6.0. How n8n's own variables, such as the
+heartbeat URL, reach its compose run today is not in a repo doc; run the compose
+command the way you already do and make the Doppler values present for it. The
+`doppler run` form below is INFERRED, by analogy with the Grafana restart:
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd N8N_COMPOSE_DIR && doppler run --project homelab --config dev_network -- docker compose up -d n8n; echo "exit code: $?"'
+```
+
+Check presence only, never the value:
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'docker exec n8n sh -c "if [ -n \"\$EXPIRY_WATCH_ROUTER_SECRET\" ]; then echo EXPIRY_WATCH_ROUTER_SECRET set; else echo EXPIRY_WATCH_ROUTER_SECRET unset; fi; echo N8N_BLOCK_ENV_ACCESS_IN_NODE=\${N8N_BLOCK_ENV_ACCESS_IN_NODE:-unset}"'
+```
+
+Expect `set` and `false`. While env access is blocked or the variable is empty,
+the watch gets 403 and exits 1 (VERIFIED: `docs/expiry-watch.md`); Grafana is
+unaffected.
+
+**3. Re-import the router with the live import helper.** Use the existing router
+and handler ids, so the import overwrites the router in place (VERIFIED:
+`docs/live-deploy-runbook.md` section 3), and run it with the Doppler token the
+helper already uses:
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cd REPO_DIR && "$HOME/bin/siem-run" python3 -I scripts/live-deploy/n8n-setup-alert-router.py --workflow n8n/grafana-alert-router.json ROUTER_ID --error-workflow-id HANDLER_ID; echo "exit code: $?"'
+```
+
+Expected output lines (VERIFIED: the script and runbook section 3):
+`workflow import exit code: 0`, `new webhook path saved (mode 600): ...` and
+`expiry watch webhook path saved (mode 600): ...`. The helper reuses the saved
+Grafana path (`router-path`) when it looks right and makes the expiry path
+(`expiry-watch-alerts-` plus 24 URL-safe characters) the first time, writing it mode
+600 to `expiry-path` in the same config directory (VERIFIED: script). The
+committed `Expiry Watch Webhook` node ships disabled with a placeholder path
+(`PLACEHOLDER-set-by-the-import-helper`); only the helper enables it, with the
+private path. Whether a re-import leaves the workflow active is not documented
+(the runbook says imports arrive inactive; INFERRED). Publish and restart as the
+runbook says, in a quiet moment, then watch the heartbeat (step 1):
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'docker exec n8n n8n publish:workflow --id=ROUTER_ID && docker restart n8n'
+```
+
+**4. Post-import checks.** First the placeholder path must serve nothing (the
+point is that the committed node is disabled). That n8n registers no webhook for
+a disabled trigger node is UNVERIFIED against a live n8n (VERIFIED: stated as
+unverified in `docs/expiry-watch.md`); this check is how you find out:
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'curl -s -o /dev/null -w "%{http_code}\n" -X POST -H "Content-Type: application/json" -d "{}" http://127.0.0.1:HOST_PORT/webhook/PLACEHOLDER-set-by-the-import-helper'
+```
+
+Expect `404`. Anything else: stop, deactivate the workflow and report; do not use
+the endpoint. Then read the private path (an address, not a credential, but keep
+it out of git and chat; VERIFIED: `docs/expiry-watch.md`) and confirm the real
+path rejects a call with no secret:
+
+```
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'cat "$HOME/.config/doppler-siem/expiry-path"; echo'
+ssh -i KEY_FILE -o IdentitiesOnly=yes -t LOGGING_BOX 'curl -s -o /dev/null -w "%{http_code}\n" -X POST -H "Content-Type: application/json" -d "{}" http://127.0.0.1:HOST_PORT/webhook/EXPIRY_WATCH_PRIVATE_PATH'
+```
+
+(`$HOME/.config/doppler-siem` is the helper's default config directory, VERIFIED:
+runbook variable table; use yours if you changed it.) Expect `403` (VERIFIED: a
+denied call is answered 403 with a fixed body). A real accepted call comes only
+from the dry-run-then-real-run in 6c and 6d, which uses the real secret.
+
+**5. Point the watch at it.** In `/etc/expiry-watch/expiry-watch.toml` set
+`[router].url` to `http://127.0.0.1:HOST_PORT/webhook/EXPIRY_WATCH_PRIVATE_PATH`
+(the path from `expiry-path`; plain http is allowed for localhost, VERIFIED) and
+keep `[router].token_env = "EXPIRY_WATCH_ROUTER_TOKEN"`. Never commit the path.
+The file `expiry-path` may belong to the user who ran the helper while the config
+belongs to SERVICE_ACCOUNT; copy the one line by hand.
+
+**6. Ingress limits (owner step, OPEN QUESTION Q12).** The docs say to set a
+request body limit of about 16 KB for this path at the reverse proxy, and a rate
+limit (per source and global), request and header timeouts and a concurrency
+limit there, because a denied call still starts one workflow execution and only
+the proxy can stop that early (VERIFIED: `docs/expiry-watch.md`). The watch posts
+a few requests a day. n8n's own body limit is `N8N_PAYLOAD_SIZE_MAX`, default 16
+(MiB per the cited n8n docs, read 2026-11-19 by that doc); check its unit and
+minimum in the n8n docs before lowering it, since this runbook does not set it
+(INFERRED that it can go lower). Q12: the watch posts to the loopback port in 6.0,
+which does not pass a reverse proxy, so those limits do not apply on that path,
+and anyone who can reach n8n's webhook address on the siem network or LAN can also
+reach this endpoint with a denied call. Decide where the limits live for this
+path.
+
+**Rotate.** Generate a new value, store it with the command in item 1 (it
+replaces the old one), then restart the n8n container so it reads the new
+environment (VERIFIED: `docs/expiry-watch.md` owner step 5): recreate n8n with the
+same `doppler run` command as item 2. Both sides change together; between the
+n8n restart and the next watch run the watch must already hold the new value (the
+dry run in 6c confirms).
+
+**Revoke the watch alone.** Empty the router's variable (VERIFIED: `docs/expiry-watch.md`
+owner step 5): set the n8n entry to an empty value, or delete
+`EXPIRY_WATCH_ROUTER_TOKEN` from the dev config so the substitution is empty, and
+recreate n8n. The endpoint then denies every call with 403. Grafana alerts are
+unaffected (VERIFIED). A full rollback of this section: restore the backed-up
+n8n compose file, recreate n8n, and re-import the previous workflow from the step
+2 backup archive or deactivate the `Expiry Watch Webhook` node in the n8n
+interface.
+
 ### 6a. Private config folder and copies (on LOGGING_BOX)
 
 The folder must be writable only by the job user (VERIFIED: "Paths and symbolic
@@ -1005,9 +1169,11 @@ sudoedit /etc/expiry-watch/expiry-watch.toml
 
 Edit (the example values are placeholders and several will fail until replaced):
 
-- `[router].url`: the localhost URL from section 6.0,
-  `http://127.0.0.1:HOST_PORT/webhook/PRIVATE_WEBHOOK_PATH` (the private path is
-  in the `router-path` file in the secrets config directory, runbook section 7).
+- `[router].url`: the localhost URL from section 6.0 plus the expiry watch's
+  private path from section 6.1,
+  `http://127.0.0.1:HOST_PORT/webhook/EXPIRY_WATCH_PRIVATE_PATH` (the path is in
+  the `expiry-path` file in the helper's config directory, not the Grafana
+  `router-path`).
 - `path` of the registry provider: `expiry-watch-registry.toml`. List your real
   items in the registry file (`name`, `kind`, `expires` as `YYYY-MM-DD`,
   `owner`, `runbook`).
@@ -1032,19 +1198,18 @@ The config only ever names variables, never values (VERIFIED). The names:
 | `EXPIRY_WATCH_MATRIX_TOKEN` | `[matrix]` | example config |
 | `EXPIRY_WATCH_SMTP_USER`, `EXPIRY_WATCH_SMTP_PASSWORD` | `[email]` login | example config |
 
-Set only the ones the config uses. Same pattern as step 5a, to dev, each ending
-in `> /dev/null`:
+Set only the ones the config uses, to the dev_network config, each with
+`--silent` and ending in `> /dev/null`.
+
+`EXPIRY_WATCH_ROUTER_TOKEN` is already set by section 6.1, item 1 (a generated
+value, never typed and never the Grafana secret); do not set it again here. For
+any other variable you use, such as `EXPIRY_WATCH_MATRIX_TOKEN`:
 
 ```
-read -rs -p "Value for EXPIRY_WATCH_ROUTER_TOKEN: " VAL; echo
-printf '%s' "$VAL" | doppler secrets set EXPIRY_WATCH_ROUTER_TOKEN --project homelab --config dev_network --silent > /dev/null
+read -rs -p "Value for VARIABLE_NAME: " VAL; echo
+printf '%s' "$VAL" | doppler secrets set VARIABLE_NAME --project homelab --config dev_network --silent > /dev/null
 unset VAL
 ```
-
-(Q11 is decided: a new value, never the Grafana secret. Generate it with
-`openssl rand -base64 32` and give the same value to the n8n container as
-`EXPIRY_WATCH_ROUTER_SECRET`, per `docs/expiry-watch.md`, "The router
-credential".)
 
 ### 6c. Dry run first (changes nothing, posts nothing, saves nothing)
 
@@ -1085,8 +1250,7 @@ variable only; no value goes in the unit, the cron line or the config). That
 doc's examples instead read the router secret from an `EnvironmentFile` (mode
 0600, owned by the job user); using `doppler run` in place of it is INFERRED, and
 needs the Doppler CLI logged in for that user (non-interactive login for a
-scheduled job is not covered by any repo doc). Decide Q11 on the router secret
-separately. The doc also warns that nothing alerts you if the schedule stops;
+scheduled job is not covered by any repo doc). The doc also warns that nothing alerts you if the schedule stops;
 use job monitoring (VERIFIED).
 
 Rollback: disable the timer or remove the cron line. Deleting the state file
