@@ -362,7 +362,8 @@ they are done on the live box is INFERRED until you check):
 - The updated router workflow is imported and active.
 - `HEARTBEAT_PING_URL` and `HEARTBEAT_KIND` are set on the n8n container, with
   `N8N_BLOCK_ENV_ACCESS_IN_NODE=false`.
-- The check at the observer has a 5 minute period and a 10 minute grace time.
+- The check at the observer has a simple 5 minute period and a grace time of at least 15 minutes
+  (see [heartbeat.md](heartbeat.md) if it shows down while the path is up).
 
 Check the n8n container has the variable, printing presence only, never the
 value:

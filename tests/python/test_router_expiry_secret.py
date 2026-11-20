@@ -548,6 +548,12 @@ def test_every_existing_node_and_connection_is_kept_and_only_four_nodes_are_adde
     old_nodes = {n["name"]: n for n in old["nodes"]}
     for name, n in _by_name().items():
         if name in old_nodes:
+            if name == "Heartbeat Ping":
+                # the one deliberate change since the baseline (issue #169): retry and a shorter timeout
+                n = copy.deepcopy(n)
+                for key in ("retryOnFail", "maxTries", "waitBetweenTries"):
+                    n.pop(key)
+                n["parameters"]["options"]["timeout"] = old_nodes[name]["parameters"]["options"]["timeout"]
             assert n == old_nodes[name], "an existing node changed: " + name
     assert set(_by_name()) - set(old_nodes) == {CHECK, GATE, DENY, EXPIRY_HOOK}
     assert set(old_nodes) <= set(_by_name())
