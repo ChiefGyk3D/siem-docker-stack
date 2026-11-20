@@ -706,7 +706,7 @@
         "method": "GET",
         "url": "={{ $json.url }}",
         "options": {
-          "timeout": 10000
+          "timeout": 5000
         }
       },
       "id": "heartbeat-ping",
@@ -717,6 +717,9 @@
         1100,
         960
       ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
       "onError": "continueRegularOutput"
     },
     {
