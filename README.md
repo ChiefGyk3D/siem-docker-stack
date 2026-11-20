@@ -173,10 +173,10 @@ cd siem-docker-stack
 #    Change NVME_DEV and SATA_DEV to match your hardware.
 #    Run `lsblk` to identify your disks.
 sudo nano scripts/01-disk-setup.sh
-sudo bash scripts/01-disk-setup.sh
+sudo scripts/01-disk-setup.sh
 
 # 3. Install Docker, tune kernel, configure firewall
-sudo bash scripts/02-bootstrap.sh
+sudo scripts/02-bootstrap.sh
 
 # 4. Configure your environment
 cp .env.example .env

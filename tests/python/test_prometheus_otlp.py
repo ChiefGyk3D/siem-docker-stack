@@ -385,7 +385,7 @@ def ready_path(render):
 
 def test_render_ignores_the_uid_override_when_root():
     text = RENDER.read_text(encoding="utf-8")
-    assert re.search(r'id -u\)" -eq 0 \].*\n?.*OWNER_UID=65534|OWNER_UID=65534\s*# root', text), \
+    assert re.search(r'"\$RUN_UID" -eq 0 \].*\n?.*OWNER_UID=65534|OWNER_UID=65534\s*# root', text), \
         "root must not honour PROMETHEUS_FILE_UID"
 
 

@@ -1,8 +1,11 @@
-#!/bin/bash
+#!/bin/bash -p
 # =============================================================================
 # 02-bootstrap.sh — Install Docker, kernel tuning, prepare for SIEM stack
 # =============================================================================
-# Run on the SIEM server as root, AFTER 01-disk-setup.sh.
+# Run on the SIEM server as root, AFTER 01-disk-setup.sh. Start it by its path
+# (sudo scripts/02-bootstrap.sh), never as `bash script`: the privileged-mode
+# shebang keeps BASH_ENV and exported shell functions from running as root, and
+# an explicit interpreter bypasses it, so root refuses to continue that way.
 #
 # What this script does:
 #   1. Updates system packages and installs dependencies
@@ -14,7 +17,23 @@
 #   7. Verifies data disks are mounted
 # =============================================================================
 
+set +x
+# SHELLOPTS and BASHOPTS are readonly in bash and are ignored in privileged mode.
+unset BASH_ENV ENV CDPATH GLOBIGNORE PS4
 set -euo pipefail
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH  # fixed PATH before any command runs
+
+# Who runs this is asked of the kernel through the absolute id program, never read from EUID or UID
+# (bash imports both from the environment, so a caller could pick the branch).
+RUN_UID="$(/usr/bin/id -u 2>/dev/null || /bin/id -u 2>/dev/null)" || RUN_UID=
+case "$RUN_UID" in '' | *[!0-9]*) echo "ERROR: cannot tell who is running (no numeric user number)" >&2; exit 1 ;; esac
+RUN_UID=$((10#$RUN_UID))
+if [ "$RUN_UID" -eq 0 ] && ! [[ "$-" == *p* ]]; then
+    # `bash script` bypasses the privileged shebang that keeps BASH_ENV and exported functions out
+    echo "ERROR: as root, run this script by its path (sudo -E scripts/02-bootstrap.sh), not as 'bash script'" >&2
+    exit 1
+fi
 
 # Set SIEM_USER via env var or default to current user
 SIEM_USER="${SIEM_USER:-$(logname 2>/dev/null || echo "${SUDO_USER:-siem}")}"
@@ -30,7 +49,7 @@ echo -e "${CYAN}║  SIEM Server — System Bootstrap          ║${NC}"
 echo -e "${CYAN}╚══════════════════════════════════════════╝${NC}"
 echo ""
 
-if [ "$EUID" -ne 0 ]; then
+if [ "$RUN_UID" -ne 0 ]; then
     echo -e "${RED}ERROR: Must run as root (sudo)${NC}"
     exit 1
 fi
@@ -159,7 +178,7 @@ echo -e "${YELLOW}[6/7] Configuring firewall...${NC}"
 # "Network exposure"). The ufw rules below are defense in depth for the case
 # where you widen those on purpose, and every one names a source network.
 #
-#   SIEM_ALLOWED_CIDR=192.0.2.0/24 sudo -E bash scripts/02-bootstrap.sh
+#   SIEM_ALLOWED_CIDR=192.0.2.0/24 sudo -E scripts/02-bootstrap.sh
 apt install -y ufw
 
 # SSH (critical — don't lock yourself out!)

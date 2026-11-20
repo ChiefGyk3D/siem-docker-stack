@@ -104,8 +104,8 @@ docker compose up -d logstash grafana opensearch-dashboards elasticsearch-export
 ## 3. Fresh-install bring-up order (skip if you did step 2)
 
 ```bash
-bash scripts/01-disk-setup.sh          # now also creates /data/hot/alertmanager, /data/warm/snapshots
-bash scripts/02-bootstrap.sh
+sudo scripts/01-disk-setup.sh          # now also creates /data/hot/alertmanager, /data/warm/snapshots
+sudo scripts/02-bootstrap.sh
 bash scripts/06-generate-wazuh-certs.sh
 bash scripts/07-generate-opensearch-certs.sh
 sudo scripts/03-deploy.sh local
