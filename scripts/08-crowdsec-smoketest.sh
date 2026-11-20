@@ -112,8 +112,41 @@ OPENSEARCH_URL="${OPENSEARCH_URL:-https://localhost:9200}"
 GRAFANA_URL="${GRAFANA_URL:-http://localhost:3000}"
 GRAFANA_USER="${GRAFANA_USER:-admin}"
 GRAFANA_PASS="${GRAFANA_PASS:-${GRAFANA_ADMIN_PASS:-}}"
+# The helper is opened once, the OPEN file and every directory above it are checked, and that same
+# descriptor is sourced (docs/container-engine.md). The check stays inline: a shared loader would
+# itself have to be sourced unchecked first.
+SL_LIB="${SCRIPT_DIR}/lib-secrets.sh"
+sl_fail() { echo "refusing to source ${SL_LIB}: $1" >&2; exit 1; }
+[ -f "$SL_LIB" ] && [ ! -L "$SL_LIB" ] || sl_fail "it is missing or is a link"
+exec 7<"$SL_LIB" || sl_fail "it cannot be opened"
+SL_OWNER="$(/usr/bin/stat -L -c %u -- /proc/self/fd/7)"
+SL_MODE="$(/usr/bin/stat -L -c %a -- /proc/self/fd/7)"
+SL_LINKS="$(/usr/bin/stat -L -c %h -- /proc/self/fd/7)"
+SL_MASK=002  # world write is never allowed; group write too when running as root
+[ "$CE_STRICT" != 1 ] || SL_MASK=022
+if [ ! -f /proc/self/fd/7 ] || { [ "$SL_OWNER" != 0 ] && [ "$SL_OWNER" != "$CE_UID" ]; } ||
+    [ $((8#$SL_MODE & 8#$SL_MASK)) -ne 0 ] || [ "$SL_LINKS" != 1 ]; then
+    sl_fail "it must be a regular file with one link, owned by root or by you, not world writable (and not group writable when run as root)"
+fi
+SL_P="$SCRIPT_DIR"
+while :; do
+    [ ! -L "$SL_P" ] || sl_fail "${SL_P} is a symlink"
+    SL_PO="$(/usr/bin/stat -c %u -- "$SL_P")"
+    SL_PM="$(/usr/bin/stat -c %a -- "$SL_P")"
+    if [ "$CE_STRICT" = 1 ]; then  # as root: root-owned and closed to group and others, all the way up
+        { [ "$SL_PO" = 0 ] && [ $((8#$SL_PM & 8#022)) -eq 0 ]; } ||
+            sl_fail "${SL_P} (or a directory above it) is not root-owned or is group or world writable"
+    else  # root or you; world write only on a sticky directory (/tmp)
+        { [ "$SL_PO" = 0 ] || [ "$SL_PO" = "$CE_UID" ]; } &&
+            { [ $((8#$SL_PM & 8#002)) -eq 0 ] || [ $((8#$SL_PM & 8#1000)) -ne 0 ]; } ||
+            sl_fail "${SL_P} (or a directory above it) is not owned by root or by you or is world writable"
+    fi
+    [ "$SL_P" = / ] && break
+    SL_P="$(/usr/bin/dirname -- "$SL_P")"
+done
 # shellcheck source=scripts/lib-secrets.sh
-source "${SCRIPT_DIR}/lib-secrets.sh"
+source /proc/self/fd/7
+exec 7<&-
 require_secret GRAFANA_PASS "$GRAFANA_PASS" || { echo "Set GRAFANA_PASS (or GRAFANA_ADMIN_PASS in .env)." >&2; exit 1; }
 
 if [ -z "${OPENSEARCH_ADMIN_PASSWORD:-}" ]; then

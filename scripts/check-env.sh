@@ -50,8 +50,46 @@ REQUIRED=(
 )
 
 # One placeholder rule for every shell script lives in lib-secrets.sh.
+# The helper is opened once, the OPEN file and every directory above it are checked, and that same
+# descriptor is sourced, so a swap of the path after the check changes nothing (docs/container-engine.md).
+# This small check stays inline in each script: a shared loader would itself have to be sourced
+# unchecked first.
+SL_DIR="$(/usr/bin/dirname -- "$(/usr/bin/readlink -f -- "${BASH_SOURCE[0]}")")"
+SL_LIB="${SL_DIR}/lib-secrets.sh"
+sl_fail() { echo "check-env: refusing to source ${SL_LIB}: $1" >&2; exit 1; }
+SL_UID="$(/usr/bin/id -u 2>/dev/null || /bin/id -u 2>/dev/null)" || SL_UID=
+case "$SL_UID" in '' | *[!0-9]*) sl_fail "cannot tell who is running (no numeric user number)" ;; esac
+SL_UID=$((10#$SL_UID))
+[ -f "$SL_LIB" ] && [ ! -L "$SL_LIB" ] || sl_fail "it is missing or is a link"
+exec 7<"$SL_LIB" || sl_fail "it cannot be opened"
+SL_OWNER="$(/usr/bin/stat -L -c %u -- /proc/self/fd/7)"
+SL_MODE="$(/usr/bin/stat -L -c %a -- /proc/self/fd/7)"
+SL_LINKS="$(/usr/bin/stat -L -c %h -- /proc/self/fd/7)"
+SL_MASK=002  # world write is never allowed; group write too when running as root
+[ "$SL_UID" -ne 0 ] || SL_MASK=022
+if [ ! -f /proc/self/fd/7 ] || { [ "$SL_OWNER" != 0 ] && [ "$SL_OWNER" != "$SL_UID" ]; } ||
+    [ $((8#$SL_MODE & 8#$SL_MASK)) -ne 0 ] || [ "$SL_LINKS" != 1 ]; then
+    sl_fail "it must be a regular file with one link, owned by root or by you, not world writable (and not group writable when run as root)"
+fi
+SL_P="$SL_DIR"
+while :; do
+    [ ! -L "$SL_P" ] || sl_fail "${SL_P} is a symlink"
+    SL_PO="$(/usr/bin/stat -c %u -- "$SL_P")"
+    SL_PM="$(/usr/bin/stat -c %a -- "$SL_P")"
+    if [ "$SL_UID" -eq 0 ]; then  # as root: root-owned and closed to group and others, all the way up
+        { [ "$SL_PO" = 0 ] && [ $((8#$SL_PM & 8#022)) -eq 0 ]; } ||
+            sl_fail "${SL_P} (or a directory above it) is not root-owned or is group or world writable"
+    else  # root or you; world write only on a sticky directory (/tmp)
+        { [ "$SL_PO" = 0 ] || [ "$SL_PO" = "$SL_UID" ]; } &&
+            { [ $((8#$SL_PM & 8#002)) -eq 0 ] || [ $((8#$SL_PM & 8#1000)) -ne 0 ]; } ||
+            sl_fail "${SL_P} (or a directory above it) is not owned by root or by you or is world writable"
+    fi
+    [ "$SL_P" = / ] && break
+    SL_P="$(/usr/bin/dirname -- "$SL_P")"
+done
 # shellcheck source=scripts/lib-secrets.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib-secrets.sh"
+source /proc/self/fd/7
+exec 7<&-
 is_placeholder() { secret_is_placeholder "$1"; }
 
 bad=0

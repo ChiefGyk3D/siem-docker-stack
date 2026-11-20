@@ -156,6 +156,17 @@ file is checked, and that same open descriptor is sourced, so replacing the path
 after the check changes nothing. All scripts carry the same bootstrap block; a test
 keeps the copies identical.
 
+`lib-secrets.sh` (the placeholder rule) is loaded the same way by `check-env.sh`,
+`deploy-n8n-soar.sh`, `08-crowdsec-smoketest.sh` and
+`render-prometheus-web-config.sh`: no script sources it by pathname. Each one opens it
+once on a descriptor, checks the open file (a regular file with one link, owned by root
+or by the running user, not world writable, and not group writable when running as
+root) and every directory above it (no symlink; as root, root-owned and closed to group
+and others; otherwise owned by root or by you and not world writable, except a sticky
+directory such as `/tmp`), then sources that same descriptor. The check stays inline in
+each script on purpose: a shared loader file would itself have to be sourced unchecked
+first. Tests: `tests/python/test_secrets_helper_bootstrap.py`.
+
 ## The root-owned firewall script
 
 `prometheus-otlp-firewall.sh` uses the same bootstrap and, as root, also requires

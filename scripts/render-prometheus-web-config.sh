@@ -114,11 +114,12 @@ fi
 exec 9<"$LIB_PATH" || lib_fail "it cannot be opened"
 LIB_OWNER="$(/usr/bin/stat -L -c %u -- /proc/self/fd/9)"
 LIB_MODE="$(/usr/bin/stat -L -c %a -- /proc/self/fd/9)"
+LIB_LINKS="$(/usr/bin/stat -L -c %h -- /proc/self/fd/9)"
 LIB_MASK=002  # world write is never allowed; group write too when running as root
 [ "$RUN_UID" -ne 0 ] || LIB_MASK=022
 if [ ! -f /proc/self/fd/9 ] || { [ "$LIB_OWNER" != 0 ] && [ "$LIB_OWNER" != "$RUN_UID" ]; } ||
-    [ $((8#$LIB_MODE & 8#$LIB_MASK)) -ne 0 ]; then
-    lib_fail "it must be a regular file owned by root or by you, not world writable (and not group writable when run as root)"
+    [ $((8#$LIB_MODE & 8#$LIB_MASK)) -ne 0 ] || [ "$LIB_LINKS" != 1 ]; then
+    lib_fail "it must be a regular file with one link, owned by root or by you, not world writable (and not group writable when run as root)"
 fi
 # shellcheck source=scripts/lib-secrets.sh
 source /proc/self/fd/9
