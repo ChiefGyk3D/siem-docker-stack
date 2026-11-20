@@ -772,3 +772,53 @@ def test_the_cap_holds_for_a_dot_heavy_body_at_the_boundary(tmp_path, smtp_plain
     assert _run(cfg, send=True, providers=dots)[0] == 0
     (s,) = smtp_plain.sessions
     assert len(s["data"].encode("latin-1")) + 3 <= parsed.max_message_bytes
+
+
+# --- state review: backward clock and non-regular state ------------------------------------
+
+def test_a_clock_moving_back_into_an_earlier_week_is_refused(tmp_path, smtp_plain):
+    cfg = _write(tmp_path, smtp_plain.server_address[1])
+    assert _send(cfg) == 0
+    marker = tmp_path / "weekly-digest-state" / "last-sent"
+    err = []
+    code = wd.run(cfg, NOW - dt.timedelta(days=7), env={}, out=lambda m: None, err=err.append, send=True,
+                  providers=_fakes())
+    assert code == 4 and "last-sent" in "\n".join(err) and len(smtp_plain.sessions) == 1
+    assert marker.read_text().strip() == "2026-W47"
+
+
+def test_a_forced_send_under_a_backward_clock_keeps_the_greatest_week(tmp_path, smtp_plain):
+    cfg = _write(tmp_path, smtp_plain.server_address[1])
+    assert _send(cfg) == 0
+    assert _send(cfg, now=NOW - dt.timedelta(days=14), force=True) == 0
+    assert (tmp_path / "weekly-digest-state" / "last-sent").read_text().strip() == "2026-W47"
+    assert _send(cfg) == 4  # still refused for the real week
+
+
+def test_an_old_single_week_marker_still_loads_and_a_later_week_sends(tmp_path, smtp_plain):
+    cfg, marker = _marker(tmp_path, smtp_plain)
+    marker.write_text("2026-W46\n")
+    assert _run(cfg, send=True, providers=_fakes())[0] == 0
+    assert marker.read_text().strip() == "2026-W47"
+
+
+@pytest.mark.parametrize("name", ["last-sent", "pending"])
+@pytest.mark.parametrize("kind", ["directory", "symlink", "fifo"])
+@pytest.mark.parametrize("force", [False, True])
+def test_non_regular_state_is_refused_before_any_smtp_even_with_force(tmp_path, smtp_plain, name, kind, force):
+    import os
+    cfg, marker = _marker(tmp_path, smtp_plain)
+    entry = marker.parent / name
+    if kind == "directory":
+        entry.mkdir()
+    elif kind == "symlink":
+        other = tmp_path / "other"
+        other.write_text("2026-W01\n")
+        entry.symlink_to(other)
+    else:
+        os.mkfifo(entry)
+    err = []
+    code = wd.run(cfg, NOW, env={}, out=lambda m: None, err=err.append, send=True, providers=_fakes(),
+                  force=force)
+    assert code == 4 and name in "\n".join(err) and not smtp_plain.sessions
+    assert _lock_is_free(marker.parent)

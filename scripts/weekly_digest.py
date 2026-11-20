@@ -399,11 +399,32 @@ class SendGuard:
             raise
         return self
 
+    def _require_regular_state(self):
+        """`last-sent` and `pending` must be absent or plain files. Anything else (a directory, a link,
+        a FIFO, a device) cannot be replaced by the atomic write, so refuse BEFORE any SMTP, even with
+        --force: --force does not remove or repair such an entry, the owner has to."""
+        for name in ("last-sent", "pending"):
+            try:
+                mode = os.stat(name, dir_fd=self.fd, follow_symlinks=False).st_mode
+            except FileNotFoundError:
+                continue
+            except OSError:
+                mode = None
+            if mode is None or not stat.S_ISREG(mode):
+                raise _Refused(f"the state folder entry '{name}' is not a regular file (a directory, link or "
+                               f"special file); --force does not remove it: remove it yourself, then re-run")
+
     def check_state(self):
+        self._require_regular_state()
         if self.force:
             return
-        if self.last_sent() == self.week:
-            raise _Refused(f"a digest was already sent for {self.week}; use --force to send again")
+        last = self.last_sent()
+        if last is not None and last >= self.week:  # YYYY-Www sorts like the calendar
+            if last == self.week:
+                raise _Refused(f"a digest was already sent for {self.week}; use --force to send again")
+            raise _Refused(f"the last-sent marker names {last}, which is later than the current week "
+                           f"{self.week} (the clock may have moved backward); check the clock, or fix the "
+                           f"file 'last-sent' in the state folder, or use --force")
         try:
             os.stat("pending", dir_fd=self.fd, follow_symlinks=False)
         except FileNotFoundError:
@@ -473,7 +494,11 @@ class SendGuard:
 
     def mark_sent(self):
         """After acceptance: the week is recorded durably first, then the pending note is removed."""
-        self._write_durable("last-sent", self.week + "\n")
+        try:  # keep the greatest week ever sent: a forced send under a backward clock never lowers it
+            earlier = self.last_sent()
+        except _Refused:
+            earlier = None  # a damaged marker under --force is replaced
+        self._write_durable("last-sent", max(self.week, earlier or self.week) + "\n")
         try:
             os.unlink("pending", dir_fd=self.fd)
         except FileNotFoundError:
