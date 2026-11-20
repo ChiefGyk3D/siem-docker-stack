@@ -555,6 +555,23 @@ def _refuse_constant(name):
 _FETCH_SLOTS = threading.BoundedSemaphore(MAX_STUCK_FETCHES)
 
 
+class _SlotLease:
+    """One acquired fetch slot with explicit ownership. The acquirer owns it until the worker thread
+    has started; from then on the worker's finally owns it. release() is idempotent, so neither side
+    can release twice (a second release of a BoundedSemaphore raises ValueError)."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._held = True
+
+    def release(self):
+        with self._lock:
+            if not self._held:
+                return
+            self._held = False
+        _FETCH_SLOTS.release()
+
+
 class _HttpStatus(Exception):
     def __init__(self, code):
         self.code = code
@@ -588,6 +605,8 @@ def http_get_json(url, token, timeout):
         raise ExpiryWatchError(f"{host}: not requested, earlier requests are still stuck (a name lookup cannot "
                                "be interrupted); fix name resolution")
 
+    lease = _SlotLease()
+
     def work():
         conn = None
         try:
@@ -617,8 +636,10 @@ def http_get_json(url, token, timeout):
                     raise _TooLarge
                 chunks.append(chunk)
             box["data"] = b"".join(chunks)
-        except Exception as e:  # reported below; process-control exceptions pass through
+        except Exception as e:  # reported below
             box["error"] = e
+        except BaseException as e:  # SystemExit, KeyboardInterrupt: re-raised in the caller below
+            box["fatal"] = e
         finally:
             try:
                 if conn is not None:
@@ -626,13 +647,13 @@ def http_get_json(url, token, timeout):
             except Exception:  # cleanup only: it must neither replace the result nor keep the slot
                 pass
             finally:
-                _FETCH_SLOTS.release()
+                lease.release()
 
-    worker = threading.Thread(target=work, daemon=True, name=f"expiry-get-{host}")
     try:
+        worker = threading.Thread(target=work, daemon=True, name=f"expiry-get-{host}")
         worker.start()
     except BaseException:
-        _FETCH_SLOTS.release()
+        lease.release()  # the acquirer still owns the slot: construction or start failed
         raise
     worker.join(timeout)
     if worker.is_alive():
@@ -645,6 +666,8 @@ def http_get_json(url, token, timeout):
                 pass
         worker.join(1.0)
         raise ExpiryWatchError(f"{host} did not answer: timed out (overall deadline {timeout:g}s)")
+    if "fatal" in box:
+        raise box["fatal"]  # the worker has released the slot
     err = box.get("error")
     if isinstance(err, _HttpStatus):
         if 300 <= err.code < 400:
@@ -1329,6 +1352,7 @@ def _run_deadline(dl, fn):
     sent anything yet: it checks the deadline right after the lookup returns."""
     if not _FETCH_SLOTS.acquire(blocking=False):
         raise _Overrun("not tried, earlier requests are still stuck (a name lookup cannot be interrupted)")
+    lease = _SlotLease()
     box = {}
 
     def work():
@@ -1336,14 +1360,16 @@ def _run_deadline(dl, fn):
             box["value"] = fn()
         except Exception as e:  # handed to the caller below
             box["error"] = e
+        except BaseException as e:  # SystemExit, KeyboardInterrupt: re-raised in the caller below
+            box["fatal"] = e
         finally:
-            _FETCH_SLOTS.release()
+            lease.release()
 
-    worker = threading.Thread(target=work, daemon=True, name="expiry-delivery")
     try:
+        worker = threading.Thread(target=work, daemon=True, name="expiry-delivery")
         worker.start()
     except BaseException:
-        _FETCH_SLOTS.release()
+        lease.release()  # the acquirer still owns the slot: construction or start failed
         raise
     worker.join(max(0.0, dl.end - time.monotonic()))
     if worker.is_alive():
@@ -1351,6 +1377,8 @@ def _run_deadline(dl, fn):
         if dl.delivered:
             return None  # only the goodbye was slow
         raise _Overrun(f"timed out (overall deadline {dl.seconds:g}s)")
+    if "fatal" in box:
+        raise box["fatal"]  # the worker has released the slot
     err = box.get("error")
     if isinstance(err, TimeoutError):  # socket.timeout is TimeoutError
         raise _Overrun(f"timed out (overall deadline {dl.seconds:g}s)") from None
