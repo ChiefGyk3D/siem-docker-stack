@@ -47,15 +47,18 @@ The file, its directory and every directory above it up to `/` must be owned by
 root and not writable by group or others; links are resolved first and the
 resolved file is what runs. If there is no such file the script stops and says so.
 
-The engine process gets a minimal explicit environment, not yours: a fixed `PATH`
-plus `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `TERM`, `TZ` and
-`XDG_RUNTIME_DIR` when they are set. Everything else is dropped, notably
-`DOCKER_HOST`, `DOCKER_CONTEXT`, `DOCKER_CONFIG`, `CONTAINER_HOST`,
-`CONTAINER_CONNECTION`, `XDG_CONFIG_HOME`, `LD_*`, `BASH_ENV`, `ENV` and proxy
-variables. So the engine always talks to its local default endpoint. A remote
-engine would need its own validated setting; there is none. The engine's own
-per-user configuration under `HOME` (for example `~/.docker/config.json`) is still
-read.
+The engine process gets a minimal explicit environment, not yours: a fixed `PATH`,
+`USER`, `LOGNAME`, `LANG`, `LC_ALL`, `TERM` and `TZ` when they are set, and a fresh
+private empty `HOME`. That home is a mode 0700 directory made for the one call and
+removed after it; `DOCKER_CONFIG` and the `XDG_*` directories point inside it.
+Nothing else is passed: not `DOCKER_HOST`, `DOCKER_CONTEXT`, `CONTAINER_HOST`,
+`CONTAINER_CONNECTION`, your `HOME`, `XDG_RUNTIME_DIR`, `LD_*`, `BASH_ENV`, `ENV` or
+proxy variables. So no per-user engine configuration is read (docker `config.json`
+and contexts, CLI plugins, credential helpers, podman `containers.conf` and
+connections), and the engine uses its system defaults and local system socket.
+Consequences: registry credentials in your home are not used, and rootless Podman
+(whose storage lives under `HOME`) is not supported by these helpers; use rootful
+Podman. A remote engine would need its own validated setting; there is none.
 
 The Python helpers share `scripts/container_engine.py` (`engine_run`). Shell
 scripts source `scripts/lib-container-engine.sh` (POSIX sh; it needs GNU `stat`
@@ -70,21 +73,25 @@ streamed Python helper.
 
 ## Sourcing the helper
 
-Each script finds its own real directory (symlinks resolved) and sources
+Each script sets a fixed `PATH` as its first command when it runs as root, calls
+`stat`, `readlink`, `dirname` and `id` by absolute path while it bootstraps, and
+finds its own real directory (symlinks resolved). It sources
 `lib-container-engine.sh` from there, never from a directory next to a link that
 launched it. It refuses a helper that is a symlink, is owned by someone other than
 root or the running user, or is world writable (and group writable when running
-as root).
+as root). As root it also requires every directory above the helper to be
+root-owned and not group or world writable. The helper is opened once, the open
+file is checked, and that same open descriptor is sourced, so replacing the path
+after the check changes nothing. All scripts carry the same bootstrap block; a test
+keeps the copies identical.
 
 ## The root-owned firewall script
 
-`prometheus-otlp-firewall.sh`, run as root, resolves its own real path, requires
-the script, the helper and every directory above them up to `/` to be root-owned
-and not group or world writable, opens the helper once, checks the open file, and
-sources that same open descriptor. Install both files into the root-owned
-directory, as in [prometheus-otlp.md](prometheus-otlp.md). The script still
-changes only the `DOCKER-USER` chain; whether that chain exists under Podman is
-not verified.
+`prometheus-otlp-firewall.sh` uses the same bootstrap and, as root, also requires
+the script itself and every directory above it to be root-owned and not group or
+world writable. Install both files into the root-owned directory, as in
+[prometheus-otlp.md](prometheus-otlp.md). The script still changes only the
+`DOCKER-USER` chain; whether that chain exists under Podman is not verified.
 
 ## Not covered
 

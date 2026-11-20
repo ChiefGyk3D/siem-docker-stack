@@ -286,25 +286,20 @@ def test_a_failed_rule_listing_changes_nothing(fw):
 
 @pytest.fixture()
 def fw_root(fw, tmp_path):
-    """The firewall script as a simulated root (stub id and stat), env overrides set."""
+    """The firewall script as a simulated root: a sandbox copy that believes EUID is 0, with stub stat
+    and id (the real script resets PATH as root, so the stubs are wired in by absolute path)."""
+    from conftest import root_copy, write_stat_stub
     stubs = tmp_path / "fw-root-stubs"
-    stubs.mkdir()
-    write_stub(stubs, "id", "#!/bin/sh\necho 0\n")
+    sandbox = tmp_path / "fw-root"
 
     def run(owner, mode="755", *args):
-        write_stub(stubs, "stat", textwrap.dedent(f"""\
-            #!/bin/sh
-            case "$2" in
-              %u) echo {owner} ;;
-              %a) echo {mode} ;;
-              *) exec /usr/bin/stat "$@" ;;
-            esac
-            """))
-        env = {"PATH": f"{stubs}:{fw.stubs}:/usr/bin:/bin", "IPT_LOG": str(fw.log),
+        write_stat_stub(stubs, owner, mode)
+        root_copy(sandbox, ["prometheus-otlp-firewall.sh", "lib-container-engine.sh"], FIREWALL.parent, stubs)
+        env = {"PATH": f"{fw.stubs}:/usr/bin:/bin", "IPT_LOG": str(fw.log),
                "IPT_STATE": str(tmp_path / "ipt.state"),
                "IPTABLES": str(fw.stubs / "iptables"), "DOCKER": str(fw.stubs / "docker")}
         fw.log.write_text("", encoding="utf-8")
-        proc = subprocess.run([BASH, str(FIREWALL), *(args or GOOD)], env=env, text=True,
+        proc = subprocess.run([BASH, str(sandbox / FIREWALL.name), *(args or GOOD)], env=env, text=True,
                               capture_output=True, stdin=subprocess.DEVNULL, timeout=30)
         proc.calls = [x for x in fw.log.read_text(encoding="utf-8").splitlines() if x]
         return proc

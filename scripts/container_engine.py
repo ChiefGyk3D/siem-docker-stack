@@ -10,9 +10,12 @@ Standard library only, and no top-level statements besides definitions, because
 scripts/deploy-n8n-soar.sh streams this file together with n8n_address.py to the SIEM host.
 No shell string is ever built from the setting: callers pass argument lists.
 """
+import contextlib
 import os
+import shutil
 import stat
 import subprocess
+import tempfile
 
 ENGINES = ("docker", "podman")
 DEFAULT_ENGINE = "docker"
@@ -20,11 +23,12 @@ ENV_NAME = "CONTAINER_ENGINE"
 TRUSTED_DIRS = ("/usr/bin", "/usr/local/bin", "/bin", "/snap/bin")
 TRUSTED_UID = 0  # the owner a trusted binary and every directory above it must have
 TRUSTED_ROOT = "/"  # ownership is checked on every directory from here down to the binary
-# The only variables an engine process inherits (plus a fixed PATH). Everything else, notably
-# DOCKER_HOST, DOCKER_CONTEXT, DOCKER_CONFIG, CONTAINER_HOST, CONTAINER_CONNECTION, XDG_CONFIG_HOME,
-# LD_*, BASH_ENV, ENV and proxy variables, is dropped, so a trusted binary cannot be pointed at another
-# daemon, a credential helper or a loader hook through the caller's environment.
-ENV_KEEP = ("HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TERM", "TZ", "XDG_RUNTIME_DIR")
+# The only variables an engine process inherits from the caller (plus a fixed PATH and a private
+# empty HOME, see private_home). Everything else, notably DOCKER_HOST, DOCKER_CONTEXT,
+# DOCKER_CONFIG, CONTAINER_HOST, CONTAINER_CONNECTION, HOME, XDG_*, LD_*, BASH_ENV, ENV and proxy
+# variables, is dropped, so a trusted binary cannot be pointed at another daemon, a per-user
+# config file, a plugin, a credential helper or a loader hook through the caller's environment.
+ENV_KEEP = ("USER", "LOGNAME", "LANG", "LC_ALL", "TERM", "TZ")
 
 
 class ContainerEngineError(Exception):
@@ -105,23 +109,40 @@ def engine_exe(name):
     return exe
 
 
-def engine_env(path=None, environ=None):
-    """The explicit child environment for an engine process: ENV_KEEP from `environ` and a PATH made of
-    the trusted directories only (or `path`)."""
+@contextlib.contextmanager
+def private_home():
+    """A fresh private (mode 0700) empty directory, removed afterwards, to serve as the engine's HOME."""
+    d = tempfile.mkdtemp(prefix="engine-home-")
+    try:
+        yield d
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def engine_env(home, path=None, environ=None):
+    """The explicit child environment for an engine process: ENV_KEEP from `environ`, a PATH made of the
+    trusted directories only (or `path`), and HOME, DOCKER_CONFIG and the XDG directories inside `home`
+    (a private empty directory), so no per-user engine configuration is ever read."""
     environ = os.environ if environ is None else environ
     if path is None:
         good = [d for d in TRUSTED_DIRS if os.path.isdir(d) and _dirs_ok(os.path.realpath(d), TRUSTED_UID, TRUSTED_ROOT)]
         path = ":".join(good) or "/usr/bin:/bin"
     env = {k: environ[k] for k in ENV_KEEP if k in environ}
     env["PATH"] = path
+    env["HOME"] = home
+    env["DOCKER_CONFIG"] = os.path.join(home, "docker")
+    for k in ("CONFIG", "DATA", "CACHE", "STATE"):
+        env[f"XDG_{k}_HOME"] = os.path.join(home, k.lower())
     return env
 
 
 def engine_run(argv, run=subprocess.run, **kwargs):
     """subprocess.run with the engine pinned: when argv[0] is docker or podman, execute the resolved
-    canonical binary (argv[0] stays the plain name) with an explicit minimal environment (engine_env,
-    any `env` the caller passed is replaced); any other program is run unchanged."""
+    canonical binary (argv[0] stays the plain name) with an explicit minimal environment and a private
+    empty HOME (engine_env; any `env` the caller passed is replaced); any other program is run unchanged."""
     if argv and argv[0] in ENGINES:
         kwargs["executable"] = engine_exe(argv[0])
-        kwargs["env"] = engine_env()
+        with private_home() as home:
+            kwargs["env"] = engine_env(home)
+            return run(argv, **kwargs)
     return run(argv, **kwargs)

@@ -462,10 +462,11 @@ def real_runner(argv):
     if exe is None:
         return 127, f"no trusted '{argv[0]}' found in {', '.join(TRUSTED_DIRS)} (root-owned, not writable by others)"
     good = [d for d in TRUSTED_DIRS if os.path.isdir(d) and _dirs_ok(os.path.realpath(d), TRUSTED_UID, TRUSTED_ROOT)]
-    env = container_engine.engine_env(path=":".join(good))  # no DOCKER_HOST, LD_*, config or helper variables
     try:
-        proc = subprocess.run([argv[0], *argv[1:]], executable=exe, capture_output=True, text=True,
-                              timeout=120, env=env)
+        with container_engine.private_home() as home:  # no DOCKER_HOST, LD_*, per-user config or helpers
+            env = container_engine.engine_env(home, path=":".join(good))
+            proc = subprocess.run([argv[0], *argv[1:]], executable=exe, capture_output=True, text=True,
+                                  timeout=120, env=env)
     except FileNotFoundError:
         return 127, f"command not found: {argv[0]}"
     except subprocess.TimeoutExpired:

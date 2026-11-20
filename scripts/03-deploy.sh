@@ -15,27 +15,44 @@
 # =============================================================================
 
 set -euo pipefail
+[ "${EUID:-1}" -ne 0 ] || { PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH; }  # root: fixed PATH before any command runs
 
 SIEM_HOST="${1:-${SIEM_HOST:-localhost}}"
 SIEM_USER="${2:-${SIEM_USER:-$(whoami)}}"
-SCRIPT_DIR="$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")"  # the real directory, symlinks resolved
+SCRIPT_DIR="$(/usr/bin/dirname -- "$(/usr/bin/readlink -f -- "${BASH_SOURCE[0]}")")"  # the real directory, symlinks resolved
 REPO_DIR="${SCRIPT_DIR}/.."
 DEPLOY_DIR="/opt/siem"
 
 # CONTAINER_ENGINE (docker by default, or podman): the validated name is one of two
 # fixed words, so it is safe inside the command strings run on the target host.
 CE_LIB="${SCRIPT_DIR}/lib-container-engine.sh"
-CE_LIB_OWNER="$(stat -L -c '%u' -- "$CE_LIB" 2>/dev/null || echo bad)"
-CE_LIB_MODE="$(stat -L -c '%a' -- "$CE_LIB" 2>/dev/null || echo 777)"
-CE_LIB_MASK=002  # world write is never allowed; group write too when running as root
-[ "$(id -u)" != 0 ] || CE_LIB_MASK=022
-if [ -L "$CE_LIB" ] || { [ "$CE_LIB_OWNER" != 0 ] && [ "$CE_LIB_OWNER" != "$(id -u)" ]; } ||
-    [ $((8#$CE_LIB_MODE & 8#$CE_LIB_MASK)) -ne 0 ]; then
-    echo "refusing to source ${CE_LIB}: it must be a regular file owned by root or by you, not world writable (and not group writable when run as root)" >&2
-    exit 1
+ce_boot_fail() { echo "refusing to source ${CE_LIB}: $1" >&2; exit 1; }
+CE_STRICT=0
+[ "${EUID:-1}" -ne 0 ] || CE_STRICT=1
+if [ "$CE_STRICT" = 1 ]; then  # as root: the helper and every directory above it must be root-owned and not writable
+    CE_P="$CE_LIB"
+    while :; do
+        [ "$(/usr/bin/stat -c %u -- "$CE_P")" = 0 ] && [ $((8#$(/usr/bin/stat -c %a -- "$CE_P") & 8#022)) -eq 0 ] ||
+            ce_boot_fail "${CE_P} (or a directory above it) is not root-owned or is group or world writable"
+        [ "$CE_P" = / ] && break
+        CE_P="$(/usr/bin/dirname -- "$CE_P")"
+    done
+fi
+[ -f "$CE_LIB" ] && [ ! -L "$CE_LIB" ] || ce_boot_fail "it is missing or is a link"
+# Open the helper once, check the OPEN file (-L: the descriptor link points at the file), and source
+# that same descriptor, so a rename or replacement of the path after this point changes nothing.
+exec 9<"$CE_LIB" || ce_boot_fail "it cannot be opened"
+CE_OWNER="$(/usr/bin/stat -L -c %u -- /proc/self/fd/9)"
+CE_MODE="$(/usr/bin/stat -L -c %a -- /proc/self/fd/9)"
+CE_MASK=002  # world write is never allowed; group write too when running as root
+[ "$CE_STRICT" != 1 ] || CE_MASK=022
+if [ ! -f /proc/self/fd/9 ] || { [ "$CE_OWNER" != 0 ] && [ "$CE_OWNER" != "$(/usr/bin/id -u)" ]; } ||
+    [ $((8#$CE_MODE & 8#$CE_MASK)) -ne 0 ]; then
+    ce_boot_fail "it must be a regular file owned by root or by you, not world writable (and not group writable when run as root)"
 fi
 # shellcheck source=scripts/lib-container-engine.sh
-source "$CE_LIB"
+source /proc/self/fd/9
+exec 9<&-
 ce_init_name || exit 1
 
 RED='\033[0;31m'

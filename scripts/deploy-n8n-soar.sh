@@ -10,6 +10,7 @@
 # The script reads N8N_API_KEY from the environment — change it in one place.
 # =============================================================================
 set -euo pipefail
+[ "${EUID:-1}" -ne 0 ] || { PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH; }  # root: fixed PATH before any command runs
 
 # ---------------------------------------------------------------------------
 # Configuration — change these as needed
@@ -22,8 +23,8 @@ GRAFANA_URL="${GRAFANA_URL:-http://localhost:3000}"
 GRAFANA_USER="${GRAFANA_USER:-admin}"
 GRAFANA_PASS="${GRAFANA_PASS:-}"
 SSH_USER="${SIEM_USER:-$(whoami)}"
-SCRIPT_BIN_DIR="$(dirname -- "$(readlink -f -- "$0")")"  # the real scripts directory, symlinks resolved
-SCRIPT_DIR="$(dirname -- "$SCRIPT_BIN_DIR")"
+SCRIPT_BIN_DIR="$(/usr/bin/dirname -- "$(/usr/bin/readlink -f -- "$0")")"  # the real scripts directory, symlinks resolved
+SCRIPT_DIR="$(/usr/bin/dirname -- "$SCRIPT_BIN_DIR")"
 N8N_DIR="${SCRIPT_DIR}/n8n"
 
 # Secrets: no defaults. A missing, empty or placeholder value stops the script
@@ -42,17 +43,33 @@ require_secret GRAFANA_PASS "$GRAFANA_PASS" || exit 1
 # trusted-binary resolver) followed by n8n_address.py. Only the validated engine
 # name (docker or podman) is sent to the host.
 CE_LIB="${SCRIPT_BIN_DIR}/lib-container-engine.sh"
-CE_LIB_OWNER="$(stat -L -c '%u' -- "$CE_LIB" 2>/dev/null || echo bad)"
-CE_LIB_MODE="$(stat -L -c '%a' -- "$CE_LIB" 2>/dev/null || echo 777)"
-CE_LIB_MASK=002  # world write is never allowed; group write too when running as root
-[ "$(id -u)" != 0 ] || CE_LIB_MASK=022
-if [ -L "$CE_LIB" ] || { [ "$CE_LIB_OWNER" != 0 ] && [ "$CE_LIB_OWNER" != "$(id -u)" ]; } ||
-    [ $((8#$CE_LIB_MODE & 8#$CE_LIB_MASK)) -ne 0 ]; then
-    echo "refusing to source ${CE_LIB}: it must be a regular file owned by root or by you, not world writable (and not group writable when run as root)" >&2
-    exit 1
+ce_boot_fail() { echo "refusing to source ${CE_LIB}: $1" >&2; exit 1; }
+CE_STRICT=0
+[ "${EUID:-1}" -ne 0 ] || CE_STRICT=1
+if [ "$CE_STRICT" = 1 ]; then  # as root: the helper and every directory above it must be root-owned and not writable
+    CE_P="$CE_LIB"
+    while :; do
+        [ "$(/usr/bin/stat -c %u -- "$CE_P")" = 0 ] && [ $((8#$(/usr/bin/stat -c %a -- "$CE_P") & 8#022)) -eq 0 ] ||
+            ce_boot_fail "${CE_P} (or a directory above it) is not root-owned or is group or world writable"
+        [ "$CE_P" = / ] && break
+        CE_P="$(/usr/bin/dirname -- "$CE_P")"
+    done
+fi
+[ -f "$CE_LIB" ] && [ ! -L "$CE_LIB" ] || ce_boot_fail "it is missing or is a link"
+# Open the helper once, check the OPEN file (-L: the descriptor link points at the file), and source
+# that same descriptor, so a rename or replacement of the path after this point changes nothing.
+exec 9<"$CE_LIB" || ce_boot_fail "it cannot be opened"
+CE_OWNER="$(/usr/bin/stat -L -c %u -- /proc/self/fd/9)"
+CE_MODE="$(/usr/bin/stat -L -c %a -- /proc/self/fd/9)"
+CE_MASK=002  # world write is never allowed; group write too when running as root
+[ "$CE_STRICT" != 1 ] || CE_MASK=022
+if [ ! -f /proc/self/fd/9 ] || { [ "$CE_OWNER" != 0 ] && [ "$CE_OWNER" != "$(/usr/bin/id -u)" ]; } ||
+    [ $((8#$CE_MODE & 8#$CE_MASK)) -ne 0 ]; then
+    ce_boot_fail "it must be a regular file owned by root or by you, not world writable (and not group writable when run as root)"
 fi
 # shellcheck source=scripts/lib-container-engine.sh
-source "$CE_LIB"
+source /proc/self/fd/9
+exec 9<&-
 ce_init_name || exit 1
 if [[ -z "${N8N_BASE:-}" ]]; then
   LOOKUP_SRC="$(cat "${SCRIPT_BIN_DIR}/container_engine.py" "${SCRIPT_BIN_DIR}/n8n_address.py")" || exit 1

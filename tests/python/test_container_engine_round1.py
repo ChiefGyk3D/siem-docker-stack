@@ -30,9 +30,10 @@ POISON = {
     "DOCKER_HOST": "tcp://192.0.2.99:2375", "DOCKER_CONTEXT": "evil", "DOCKER_CONFIG": "/tmp/evilcfg",
     "CONTAINER_HOST": "ssh://evil@192.0.2.99", "CONTAINER_CONNECTION": "evil", "XDG_CONFIG_HOME": "/tmp/evilxdg",
     "LD_PRELOAD": "/tmp/evil.so", "LD_LIBRARY_PATH": "/tmp/evil", "BASH_ENV": "/tmp/evil.sh", "ENV": "/tmp/evil.sh",
-    "HTTPS_PROXY": "http://192.0.2.99:3128", "DOCKER_CERT_PATH": "/tmp/evil", "PYTHONPATH": "/tmp/evil",
+    "HTTPS_PROXY": "http://192.0.2.99:3128", "XDG_RUNTIME_DIR": "/run/user/evil", "DOCKER_CERT_PATH": "/tmp/evil", "PYTHONPATH": "/tmp/evil",
 }
-ALLOWED = set(ce.ENGINES) | set(ce.ENV_KEEP) | {"PATH"}
+ALLOWED = set(ce.ENV_KEEP) | {"PATH", "HOME", "DOCKER_CONFIG", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME",
+                               "XDG_STATE_HOME"}
 
 
 def make_exe(path, body, mode=0o755):
@@ -72,8 +73,15 @@ def child_env(path):
 def assert_clean(got, good):
     got = {k: v for k, v in got.items() if k not in ("_", "PWD", "SHLVL", "OLDPWD")}  # added by the stub shell
     assert set(got) <= ALLOWED, sorted(set(got) - ALLOWED)
-    assert not (set(got) & set(POISON)), sorted(set(got) & set(POISON))
-    assert got["PATH"] == str(good) and got.get("HOME") == "/home/someone"
+    assert not any(got.get(k) == v for k, v in POISON.items()), "a caller value reached the engine"
+    assert not (set(got) & set(POISON) - ALLOWED)
+    assert got["PATH"] == str(good)
+    # a private empty home, not the caller's, with every config location inside it, removed afterwards
+    home = got["HOME"]
+    assert home != "/home/someone" and "XDG_RUNTIME_DIR" not in got
+    assert got["DOCKER_CONFIG"].startswith(home + "/")
+    assert all(got[k].startswith(home + "/") for k in got if k.startswith("XDG_"))
+    assert not os.path.exists(home), "the private home was not removed"
 
 
 # ------------------------------------------------------------------ 1. environment
@@ -126,9 +134,10 @@ def test_shell_ce_run_gives_the_engine_a_minimal_environment(shell, tmp_path):
                           capture_output=True, stdin=subprocess.DEVNULL, timeout=30)
     assert proc.returncode == 0, proc.stderr
     got = child_env(out)
-    assert not (set(got) & set(POISON)) and got["PATH"] == "/usr/bin:/usr/local/bin:/bin:/snap/bin"
-    assert got["HOME"] == "/home/someone"
+    assert not any(got.get(k) == v for k, v in POISON.items()) and got["PATH"] == "/usr/bin:/usr/local/bin:/bin:/snap/bin"
     assert set(got) - {"_", "PWD", "SHLVL", "OLDPWD"} <= ALLOWED
+    assert got["HOME"] != "/home/someone" and got["DOCKER_CONFIG"].startswith(got["HOME"] + "/")
+    assert not os.path.exists(got["HOME"]), "the private home was not removed"
 
 
 @pytest.mark.parametrize("shell", SHELLS)
@@ -244,31 +253,28 @@ def test_scripts_derive_their_directory_from_the_real_path():  # guard
 
 # ------------------------------------------------------------------ 3. firewall as root
 
-def _fw_root_sandbox(tmp_path, evil_lib=None):
-    """The firewall plus its helper in a temp dir, run as a simulated root (stub id and stat)."""
-    d = tmp_path / "rootcopy"
-    d.mkdir()
-    shutil.copy(FIREWALL, d / "prometheus-otlp-firewall.sh")
-    shutil.copy(HELPER, d / "lib-container-engine.sh")
+def _fw_root_sandbox(tmp_path):
+    """The firewall plus its helper in a temp dir that believes it is root (see conftest.root_copy)."""
+    from conftest import root_copy
     stubs = tmp_path / "stubs"
-    stubs.mkdir()
-    make_exe(stubs / "id", "#!/bin/sh\necho 0\n")
+    d = root_copy(tmp_path / "rootcopy", ["prometheus-otlp-firewall.sh", "lib-container-engine.sh"], SCRIPTS)
     return d, stubs
 
 
 def _stat_stub(stubs, body_extra=""):
-    make_exe(stubs / "stat", f"""#!/bin/sh
-{body_extra}
-case "$2" in
-  %u) echo 0 ;;
-  %a) echo 755 ;;
-  *) exec /usr/bin/stat "$@" ;;
-esac
-""")
+    from conftest import write_stat_stub
+    write_stat_stub(stubs, 0, "755", body_extra)
+
+
+def _retarget(d, stubs):
+    """Point the sandbox copy at the stubs (done after the stubs exist)."""
+    for f in (x for x in d.iterdir() if not x.is_symlink()):  # never write through a link into the repo
+        f.write_text(f.read_text().replace("/usr/bin/stat", str(stubs / "stat")).replace("/usr/bin/id", str(stubs / "id")))
 
 
 def _run_fw(d, stubs, tmp_path, *args):
-    env = {"PATH": f"{stubs}:/usr/bin:/bin", "EVIL_MARKER": str(tmp_path / "marker"), "HOME": str(tmp_path)}
+    _retarget(d, stubs)
+    env = {"PATH": "/usr/bin:/bin", "EVIL_MARKER": str(tmp_path / "marker"), "HOME": str(tmp_path)}
     return subprocess.run(["bash", str(d / "prometheus-otlp-firewall.sh"), *args], env=env, text=True,
                           capture_output=True, stdin=subprocess.DEVNULL, timeout=30, cwd=str(tmp_path))
 
@@ -276,11 +282,12 @@ def _run_fw(d, stubs, tmp_path, *args):
 def test_firewall_root_via_a_symlink_never_sources_a_helper_beside_the_link(tmp_path):
     d, stubs = _fw_root_sandbox(tmp_path)
     _stat_stub(stubs)
+    _retarget(d, stubs)
     launch = tmp_path / "launch"
     launch.mkdir()
     (launch / "prometheus-otlp-firewall.sh").symlink_to(d / "prometheus-otlp-firewall.sh")
     (launch / "lib-container-engine.sh").write_text(EVIL_LIB, encoding="utf-8")
-    env = {"PATH": f"{stubs}:/usr/bin:/bin", "EVIL_MARKER": str(tmp_path / "marker"), "HOME": str(tmp_path)}
+    env = {"PATH": "/usr/bin:/bin", "EVIL_MARKER": str(tmp_path / "marker"), "HOME": str(tmp_path)}
     proc = subprocess.run(["bash", str(launch / "prometheus-otlp-firewall.sh")], env=env, text=True,
                           capture_output=True, stdin=subprocess.DEVNULL, timeout=30, cwd=str(tmp_path))
     assert not (tmp_path / "marker").exists()
@@ -299,14 +306,7 @@ def test_firewall_root_refuses_a_helper_that_is_a_link(tmp_path):
 def test_firewall_root_checks_every_ancestor_directory(tmp_path):
     d, stubs = _fw_root_sandbox(tmp_path)
     # everything is root-owned except one directory ABOVE the script directory
-    make_exe(stubs / "stat", f"""#!/bin/sh
-if [ "$2" = %u ] && [ "$4" = "{tmp_path}" ]; then echo 1234; exit 0; fi
-case "$2" in
-  %u) echo 0 ;;
-  %a) echo 755 ;;
-  *) exec /usr/bin/stat "$@" ;;
-esac
-""")
+    _stat_stub(stubs, f'if [ "$fmt" = %u ] && [ "$last" = "{tmp_path}" ]; then echo 1234; exit 0; fi')
     proc = _run_fw(d, stubs, tmp_path)
     assert proc.returncode != 0 and "or a directory above it" in proc.stderr
 
@@ -323,7 +323,7 @@ def test_firewall_root_sources_the_verified_descriptor_not_the_path(tmp_path):
     evil = tmp_path / "evil.sh"
     evil.write_text(EVIL_LIB, encoding="utf-8")
     # the moment the script checks the OPEN file, swap the path for the attacker's file
-    _stat_stub(stubs, f'if [ "$4" = /proc/self/fd/9 ] && [ "$2" = %u ]; then /bin/mv -f "{evil}" "{d}/lib-container-engine.sh"; fi')
+    _stat_stub(stubs, f'if [ "$last" = /proc/self/fd/9 ] && [ "$fmt" = %u ]; then /bin/mv -f "{evil}" "{d}/lib-container-engine.sh"; fi')
     proc = _run_fw(d, stubs, tmp_path)
     assert not (tmp_path / "marker").exists(), "the swapped file was sourced"
     assert "usage" in proc.stderr
