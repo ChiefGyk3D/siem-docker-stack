@@ -408,11 +408,9 @@ def test_shell_init_sets_name_and_reports_a_missing_binary(shell):
 @pytest.mark.parametrize("shell", SHELLS)
 def test_shell_helper_never_evals_or_builds_commands(shell):
     text = HELPER.read_text()
-    code = "\n".join(ln for ln in text.splitlines()
-                     if not ln.lstrip().startswith("#") and ln.strip() != 'eval "$_ce_saved"')
-    # the one allowed eval replays the caller's own `trap -p` listing (checked in test_container_engine_round6)
+    code = "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
+    # round 7: no eval anywhere (the trap save and replay that needed one is gone)
     assert not re.search(r"\beval\b|\bsh -c\b|\bbash -c\b|`", code)
-    assert text.count('eval "$_ce_saved"') == 1
 
 
 # ---------------------------------------------------------------- shell scripts use the helper

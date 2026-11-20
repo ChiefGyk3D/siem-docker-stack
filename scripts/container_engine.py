@@ -14,11 +14,9 @@ import contextlib
 import os
 import re
 import shutil
-import signal
 import stat
 import subprocess
 import tempfile
-import threading
 
 ENGINES = ("docker", "podman")
 DEFAULT_ENGINE = "docker"
@@ -152,49 +150,19 @@ def _make_home():
 @contextlib.contextmanager
 def private_home():
     """A fresh private (mode 0700, checked after creation) empty directory under a validated fixed base,
-    removed afterwards, to serve as the engine's HOME.
+    removed afterwards by try/finally, to serve as the engine's HOME.
 
-    Signal cleanup works only in the main thread (Python allows signal handlers nowhere else): there
-    SIGTERM and SIGHUP raise SystemExit while the directory exists, so the cleanup still runs. A signal
-    whose current disposition is SIG_IGN is left ignored (nohup keeps working), and a previous handler
-    Python cannot report (None) is restored as SIG_DFL. A worker thread cannot be protected (Python
-    allows signal handlers only in the main thread), so it is refused with ContainerEngineError rather
-    than run without protection. While the directory is being deleted TERM, HUP and INT are blocked, so a
-    signal cannot interrupt the deletion; it is held and delivered to the restored handler afterwards.
-    SIGKILL cannot be handled."""
-    if threading.current_thread() is not threading.main_thread():
-        raise ContainerEngineError("the private engine home must be used from the main thread "
-                                   "(signal cleanup cannot be installed elsewhere)")
-    sigs = (signal.SIGTERM, signal.SIGHUP)
-
-    def _stop(signum, frame):
-        raise SystemExit(128 + signum)
-
-    # handlers first, directory second: no window where the directory exists unprotected
-    old = {}
-    try:
-        for sig in sigs:
-            prev = signal.getsignal(sig)
-            if prev is signal.SIG_IGN:
-                continue
-            old[sig] = signal.SIG_DFL if prev is None else prev
-            signal.signal(sig, _stop)
-        d = _make_home()
-    except BaseException:
-        for sig, handler in old.items():
-            signal.signal(sig, handler)
-        raise
+    The directory is removed on a normal return, an exception, KeyboardInterrupt and SystemExit. This
+    function installs no signal handler and touches no signal mask. Not covered: a signal whose default
+    action ends the process without running Python (SIGKILL always; SIGTERM and SIGHUP unless the
+    program has its own handler that raises) leaves the directory behind. A program that wants SIGTERM
+    cleanup installs `signal.signal(signal.SIGTERM, lambda s, f: sys.exit(128 + s))` itself, in its main
+    thread. Leftover engine-home-* directories under the base are safe to delete when no engine call runs."""
+    d = _make_home()
     try:
         yield d
     finally:
-        # INT is held too (its handler is not replaced; only its delivery waits until the home is gone)
-        mask = signal.pthread_sigmask(signal.SIG_BLOCK, {*sigs, signal.SIGINT})
-        try:
-            shutil.rmtree(d, ignore_errors=True)
-            for sig, handler in old.items():
-                signal.signal(sig, handler)
-        finally:
-            signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+        shutil.rmtree(d, ignore_errors=True)
 
 
 def engine_env(home, path=None, environ=None):

@@ -11,7 +11,6 @@ import os
 import shutil
 import signal
 import subprocess
-import threading
 import time
 
 import pytest
@@ -236,21 +235,6 @@ def _start(shell, tmp_path, ignore_term=False):
 
 
 @pytest.mark.parametrize("shell", SHELLS)
-@pytest.mark.parametrize("sig,status", [(signal.SIGTERM, 143), (signal.SIGHUP, 129)])  # INT: see round 5 (the runner is async, so it ignores INT sent to it directly; the script's INT is forwarded as TERM)
-def test_a_signalled_ce_run_stops_the_engine_at_once_and_removes_the_home(shell, sig, status, tmp_path):
-    p = _start(shell, tmp_path)
-    home = (tmp_path / "home.txt").read_text().strip()
-    engine = int((tmp_path / "pid.txt").read_text())
-    sub = int((tmp_path / "ppid.txt").read_text())  # the ce_run subshell: the engine's parent
-    t0 = time.time()
-    os.kill(sub, sig)
-    out, _ = p.communicate(timeout=10)
-    assert time.time() - t0 < 3, "the signal was not handled while the engine ran"
-    assert f"rc={status}" in out, out
-    assert _gone(home) and _dead(engine)
-
-
-@pytest.mark.parametrize("shell", SHELLS)
 def test_a_process_group_term_removes_the_home(shell, tmp_path):
     p = _start(shell, tmp_path)
     home = (tmp_path / "home.txt").read_text().strip()
@@ -258,126 +242,6 @@ def test_a_process_group_term_removes_the_home(shell, tmp_path):
     os.killpg(os.getpgid(p.pid), signal.SIGTERM)
     p.communicate(timeout=10)
     assert _gone(home) and _dead(engine)
-
-
-def test_an_engine_that_ignores_term_is_killed_after_the_grace_period(tmp_path):
-    p = _start("bash", tmp_path, ignore_term=True)
-    home = (tmp_path / "home.txt").read_text().strip()
-    engine = int((tmp_path / "pid.txt").read_text())
-    sub = int((tmp_path / "ppid.txt").read_text())
-    os.kill(sub, signal.SIGTERM)
-    p.communicate(timeout=15)
-    assert _gone(home, 8) and _dead(engine, 8)
-
-
-def test_the_shell_helper_documents_what_a_signal_to_the_script_itself_does():  # guard
-    text = HELPER.read_text()
-    assert "tracked child" in text and "128 + signal" in text
-
-
-# ------------------------------------------------------------------ 3. python signal handling
-
-@pytest.fixture
-def trusted(tmp_path, monkeypatch):
-    good = tmp_path / "good"
-    good.mkdir()
-    good.chmod(0o755)
-    monkeypatch.setattr(ce, "TRUSTED_DIRS", (str(good),))
-    monkeypatch.setattr(ce, "TRUSTED_UID", os.geteuid())
-    monkeypatch.setattr(ce, "TRUSTED_ROOT", str(tmp_path))
-    return good
-
-
-@pytest.fixture
-def keep_handlers():
-    saved = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP)}
-    yield
-    for s, h in saved.items():
-        signal.signal(s, h)
-
-
-def test_a_signal_that_is_ignored_stays_ignored(keep_handlers):
-    signal.signal(signal.SIGHUP, signal.SIG_IGN)
-    with ce.private_home():
-        assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
-        assert signal.getsignal(signal.SIGTERM) not in (signal.SIG_DFL, signal.SIG_IGN)
-    assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
-
-
-def test_an_unreportable_previous_handler_is_restored_as_default_without_a_crash(keep_handlers, monkeypatch):
-    real = signal.getsignal
-    monkeypatch.setattr(ce.signal, "getsignal", lambda s: None if s == signal.SIGTERM else real(s))
-    with ce.private_home():
-        pass
-    assert real(signal.SIGTERM) == signal.SIG_DFL
-
-
-def test_nested_contexts_restore_in_order(keep_handlers):
-    original = signal.getsignal(signal.SIGTERM)
-    with ce.private_home():
-        outer = signal.getsignal(signal.SIGTERM)
-        with ce.private_home():
-            assert signal.getsignal(signal.SIGTERM) is not outer
-        assert signal.getsignal(signal.SIGTERM) is outer
-    assert signal.getsignal(signal.SIGTERM) is original
-
-
-def test_the_directory_is_removed_before_the_handlers_are_restored(keep_handlers, monkeypatch):
-    seen = {}
-    real_rmtree = ce.shutil.rmtree
-    original = signal.getsignal(signal.SIGTERM)
-
-    def spy(path, **kw):
-        seen["during_delete"] = signal.getsignal(signal.SIGTERM)
-        return real_rmtree(path, **kw)
-
-    monkeypatch.setattr(ce.shutil, "rmtree", spy)
-    with ce.private_home():
-        pass
-    assert seen["during_delete"] is not original and seen["during_delete"] not in (signal.SIG_DFL, signal.SIG_IGN)
-
-
-def test_the_directory_is_removed_even_if_restoring_a_handler_fails(keep_handlers, monkeypatch):
-    holder = {}
-    real_signal = signal.signal
-
-    def boom(sig, handler):
-        if handler is signal.SIG_DFL or callable(handler) and holder.get("exiting"):
-            raise RuntimeError("cannot restore")
-        return real_signal(sig, handler)
-
-    with pytest.raises(RuntimeError):
-        with ce.private_home() as d:
-            holder["dir"] = d
-            holder["exiting"] = True
-            monkeypatch.setattr(ce.signal, "signal", boom)
-    monkeypatch.undo()
-    assert not os.path.exists(holder["dir"])
-
-
-def test_a_worker_thread_runs_cleanly_and_leaves_the_handlers_alone(trusted, tmp_path, keep_handlers):
-    rec = tmp_path / "home.txt"
-    make_exe(trusted / "docker", f'#!/bin/sh\necho "$HOME" > "{rec}"\n')
-    before = signal.getsignal(signal.SIGTERM)
-    result = {}
-
-    def work():
-        try:
-            result["rc"] = ce.engine_run(["docker", "ps"], capture_output=True).returncode
-        except BaseException as err:  # the test must see any failure
-            result["err"] = err
-
-    t = threading.Thread(target=work)
-    t.start()
-    t.join(15)
-    # round 5: a worker thread cannot be protected, so it is refused (test_container_engine_round5.py)
-    assert isinstance(result.get("err"), ce.ContainerEngineError)
-    assert signal.getsignal(signal.SIGTERM) is before
-    assert not rec.exists()
-
-
-def test_the_docs_in_the_function_say_main_thread_only():  # guard
-    assert "main thread" in ce.private_home.__wrapped__.__doc__
 
 
 # ------------------------------------------------------------------ 4. per-variable patterns

@@ -144,109 +144,49 @@ ce_mkhome() { # set _ce_home to a fresh private home; fail closed when no safe b
     return 1
 }
 
-ce_stop() { # N: stop the engine child promptly (TERM, then KILL after 5 s), then leave with status N
-    # a signal between the fork and the PID assignment is remembered; the caller acts on it right after
-    if [ -z "${_ce_child-}" ] && [ -n "${_ce_sp-}" ]; then
-        _ce_pend=$1
-        return 0
-    fi
-    if [ -n "${_ce_child-}" ]; then
-        kill -TERM "$_ce_child" 2>/dev/null
-        ( /bin/sleep 5; kill -KILL "$_ce_child" 2>/dev/null ) >/dev/null 2>&1 </dev/null &  # holds no pipe of ours
-        _ce_dog=$!
-        wait "$_ce_child" 2>/dev/null
-        kill "$_ce_dog" 2>/dev/null
-    fi
-    trap '' HUP INT TERM  # nothing interrupts the cleanup that follows
-    exit "$1"  # the EXIT trap removes the private home
-}
-
-ce_fwd() { # N: a signal reached the invoking shell: stop the runner (its trap stops the engine), then leave with N
-    if [ -z "${_ce_runner-}" ] && [ -n "${_ce_sp-}" ]; then  # between the fork and the PID assignment
-        _ce_pend=$1
-        return 0
-    fi
-    if [ -n "${_ce_runner-}" ]; then
-        kill -TERM "$_ce_runner" 2>/dev/null
-        wait "$_ce_runner" 2>/dev/null
-    fi
-    exit "$1"
-}
-
 ce_run() {
     [ -n "${CE_BIN-}" ] || { echo "ce_run: no engine resolved (call ce_init first)" >&2; return 1; }
-    # The runner below is a child of the invoking shell, so a signal sent to the script itself would
-    # not reach it. The invoking shell therefore forwards HUP, INT and TERM to the runner, waits for
-    # it to stop the engine and remove the home, and leaves with 128 + signal. HUP, INT and TERM go
-    # back to their defaults afterwards (EXIT traps are never touched; no script of ours sets the
-    # others). A script that calls ce_run inside $(...) or a pipeline relies on the signal reaching
-    # the process group, which every terminal and supervisor kill does.
-    # The caller's own HUP, INT and TERM traps are saved first and put back afterwards.
-    # (bash lists them with `trap -p`; the shells that cannot, such as dash, leave the three at their defaults)
-    _ce_saved=$(trap -p HUP INT TERM 2>/dev/null) || _ce_saved=
-    _ce_runner=
-    _ce_pend=
-    trap 'ce_fwd 129' HUP
-    trap 'ce_fwd 130' INT
-    trap 'ce_fwd 143' TERM
-    exec 4<&0  # an async command gets /dev/null as stdin unless it is redirected from another descriptor
-    _ce_sp=1  # from here until the PID is recorded a signal is remembered, not lost
-    ce_runner "$@" <&4 4<&- &
-    _ce_runner=$!
-    _ce_sp=
-    exec 4<&-
-    [ -z "$_ce_pend" ] || ce_fwd "$_ce_pend"
-    _ce_rc=0
-    wait "$_ce_runner" || _ce_rc=$?
-    _ce_runner=
-    trap - HUP INT TERM
-    # the only eval in this file: it replays the shell's own quoted `trap -p` listing of the caller's traps
-    eval "$_ce_saved"
-    return "$_ce_rc"
-}
-
-ce_runner() {
-    _ce_n=$#
-    {  # always called as an async command by ce_run, so this is already its own shell process
-        # the EXIT and signal traps exist before the home does, so a signal at any point removes it
-        _ce_sp=  # these were set in the invoking shell when this process was forked
-        _ce_pend=
+    # One subshell, the engine in its foreground, no PID bookkeeping and no forwarding. The subshell
+    # has its own traps, so the caller's traps (EXIT included) are never read, changed or replayed.
+    # The EXIT trap is set before the home exists. A signal that arrives while the home is being made
+    # is only noted, and acted on right after; once the home exists, HUP, INT and TERM just `exit`
+    # (status 128 + signal) and the EXIT trap removes the home. The EXIT trap ignores the three
+    # signals first, so a second signal cannot cut the deletion short.
+    # What this does not cover (see docs/container-engine.md): SIGKILL leaves the private home behind
+    # (engine-home.* under the base, safe to delete when no engine call is running); a signal sent to
+    # the script alone, not to its process group, is acted on when the engine call returns (a terminal
+    # or supervisor kill reaches the whole group); a killed engine CLIENT does not stop the container
+    # the engine already started.
+    (
         _ce_home=
-        # signals are ignored while the home is deleted, so a late forwarded TERM cannot abort the deletion
-        trap 'trap "" HUP INT TERM; [ -z "$_ce_home" ] || /usr/bin/rm -rf -- "$_ce_home"' EXIT
-        _ce_child=
-        # the engine runs as a tracked child and the shell waits for it, so a signal is handled at once
-        # (a trap does not run while a foreground command is executing); the status is 128 + signal
-        trap 'ce_stop 129' HUP
-        trap 'ce_stop 130' INT
-        trap 'ce_stop 143' TERM
+        _ce_got=
+        trap '_ce_got=129' HUP
+        trap '_ce_got=130; _ce_int=1' INT
+        trap '_ce_got=143' TERM
+        # bash goes on after a foreground child that merely exits 130, so after INT the subshell
+        # ends by the signal itself (bash only: BASHPID), and the calling script stops too
+        trap 'trap "" HUP INT TERM; [ -z "$_ce_home" ] || /usr/bin/rm -rf -- "$_ce_home"
+            [ -z "${_ce_int-}" ] || [ -z "${BASHPID-}" ] || { trap - INT; kill -INT "$BASHPID"; }' EXIT
         ce_mkhome || exit 1
-        # engine arguments are "$@"; append the env command after them, then rotate them to the end
-        set -- "$@" /usr/bin/env -i "PATH=$CE_SAFE_PATH" "HOME=$_ce_home" "DOCKER_CONFIG=$_ce_home/docker" \
+        [ -z "$_ce_got" ] || exit "$_ce_got"
+        trap 'exit 129' HUP
+        trap '_ce_int=1; exit 130' INT
+        trap 'exit 143' TERM
+        # one fixed word per kept variable: a dropped one repeats PATH, so no word is ever split or empty
+        _ce_l="PATH=$CE_SAFE_PATH"
+        _ce_c=$_ce_l
+        _ce_t=$_ce_l
+        _ce_z=$_ce_l
+        if [ -n "${LANG-}" ] && ce_ok_locale "$LANG"; then _ce_l="LANG=$LANG"; fi
+        if [ -n "${LC_ALL-}" ] && ce_ok_locale "$LC_ALL"; then _ce_c="LC_ALL=$LC_ALL"; fi
+        if [ -n "${TERM-}" ] && ce_ok_term "$TERM"; then _ce_t="TERM=$TERM"; fi
+        if [ -n "${TZ-}" ] && ce_ok_tz "$TZ"; then _ce_z="TZ=$TZ"; fi
+        /usr/bin/env -i "PATH=$CE_SAFE_PATH" "HOME=$_ce_home" "DOCKER_CONFIG=$_ce_home/docker" \
             "XDG_CONFIG_HOME=$_ce_home/config" "XDG_DATA_HOME=$_ce_home/data" "XDG_CACHE_HOME=$_ce_home/cache" \
-            "XDG_STATE_HOME=$_ce_home/state"
-        if [ -n "${LANG-}" ] && ce_ok_locale "$LANG"; then set -- "$@" "LANG=$LANG"; fi
-        if [ -n "${LC_ALL-}" ] && ce_ok_locale "$LC_ALL"; then set -- "$@" "LC_ALL=$LC_ALL"; fi
-        if [ -n "${TERM-}" ] && ce_ok_term "$TERM"; then set -- "$@" "TERM=$TERM"; fi
-        if [ -n "${TZ-}" ] && ce_ok_tz "$TZ"; then set -- "$@" "TZ=$TZ"; fi
-        set -- "$@" "$CE_BIN"
-        while [ "$_ce_n" -gt 0 ]; do
-            set -- "$@" "$1"
-            shift
-            _ce_n=$((_ce_n - 1))
-        done
-        exec 3<&0  # an async command gets /dev/null as stdin unless it is redirected from another descriptor
-        _ce_sp=1  # from here until the PID is recorded a signal is remembered, not lost
-        "$@" <&3 3<&- &
-        _ce_child=$!
-        _ce_sp=
-        exec 3<&-
-        [ -z "$_ce_pend" ] || ce_stop "$_ce_pend"
-        _ce_rc=0
-        wait "$_ce_child" || _ce_rc=$?
-        trap '' HUP INT TERM
+            "XDG_STATE_HOME=$_ce_home/state" "$_ce_l" "$_ce_c" "$_ce_t" "$_ce_z" "$CE_BIN" "$@"
+        _ce_rc=$?  # the engine is not the last command, so the shell stays to run the EXIT trap
         exit "$_ce_rc"
-    }
+    )
 }
 
 # ce_source_env FILE: source a shell-syntax .env safely. The file must be a regular file, not a link;

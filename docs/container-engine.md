@@ -94,18 +94,29 @@ root-owned and not group or world writable, opens it once and sources that open
 descriptor. For an ordinary user the file must be owned by root or by you and not world
 writable.
 
-Signals: `ce_run` runs the engine under a tracked runner and waits for it. The calling
-script forwards HUP, INT and TERM sent to itself to the runner, which stops the engine
-at once (TERM, then KILL after 5 seconds), removes the private home, and the script
-leaves with status 129, 130 or 143. A signal that arrives between starting a child and
-recording its PID is remembered and acted on as soon as the PID is known. In
-bash, the shell of every caller, `ce_run` saves the caller's own HUP, INT and TERM traps
-and puts back exactly those afterwards (a signal with no trap goes back to its default; a
-signal ignored on entry stays ignored); a shell that cannot list its traps, such as dash,
-gets the three at their defaults. In Python, signal cleanup works only in the main thread, and a worker thread
-is refused with `ContainerEngineError` rather than run without protection; a signal
-that is ignored stays ignored; TERM, HUP and INT are held while the directory is deleted
-and delivered afterwards.
+Signals (kept deliberately small): `ce_run` runs the engine in the foreground of a
+subshell that has its own traps, so your script's traps are never read or changed. The
+subshell sets one EXIT trap that deletes the private home before the home exists. HUP,
+INT and TERM in that subshell just `exit` with 129, 130 or 143, and the EXIT trap removes
+the home; a signal that arrives while the home is being made is noted and acted on right
+after. No process is tracked, forwarded to or killed by the library. In Python,
+`private_home` is a plain try/finally with `rmtree`: it covers a return, an exception,
+KeyboardInterrupt and SystemExit, and installs no signal handler.
+
+What is not covered, honestly:
+
+- SIGKILL (or a power loss) leaves `engine-home.*` (shell) or `engine-home-*` (Python)
+  under `/run`, `/var/tmp` or `/tmp`. The directory is empty or holds only what the
+  engine wrote into its private home; delete it when no engine call is running, for
+  example `sudo find /run /var/tmp /tmp -maxdepth 1 -name 'engine-home*' -mmin +60 -exec rm -rf -- {} +`.
+- A signal sent to the script's PID alone (not its process group) is acted on when the
+  running engine call returns, because the shell does not run a trap during a foreground
+  command. A terminal Ctrl-C, a logout and a supervisor stop reach the whole group, so
+  the engine stops too.
+- If the engine client is killed, the container it already asked the daemon to start may
+  keep running; stop it with the engine's own command.
+- In Python, SIGTERM and SIGHUP with their default action end the process without
+  cleanup; a program that wants cleanup installs its own handler that raises.
 
 Each kept variable has its own pattern: `LANG` and `LC_ALL` are `C`, `POSIX`, `C.UTF-8` or
 `ll_CC[.charset]`; `TERM` is terminal-name characters only; `TZ` is a zone name such as

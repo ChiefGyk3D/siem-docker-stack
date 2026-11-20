@@ -329,32 +329,6 @@ def test_shell_removes_the_home_when_the_call_is_signalled(shell, sig, tmp_path)
     assert "rc=" in proc.stdout
 
 
-def test_python_removes_the_home_when_the_caller_gets_sigterm(trusted, tmp_path):
-    rec = tmp_path / "home.txt"
-    make_exe(trusted / "docker", HOME_DUMP % (rec, "kill -TERM $PPID\n/bin/sleep 5\n"))
-    driver = f'''
-import os, sys
-sys.path.insert(0, "{SCRIPTS}")
-import container_engine as ce
-ce.TRUSTED_DIRS = ("{trusted}",)
-ce.TRUSTED_UID = {os.geteuid()}
-ce.TRUSTED_ROOT = "{tmp_path}"
-ce.engine_run(["docker", "ps"], capture_output=True)
-'''
-    t0 = time.time()
-    proc = subprocess.run([sys.executable, "-I", "-c", driver], capture_output=True, text=True, timeout=30)
-    assert time.time() - t0 < 4, "the engine was not stopped"
-    assert proc.returncode == 128 + signal.SIGTERM
-    assert not os.path.exists(rec.read_text().strip()), "the private home was left behind"
-
-
-def test_python_restores_the_signal_handlers_afterwards(trusted, tmp_path):
-    before = signal.getsignal(signal.SIGTERM)
-    with ce.private_home():
-        assert signal.getsignal(signal.SIGTERM) is not before
-    assert signal.getsignal(signal.SIGTERM) is before
-
-
 def test_gameday_runner_reports_a_missing_safe_base_instead_of_crashing(tmp_path, monkeypatch):
     good = tmp_path / "good"
     make_exe(good / "docker", "#!/bin/sh\n")
