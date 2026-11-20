@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")"  # the real directory, symlinks resolved
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 RED='\033[0;31m'
@@ -66,8 +66,18 @@ if [ -n "$ENV_FILE" ]; then
 fi
 
 # CONTAINER_ENGINE (docker by default, or podman) may come from the environment or that .env.
+CE_LIB="${SCRIPT_DIR}/lib-container-engine.sh"
+CE_LIB_OWNER="$(stat -L -c '%u' -- "$CE_LIB" 2>/dev/null || echo bad)"
+CE_LIB_MODE="$(stat -L -c '%a' -- "$CE_LIB" 2>/dev/null || echo 777)"
+CE_LIB_MASK=002  # world write is never allowed; group write too when running as root
+[ "$(id -u)" != 0 ] || CE_LIB_MASK=022
+if [ -L "$CE_LIB" ] || { [ "$CE_LIB_OWNER" != 0 ] && [ "$CE_LIB_OWNER" != "$(id -u)" ]; } ||
+    [ $((8#$CE_LIB_MODE & 8#$CE_LIB_MASK)) -ne 0 ]; then
+    echo "refusing to source ${CE_LIB}: it must be a regular file owned by root or by you, not world writable (and not group writable when run as root)" >&2
+    exit 1
+fi
 # shellcheck source=scripts/lib-container-engine.sh
-source "${SCRIPT_DIR}/lib-container-engine.sh"
+source "$CE_LIB"
 ce_init || exit 1
 
 MISSING=0
@@ -92,7 +102,7 @@ echo ""
 echo -e "${YELLOW}[1/4] Waiting for opensearch-hot HTTPS endpoint...${NC}"
 UP=0
 for i in {1..30}; do
-    CODE=$("$CE_BIN" exec opensearch-hot \
+    CODE=$(ce_run exec opensearch-hot \
         curl -sk -o /dev/null -w '%{http_code}' https://localhost:9200/ 2>/dev/null || echo "000")
     # 401 = security initialized, 503 = security index not initialized yet,
     # 200 would mean auth is off — any of these means TLS + HTTP are up.
@@ -116,7 +126,7 @@ echo -e "${YELLOW}[2/4] Generating bcrypt hashes...${NC}"
 
 hash_password() {
     local pass="$1"
-    "$CE_BIN" exec -e HASH_PASS="$pass" opensearch-hot bash -c \
+    ce_run exec -e HASH_PASS="$pass" opensearch-hot bash -c \
         'plugins/opensearch-security/tools/hash.sh -p "$HASH_PASS"' 2>/dev/null \
         | grep -E '^\$2[aby]\$' | tail -1
 }
@@ -164,7 +174,7 @@ echo -e "${GREEN}✓ internal_users.yml rendered${NC}"
 # hostname verification (self-signed certs).
 echo ""
 echo -e "${YELLOW}[4/4] Applying security configuration (securityadmin.sh)...${NC}"
-"$CE_BIN" exec opensearch-hot bash -c '
+ce_run exec opensearch-hot bash -c '
     plugins/opensearch-security/tools/securityadmin.sh \
         -cd /usr/share/opensearch/config/opensearch-security \
         -cacert /usr/share/opensearch/config/certs/root-ca.pem \
@@ -177,9 +187,9 @@ echo -e "${YELLOW}[4/4] Applying security configuration (securityadmin.sh)...${N
 # ── Verify ───────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${YELLOW}Verifying...${NC}"
-AUTH_CODE=$("$CE_BIN" exec opensearch-hot curl -sk -o /dev/null -w '%{http_code}' \
+AUTH_CODE=$(ce_run exec opensearch-hot curl -sk -o /dev/null -w '%{http_code}' \
     -u "admin:${OPENSEARCH_ADMIN_PASSWORD}" https://localhost:9200/_cluster/health)
-NOAUTH_CODE=$("$CE_BIN" exec opensearch-hot curl -sk -o /dev/null -w '%{http_code}' \
+NOAUTH_CODE=$(ce_run exec opensearch-hot curl -sk -o /dev/null -w '%{http_code}' \
     https://localhost:9200/_cluster/health)
 
 if [ "$AUTH_CODE" = "200" ]; then

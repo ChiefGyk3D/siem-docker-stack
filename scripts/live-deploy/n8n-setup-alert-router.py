@@ -41,7 +41,7 @@ import subprocess
 import sys
 import uuid
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), ".."))
 import container_engine  # noqa: E402  (the shared CONTAINER_ENGINE setting and trusted-binary resolver)
 
 CONTAINER = os.environ.get("N8N_CONTAINER", "n8n")

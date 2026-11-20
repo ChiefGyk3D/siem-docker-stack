@@ -22,11 +22,21 @@
 # =============================================================================
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")"  # the real directory, symlinks resolved
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # CONTAINER_ENGINE (docker by default, or podman) comes from the environment.
+CE_LIB="${SCRIPT_DIR}/lib-container-engine.sh"
+CE_LIB_OWNER="$(stat -L -c '%u' -- "$CE_LIB" 2>/dev/null || echo bad)"
+CE_LIB_MODE="$(stat -L -c '%a' -- "$CE_LIB" 2>/dev/null || echo 777)"
+CE_LIB_MASK=002  # world write is never allowed; group write too when running as root
+[ "$(id -u)" != 0 ] || CE_LIB_MASK=022
+if [ -L "$CE_LIB" ] || { [ "$CE_LIB_OWNER" != 0 ] && [ "$CE_LIB_OWNER" != "$(id -u)" ]; } ||
+    [ $((8#$CE_LIB_MODE & 8#$CE_LIB_MASK)) -ne 0 ]; then
+    echo "refusing to source ${CE_LIB}: it must be a regular file owned by root or by you, not world writable (and not group writable when run as root)" >&2
+    exit 1
+fi
 # shellcheck source=scripts/lib-container-engine.sh
-source "${SCRIPT_DIR}/lib-container-engine.sh"
+source "$CE_LIB"
 ce_init || exit 1
 
 HASH_TOOL="/usr/share/wazuh-indexer/plugins/opensearch-security/tools/hash.sh"
@@ -72,7 +82,7 @@ for f in roles.fragment.yml roles_mapping.fragment.yml internal_users.fragment.y
 done
 
 echo "[1/4] Hashing the password inside wazuh-indexer..."
-HASH=$(printf '%s' "$WAZUH_GRAFANA_RO_PASSWORD" | "$CE_BIN" exec -i wazuh-indexer bash -c \
+HASH=$(printf '%s' "$WAZUH_GRAFANA_RO_PASSWORD" | ce_run exec -i wazuh-indexer bash -c \
     "export JAVA_HOME=/usr/share/wazuh-indexer/jdk && IFS= read -r P && ${HASH_TOOL} -p \"\$P\"" \
     2>/dev/null | grep -E '^\$2[aby]\$' | tail -1 || true)
 if [ -z "$HASH" ]; then
@@ -87,8 +97,8 @@ trap 'rm -rf "$WORK"' EXIT
 # (and any older block with that key) in the file, keeping everything else.
 upsert() {
     local name="$1" frag="$2"
-    "$CE_BIN" exec wazuh-indexer cp "${SEC_CFG}/${name}" "${SEC_CFG}/${name}.bak"
-    "$CE_BIN" exec wazuh-indexer cat "${SEC_CFG}/${name}" > "${WORK}/${name}"
+    ce_run exec wazuh-indexer cp "${SEC_CFG}/${name}" "${SEC_CFG}/${name}.bak"
+    ce_run exec wazuh-indexer cat "${SEC_CFG}/${name}" > "${WORK}/${name}"
     RO_USER="$RO_USER" RO_HASH="$HASH" python3 - "${WORK}/${name}" "${FRAG_DIR}/${frag}" <<'PYEOF'
 import os, re, sys
 path, frag = sys.argv[1], sys.argv[2]
@@ -103,12 +113,12 @@ content = pattern.sub("", content)
 content = content.rstrip("\n") + "\n\n" + body
 open(path, "w", encoding="utf-8").write(content)
 PYEOF
-    "$CE_BIN" exec -i wazuh-indexer bash -c 'cat > "$0"' "${SEC_CFG}/${name}" < "${WORK}/${name}"
+    ce_run exec -i wazuh-indexer bash -c 'cat > "$0"' "${SEC_CFG}/${name}" < "${WORK}/${name}"
 }
 
 apply() { # <file> <type>
     local out
-    out=$("$CE_BIN" exec wazuh-indexer bash -c "export JAVA_HOME=/usr/share/wazuh-indexer/jdk && ${SEC_TOOL} \
+    out=$(ce_run exec wazuh-indexer bash -c "export JAVA_HOME=/usr/share/wazuh-indexer/jdk && ${SEC_TOOL} \
         -f ${SEC_CFG}/$1 -t $2 \
         -cacert ${CERTS}/root-ca.pem -cert ${CERTS}/admin.pem -key ${CERTS}/admin-key.pem \
         -icl -nhnv" 2>&1) || { echo "$out" | tail -5 >&2; echo "ERROR: securityadmin failed for $2" >&2; exit 1; }
@@ -130,7 +140,7 @@ apply internal_users.yml internalusers
 probe() { # <method> <path>
     local cred="${RO_USER}:${WAZUH_GRAFANA_RO_PASSWORD}"
     cred="${cred//\\/\\\\}"; cred="${cred//\"/\\\"}"
-    printf 'user = "%s"\n' "$cred" | "$CE_BIN" exec -i wazuh-indexer curl -K - -sk \
+    printf 'user = "%s"\n' "$cred" | ce_run exec -i wazuh-indexer curl -K - -sk \
         -o /dev/null -w '%{http_code}' -X "$1" "https://localhost:9200$2"
 }
 

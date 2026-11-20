@@ -214,7 +214,9 @@ def _run_provision(tmp_path, password="Zx9-grafana-ro-pw", extra_env=None, seed=
     sandbox.mkdir(parents=True, exist_ok=True)
     (sandbox / PROVISION.name).write_text(PROVISION.read_text(encoding="utf-8"), encoding="utf-8")
     lib = (REPO_ROOT / "scripts" / "lib-container-engine.sh").read_text(encoding="utf-8")
-    stub = '\nce_init() { CE_NAME=docker; CE_BIN="%s"; }\n' % (bindir / "docker")
+    stub = ('\nce_init() { CE_NAME=docker; CE_BIN="%s"; }\n'
+            'ce_run() { "$CE_BIN" "$@"; }  # the fake reads FAKE_* variables the real ce_run would drop\n'
+            % (bindir / "docker"))
     (sandbox / "lib-container-engine.sh").write_text(lib + stub, encoding="utf-8")
     env = {"PATH": f"{bindir}:{os.environ['PATH']}", "HOME": str(tmp_path),
            "FAKE_FS": str(fs), "FAKE_LOG": str(tmp_path / "log.jsonl"),

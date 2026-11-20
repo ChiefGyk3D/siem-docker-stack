@@ -20,6 +20,11 @@ ENV_NAME = "CONTAINER_ENGINE"
 TRUSTED_DIRS = ("/usr/bin", "/usr/local/bin", "/bin", "/snap/bin")
 TRUSTED_UID = 0  # the owner a trusted binary and every directory above it must have
 TRUSTED_ROOT = "/"  # ownership is checked on every directory from here down to the binary
+# The only variables an engine process inherits (plus a fixed PATH). Everything else, notably
+# DOCKER_HOST, DOCKER_CONTEXT, DOCKER_CONFIG, CONTAINER_HOST, CONTAINER_CONNECTION, XDG_CONFIG_HOME,
+# LD_*, BASH_ENV, ENV and proxy variables, is dropped, so a trusted binary cannot be pointed at another
+# daemon, a credential helper or a loader hook through the caller's environment.
+ENV_KEEP = ("HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TERM", "TZ", "XDG_RUNTIME_DIR")
 
 
 class ContainerEngineError(Exception):
@@ -100,9 +105,23 @@ def engine_exe(name):
     return exe
 
 
+def engine_env(path=None, environ=None):
+    """The explicit child environment for an engine process: ENV_KEEP from `environ` and a PATH made of
+    the trusted directories only (or `path`)."""
+    environ = os.environ if environ is None else environ
+    if path is None:
+        good = [d for d in TRUSTED_DIRS if os.path.isdir(d) and _dirs_ok(os.path.realpath(d), TRUSTED_UID, TRUSTED_ROOT)]
+        path = ":".join(good) or "/usr/bin:/bin"
+    env = {k: environ[k] for k in ENV_KEEP if k in environ}
+    env["PATH"] = path
+    return env
+
+
 def engine_run(argv, run=subprocess.run, **kwargs):
     """subprocess.run with the engine pinned: when argv[0] is docker or podman, execute the resolved
-    canonical binary (argv[0] stays the plain name); any other program is run unchanged."""
+    canonical binary (argv[0] stays the plain name) with an explicit minimal environment (engine_env,
+    any `env` the caller passed is replaced); any other program is run unchanged."""
     if argv and argv[0] in ENGINES:
         kwargs["executable"] = engine_exe(argv[0])
+        kwargs["env"] = engine_env()
     return run(argv, **kwargs)

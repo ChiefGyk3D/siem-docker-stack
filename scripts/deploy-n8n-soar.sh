@@ -22,13 +22,14 @@ GRAFANA_URL="${GRAFANA_URL:-http://localhost:3000}"
 GRAFANA_USER="${GRAFANA_USER:-admin}"
 GRAFANA_PASS="${GRAFANA_PASS:-}"
 SSH_USER="${SIEM_USER:-$(whoami)}"
-SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_BIN_DIR="$(dirname -- "$(readlink -f -- "$0")")"  # the real scripts directory, symlinks resolved
+SCRIPT_DIR="$(dirname -- "$SCRIPT_BIN_DIR")"
 N8N_DIR="${SCRIPT_DIR}/n8n"
 
 # Secrets: no defaults. A missing, empty or placeholder value stops the script
 # before anything is sent. The messages name the variable, never its value.
 # shellcheck source=scripts/lib-secrets.sh
-source "$(dirname "$0")/lib-secrets.sh"
+source "${SCRIPT_BIN_DIR}/lib-secrets.sh"
 require_secret N8N_API_KEY "${N8N_API_KEY:-}" || {
   echo "Usage: N8N_API_KEY=<your n8n API key> GRAFANA_PASS=<grafana admin password> $0 [siem-server-ip]" >&2
   exit 1
@@ -40,11 +41,21 @@ require_secret GRAFANA_PASS "$GRAFANA_PASS" || exit 1
 # The stream is container_engine.py (the shared CONTAINER_ENGINE setting and the
 # trusted-binary resolver) followed by n8n_address.py. Only the validated engine
 # name (docker or podman) is sent to the host.
+CE_LIB="${SCRIPT_BIN_DIR}/lib-container-engine.sh"
+CE_LIB_OWNER="$(stat -L -c '%u' -- "$CE_LIB" 2>/dev/null || echo bad)"
+CE_LIB_MODE="$(stat -L -c '%a' -- "$CE_LIB" 2>/dev/null || echo 777)"
+CE_LIB_MASK=002  # world write is never allowed; group write too when running as root
+[ "$(id -u)" != 0 ] || CE_LIB_MASK=022
+if [ -L "$CE_LIB" ] || { [ "$CE_LIB_OWNER" != 0 ] && [ "$CE_LIB_OWNER" != "$(id -u)" ]; } ||
+    [ $((8#$CE_LIB_MODE & 8#$CE_LIB_MASK)) -ne 0 ]; then
+    echo "refusing to source ${CE_LIB}: it must be a regular file owned by root or by you, not world writable (and not group writable when run as root)" >&2
+    exit 1
+fi
 # shellcheck source=scripts/lib-container-engine.sh
-source "$(dirname "$0")/lib-container-engine.sh"
+source "$CE_LIB"
 ce_init_name || exit 1
 if [[ -z "${N8N_BASE:-}" ]]; then
-  LOOKUP_SRC="$(cat "$(dirname "$0")/container_engine.py" "$(dirname "$0")/n8n_address.py")" || exit 1
+  LOOKUP_SRC="$(cat "${SCRIPT_BIN_DIR}/container_engine.py" "${SCRIPT_BIN_DIR}/n8n_address.py")" || exit 1
   N8N_BASE="$(ssh "${SSH_USER}@${SIEM_SERVER}" \
     "CONTAINER_ENGINE=$(printf '%q' "$CE_NAME") N8N_CONTAINER=$(printf '%q' "${N8N_CONTAINER:-n8n}") SIEM_NETWORK=$(printf '%q' "${SIEM_NETWORK:-}") N8N_PORT=$(printf '%q' "${N8N_PORT:-80}") python3 -I -" \
     <<< "$LOOKUP_SRC")" || {

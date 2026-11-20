@@ -33,6 +33,17 @@ die() { echo "prometheus-otlp-firewall: $*" >&2; exit 1; }
 
 LIB_NAME=lib-container-engine.sh
 
+chain_ok() { # <path>: root-owned and not group or world writable, the path and every ancestor up to /
+    local p="$1" owner mode
+    while :; do
+        owner="$(stat -c %u -- "$p")" || return 1
+        mode="$(stat -c %a -- "$p")" || return 1
+        [ "$owner" -eq 0 ] && [ $((8#$mode & 8#022)) -eq 0 ] || return 1
+        [ "$p" = / ] && return 0
+        p="$(dirname -- "$p")"
+    done
+}
+
 if [ "$(id -u)" -eq 0 ]; then
     # As root: fixed PATH, fixed program names (no IPTABLES/DOCKER overrides), and
     # only code nobody else can edit. Run the root-owned copy (docs).
@@ -41,24 +52,37 @@ if [ "$(id -u)" -eq 0 ]; then
         export PATH
     fi
     IPT=iptables
-    SELF="${BASH_SOURCE[0]}"
-    for f in "$(dirname "$SELF")" "$SELF" "$(dirname "$SELF")/${LIB_NAME}"; do
-        [ "$(stat -c '%u' "$f")" -eq 0 ] && [ $((8#$(stat -c '%a' "$f") & 8#022)) -eq 0 ] ||
-            die "${f} is not root-owned (or is group or world writable); run the root-owned copy of the script and its ${LIB_NAME} (docs/prometheus-otlp.md)"
+    # Resolve every symlink first: the helper is the one next to the REAL script, never one
+    # next to a link someone else placed. The whole chain to / must be root-owned and not writable.
+    SELF="$(readlink -f -- "${BASH_SOURCE[0]}")" || die "cannot resolve this script's real path"
+    SELF_DIR="$(dirname -- "$SELF")"
+    LIB="${SELF_DIR}/${LIB_NAME}"
+    [ -f "$LIB" ] && [ ! -L "$LIB" ] || die "${LIB} is missing or is a link; install the real file next to the script (docs/prometheus-otlp.md)"
+    for f in "$SELF_DIR" "$SELF" "$LIB"; do
+        chain_ok "$f" ||
+            die "${f} (or a directory above it) is not root-owned or is group or world writable; run the root-owned copy of the script and its ${LIB_NAME} (docs/prometheus-otlp.md)"
     done
+    # Open the helper once, check the OPEN file, and source that same descriptor: a rename or
+    # replacement of the path after this point cannot change what runs.
+    exec 9<"$LIB"
+    [ "$(stat -c %u -- /proc/self/fd/9)" -eq 0 ] && [ $((8#$(stat -c %a -- /proc/self/fd/9) & 8#022)) -eq 0 ] ||
+        die "the opened ${LIB_NAME} is not root-owned or is group or world writable"
     # shellcheck source=scripts/lib-container-engine.sh
-    source "$(dirname "$SELF")/${LIB_NAME}"
+    source /proc/self/fd/9
+    exec 9<&-
     ce_init || exit 1
     DOCKER_BIN="$CE_BIN"
 else
     [ "${PROM_FW_NO_SUDO:-}" = 1 ] || die "run as root (sudo)"
     IPT="${IPTABLES:-iptables}"
+    SELF="$(readlink -f -- "${BASH_SOURCE[0]}")"
     # shellcheck source=scripts/lib-container-engine.sh
-    source "$(dirname "${BASH_SOURCE[0]}")/${LIB_NAME}"
+    source "$(dirname -- "$SELF")/${LIB_NAME}"
     ce_init_name || exit 1
     # Test mode only (root ignores this): DOCKER may name a stub engine binary.
-    DOCKER_BIN="${DOCKER:-}"
-    [ -n "$DOCKER_BIN" ] || DOCKER_BIN="$(ce_resolve "$CE_NAME")" || die "no trusted '${CE_NAME}' found"
+    CE_BIN="${DOCKER:-}"
+    [ -n "$CE_BIN" ] || CE_BIN="$(ce_resolve "$CE_NAME")" || die "no trusted '${CE_NAME}' found"
+    DOCKER_BIN="$CE_BIN"
 fi
 
 OCTET='(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
@@ -67,7 +91,7 @@ CIDR="^${OCTET}\\.${OCTET}\\.${OCTET}\\.${OCTET}/([0-9]|[12][0-9]|3[0-2])$"
 
 discover_port() { # prints the single published IPv4 port of the receiver
     local out line port="" n=0
-    out="$("$DOCKER_BIN" port prometheus-otlp 9090/tcp)" || die "${CE_NAME} port failed: is the prometheus-otlp container running?"
+    out="$(ce_run port prometheus-otlp 9090/tcp)" || die "${CE_NAME} port failed: is the prometheus-otlp container running?"
     while IFS= read -r line; do
         if [[ "$line" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:([0-9]+)$ ]]; then
             port="${BASH_REMATCH[1]}"

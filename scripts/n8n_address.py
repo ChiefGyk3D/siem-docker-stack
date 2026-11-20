@@ -26,7 +26,7 @@ import subprocess
 import sys
 
 try:
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
     import container_engine as ce
 except (NameError, ImportError):
     # Streamed over ssh together with container_engine.py (deploy-n8n-soar.sh): both files

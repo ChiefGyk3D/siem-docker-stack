@@ -155,12 +155,15 @@ def fw(tmp_path):
     write_stub(stubs, "docker", textwrap.dedent("""\
         #!/usr/bin/env python3
         import os, sys
-        sys.stdout.write(os.environ.get("DOCKER_PORT_OUT", ""))
+        # the engine runs with a scrubbed environment (issue #130), so the canned output is a file
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "docker.out")) as fh:
+            sys.stdout.write(fh.read())
         """))
 
     def run(*args, docker_out="127.0.0.1:9091\n", state="", **extra_env):
         state_path = tmp_path / "ipt.state"
         state_path.write_text(state, encoding="utf-8")
+        (stubs / "docker.out").write_text(docker_out, encoding="utf-8")
         log.write_text("", encoding="utf-8")
         env = {"PATH": f"{stubs}:/usr/bin:/bin", "IPT_LOG": str(log), "IPT_STATE": str(state_path),
                "IPTABLES": str(stubs / "iptables"), "DOCKER": str(stubs / "docker"),

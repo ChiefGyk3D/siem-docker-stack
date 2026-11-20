@@ -16,9 +16,12 @@
 #   ce_init                       set CE_NAME and CE_BIN (the resolved binary);
 #                                 returns 1 with a message on stderr on failure
 #   ce_init_name                  set CE_NAME only (for a command run on another host)
+#   ce_run ARGS...                run "$CE_BIN" ARGS with a minimal explicit environment
 #
-# Callers use "$CE_BIN" exec ... as an argument list. The value of
-# CONTAINER_ENGINE is never put in a command string, evaluated, or echoed.
+# Callers run the engine as an argument list through ce_run. The raw value of
+# CONTAINER_ENGINE is never put in a command string, evaluated, or echoed. Only the
+# validated fixed token CE_NAME (exactly "docker" or "podman") is placed in the command
+# strings that scripts send to another host.
 # =============================================================================
 
 CE_TRUSTED_DIRS="/usr/bin /usr/local/bin /bin /snap/bin"
@@ -76,6 +79,21 @@ ce_resolve() {
         return 0
     done
     return 1
+}
+
+# ce_run ARGS...: run the resolved engine ($CE_BIN) with an explicit minimal environment:
+# a fixed PATH plus HOME USER LOGNAME LANG LC_ALL TERM TZ XDG_RUNTIME_DIR when set. Everything
+# else (DOCKER_HOST, DOCKER_CONTEXT, DOCKER_CONFIG, CONTAINER_HOST, CONTAINER_CONNECTION,
+# XDG_CONFIG_HOME, LD_*, BASH_ENV, ENV, proxies) is dropped. Same list as ENV_KEEP in
+# container_engine.py. Standard input and output pass through.
+CE_SAFE_PATH="/usr/bin:/usr/local/bin:/bin:/snap/bin"
+ce_run() {
+    [ -n "${CE_BIN-}" ] || { echo "ce_run: no engine resolved (call ce_init first)" >&2; return 1; }
+    /usr/bin/env -i "PATH=$CE_SAFE_PATH" \
+        ${HOME+"HOME=$HOME"} ${USER+"USER=$USER"} ${LOGNAME+"LOGNAME=$LOGNAME"} \
+        ${LANG+"LANG=$LANG"} ${LC_ALL+"LC_ALL=$LC_ALL"} ${TERM+"TERM=$TERM"} ${TZ+"TZ=$TZ"} \
+        ${XDG_RUNTIME_DIR+"XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"} \
+        "$CE_BIN" "$@"
 }
 
 ce_init_name() {

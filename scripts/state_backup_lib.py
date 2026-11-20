@@ -39,7 +39,7 @@ import tomllib
 import zlib
 from dataclasses import dataclass, field
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import container_engine  # noqa: E402  (the shared CONTAINER_ENGINE setting and trusted-binary resolver, issue #130)
 from datetime import datetime, timezone
 

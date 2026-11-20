@@ -46,7 +46,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import container_engine  # noqa: E402  (the one shared engine setting and trusted-binary resolver, issue #130)
 
 MARKER = "# gameday-84"  # the line marker is MARKER + "-" + the run id
@@ -461,9 +461,8 @@ def real_runner(argv):
     exe = resolve_cli(argv[0])
     if exe is None:
         return 127, f"no trusted '{argv[0]}' found in {', '.join(TRUSTED_DIRS)} (root-owned, not writable by others)"
-    env = dict(os.environ)
     good = [d for d in TRUSTED_DIRS if os.path.isdir(d) and _dirs_ok(os.path.realpath(d), TRUSTED_UID, TRUSTED_ROOT)]
-    env["PATH"] = ":".join(good)
+    env = container_engine.engine_env(path=":".join(good))  # no DOCKER_HOST, LD_*, config or helper variables
     try:
         proc = subprocess.run([argv[0], *argv[1:]], executable=exe, capture_output=True, text=True,
                               timeout=120, env=env)
@@ -518,6 +517,7 @@ def real_resolver(cfg):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import n8n_address
     env = dict(os.environ)
+    env["CONTAINER_ENGINE"] = cfg["docker"]  # the one engine this run chose, never re-read from the environment
     if cfg.get("n8n_base"):
         env["N8N_BASE"] = cfg["n8n_base"]
     env.setdefault("N8N_CONTAINER", cfg["n8n_container"])
