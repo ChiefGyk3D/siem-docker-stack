@@ -124,7 +124,7 @@ ce_ok_tz() { # a zone name: no leading colon or slash, no dots, no empty compone
     [ "${#1}" -le 40 ]
 }
 
-ce_mkhome() { # print a fresh private home; fail closed when no safe base exists
+ce_mkhome() { # set _ce_home to a fresh private home; fail closed when no safe base exists
     for _ce_b in $CE_HOME_BASES; do
         [ -d "$_ce_b" ] && [ ! -L "$_ce_b" ] || continue
         _ce_bs=$(/usr/bin/stat -c '%u %a' -- "$_ce_b") || continue
@@ -135,7 +135,7 @@ ce_mkhome() { # print a fresh private home; fail closed when no safe base exists
         _ce_h=$(TMPDIR= /usr/bin/mktemp -d -p "$_ce_b" engine-home.XXXXXXXX 2>/dev/null) || continue
         if [ -d "$_ce_h" ] && [ ! -L "$_ce_h" ] &&
             [ "$(/usr/bin/stat -c '%u %a' -- "$_ce_h")" = "$(/usr/bin/id -u) 700" ]; then
-            printf '%s' "$_ce_h"
+            _ce_home=$_ce_h
             return 0
         fi
         /usr/bin/rm -rf -- "$_ce_h"
@@ -155,18 +155,50 @@ ce_stop() { # N: stop the engine child promptly (TERM, then KILL after 5 s), the
     exit "$1"  # the EXIT trap removes the private home
 }
 
+ce_fwd() { # N: a signal reached the invoking shell: stop the runner (its trap stops the engine), then leave with N
+    if [ -n "${_ce_runner-}" ]; then
+        kill -TERM "$_ce_runner" 2>/dev/null
+        wait "$_ce_runner" 2>/dev/null
+    fi
+    exit "$1"
+}
+
 ce_run() {
     [ -n "${CE_BIN-}" ] || { echo "ce_run: no engine resolved (call ce_init first)" >&2; return 1; }
+    # The runner below is a child of the invoking shell, so a signal sent to the script itself would
+    # not reach it. The invoking shell therefore forwards HUP, INT and TERM to the runner, waits for
+    # it to stop the engine and remove the home, and leaves with 128 + signal. HUP, INT and TERM go
+    # back to their defaults afterwards (EXIT traps are never touched; no script of ours sets the
+    # others). A script that calls ce_run inside $(...) or a pipeline relies on the signal reaching
+    # the process group, which every terminal and supervisor kill does.
+    _ce_runner=
+    trap 'ce_fwd 129' HUP
+    trap 'ce_fwd 130' INT
+    trap 'ce_fwd 143' TERM
+    exec 4<&0  # an async command gets /dev/null as stdin unless it is redirected from another descriptor
+    ce_runner "$@" <&4 4<&- &
+    _ce_runner=$!
+    exec 4<&-
+    _ce_rc=0
+    wait "$_ce_runner" || _ce_rc=$?
+    _ce_runner=
+    trap - HUP INT TERM
+    return "$_ce_rc"
+}
+
+ce_runner() {
     _ce_n=$#
-    (
-        _ce_home=$(ce_mkhome) || exit 1
-        trap '/usr/bin/rm -rf -- "$_ce_home"' EXIT
+    {  # always called as an async command by ce_run, so this is already its own shell process
+        # the EXIT and signal traps exist before the home does, so a signal at any point removes it
+        _ce_home=
+        trap '[ -z "$_ce_home" ] || /usr/bin/rm -rf -- "$_ce_home"' EXIT
         _ce_child=
         # the engine runs as a tracked child and the shell waits for it, so a signal is handled at once
         # (a trap does not run while a foreground command is executing); the status is 128 + signal
         trap 'ce_stop 129' HUP
         trap 'ce_stop 130' INT
         trap 'ce_stop 143' TERM
+        ce_mkhome || exit 1
         # engine arguments are "$@"; append the env command after them, then rotate them to the end
         set -- "$@" /usr/bin/env -i "PATH=$CE_SAFE_PATH" "HOME=$_ce_home" "DOCKER_CONFIG=$_ce_home/docker" \
             "XDG_CONFIG_HOME=$_ce_home/config" "XDG_DATA_HOME=$_ce_home/data" "XDG_CACHE_HOME=$_ce_home/cache" \
@@ -188,7 +220,7 @@ ce_run() {
         _ce_rc=0
         wait "$_ce_child" || _ce_rc=$?
         exit "$_ce_rc"
-    )
+    }
 }
 
 # ce_source_env FILE: source a shell-syntax .env safely. The file must be a regular file, not a link;

@@ -157,29 +157,43 @@ def private_home():
     Signal cleanup works only in the main thread (Python allows signal handlers nowhere else): there
     SIGTERM and SIGHUP raise SystemExit while the directory exists, so the cleanup still runs. A signal
     whose current disposition is SIG_IGN is left ignored (nohup keeps working), and a previous handler
-    Python cannot report (None) is restored as SIG_DFL. In a worker thread no handler is installed; the
-    directory is still removed on every normal or exceptional exit, and the caller owns signal policy.
-    The directory is removed first and the handlers are restored after, so no signal can arrive between
-    the two with the default action in force. SIGKILL cannot be handled."""
-    d = _make_home()
+    Python cannot report (None) is restored as SIG_DFL. A worker thread cannot be protected (Python
+    allows signal handlers only in the main thread), so it is refused with ContainerEngineError rather
+    than run without protection. While the directory is being deleted TERM and HUP are blocked, so a
+    signal cannot interrupt the deletion; it is held and delivered to the restored handler afterwards.
+    SIGKILL cannot be handled."""
+    if threading.current_thread() is not threading.main_thread():
+        raise ContainerEngineError("the private engine home must be used from the main thread "
+                                   "(signal cleanup cannot be installed elsewhere)")
+    sigs = (signal.SIGTERM, signal.SIGHUP)
+
+    def _stop(signum, frame):
+        raise SystemExit(128 + signum)
+
+    # handlers first, directory second: no window where the directory exists unprotected
     old = {}
-    if threading.current_thread() is threading.main_thread():
-        def _stop(signum, frame):
-            raise SystemExit(128 + signum)
-        for sig in (signal.SIGTERM, signal.SIGHUP):
+    try:
+        for sig in sigs:
             prev = signal.getsignal(sig)
             if prev is signal.SIG_IGN:
                 continue
             old[sig] = signal.SIG_DFL if prev is None else prev
             signal.signal(sig, _stop)
+        d = _make_home()
+    except BaseException:
+        for sig, handler in old.items():
+            signal.signal(sig, handler)
+        raise
     try:
         yield d
     finally:
+        mask = signal.pthread_sigmask(signal.SIG_BLOCK, set(sigs))
         try:
             shutil.rmtree(d, ignore_errors=True)
-        finally:
             for sig, handler in old.items():
                 signal.signal(sig, handler)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, mask)
 
 
 def engine_env(home, path=None, environ=None):

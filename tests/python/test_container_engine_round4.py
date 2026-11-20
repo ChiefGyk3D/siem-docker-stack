@@ -236,7 +236,7 @@ def _start(shell, tmp_path, ignore_term=False):
 
 
 @pytest.mark.parametrize("shell", SHELLS)
-@pytest.mark.parametrize("sig,status", [(signal.SIGTERM, 143), (signal.SIGHUP, 129), (signal.SIGINT, 130)])
+@pytest.mark.parametrize("sig,status", [(signal.SIGTERM, 143), (signal.SIGHUP, 129)])  # INT: see round 5 (the runner is async, so it ignores INT sent to it directly; the script's INT is forwarded as TERM)
 def test_a_signalled_ce_run_stops_the_engine_at_once_and_removes_the_home(shell, sig, status, tmp_path):
     p = _start(shell, tmp_path)
     home = (tmp_path / "home.txt").read_text().strip()
@@ -370,9 +370,10 @@ def test_a_worker_thread_runs_cleanly_and_leaves_the_handlers_alone(trusted, tmp
     t = threading.Thread(target=work)
     t.start()
     t.join(15)
-    assert result == {"rc": 0}
+    # round 5: a worker thread cannot be protected, so it is refused (test_container_engine_round5.py)
+    assert isinstance(result.get("err"), ce.ContainerEngineError)
     assert signal.getsignal(signal.SIGTERM) is before
-    assert not os.path.exists(rec.read_text().strip())
+    assert not rec.exists()
 
 
 def test_the_docs_in_the_function_say_main_thread_only():  # guard
