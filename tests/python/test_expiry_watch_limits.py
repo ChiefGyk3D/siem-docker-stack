@@ -5,6 +5,7 @@ two places: the watch (it refuses to send a body over 16 KB and spaces and caps 
 Check Expiry Secret node (it denies a body over 16 KB and a post that arrives too fast).
 """
 import json
+import re
 import subprocess
 
 import pytest
@@ -105,7 +106,20 @@ def test_the_pause_never_runs_past_the_delivery_budget(tmp_path, router, monkeyp
 
 def test_the_watch_limits_stay_within_the_router_limits():
     assert ew.ROUTER_MIN_INTERVAL_SECONDS * 1000 >= ROUTER_MIN_INTERVAL_MS
-    assert ew.MAX_ROUTER_POSTS_PER_RUN <= ROUTER_MAX_PER_WINDOW
+    # two runs inside one router window (a manual re-run after a scheduled one) must also fit
+    assert 2 * ew.MAX_ROUTER_POSTS_PER_RUN <= ROUTER_MAX_PER_WINDOW
+
+
+def test_a_pause_that_overruns_the_budget_does_not_send(tmp_path, router, monkeypatch):
+    import time
+    srv, base = router
+    monkeypatch.setattr(ew, "_pause", lambda s: time.sleep(1.5))
+    monkeypatch.setattr(ew, "ROUTER_MIN_INTERVAL_SECONDS", 0.3)
+    cfg = _multi_setup(tmp_path, base, 2)
+    cfg.write_text(cfg.read_text().replace("[watch]\n", "[watch]\ndelivery_budget_seconds = 1\n", 1))
+    code, _, err = _run(cfg, _at(14))
+    assert len(_Recorder.seen) == 1, "the second post must not be sent after the pause used up the budget"
+    assert code == 1 and "delivery budget" in err
 
 
 # --- the router: Check Expiry Secret -----------------------------------------------------------
@@ -200,13 +214,50 @@ def test_an_oversized_body_does_not_use_up_the_rate():
     assert _calls([_item(body=_big_body()), _item()], [t0, t0 + 1]) == [False, True]
 
 
-def test_the_size_check_runs_before_the_secret_comparison_loop():
-    lines = _by_name()[CHECK]["parameters"]["jsCode"].splitlines()
-    code = "\n".join(ln for ln in lines if not ln.lstrip().startswith("//"))
-    assert "MAX_BODY = 16384" in code
-    assert "const sizeOk = withinSize(item);" in code
-    assert code.index("const sizeOk") < code.index("for (let i")
-    assert "sizeOk && isStr(cfg)" in code
+def _size_fn(body, headers=None):
+    """Run the node's real withinSize() on its own: the shape check would hide it if run end to end."""
+    code = _by_name()[CHECK]["parameters"]["jsCode"]
+    m = re.search(r"const MAX_BODY = \d+;", code)
+    f = re.search(r"function withinSize\(item\) \{.*?\n\}\n", code, re.S)
+    assert m and f
+    harness = ("const isStr=(v)=>typeof v==='string';" + m.group(0) + f.group(0)
+               + f"console.log(JSON.stringify(withinSize({{headers:{json.dumps(headers or {})},"
+                 f"body:{json.dumps(body)}}})));")
+    r = subprocess.run([_node_bin(), "-"], input=harness, capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr[-300:]
+    return json.loads(r.stdout)
+
+
+def test_the_size_function_counts_utf8_bytes_not_characters():
+    assert _size_fn({"pad": "x" * 16000}) is True
+    assert _size_fn({"pad": "x" * 16400}) is False
+    assert _size_fn({"pad": "é" * 9000}) is False, "9000 two-byte characters are 18000 bytes"
+    assert _size_fn({"pad": "\U0001F600" * 5000}) is False, "5000 four-byte characters are 20000 bytes"
+    assert _size_fn({"pad": "\U0001F600" * 3000}) is True
+
+
+def test_the_size_function_checks_the_content_length_header():
+    assert _size_fn({}, {"content-length": str(MAX_BODY + 1)}) is False
+    assert _size_fn({}, {"content-length": str(MAX_BODY)}) is True
+    assert _size_fn({}, {"content-length": "12abc"}) is False
+
+
+def test_nothing_is_measured_or_counted_before_the_secret_matches():
+    """A caller with the wrong secret must not make the node serialize its body (toJSON would run)."""
+    code = _by_name()[CHECK]["parameters"]["jsCode"]
+    ctx = {"env": {VAR: SECRET}}
+    harness = (_ctx_js(ctx) + "let __n=0;const __res=[];"
+               "const $getWorkflowStaticData=()=>({});"
+               "for(const hdr of ['Bearer wrong','Bearer " + SECRET + "']){"
+               "const body={toJSON(){__n++;return {};}};"
+               "const f=new Function('$input','$','$prevNode','$env','$getWorkflowStaticData'," + json.dumps(code) + ");"
+               "f({first:()=>({json:{headers:{authorization:hdr},body}})},$,$prevNode,$env,$getWorkflowStaticData);"
+               "__res.push(__n);}console.log(JSON.stringify(__res));")
+    r = subprocess.run([_node_bin(), "-"], input=harness, capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr[-300:]
+    wrong, right = json.loads(r.stdout)
+    assert wrong == 0, "the body was serialized for a caller with the wrong secret"
+    assert right >= 1, "the check must still run for a caller with the right secret"
 
 
 def test_the_endpoint_stays_disabled_with_a_placeholder_and_the_docs_state_the_limits():

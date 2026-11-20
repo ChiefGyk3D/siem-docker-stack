@@ -57,7 +57,7 @@ MAX_ACKNOWLEDGED = 200
 # The watch's own limits stay inside the router's, so a normal run is never denied by the router.
 MAX_ROUTER_BODY_BYTES = 16 * 1024
 ROUTER_MIN_INTERVAL_SECONDS = 2.0
-MAX_ROUTER_POSTS_PER_RUN = 25
+MAX_ROUTER_POSTS_PER_RUN = 15  # two runs inside one router window (a re-run after a scheduled one) still fit in 30
 _pause = time.sleep  # a hook, so a test does not have to wait
 MAX_STUCK_FETCHES = 4 # name lookups cannot be interrupted: at most this many may be pending at once
 UTC = dt.timezone.utc
@@ -1947,6 +1947,10 @@ def _run_pass(root, leaf, now, env, out, err, dry_run, opener):
                     if wait > 0:
                         _pause(wait)
                         left = budget_end - time.monotonic()
+                        if left <= 0:  # the pause itself used up the budget: send nothing, stay due
+                            over_budget += 1
+                            delivered = False
+                            continue
                 router_posts += 1
             try:
                 send(b=left)

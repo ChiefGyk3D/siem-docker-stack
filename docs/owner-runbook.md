@@ -56,7 +56,7 @@ Rules every step follows:
 | Q8 | The Grafana group id for `grafana_uid`/`grafana_gid` in the backup config is not stated. The compose file sets `user: "472"` (VERIFIED) and the example says `grafana_gid = 0`. Read it with `docker exec grafana id`. | Step 2 |
 | Q9a | How does the dedicated service account get Docker access for `docker cp` and `docker exec`? Docker group membership is root-equivalent; the safer option is a root-owned wrapper allowed by one exact `sudoers` rule. This doc does not choose. | Steps 0c, 2 |
 | Q10 | How is a P1 produced on demand to test the email route end to end? No doc says. | Step 5 |
-| Q12 | ANSWERED (owner decision 2026-11-20, issue #157). The limits live in the watch (it refuses a body over 16 KB, waits 2 s between posts, posts at most 25 per run) and in the router's `Check Expiry Secret` node (it denies a body over 16 KB, a call under 1 s after the last accepted one, and more than 30 accepted calls in 10 minutes). See `docs/expiry-watch.md`, "Request limits". | Step 6 |
+| Q12 | ANSWERED (owner decision 2026-11-20, issue #157). The limits live in the watch (it refuses a body over 16 KB, waits 2 s between posts, posts at most 15 per run) and in the router's `Check Expiry Secret` node (it denies a body over 16 KB, a call under 1 s after the last accepted one, and more than 30 accepted calls in 10 minutes). See `docs/expiry-watch.md`, "Request limits". | Step 6 |
 
 ## Order and why
 
@@ -1128,7 +1128,7 @@ belongs to SERVICE_ACCOUNT; copy the one line by hand.
 to the loopback port in 6.0, which does not pass a reverse proxy, so a proxy
 cannot enforce limits on this path. They live in the watch and in the router
 instead (VERIFIED: `docs/expiry-watch.md`, "Request limits"): the watch refuses a
-body over 16 KB, waits 2 seconds between posts and posts at most 25 times per
+body over 16 KB, waits 2 seconds between posts and posts at most 15 times per
 run; the router's `Check Expiry Secret` node denies a body over 16 KB, a call
 under 1 second after the last accepted one and more than 30 accepted calls in 10
 minutes. No owner step is needed for these once the router is re-imported. After

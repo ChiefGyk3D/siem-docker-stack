@@ -384,7 +384,7 @@ and in the router, not at a proxy:
 
 - The watch refuses to send a body over 16 KB (16384 bytes): it sends nothing,
   names the size in the error and exits 1. It also waits at least 2 seconds
-  between router posts and posts at most 25 times per run; a notice that was
+  between router posts and posts at most 15 times per run (so two runs inside the router's 10 minute window fit under its 30); a notice that was
   not posted stays due for the next run.
 - The router's `Check Expiry Secret` node denies (403) a body over 16 KB (the
   parsed body re-serialized, and the `content-length` header when n8n passes it
@@ -399,8 +399,11 @@ and in the router, not at a proxy:
   check denies every call if it cannot), that two executions that overlap do not
   both read the old counter (a burst may then slip through), and that the
   `content-length` header reaches the node. A Code node cannot see the raw body
-  bytes, and it runs after n8n has read the whole body, so it does not stop that
-  work.
+  bytes, and it runs after n8n has read and parsed the whole body, so it does not
+  stop that work, and a chunked body or one padded with JSON whitespace passes
+  the size check when its parsed form is small. The check runs after the secret
+  comparison and counts UTF-8 bytes of the re-serialized body. It is defense in
+  depth: the real cap on the raw request is n8n's `N8N_PAYLOAD_SIZE_MAX` below.
 - What these limits cannot do: a denied call still starts one workflow
   execution, and n8n's own body limit is `N8N_PAYLOAD_SIZE_MAX`, default 16 MiB
   (n8n docs, endpoints environment variables, read 2026-11-19). Lower it for the
