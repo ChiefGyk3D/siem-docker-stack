@@ -189,14 +189,42 @@ def read_private_file(path):
 
 
 def write_private_file(path, value):
-    """Write value to path with mode 600 enforced on the opened file, over an existing file too."""
-    fd, _ = _open_private(path, os.O_WRONLY | os.O_CREAT)
+    """Replace path atomically and durably with mode 600: write a temp file in the same folder (created
+    exclusively, no symlink followed, mode 600 requested at creation), write until every byte is out,
+    fsync it, rename it over the final name, fsync the folder. The temp file is removed on any failure and
+    the old file stays untouched. A symlink or non-regular final path is refused."""
+    if os.path.lexists(path):
+        os.close(_open_private(path, os.O_RDONLY)[0])  # refuses a symlink, non-regular file, foreign owner
+    folder = os.path.dirname(path) or "."
+    tmp = os.path.join(folder, ".%s.tmp-%d-%s" % (os.path.basename(path), os.getpid(), secrets.token_hex(6)))
+    data = value.encode("utf-8")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, stat.S_IRUSR | stat.S_IWUSR)
     try:
-        os.fchmod(fd, 0o600)
-        os.ftruncate(fd, 0)
-        os.write(fd, value.encode("utf-8"))
+        try:
+            view = memoryview(data)
+            while view:
+                try:
+                    written = os.write(fd, view)
+                except InterruptedError:
+                    continue
+                if written <= 0:
+                    raise OSError("short write to %s made no progress" % tmp)
+                view = view[written:]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    dir_fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(dir_fd)
     finally:
-        os.close(fd)
+        os.close(dir_fd)
 
 
 def valid_origin(text):

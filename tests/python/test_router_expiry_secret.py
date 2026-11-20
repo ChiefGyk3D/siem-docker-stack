@@ -694,6 +694,102 @@ def test_writing_the_path_file_forces_mode_600_even_over_an_existing_file(tmp_pa
     assert (fresh.stat().st_mode & 0o777) == 0o600
 
 
+def _only(tmp_path):
+    return sorted(p.name for p in tmp_path.iterdir())
+
+
+def test_private_write_survives_short_writes_and_reads_back_exactly(tmp_path, monkeypatch):
+    import os
+    mod = _setup()
+    real_write = os.write
+    calls = []
+
+    def short(fd, data):
+        calls.append(len(data))
+        return real_write(fd, bytes(data[:3]))
+
+    monkeypatch.setattr(mod.os, "write", short)
+    f = tmp_path / "expiry-path"
+    mod.write_private_file(str(f), SAFE_PRIVATE)
+    monkeypatch.undo()
+    assert len(calls) > 1, "the write must loop until every byte is written"
+    assert f.read_text() == SAFE_PRIVATE and mod.read_private_file(str(f)) == SAFE_PRIVATE
+    assert _only(tmp_path) == ["expiry-path"]
+
+
+def test_private_write_failure_keeps_the_old_file_and_leaves_no_temp_file(tmp_path, monkeypatch):
+    mod = _setup()
+    f = tmp_path / "expiry-path"
+    f.write_text("old-value")
+    f.chmod(0o600)
+
+    def boom(fd, data):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(mod.os, "write", boom)
+    with pytest.raises(OSError):
+        mod.write_private_file(str(f), SAFE_PRIVATE)
+    monkeypatch.undo()
+    assert f.read_text() == "old-value"
+    assert _only(tmp_path) == ["expiry-path"]
+
+
+def test_private_write_stalled_write_and_fsync_failure_keep_the_old_file(tmp_path, monkeypatch):
+    mod = _setup()
+    f = tmp_path / "expiry-path"
+    f.write_text("old-value")
+    f.chmod(0o600)
+    monkeypatch.setattr(mod.os, "write", lambda fd, data: 0)
+    with pytest.raises(OSError):
+        mod.write_private_file(str(f), SAFE_PRIVATE)
+    monkeypatch.undo()
+    assert f.read_text() == "old-value" and _only(tmp_path) == ["expiry-path"]
+
+    def nosync(fd):
+        raise OSError(5, "I/O error")
+
+    monkeypatch.setattr(mod.os, "fsync", nosync)
+    with pytest.raises(OSError):
+        mod.write_private_file(str(f), SAFE_PRIVATE)
+    monkeypatch.undo()
+    assert f.read_text() == "old-value" and _only(tmp_path) == ["expiry-path"]
+
+
+def test_private_write_temp_file_is_created_mode_600_never_wider(tmp_path, monkeypatch):
+    import os
+    mod = _setup()
+    old_umask = os.umask(0)
+    seen = []
+    real_replace = os.replace
+
+    def spy(src, dst, *a, **k):
+        seen.append(os.stat(src).st_mode & 0o777)
+        return real_replace(src, dst, *a, **k)
+
+    monkeypatch.setattr(mod.os, "replace", spy)
+    try:
+        mod.write_private_file(str(tmp_path / "expiry-path"), SAFE_PRIVATE)
+    finally:
+        os.umask(old_umask)
+    assert seen == [0o600], "the temp file must be 600 before it is renamed into place"
+
+
+def test_private_write_refuses_a_symlink_or_non_regular_final_path(tmp_path):
+    import os
+    mod = _setup()
+    target = tmp_path / "target"
+    target.write_text("keep")
+    link = tmp_path / "link"
+    link.symlink_to(target)
+    with pytest.raises(SystemExit):
+        mod.write_private_file(str(link), SAFE_PRIVATE)
+    assert link.is_symlink() and target.read_text() == "keep"
+    os.mkfifo(tmp_path / "fifo", 0o600)
+    with pytest.raises(SystemExit):
+        mod.write_private_file(str(tmp_path / "fifo"), SAFE_PRIVATE)
+    assert _only(tmp_path) == ["fifo", "link", "target"]
+
+
 def test_symlink_fifo_directory_and_foreign_owner_path_files_are_refused(tmp_path, monkeypatch):
     import os
     mod = _setup()
