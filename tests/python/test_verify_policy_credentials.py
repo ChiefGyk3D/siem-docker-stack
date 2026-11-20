@@ -317,13 +317,77 @@ def test_no_text_tells_anyone_to_start_a_hardened_script_through_bash():
     """Run as root, `bash script` runs BASH_ENV, imported functions, SHELLOPTS and BASHOPTS before line 1 and
     bypasses the privileged shebang. Usage lines, emitted next-step commands and the docs say to run
     these scripts by their path (sudo scripts/...)."""
-    pattern = re.compile(r"\bbash\s+(?:-\S+\s+)*(?:\S*/)?(?:" + "|".join(re.escape(h) for h in HARDENED) + ")")
+    # any shell interpreter, with options (and sudo options or variables before it), then a relative or
+    # absolute path to one of the scripts
+    pattern = re.compile(r"\b(?:ba|da|z|k|a)?sh\s+(?:-\S+\s+)*(?:\S*/)?(?:"
+                         + "|".join(re.escape(h) for h in HARDENED) + ")")
     hits = []
     for path in all_text_files():
         for n, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
             if pattern.search(line):
                 hits.append(f"{path.relative_to(REPO_ROOT)}:{n}: {line.strip()}")
     assert not hits, "\n".join(hits)
+
+
+CANONICAL = {
+    "scripts/04-apply-ism-policy.sh": ["sudo scripts/04-apply-ism-policy.sh"],
+    "scripts/05-verify.sh": ["sudo scripts/05-verify.sh"],
+    "scripts/08b-init-opensearch-security.sh": ["sudo scripts/08b-init-opensearch-security.sh",
+                                                "sudo scripts/04-apply-ism-policy.sh", "sudo scripts/05-verify.sh"],
+    "scripts/03-deploy.sh": ["sudo scripts/08b-init-opensearch-security.sh", "sudo scripts/04-apply-ism-policy.sh",
+                             "sudo scripts/05-verify.sh"],
+    "README.md": ["sudo scripts/04-apply-ism-policy.sh", "sudo scripts/05-verify.sh"],
+    "docs/phase-f-testing.md": ["sudo scripts/08b-init-opensearch-security.sh", "sudo scripts/04-apply-ism-policy.sh",
+                                "sudo scripts/05-verify.sh"],
+    "docs/maintenance.md": ["sudo /path/to/scripts/05-verify.sh"],
+    "docs/container-engine.md": ["sudo scripts/05-verify.sh"],
+}
+
+
+@pytest.mark.parametrize("relpath", sorted(CANONICAL))
+def test_the_direct_execution_commands_are_present(relpath):
+    text = (REPO_ROOT / relpath).read_text(encoding="utf-8")
+    for command in CANONICAL[relpath]:
+        assert command in text, f"{relpath} does not show `{command}`"
+
+
+def trace_hijacks(first):
+    plain = lambda pw: "".join(f"{k}='{v}'\n" for k, v in pw.items())  # noqa: E731
+    ps4 = f'PS4="${first} "\n'
+    debug = f"trap 'printf \"%s\\n\" \"${first}\"' DEBUG\n"
+    return {
+        "ps4_then_set_x": lambda pw: plain(pw) + ps4 + "set -x\n",
+        "set_x_then_ps4": lambda pw: "set -x\n" + plain(pw) + ps4,
+        "exported_ps4": lambda pw: plain(pw) + f'export PS4="${first} "\nset -x\n',
+        "debug_trap_stdout": lambda pw: plain(pw) + debug,
+        "debug_trap_stderr": lambda pw: plain(pw) + f"trap 'printf \"%s\\n\" \"${first}\" >&2' DEBUG\n",
+        "return_trap": lambda pw: plain(pw) + f"trap 'printf \"%s\\n\" \"${first}\"' RETURN\nset -T\n",
+    }
+
+
+@SPECS
+@pytest.mark.parametrize("how", ["ps4_then_set_x", "set_x_then_ps4", "exported_ps4", "debug_trap_stdout",
+                                 "debug_trap_stderr", "return_trap"])
+def test_an_env_file_cannot_make_the_trace_or_a_trap_print_a_password(tmp_path, spec, how):
+    """The file is shell code: `PS4="$PASSWORD "; set -x` makes bash expand the password in every trace line
+    (the line for the `set +x` that ends tracing included), and a DEBUG or RETURN trap can print it. Tracing,
+    PS4 and those traps are neutralized while the loader's output is still discarded."""
+    box = Box(tmp_path, spec)
+    proc = box.run(via="file", env_text=trace_hijacks(spec["vars"][0])[how])
+    ran(proc, spec)
+    assert SENTINEL not in proc.stdout + proc.stderr, "a password printed through the trace or a trap"
+    for suffix in ("-argv", "-environ"):
+        for name, data in box.recorded(suffix).items():
+            assert SENTINEL not in data, f"secret in {name}"
+
+
+def test_only_the_final_status_of_the_env_file_decides_the_load(tmp_path):
+    """DOCUMENTED LIMIT: the loader reports the status of the complete file. A command that fails in the
+    middle but is followed by one that succeeds does not make the load fail."""
+    box = Box(tmp_path, POLICY)
+    proc = box.run(via="file", env_text=lambda pw: "false\n" + "".join(f"{k}='{v}'\n" for k, v in pw.items()))
+    ran(proc, POLICY)
+    assert box.curl_calls()
 
 
 @pytest.mark.parametrize("spec", [VERIFY, POLICY], ids=["verify", "policy"])

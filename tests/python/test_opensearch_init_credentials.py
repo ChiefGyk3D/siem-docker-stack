@@ -498,6 +498,30 @@ def test_internal_users_file_is_never_created_wider_than_final_mode(tmp_path):
     assert sorted(p.name for p in box.sec.iterdir() if "tmp" in p.name) == []  # no leftover temporary file
 
 
+@pytest.mark.parametrize("how", ["ps4_then_set_x", "set_x_then_ps4", "exported_ps4", "debug_trap_stdout",
+                                 "debug_trap_stderr", "return_trap"])
+def test_an_env_file_cannot_make_the_trace_or_a_trap_print_a_password(tmp_path, how):
+    """`PS4="$PASSWORD "; set -x` in the .env makes bash expand the password in every trace line, the one for
+    the `set +x` that ends tracing included; a DEBUG or RETURN trap can print it too."""
+    first = "OPENSEARCH_ADMIN_PASSWORD"
+    plain = lambda pw: "".join(f"{k}='{v}'\n" for k, v in pw.items())  # noqa: E731
+    styles = {
+        "ps4_then_set_x": lambda pw: plain(pw) + f'PS4="${first} "\nset -x\n',
+        "set_x_then_ps4": lambda pw: "set -x\n" + plain(pw) + f'PS4="${first} "\n',
+        "exported_ps4": lambda pw: plain(pw) + f'export PS4="${first} "\nset -x\n',
+        "debug_trap_stdout": lambda pw: plain(pw) + f"trap 'printf \"%s\\n\" \"${first}\"' DEBUG\n",
+        "debug_trap_stderr": lambda pw: plain(pw) + f"trap 'printf \"%s\\n\" \"${first}\" >&2' DEBUG\n",
+        "return_trap": lambda pw: plain(pw) + f"trap 'printf \"%s\\n\" \"${first}\"' RETURN\nset -T\n",
+    }
+    box = make(tmp_path)
+    proc = box.run(via="file", env_style=styles[how])
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert SENTINEL not in proc.stdout + proc.stderr, "a password printed through the trace or a trap"
+    for c in box.engine_calls():
+        assert SENTINEL not in c["argv"] and SENTINEL not in c["env"]
+    assert_children_clean(box, EVERY_TOOL)
+
+
 @pytest.mark.parametrize("bad", ["false\n", "if then\n", "return 1\n"])
 def test_a_failing_env_file_is_reported_and_stops_before_any_engine_call(tmp_path, bad):
     """A .env whose load fails (a failing command, a syntax error) must not look like success: the script

@@ -224,14 +224,22 @@ ce_source_env() {
         return 1
     fi
     if [ "${2-}" = noexport ]; then  # a plain assignment stays in this shell and is not exported
-        # The file is shell code and may turn tracing on itself (`set -x`), which would print every later
-        # assignment, passwords included. Standard error is discarded while it runs, and tracing is
-        # switched off again right after. That also hides the file's own error messages, so a failed load
-        # (a nonzero status from the file: a failing command, a syntax error, a `return 1`) is reported
-        # here by a value-free line naming the file, and returned to the caller, which must stop.
+        # The file is shell code and may turn tracing on itself (`set -x`), set PS4 to a string that holds a
+        # password (bash expands PS4 for every trace line, the one for the `set +x` that ends tracing
+        # included) or install a DEBUG, RETURN or ERR trap that prints one. So its standard output and
+        # error are discarded for the whole group, and tracing, PS4 and those traps are neutralized INSIDE
+        # that same group, before the output comes back. That also hides the file's own error messages,
+        # so when sourcing the complete file returns nonzero (the status of its last command, or a
+        # syntax error, or a `return`) a value-free line naming the file is printed and the status is
+        # returned to the caller, which must stop. A command that fails in the middle of the file, with
+        # a later command that succeeds, does NOT fail the load.
         _ce_rc=0
-        { . /proc/self/fd/8; } 2> /dev/null || _ce_rc=$?
-        set +x
+        {
+            . /proc/self/fd/8 || _ce_rc=$?
+            set +x +T
+            trap - DEBUG RETURN ERR
+            PS4='+ '
+        } > /dev/null 2>&1
         exec 8<&-
         if [ "$_ce_rc" -ne 0 ]; then
             echo "failed to load ${_ce_ef} (it exited with status ${_ce_rc}); fix the file and run again" >&2

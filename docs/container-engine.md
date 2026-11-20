@@ -93,9 +93,13 @@ file or sources anything. `04-apply-ism-policy.sh`, `05-verify.sh` and `08b-init
 only a regular file (not a link) that is root-owned, with every directory above it
 root-owned and not group or world writable, opens it once and sources that open
 descriptor. For an ordinary user the file must be owned by root or by you and not world
-writable. If the file's load fails (a failing command or a syntax error in it), the loader
-prints a one-line message naming the file (never a value) and the script stops before
-any request.
+writable. When sourcing the complete file returns nonzero (the status of its last command,
+a syntax error, or a `return 1`), the loader prints a one-line message naming the file
+(never a value) and the script stops before any request. A command that fails in the
+middle of the file, followed by one that succeeds, does not fail the load. While the file
+runs, its output is discarded and tracing, `PS4` and `DEBUG`, `RETURN` and `ERR` traps are
+switched off before the output comes back, so a `PS4` or a trap that holds a password
+prints nothing.
 
 Start these scripts by their path (`sudo scripts/05-verify.sh`), never through an
 explicit `bash` interpreter: as root an explicit interpreter reads `BASH_ENV`, imported
