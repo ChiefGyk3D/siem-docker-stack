@@ -819,6 +819,12 @@ This project is licensed under the [GNU GPL v2](LICENSE).
 
 If this project is useful to you, consider supporting continued development:
 
+<div align="center">
+
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/A0A4E59UP)
+
+</div>
+
 ### Recurring Support
 
 <table>
