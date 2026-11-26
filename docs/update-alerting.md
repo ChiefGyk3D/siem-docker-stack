@@ -1,6 +1,6 @@
-# Update alerting (pfSense and UniFi)
+# Update alerting (pfSense, UniFi and Twingate)
 
-Grafana alerts that keep nagging while a pfSense or UniFi update is pending.
+Grafana alerts that keep nagging while a pfSense, UniFi or Twingate Connector update is pending.
 Nothing here applies an update or changes a device. The alerts read data that
 is already collected, and they clear only when the data shows the update is
 gone.
@@ -36,6 +36,8 @@ you turn it on.
 | `n8n/grafana-alert-router.json` | Router with header auth and the added Pushover nodes |
 | `docs/heartbeat.md` | The alert path heartbeat (dead-man's switch), its own rule, policy route and settings |
 | `scripts/pfsense-update-metric.sh` | Read-only metric source for the firewall (not deployed) |
+| `docker/grafana/provisioning/alerting/update-alert-rules-twingate.yml` | Twingate Connector rules and a collector health rule, shipped paused |
+| `scripts/twingate-update-metric.py` | Read-only metric source for Twingate Connectors (not deployed) |
 | `tests/python/test_update_alerting.py` | Tests for all of the above (Node is required) |
 
 ### Rules
@@ -153,13 +155,96 @@ Telegraf exec input for the firewall:
 Copy `scripts/pfsense-update-metric.sh` to that path by hand when you are
 ready. The script runs only those two read-only commands.
 
+### Twingate data (not deployed)
+
+The Twingate rules ship paused (`update-alert-rules-twingate.yml`). Enable
+them (set `isPaused: false`) once the collector below runs and the metrics
+arrive in the InfluxDB database `telegraf` (datasource `influxdb-twingate`).
+
+The Twingate Admin API is GraphQL and has no "update available" field. The
+Connector type has `version`, `state`, `lastHeartbeatAt` and `name`, so the
+collector compares each Connector version with the newest released version.
+`scripts/twingate-update-metric.py` (Python standard library only, read-only)
+sends one GraphQL query for the Connectors and one GET to the Docker Hub tags
+API for `twingate/connector`. Docker Hub was chosen over the Twingate
+Connector changelog page: it returns small, structured JSON with one version
+per tag, while the changelog is a 1 MB HTML page that would need scraping and
+breaks when the layout changes. A source that returns nothing is a failure.
+
+Metrics (integers, so the field type never changes):
+
+- `twingate_connector_behind`, tags `connector` and `managed_by`: how many
+  released versions are newer than the Connector (0 when current).
+- `twingate_connector_up`, tags `connector` and `managed_by`: 1 when the
+  state is `ALIVE`, otherwise 0.
+- `twingate_update_check_success`: 1 when the whole check ran, 0 when it
+  failed. On any failure (API error, GraphQL errors, no Connectors returned,
+  an unparsable version, a bad management config or an unreachable
+  latest-version source) the script prints only
+  `twingate_update_check_success value=0i` and exits non-zero. Telegraf may
+  drop the output of a command that exits non-zero, so the health rule also
+  alerts on missing data.
+
+Credentials come from the environment only, never from an argument or a file
+in this repo, and the script never prints them:
+
+| Variable | Meaning |
+|----------|---------|
+| `TWINGATE_API_KEY` | Admin API key (read-only is enough), from the secret manager (Doppler) |
+| `TWINGATE_NETWORK_URL` | `https://<network>.twingate.com`; any other host is refused so the key cannot be sent elsewhere |
+| `TWINGATE_CONNECTOR_MANAGED_BY_FILE` | optional path to the management mapping (below) |
+| `TWINGATE_CONNECTOR_MANAGED_BY` | optional inline JSON mapping, used only when no file is set |
+
+Telegraf exec input (the values are injected into Telegraf's environment from
+the secret manager; nothing is written into the file):
+
+```toml
+[[inputs.exec]]
+  commands = ["/usr/local/bin/twingate-update-metric.py"]
+  interval = "1h"
+  timeout = "60s"
+  data_format = "influx"
+```
+
+Copy `scripts/twingate-update-metric.py` to that path by hand when you are
+ready. The rules assume one run per hour.
+
+#### How each Connector is managed (`managed_by`)
+
+Connectors are not all updated the same way, and the mix will change. The
+collector reads a small JSON object that maps a Connector name to one of
+three modes and writes it as the `managed_by` tag:
+
+| Mode | Meaning | Alerting |
+|------|---------|----------|
+| `docker` | a container updated by hand (default) | pages: warning after 7 days behind, critical after 14, `phone=true` |
+| `systemd` | a package or service updated by hand | same as `docker` |
+| `operator` | run by the Kubernetes Operator, which updates it by itself | never pages |
+
+A Connector name that the mapping does not list (an unlisted name) is
+`docker`, so a new Connector pages until you say otherwise. The mapping
+lives outside the repo, in the file named by
+`TWINGATE_CONNECTOR_MANAGED_BY_FILE` or in `TWINGATE_CONNECTOR_MANAGED_BY`;
+the shape is `{"<connector name>": "operator", "<other name>": "systemd"}`.
+A bad mapping (not JSON, a repeated name, an unknown mode, too large) fails
+the check closed.
+
+Connectors under the Kubernetes Operator auto-update, so a page for them would
+be noise. Their rule, "Twingate Connector (operator) behind over 14 days",
+is `severity=warning`, `phone=false`: it reaches Discord and Matrix and not
+the phone, and because the weekly digest lists every alert that fired, they
+show up there. Behind for 14 days means the Operator itself is stuck. The
+manual rules read only `managed_by` other than `operator`, so the two sets
+never overlap. The rules "Twingate Connector not ALIVE" and "Twingate update
+check failing or stale" apply to every mode.
+
 ### Label taxonomy
 
 | Label | What it controls |
 |-------|------------------|
 | `update_alert` | `true` marks an update-alerting rule: it matches the notification policy route with the 84h and 1h repeats, and its title belongs in `ALLOWED_ALERTNAMES` |
 | `severity` | `warning` or `critical`: the repeat interval, and the Pushover priority (1, or 2 for an allowlisted name with an urgent label) |
-| `phone` | `true` is the only way an alert reaches Pushover; any other value or no label keeps it off the phone (Discord is unaffected). Every update-pending rule for critical infrastructure (UniFi, pfSense; Twingate later) sets `phone=true`, except the UniFi 24h warning, which is `phone=false` (Discord and Matrix only) so a UniFi update pages the phone only after 7 days pending; the poller-stale watchdog is also `phone=false` |
+| `phone` | `true` is the only way an alert reaches Pushover; any other value or no label keeps it off the phone (Discord is unaffected). Every update-pending rule for critical infrastructure (UniFi, pfSense, Twingate) sets `phone=true`, except the UniFi 24h warning, which is `phone=false` (Discord and Matrix only) so a UniFi update pages the phone only after 7 days pending; the poller-stale watchdog is also `phone=false` |
 | `alert_group` | Grouping and display (`updates` for these rules); no routing effect |
 | `update_security` | `true` marks a security release: emergency priority for allowlisted names |
 
@@ -177,7 +262,7 @@ policies), or copy it to `update-notification-policy.yml` if you have no
 tree yet. Repeat intervals: 84h for warning, 1h for critical. Owner decision (issue
 #199): update alerts for critical infrastructure reach the phone and repeat at
 least twice a week until the update is applied, so no repeat interval may be
-longer than 84h. This supersedes the earlier P2 and `phone=false` ruling (#152). Refinement (owner, 2026-11-26, "wait 7 days first"): a UniFi pending update does not page the phone until it has been pending 7 days, so auto-patching devices usually finish first. The UniFi 24h warning is `phone=false`; the 7-day critical rule and the pfSense rules stay `phone=true`.
+longer than 84h. This supersedes the earlier P2 and `phone=false` ruling (#152). Refinement (owner, 2026-11-26, "wait 7 days first"): a UniFi pending update does not page the phone until it has been pending 7 days, so auto-patching devices usually finish first. The UniFi 24h warning is `phone=false`; the 7-day critical rule and the pfSense rules stay `phone=true`. Twingate (owner, 2026-11-26): critical infrastructure pages at least twice a week until updated, so the 7-day warning is `phone=true` (84h repeats), the 14-day critical pages hourly, and only the operator-managed rule is `phone=false`.
 
 ## Webhook authentication
 
@@ -495,7 +580,7 @@ you rely on the alerts.
 ## Tests
 
 ```
-python3 -m pytest tests/python/test_update_alerting.py -q
+python3 -m pytest tests/python/test_update_alerting.py tests/python/test_twingate_update_metric.py -q
 ```
 
 The tests need Node on the path (the Code node source is executed for
