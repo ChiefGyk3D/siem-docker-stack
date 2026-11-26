@@ -22,7 +22,7 @@ SEVERITIES = {"critical", "warning", "info"}
 TIERS = {"P1", "P2", "P3", "none"}
 BOOL = {"true", "false"}
 ALERT_GROUPS = {"updates", "heartbeat", "alert-path"}
-SOURCES = {"unifi", "pfsense"}
+SOURCES = {"unifi", "pfsense", "twingate"}
 # Every label a rule may carry. A label outside this set is a defect: nothing
 # reads it, so it is either a typo or an unrecorded routing key.
 ALLOWED_LABELS = {
@@ -83,8 +83,13 @@ def check_labels(labels):
         problems.append("tier none is only for the heartbeat")
     elif tier == "P1" and (sev, phone) != ("critical", "true"):
         problems.append("P1 needs severity critical and phone true")
-    elif tier == "P2" and (sev, phone) != ("warning", "false"):
-        problems.append("P2 needs severity warning and phone false")
+    elif tier == "P2" and sev != "warning":
+        problems.append("P2 needs severity warning")
+    elif tier == "P2" and phone != "false" and not (
+            phone == "true" and labels.get("alert_group") == "updates" and labels.get("update_alert") == "true"):
+        # Owner decision (#199, #200): a warning-level pending-update rule for critical infrastructure
+        # pages the phone (84h repeats). No other P2 rule may.
+        problems.append("P2 needs phone false (only an update-alerting warning may page)")
     elif tier == "P3" and (sev, phone) != ("info", "false"):
         problems.append("P3 needs severity info and phone false")
     if "digest" in labels and tier != "P3":
@@ -198,6 +203,9 @@ def test_checker_accepts_good(key):
     ("P1", {"phone": True}),
     ("P1", {"digest": "true"}),
     ("P2", {"phone": "true"}),
+    ("P2", {"phone": "true", "update_alert": "true"}),
+    ("P2", {"phone": "true", "alert_group": "updates"}),
+    ("P2", {"phone": "true", "alert_group": "updates", "update_alert": "true", "source": "other"}),
     ("P2", {"tier": "none"}),
     ("P3", {"digest": None}),
     ("P3", {"phone": "true"}),
@@ -214,6 +222,11 @@ def test_checker_rejects_bad(key, change):
         else:
             labels[k] = v
     assert check_labels(labels) != []
+
+
+def test_checker_allows_a_paging_update_warning():
+    labels = dict(GOOD["P2"], phone="true", alert_group="updates", update_alert="true", source="twingate")
+    assert check_labels(labels) == []
 
 
 @pytest.mark.parametrize("missing", REQUIRED)

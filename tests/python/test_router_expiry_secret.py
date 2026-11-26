@@ -18,7 +18,7 @@ import re
 import pytest
 
 from conftest import REPO_ROOT, import_module_from_path
-from test_update_alerting import (DISCORD_FIRING, ENV_EXAMPLE, ROUTER, _alert, _edges, _reachable, _run_code_node,
+from test_update_alerting import (DISCORD_FIRING, _rules, ENV_EXAMPLE, ROUTER, _alert, _edges, _reachable, _run_code_node,
                                   _run_graph, _workflow)
 
 GRAFANA_HOOK = "Grafana Webhook"
@@ -540,6 +540,21 @@ def test_the_baseline_fixture_is_the_unedited_pre_change_router():
     assert len(d["nodes"]) == 21 and d["nodes"][0] == GRAFANA_HOOK_PINNED
 
 
+_ALLOWLIST_RE = re.compile(r"const ALLOWED_ALERTNAMES = \[(.*?)\];", re.S)
+
+
+def _without_allowlist(node):
+    """Return (node with the ALLOWED_ALERTNAMES contents blanked, the listed titles)."""
+    code = node["parameters"]["jsCode"]
+    m = _ALLOWLIST_RE.search(code)
+    assert m and len(_ALLOWLIST_RE.findall(code)) == 1
+    titles = re.findall(r"'([^']*)'", m.group(1))
+    assert len(titles) == len(set(titles))
+    blanked = copy.deepcopy(node)
+    blanked["parameters"]["jsCode"] = code[:m.start(1)] + code[m.end(1):]
+    return titles, blanked
+
+
 def test_every_existing_node_and_connection_is_kept_and_only_four_nodes_are_added():
     """Guard: nothing that existed was edited; the change is purely additive."""
     wf, old = _workflow(), _master_workflow()
@@ -554,6 +569,15 @@ def test_every_existing_node_and_connection_is_kept_and_only_four_nodes_are_adde
                 for key in ("retryOnFail", "maxTries", "waitBetweenTries"):
                     n.pop(key)
                 n["parameters"]["options"]["timeout"] = old_nodes[name]["parameters"]["options"]["timeout"]
+            if name == "Build Pushover Payload":
+                # the allowlist may only grow, by provisioned update-rule titles (issue #200); the rest is pinned
+                titles, rest = _without_allowlist(n)
+                old_titles, old_rest = _without_allowlist(old_nodes[name])
+                assert rest == old_rest, "an existing node changed: " + name
+                assert set(old_titles) <= set(titles), "the allowlist lost a baseline title"
+                provisioned = {r["title"] for _, _, r in _rules() if r["labels"].get("update_alert") == "true"}
+                assert set(titles) - set(old_titles) <= provisioned, "the allowlist gained a title with no rule"
+                continue
             assert n == old_nodes[name], "an existing node changed: " + name
     assert set(_by_name()) - set(old_nodes) == {CHECK, GATE, DENY, EXPIRY_HOOK}
     assert set(old_nodes) <= set(_by_name())

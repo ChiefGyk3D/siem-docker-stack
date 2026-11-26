@@ -509,7 +509,9 @@ def test_pending_update_rules_all_push_to_the_phone():
                and "poller" not in r["uid"]]
     assert len(pending) >= 6
     for r in pending:
-        want = "false" if r["uid"] in {"update-unifi-pending-24h", "update-pfsense-pending-24h"} else "true"
+        # the operator-managed Twingate rule auto-updates and never pages (#200)
+        want = "false" if r["uid"] in {"update-unifi-pending-24h", "update-pfsense-pending-24h",
+                                       "update-twingate-operator-behind"} else "true"
         assert r["labels"]["phone"] == want, r["uid"]
     uids = {r["uid"] for r in pending}
     assert {"update-unifi-pending-24h", "update-unifi-pending-7d"} <= uids
@@ -1345,7 +1347,8 @@ def test_every_update_rule_sets_the_phone_label_explicitly():
     for _, _, rule in _rules():
         # the poller-stale rule and the two 24h rules (P2, owner decision 2026-11-20, issue #152) stay off the phone;
         # the UniFi 24h rule is also quiet by owner decision 2026-11-26 (7-day wait, issue #199)
-        p2 = {"update-unifi-poller-stale", "update-unifi-pending-24h", "update-pfsense-pending-24h"}
+        p2 = {"update-unifi-poller-stale", "update-unifi-pending-24h", "update-pfsense-pending-24h",
+              "update-twingate-operator-behind"}  # the last: auto-updating, digest only (#200)
         want = "false" if rule["uid"] in p2 else "true"
         assert rule["labels"].get("phone") == want, rule["uid"]
         seen += 1
