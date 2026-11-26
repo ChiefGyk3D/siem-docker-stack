@@ -37,6 +37,7 @@ D="$(cd "$(dirname "$0")/.." && pwd)/fake"
 [ ! -f "$D/fakeenv" ] || . "$D/fakeenv"
 echo "$*" >>"$D/log"
 env >>"$D/envdump"
+[ -z "$DOCKER_CONFIG" ] || ls -A "$DOCKER_CONFIG" >>"$D/cfgls" 2>/dev/null
 hold() { touch "$D/$1"; i=0; while [ ! -f "$D/go" ] && [ "$i" -lt 300 ]; do sleep 0.1; i=$((i+1)); done; }
 case "$1" in
   inspect)
@@ -121,11 +122,22 @@ IMAGE_ENV = ["PATH=/usr/bin", "LANG=C.UTF-8"]
 # Fake `find`: a path listed in the fake dir/foreign is reported as owned by another user.
 FAKE_FIND = r'''#!/bin/sh
 FD="$(cd "$(dirname "$0")/.." && pwd)/fake"
+# fake/gw lists paths reported as group- or world-writable (a "-perm /022" query).
+for a in "$@"; do
+  case "$a" in
+    /*) if [ -f "$FD/gw" ] && grep -qxF "$a" "$FD/gw"; then exit 0; fi ;;
+  esac
+done
 for a in "$@"; do
   case "$a" in
     /*) if [ -f "$FD/foreign" ] && grep -qxF "$a" "$FD/foreign"; then exit 0; fi ;;
   esac
 done
+# The test tree is not root-owned, so a trust query is answered "trusted" here;
+# the lists above model the attacker-controlled ones.
+case " $* " in
+  *" /022 "*) for a in "$@"; do case "$a" in /*) echo "$a"; exit 0 ;; esac; done ;;
+esac
 exec /usr/bin/find "$@"
 '''
 
@@ -1717,3 +1729,143 @@ def test_a_live_pid_that_is_not_this_updater_is_stale(env, which):
     finally:
         live.kill()
         live.wait()
+
+
+# --- round 4: re-exec path hardening (R3-1) and empty docker dirs (R3-2) -------
+
+def make_race_copy(env, hook):
+    """A mutant of the test copy: `hook` runs right before the clean re-exec."""
+    lines = env.script.read_text().splitlines(keepends=True)
+    out, n = [], 0
+    for line in lines:
+        if line.startswith("    exec env -i "):
+            out.append(hook + "\n")
+            n += 1
+        out.append(line)
+    assert n == 1
+    race = env.root / "race-under-test.sh"
+    race.write_text("".join(out))
+    return race
+
+
+def test_script_swapped_at_the_reexec_boundary_is_not_executed(env):
+    marker = env.root / "pwned"
+    race = make_race_copy(
+        env, f': >"{env.d}/at_reexec"; i=0; while [ ! -f "{env.d}/swapped" ] && [ "$i" -lt 300 ]; do sleep 0.1; i=$((i+1)); done')
+    p = subprocess.Popen(["sh", str(race), "--yes", NAME], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                         env=env.environ(), cwd=str(env.root))
+    env.wait_for("at_reexec")
+    race.write_text(f'#!/bin/sh\n: >"{marker}"\nexit 0\n')
+    (env.d / "swapped").write_text("")
+    out, err = p.communicate(timeout=60)
+    assert not marker.exists(), "the replacement file was executed"
+    assert p.returncode == 0, err
+    assert "result=updated" in out
+
+
+def test_relative_invocation_runs_from_the_canonical_absolute_path(env):
+    (env.d / "pull_hold").write_text("")
+    p = subprocess.Popen(["sh", "script-under-test.sh", "--yes", NAME], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                         env=env.environ(FAKE_PULL_HOLD="1"), cwd=str(env.root))
+    try:
+        env.wait_for("in_pull")
+        ident = (env.lock_base / "twingate-connector-update.lock.d" / "ident").read_text()
+        assert f"script={os.path.realpath(env.script)}\n" in ident
+    finally:
+        env.release()
+        p.communicate(timeout=60)
+    assert p.returncode == 0
+
+
+def test_symlinked_directory_is_resolved_to_the_physical_path(env):
+    link = env.root / "linkdir"
+    link.symlink_to(env.root)
+    r = subprocess.run(["sh", str(link / "script-under-test.sh"), "--dry-run", NAME], capture_output=True,
+                       text=True, env=env.environ(), cwd=str(env.root), timeout=60)
+    assert r.returncode == 0, r.stderr
+    assert "WARNING" not in r.stderr
+
+
+def test_symlinked_script_file_is_refused(env):
+    link = env.root / "link.sh"
+    link.symlink_to(env.script)
+    r = subprocess.run(["sh", str(link), "--yes", NAME], capture_output=True, text=True,
+                       env=env.environ(), cwd=str(env.root), timeout=60)
+    assert r.returncode == 2
+    assert "symbolic link" in r.stderr
+    assert env.log() == []
+
+
+def _ancestors(path):
+    out = [str(path)]
+    cur = os.path.dirname(str(path))
+    while True:
+        out.append(cur)
+        if cur == "/":
+            return out
+        cur = os.path.dirname(cur)
+
+
+@pytest.mark.parametrize("which", ["file", "dir", "parent", "root"])
+@pytest.mark.parametrize("listfile,reason", [("foreign", "not owned by root"), ("gw", "writable")])
+def test_untrusted_script_path_or_ancestor_is_refused(env, which, listfile, reason):
+    chain = _ancestors(os.path.realpath(env.script))
+    target = {"file": chain[0], "dir": chain[1], "parent": chain[2], "root": chain[-1]}[which]
+    (env.d / listfile).write_text(target + "\n")
+    r = env.run("--yes", NAME)
+    assert r.returncode == 2
+    assert reason in r.stderr and "/usr/local/sbin" in r.stderr
+    assert env.log() == []
+    assert env.leftovers() == []
+
+
+def test_untrusted_script_path_only_warns_for_a_dry_run(env):
+    (env.d / "gw").write_text(os.path.dirname(os.path.realpath(env.script)) + "\n")
+    r = env.run("--dry-run", NAME)
+    assert r.returncode == 0, r.stderr
+    assert "WARNING" in r.stderr and "would refuse" in r.stderr
+    assert changed(env) == []
+
+
+def test_real_find_refuses_a_user_owned_copy_of_the_shipped_script(env):
+    # no fake find: the real ownership and mode checks run on a user-owned copy
+    copy = env.root / "shipped-copy.sh"
+    shutil.copy(SCRIPT, copy)
+    r = subprocess.run(["sh", "shipped-copy.sh", "--yes", NAME], capture_output=True, text=True,
+                       env=env.environ(), cwd=str(env.root), timeout=60)
+    assert r.returncode == 2
+    assert "not owned by root or is group- or world-writable" in r.stderr
+    assert env.log() == []
+
+
+def test_prepopulated_docker_config_and_home_are_wiped_before_use(env):
+    rd = env.run_dir / "twingate-connector-update"
+    (rd / "docker-config").mkdir(parents=True)
+    (rd / "home").mkdir()
+    rd.chmod(0o700)
+    (rd / "docker-config" / "config.json").write_text('{"credsStore": "evil"}')
+    (rd / "docker-config" / "nested").mkdir()
+    (rd / "docker-config" / "nested" / "x").write_text("x")
+    (rd / "home" / ".dockerrc").write_text("x")
+    r = env.run("--yes", NAME)
+    assert r.returncode == 0, r.stderr
+    seen = (env.d / "cfgls").read_text().split() if (env.d / "cfgls").exists() else []
+    assert "config.json" not in seen and "nested" not in seen
+    assert env.leftovers() == []
+
+
+def test_docker_config_that_is_a_symlink_is_replaced(env):
+    rd = env.run_dir / "twingate-connector-update"
+    rd.mkdir()
+    rd.chmod(0o700)
+    other = env.hostile / "cfg"
+    other.mkdir()
+    (other / "config.json").write_text("{}")
+    (rd / "docker-config").symlink_to(other)
+    r = env.run("--yes", NAME)
+    assert r.returncode == 0, r.stderr
+    assert (other / "config.json").exists()
+    seen = (env.d / "cfgls").read_text().split() if (env.d / "cfgls").exists() else []
+    assert "config.json" not in seen

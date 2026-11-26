@@ -54,6 +54,7 @@
 # See docs/twingate-connector-update-script.md.
 
 umask 077
+TRUSTED_UID=0
 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export PATH
 
@@ -70,6 +71,42 @@ if [ "${TWINGATE_UPDATE_CLEAN_ENV:-}" != "1" ]; then
         *) [ -f "./$SELF" ] && SELF="./$SELF" ;;
     esac
     [ -f "$SELF" ] || early_die "cannot locate this script to restart it with a clean environment"
+    # Hardening: the script must live in a root-owned location. Make the path
+    # absolute and physical (the directory through `pwd -P`; the file itself must
+    # not be a link), then require the file and EVERY directory up to / to be
+    # owned by root and not group- or world-writable. A real run refuses
+    # otherwise; --dry-run continues with a warning.
+    PATH_OK=1
+    PATH_WHY=""
+    SELF_DIR=$(cd "$(dirname -- "$SELF")" 2>/dev/null && pwd -P) || SELF_DIR=""
+    if [ -z "$SELF_DIR" ] || [ -L "$SELF" ]; then
+        PATH_OK=0; PATH_WHY="cannot resolve this script to a canonical path (it must not be a symbolic link)"
+    else
+        case "$SELF_DIR" in
+            /) SELF="/${SELF##*/}" ;;
+            *) SELF="$SELF_DIR/${SELF##*/}" ;;
+        esac
+        p="$SELF"
+        while :; do
+            if [ -z "$(find "$p" -maxdepth 0 -user "${TRUSTED_UID:-0}" ! -perm /022 2>/dev/null)" ]; then
+                PATH_OK=0; PATH_WHY="this script or one of its parent directories is not owned by root or is group- or world-writable; install it in a root-owned location such as /usr/local/sbin (mode 0755 root:root)"
+                break
+            fi
+            [ "$p" = "/" ] && break
+            p="${p%/*}"
+            [ -n "$p" ] || p="/"
+        done
+    fi
+    if [ "$PATH_OK" != 1 ]; then
+        case " $* " in
+            *" --dry-run "*) printf 'WARNING: %s (a real run would refuse)\n' "$PATH_WHY" >&2 ;;
+            *) early_die "$PATH_WHY" ;;
+        esac
+    fi
+    # Read the script text ONCE and run the clean second stage from that text,
+    # so the path is never opened a second time.
+    SCRIPT_TEXT=$(cat -- "$SELF" 2>/dev/null) || early_die "cannot read this script"
+    [ -n "$SCRIPT_TEXT" ] && [ "$(printf '%s' "$SCRIPT_TEXT" | wc -c)" -lt 100000 ] || early_die "this script is empty or too large to restart"
     for v in "${TWINGATE_API_KEY:-}" "${TWINGATE_NETWORK_URL:-}" "${TWINGATE_UPDATE_WAIT_SECS:-}" \
         "${TWINGATE_UPDATE_POLL_SECS:-}" "${NOTIFY_WEBHOOK_URL:-}" "${NOTIFY_WEBHOOK_ALLOWED_HOSTS:-}" "${HOST_LABEL:-}"; do
         case "$v" in *"$NL"*) early_die "an input variable contains a newline" ;; esac
@@ -77,7 +114,7 @@ if [ "${TWINGATE_UPDATE_CLEAN_ENV:-}" != "1" ]; then
     RUN_TOKEN=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n') || RUN_TOKEN=""
     case "$RUN_TOKEN" in ''|*[!0-9a-f]*) early_die "cannot create a run token" ;; esac
     exec env -i PATH="$PATH" LC_ALL=C LANG=C TWINGATE_UPDATE_CLEAN_ENV=1 \
-        TWINGATE_UPDATE_RUN_TOKEN="$RUN_TOKEN" sh "$SELF" "$@" 3<<EOF
+        TWINGATE_UPDATE_RUN_TOKEN="$RUN_TOKEN" sh -c "$SCRIPT_TEXT" "$SELF" "$@" 3<<EOF
 TWINGATE_API_KEY=${TWINGATE_API_KEY:-}
 TWINGATE_NETWORK_URL=${TWINGATE_NETWORK_URL:-}
 TWINGATE_UPDATE_WAIT_SECS=${TWINGATE_UPDATE_WAIT_SECS:-}
@@ -119,7 +156,6 @@ export LC_ALL LANG
 # Fixed, trusted locations. Never taken from the environment.
 # /run is writable by root only, so only root can create, pre-create or hold
 # the lock and the private runtime dir. Real runs need root (TRUSTED_UID).
-TRUSTED_UID=0
 LOCK_BASE="/run"
 RUN_BASE="/run"
 # docker talks to the local socket only, with a config dir and HOME of its own
@@ -362,7 +398,21 @@ if [ "$DRY" != 1 ]; then
     printf 'script=%s\ntoken=%s\n' "$SELF" "$RUN_TOKEN" >"$LOCKD/ident"
     mkdir -m 700 "$RUNDIR" 2>/dev/null
     private "$RUNDIR" || die "runtime dir $RUNDIR is not a private (mode 700) directory owned by you"
+    # The docker config and home dirs must start empty: remove anything left
+    # there (we hold the lock and RUNDIR is private), then create them fresh.
+    for d in "$RUNDIR/docker-config" "$RUNDIR/home"; do
+        if [ -L "$d" ]; then
+            rm -f "$d" || die "cannot reset $d"
+        elif [ -e "$d" ]; then
+            { [ -d "$d" ] && owned "$d"; } || die "$d is not a directory owned by you"
+            secure_rmdir "$d"
+            [ ! -e "$d" ] || die "cannot reset $d"
+        fi
+    done
     mkdir -m 700 "$RUNDIR/docker-config" "$RUNDIR/home" 2>/dev/null
+    for d in "$RUNDIR/docker-config" "$RUNDIR/home"; do
+        [ -z "$(ls -A "$d" 2>/dev/null)" ] || die "$d is not empty"
+    done
     if ! private "$RUNDIR/docker-config" || ! private "$RUNDIR/home"; then
         die "docker config or home dir under $RUNDIR is not a private directory owned by you"
     fi

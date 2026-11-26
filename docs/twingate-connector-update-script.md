@@ -8,6 +8,25 @@ written; this page stands alone and is meant to be merged into that one's
 Owner decision 2026-11-26: Connector updates stay a one-command action that the
 owner runs on each host, one host at a time. There are no automatic updates.
 
+## Install location (required for a real run)
+
+The script restarts itself in a cleared environment, so it must live where only
+root can change it. It makes its own path absolute (the directory is resolved
+with `pwd -P`; the file itself must not be a symbolic link) and then requires
+the file and every directory above it, up to `/`, to be owned by root and not
+group- or world-writable. A real run refuses with a fixed message otherwise.
+`--dry-run` still works, with a warning. The restart does not reopen the path:
+the script text is read once, after that check, and the clean second stage runs
+from that text (`sh -c`), so a file swapped between the two stages is never
+executed. Install it, for example:
+
+```bash
+sudo install -o root -g root -m 0755 scripts/twingate-connector-update.sh /usr/local/sbin/twingate-connector-update
+sudo /usr/local/sbin/twingate-connector-update --dry-run <connector-name>
+```
+
+Running it from a checkout that a non-root user can write to is refused.
+
 ## Use
 
 Run it on the Connector's own host, for one Connector at a time:
@@ -24,8 +43,7 @@ Needs `docker` and `jq` on the host. A real run needs root and refuses as any
 other user with a clear message; `--dry-run` works for everyone. `PATH` is fixed
 to the system directories
 (`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`); the inherited
-`PATH`, `TMPDIR`, `XDG_RUNTIME_DIR` and the current directory are never used,
-and there is no environment variable that changes which programs run. Only one
+`PATH`, `TMPDIR` and `XDG_RUNTIME_DIR` are never used, and there is no environment variable that changes which programs run. Only one
 run can be active per host: one lock directory,
 `/run/twingate-connector-update.lock.d`, is the same for every environment.
 `/run` is writable by root only, so no other user can pre-create or hold it.
@@ -46,7 +64,7 @@ directory `/run/twingate-connector-update` that must be a real directory (no
 symlink), owned by root, mode 700, or the run refuses.
 The whole environment is cleared. At start the script re-executes itself under
 `env -i` with a fixed `PATH`, `LANG=C`, `DOCKER_HOST=unix:///var/run/docker.sock`,
-a `DOCKER_CONFIG` of its own (an empty root-only directory,
+a `DOCKER_CONFIG` of its own (a root-only directory, emptied by the script each run,
 `/run/twingate-connector-update/docker-config`) and a `HOME` of its own (an empty
 root-only directory, `/run/twingate-connector-update/home`). `DOCKER_CONTEXT`,
 `DOCKER_TLS_VERIFY`, `DOCKER_CERT_PATH`, `SSL_CERT_FILE`, `SSL_CERT_DIR`,
