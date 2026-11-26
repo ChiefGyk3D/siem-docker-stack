@@ -60,12 +60,18 @@ Placeholders: `/opt/siem/docker` is your compose directory.
 `cp docker-compose.yml.bak docker-compose.yml`), delete `targets/node.json`.
 Nothing else was changed.
 
-## Grafana infrastructure rules do not cover this job
+## Grafana infrastructure rules: disk only, not host down
 
-Checked against `docker/grafana/provisioning/alerting/infra-alerts.yml` on
-master (2026-11-26): the rules select `twingate-ztna|unifi-controller` and
-`Security|AI|Cryptocurrency|grafana|prometheus`. None selects `job="node"`.
-This service keeps the job name `node` because `prometheus.yml` already defines
-it, so the SIEM host is monitored in Prometheus but does not alert yet. Adding
-`node` to a rule's job regex (for example the warning host-down and disk rules)
-is a separate change and the owner's call; the rules are not edited here.
+The `node` job is in the infra disk rule only: `Infrastructure disk almost full
+(critical)` in `docker/grafana/provisioning/alerting/infra-alerts.yml`, critical
+tier with `phone=true`, the same as `twingate-ztna` and `unifi-controller`. That
+change ships with PR #231 (branch `feat/224-node-alerts`). Until it merges, master's
+infra rules select no `job="node"`.
+
+The `node` job is deliberately NOT in either host-down rule. A Grafana rule cannot
+report its own host down while Grafana is dead: if the SIEM host dies, so does the
+rule that would say so. The external heartbeat observer (`docs/heartbeat.md`)
+covers that case.
+
+The disk rules still ship paused. Nothing alerts on this host's disk until the
+owner unpauses `infra-disk-critical`; see `docs/infrastructure-alerts.md`.
