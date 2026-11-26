@@ -450,8 +450,8 @@ organization, so the repository ships it only as
 `update-notification-policy.yml.example`; it is not applied by the deploy.
 Add the route by hand in Alerting, Notification policies: a child route that
 matches `update_alert = true`, with contact point `n8n-grafana-router`, and two
-sub-routes: `severity = warning` with repeat interval 4h and
-`severity = critical` with repeat interval 1h.
+sub-routes: `severity = warning` with repeat interval 84h and
+`severity = critical` with repeat interval 24h.
 
 Check: Alerting, Notification policies shows the route. Fire a test alert (or
 wait for one) and see the message in Discord.
