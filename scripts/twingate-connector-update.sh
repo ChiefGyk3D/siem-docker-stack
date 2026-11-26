@@ -17,7 +17,11 @@
 # back) INT, TERM, HUP, PIPE and QUIT are ignored so a signal cannot leave the
 # Connector gone. SIGKILL cannot be handled by any program.
 # PATH is fixed to the system directories; the inherited PATH is not used.
-# One run at a time per host (lock dir in a private runtime dir).
+# One run at a time per host (one host-wide lock dir under /run/lock, the same
+# for every user and every environment). Tokens and the lock never use the
+# inherited TMPDIR or XDG_RUNTIME_DIR. TWINGATE_API_KEY and NOTIFY_WEBHOOK_URL
+# are copied into unexported shell variables and unset at once, so no child
+# process (docker, jq) inherits them.
 #
 # Environment (all optional, never put secrets in argv):
 #   NOTIFY_WEBHOOK_URL   https URL; a short JSON notice is POSTed at the end
@@ -31,19 +35,23 @@
 #                        must be <network>.twingate.com (https:// optional).
 #                        A pre-check warning aborts under --yes unless --force.
 #   TWINGATE_UPDATE_WAIT_SECS (default and maximum 60), TWINGATE_UPDATE_POLL_SECS
-#   TWINGATE_UPDATE_BIN_DIR   test seam: ONE absolute directory put first on
-#                        PATH (used by the tests for fake docker and curl).
+#                        (plain integers 1-60 without leading zeros, else the
+#                        default is used)
 # See docs/twingate-connector-update-script.md.
 
 umask 077
 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-case "${TWINGATE_UPDATE_BIN_DIR:-}" in
-    "") ;;
-    /*:*|*[!A-Za-z0-9_./-]*) echo "refused: TWINGATE_UPDATE_BIN_DIR must be one plain absolute path" >&2; exit 2 ;;
-    /*) PATH="$TWINGATE_UPDATE_BIN_DIR:$PATH" ;;
-    *) echo "refused: TWINGATE_UPDATE_BIN_DIR must be absolute" >&2; exit 2 ;;
-esac
 export PATH
+LC_ALL=C
+export LC_ALL
+# Secrets: keep them in unexported variables so no child process inherits them.
+API_KEY_V="${TWINGATE_API_KEY:-}"
+unset TWINGATE_API_KEY
+NOTIFY_URL="${NOTIFY_WEBHOOK_URL:-}"
+unset NOTIFY_WEBHOOK_URL
+# Fixed, trusted locations. Never taken from the environment.
+LOCK_BASE="/run/lock"
+RUN_BASE="/run/user/$(id -u)"; [ "$(id -u)" != 0 ] || RUN_BASE="/run"
 
 IMAGE_TAG="twingate/connector:1"
 ROLLBACK_TAG="twingate/connector:rollback-$$"
@@ -58,6 +66,9 @@ RUNDIR=""
 LOCKD=""
 LOCKED=0
 KEEP_TMPD=0
+SELF_ID=""
+SELF_RN=""
+MAX_BYTES=1048576
 FROM="unknown"
 TO="unknown"
 PRECHECK_WARN=0
@@ -78,11 +89,11 @@ cleanup() {
         rm -rf "$TMPD"
     fi
     if [ "$LOCKED" = 1 ] && [ -n "$LOCKD" ]; then
+        [ -z "$RUNDIR" ] || rmdir "$RUNDIR" 2>/dev/null
         rm -f "$LOCKD/pid"
         rmdir "$LOCKD" 2>/dev/null
         LOCKED=0
     fi
-    [ -z "$RUNDIR" ] || rmdir "$RUNDIR" 2>/dev/null
     return 0
 }
 set_traps() {
@@ -105,12 +116,12 @@ set_traps
 notify() {
     # $1 = result. Never fails the update, never prints the URL.
     [ "$DRY" = 1 ] && return 0
-    [ -n "${NOTIFY_WEBHOOK_URL:-}" ] || return 0
-    case "$NOTIFY_WEBHOOK_URL" in
+    [ -n "$NOTIFY_URL" ] || return 0
+    case "$NOTIFY_URL" in
         https://[A-Za-z0-9]*) ;;
         *) say "notice skipped: NOTIFY_WEBHOOK_URL is not an https URL"; return 0 ;;
     esac
-    case "$NOTIFY_WEBHOOK_URL" in
+    case "$NOTIFY_URL" in
         *[!A-Za-z0-9._~:/?\&=%+@,\;-]*) say "notice skipped: NOTIFY_WEBHOOK_URL has unexpected characters"; return 0 ;;
     esac
     if ! command -v curl >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
@@ -121,8 +132,9 @@ notify() {
     body=$(jq -nc --arg h "$label" --arg c "$NAME" --arg f "$FROM" --arg t "$TO" --arg r "$1" \
         '{"host-label":$h,connector:$c,from:$f,to:$t,result:$r}') || { say "notice skipped"; return 0; }
     # URL goes to curl on stdin (config), not argv.
-    if printf 'url = "%s"\n' "$NOTIFY_WEBHOOK_URL" |
-        curl -sS -K - --proto '=https' --max-time 5 -X POST \
+    # -q first: ignore any .curlrc. No redirects, no proxy, https only.
+    if printf 'url = "%s"\n' "$NOTIFY_URL" |
+        curl -q -sS -K - --proto '=https' --max-redirs 0 --noproxy '*' --max-time 5 -X POST \
             -H 'Content-Type: application/json' --data "$body" >/dev/null 2>&1; then
         say "notice sent"
     else
@@ -147,7 +159,7 @@ for a in "$@"; do
         --dry-run) DRY=1 ;;
         --yes) YES=1 ;;
         --force) FORCE=1 ;;
-        -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,/^umask 077/{/^umask 077/!p;}' "$0"; exit 0 ;;
         -*) die "unknown option '$a'" ;;
         *) [ -z "$NAME" ] || die "exactly one container name is allowed"; NAME="$a" ;;
     esac
@@ -167,22 +179,21 @@ NAME_RE=$(printf '%s' "$NAME" | sed 's/\./\\./g')
 command -v docker >/dev/null 2>&1 || die "docker not found"
 command -v jq >/dev/null 2>&1 || die "jq not found"
 
-# ---- private runtime dir and lock (real runs only) ---------------------------
+# ---- private runtime dir and host-wide lock (real runs only) -----------------
+# Both live under fixed locations (LOCK_BASE, RUN_BASE); the environment
+# (TMPDIR, XDG_RUNTIME_DIR) is never consulted.
 if [ "$DRY" != 1 ]; then
-    case "${XDG_RUNTIME_DIR:-}" in
-        /*) if [ -d "$XDG_RUNTIME_DIR" ] && [ ! -L "$XDG_RUNTIME_DIR" ] && owned "$XDG_RUNTIME_DIR"; then
-                RUNDIR="$XDG_RUNTIME_DIR/twingate-connector-update"
-            fi ;;
-    esac
-    [ -n "$RUNDIR" ] || RUNDIR="${TMPDIR:-/tmp}/twingate-connector-update-$(id -u)"
-    mkdir -p "$RUNDIR" 2>/dev/null || die "cannot create the private runtime dir"
-    if [ -L "$RUNDIR" ] || [ ! -d "$RUNDIR" ] || ! owned "$RUNDIR"; then die "runtime dir is not a private directory owned by you"; fi
-    chmod 700 "$RUNDIR" || die "cannot secure the runtime dir"
-    LOCKD="$RUNDIR/lock.d"
+    private() { [ -d "$1" ] && [ ! -L "$1" ] && [ -n "$(find "$1" -maxdepth 0 -user "$(id -u)" -perm 700 2>/dev/null)" ]; }
+    [ -d "$RUN_BASE" ] && [ ! -L "$RUN_BASE" ] || die "no trusted runtime dir ($RUN_BASE); run it as root"
+    [ -d "$LOCK_BASE" ] && [ ! -L "$LOCK_BASE" ] || die "no host-wide lock dir ($LOCK_BASE); refusing to run without a lock"
+    RUNDIR="$RUN_BASE/twingate-connector-update"
+    LOCKD="$LOCK_BASE/twingate-connector-update.lock.d"
     if ! mkdir "$LOCKD" 2>/dev/null; then
+        [ -d "$LOCKD" ] && [ ! -L "$LOCKD" ] || die "cannot take the host-wide lock ($LOCKD)"
         holder=$(cat "$LOCKD/pid" 2>/dev/null) || holder=""
         case "$holder" in ''|*[!0-9]*) die "another run holds the lock and its pid is unreadable ($LOCKD); if no run is active, remove that directory" ;; esac
         if kill -0 "$holder" 2>/dev/null; then die "another run is in progress (pid $holder)"; fi
+        owned "$LOCKD" || die "the stale lock $LOCKD is not owned by you; remove it by hand"
         say "removing a stale lock left by pid $holder"
         rm -f "$LOCKD/pid"
         rmdir "$LOCKD" 2>/dev/null
@@ -190,6 +201,8 @@ if [ "$DRY" != 1 ]; then
     fi
     LOCKED=1
     printf '%s\n' "$$" >"$LOCKD/pid"
+    mkdir -m 700 "$RUNDIR" 2>/dev/null
+    private "$RUNDIR" || die "runtime dir $RUNDIR is not a private (mode 700) directory owned by you"
 fi
 
 # ---- inspect and layout allowlist -------------------------------------------
@@ -209,14 +222,32 @@ esac
 IMGI=$(docker image inspect "$OLD_ID" 2>/dev/null) || die "the running image $OLD_ID is not present on this host, so a rollback would be impossible. Nothing was changed."
 IMG0=$(printf '%s' "$IMGI" | jq -ce 'if type=="array" and length==1 then .[0] else error("bad") end' 2>/dev/null) || die "cannot read the running image's config. Nothing was changed."
 
+HOSTN=$(hostname 2>/dev/null) || HOSTN=""
 LOGDRV=$(docker info --format '{{.LoggingDriver}}' 2>/dev/null | head -n 1) || LOGDRV=""
 case "$LOGDRV" in ''|*[!A-Za-z0-9._-]*) LOGDRV="json-file" ;; esac
 
-why=$(printf '%s' "$INSPECT" | jq -r --arg img "$IMAGE_TAG" --arg logdrv "$LOGDRV" --argjson i "$IMG0" '
+why=$(printf '%s' "$INSPECT" | jq -r --arg img "$IMAGE_TAG" --arg logdrv "$LOGDRV" --arg hostn "$HOSTN" --argjson i "$IMG0" '
   def blank: . == null or . == [] or . == {} or . == "" or . == 0 or . == false;
   def norm: if blank then null else . end;
+  def handled_host: ["NetworkMode","RestartPolicy","Binds","Privileged","CapAdd","CapDrop","SecurityOpt","PidMode","UsernsMode","ReadonlyRootfs","Memory","MemorySwap","MemoryReservation","CpuShares","NanoCpus","CpuQuota","LogConfig","Dns","DnsSearch","DnsOptions","ExtraHosts","Tmpfs","Ulimits","Devices","DeviceCgroupRules","DeviceRequests","Sysctls","GroupAdd","AutoRemove"];
+  def host_defaults: {"CgroupnsMode":["private"],"IpcMode":["private","shareable"],"ShmSize":[67108864],"Runtime":["runc"],"ConsoleSize":[[0,0]],"Isolation":["default"],"MemorySwappiness":[-1],"PidsLimit":[-1]};
+  def masked_ok: ["/proc/asound","/proc/acpi","/proc/interrupts","/proc/kcore","/proc/keys","/proc/latency_stats","/proc/timer_list","/proc/timer_stats","/proc/sched_debug","/proc/scsi","/sys/firmware","/sys/devices/virtual/powercap"];
+  def readonly_ok: ["/proc/bus","/proc/fs","/proc/irq","/proc/sys","/proc/sysrq-trigger"];
+  def handled_cfg: ["Image","Env","Hostname","AttachStdin","AttachStdout","AttachStderr","Tty","User","Entrypoint","Cmd","Labels","Healthcheck","WorkingDir"];
+  def hasbyte($b): explode | any(. == $b);
   .[0] as $c | ($c.HostConfig // {}) as $h | ($c.Config // {}) as $cc | ($i.Config // {}) as $ic
   | ($h.LogConfig // {}) as $l | ($cc.Env // []) as $env
+  | ($h | to_entries | map(select((.key as $k | handled_host | index($k)) | not))
+       | map(select((.value | norm) != null))
+       | map(select(
+           if .key == "MaskedPaths" then ((.value - masked_ok) | length) > 0
+           elif .key == "ReadonlyPaths" then ((.value - readonly_ok) | length) > 0
+           else (. as $e | (host_defaults[.key] // []) | any(.[]; . == $e.value) | not) end))
+       | map(.key)) as $hostextra
+  | ($cc | to_entries | map(select((.key as $k | handled_cfg | index($k)) | not))
+       | map(select(((.value | norm)) != (($ic[.key]) | norm)))
+       | map(.key)) as $cfgextra
+  | ([ $env[] | select(type == "string" and startswith("TWINGATE_")) ]) as $kept
   | [ (if $cc.Image != $img then "image is not " + $img else empty end),
       (if $h.NetworkMode != "host" then "network mode is not host" else empty end),
       (if ($h.RestartPolicy.Name != "unless-stopped") or (($h.RestartPolicy.MaximumRetryCount // 0) != 0) then "restart policy is not unless-stopped" else empty end),
@@ -245,7 +276,15 @@ why=$(printf '%s' "$INSPECT" | jq -r --arg img "$IMAGE_TAG" --arg logdrv "$LOGDR
       (if ($h.Sysctls | blank | not) then "sysctls present" else empty end),
       (if ($h.GroupAdd | blank | not) then "extra groups" else empty end),
       (if $h.AutoRemove == true then "auto-remove" else empty end),
-      (if ($env | map(select((type != "string") or contains("\n") or (contains("=") | not))) | length) > 0 then "malformed environment entry (newline or missing =)" else empty end),
+      (if ($hostextra | length) > 0 then "host settings a recreate would drop: " + ($hostextra | join(",")) else empty end),
+      (if ($cc.OpenStdin == true or $cc.StdinOnce == true) then "stdin open" else empty end),
+      (if ($cc.Domainname | norm) != null then "domain name override" else empty end),
+      (if ($cc.Hostname | norm) != null and $cc.Hostname != ($c.Id // "")[0:12] and $cc.Hostname != $hostn and $cc.Hostname != ($hostn | split(".")[0]) then "hostname override" else empty end),
+      (if ($cfgextra | length) > 0 then "container settings a recreate would drop: " + ($cfgextra | join(",")) else empty end),
+      (if ($env | map(select((type != "string") or hasbyte(10) or hasbyte(13) or hasbyte(0) or (contains("=") | not))) | length) > 0 then "malformed environment entry (newline, CR, NUL or missing =)" else empty end),
+      (if ($kept | map(select(test("^TWINGATE_[A-Za-z0-9_]+=") | not)) | length) > 0 then "malformed environment entry (invalid variable name)" else empty end),
+      (if ($kept | map(select(utf8bytelength > 8192)) | length) > 0 then "malformed environment entry (line too long)" else empty end),
+      (if ($kept | map(sub("=.*$"; "")) | (length) != (unique | length)) then "malformed environment entry (duplicate variable)" else empty end),
       (if ($env | map(select(type == "string" and startswith("TWINGATE_"))) | length) == 0 then "no TWINGATE_ environment" else empty end),
       (if ($env | map(select(type == "string" and (startswith("TWINGATE_") | not))) - ($ic.Env // []) | length) > 0 then "environment variables a recreate would drop" else empty end)
     ] | join("; ")' 2>/dev/null) || die "cannot read layout"
@@ -253,7 +292,7 @@ why=$(printf '%s' "$INSPECT" | jq -r --arg img "$IMAGE_TAG" --arg logdrv "$LOGDR
 
 # ---- Twingate Admin API (read only) -----------------------------------------
 api_setup() {
-    [ -n "${TWINGATE_API_KEY:-}" ] && [ -n "${TWINGATE_NETWORK_URL:-}" ] || return 1
+    [ -n "$API_KEY_V" ] && [ -n "${TWINGATE_NETWORK_URL:-}" ] || return 1
     v="${TWINGATE_NETWORK_URL#https://}"
     sub="${v%.twingate.com}"
     if [ "$sub" = "$v" ] || [ -z "$sub" ]; then
@@ -262,7 +301,7 @@ api_setup() {
     case "$sub" in
         *[!A-Za-z0-9-]*) warn "TWINGATE_NETWORK_URL is not <network>.twingate.com (no path, port or userinfo allowed); pre-check skipped. Confirm the other Connector is ALIVE yourself."; return 0 ;;
     esac
-    case "$TWINGATE_API_KEY" in
+    case "$API_KEY_V" in
         *[!A-Za-z0-9._~+/=-]*) warn "TWINGATE_API_KEY has unexpected characters; pre-check skipped."; return 0 ;;
     esac
     command -v curl >/dev/null 2>&1 || { warn "curl missing; pre-check skipped. Confirm the other Connector is ALIVE yourself."; return 0; }
@@ -277,8 +316,14 @@ gql_fetch() {
     while :; do
         page=$((page + 1))
         body=$(jq -nc --arg c "$cursor" '{query:"query($after: String) { connectors(first: 100, after: $after) { pageInfo { hasNextPage endCursor } edges { node { id name state version remoteNetwork { id } } } } }",variables:{after:(if $c=="" then null else $c end)}}') || return 1
-        resp=$(printf 'url = "%s/api/graphql/"\nheader = "X-API-KEY: %s"\n' "$API_URL" "$TWINGATE_API_KEY" |
-            curl -sS -K - --proto '=https' --max-time 10 -X POST -H 'Content-Type: application/json' --data "$body" 2>/dev/null) || return 1
+        # curl: -q first (no .curlrc), no redirects, no proxy, https only, hard
+        # size cap. The key goes to this one curl on stdin (a config), never
+        # into the environment or argv. head -c bounds what the shell captures.
+        resp=$(printf 'url = "%s/api/graphql/"\nheader = "X-API-KEY: %s"\n' "$API_URL" "$API_KEY_V" |
+            curl -q -sS --fail -K - --proto '=https' --max-redirs 0 --noproxy '*' --max-filesize "$MAX_BYTES" --max-time 10 -X POST -H 'Content-Type: application/json' --data "$body" 2>/dev/null |
+            head -c "$((MAX_BYTES + 1))") || return 1
+        [ -n "$resp" ] && [ "${#resp}" -le "$MAX_BYTES" ] || return 1
+        printf '%s' "$resp" | jq -e '(.errors // null) == null and (.data.connectors.edges | type) == "array"' >/dev/null 2>&1 || return 1
         got=$(printf '%s' "$resp" | jq -c '[.data.connectors.edges[].node]' 2>/dev/null) || return 1
         NODES=$(jq -nc --argjson a "$NODES" --argjson b "$got" '$a + $b' 2>/dev/null) || return 1
         more=$(printf '%s' "$resp" | jq -r '.data.connectors.pageInfo.hasNextPage // false' 2>/dev/null) || return 1
@@ -304,6 +349,7 @@ precheck() {
         fi
         rn=$(printf '%s' "$selfn" | jq -r '.[0].remoteNetwork.id // ""')
         sid=$(printf '%s' "$selfn" | jq -r '.[0].id // ""')
+        SELF_ID="$sid"; SELF_RN="$rn"
         if [ -z "$rn" ] || [ -z "$sid" ]; then
             warn "this Connector's remote network could not be read. Confirm the other Connector is ALIVE yourself."
             return 0
@@ -370,13 +416,24 @@ elif [ "$YES" != 1 ]; then
 fi
 
 # ---- helpers ----------------------------------------------------------------
+# secs VALUE DEFAULT MAX: print VALUE only if it is a canonical integer
+# (no sign, no leading zero, 1-2 digits) within 1..MAX, else DEFAULT.
+secs() {
+    case "$1" in
+        [1-9]|[1-9][0-9]) if [ "$1" -le "$3" ]; then printf '%s' "$1"; return 0; fi ;;
+    esac
+    printf '%s' "$2"
+}
+
+# Deadline helpers: elapsed wall time, never unchecked arithmetic on input.
+now() { date +%s 2>/dev/null || echo 0; }
+# nap POLL DEADLINE_LEFT: sleep min(poll, left) seconds.
+nap() { if [ "$2" -lt "$1" ]; then sleep "$2"; else sleep "$1"; fi; }
+
 wait_healthy() {
-    maxw="${TWINGATE_UPDATE_WAIT_SECS:-60}"
-    poll="${TWINGATE_UPDATE_POLL_SECS:-2}"
-    case "$maxw" in ''|*[!0-9]*) maxw=60 ;; esac
-    case "$poll" in ''|*[!0-9]*|0) poll=2 ;; esac
-    [ "$maxw" -le 60 ] || maxw=60
-    waited=0
+    maxw=$(secs "${TWINGATE_UPDATE_WAIT_SECS:-60}" 60 60)
+    poll=$(secs "${TWINGATE_UPDATE_POLL_SECS:-2}" 2 60)
+    t0=$(now); iter=0
     while :; do
         st=$(docker ps --filter "name=^${NAME_RE}\$" --format '{{.Status}}' 2>/dev/null) || st=""
         case "$st" in
@@ -384,9 +441,9 @@ wait_healthy() {
             Up*)
                 if docker exec "$NAME" ./connectord --version >/dev/null 2>&1; then return 0; fi ;;
         esac
-        [ "$waited" -lt "$maxw" ] || return 1
-        sleep "$poll"
-        waited=$((waited + poll))
+        left=$((maxw - ($(now) - t0))); iter=$((iter + 1))
+        { [ "$left" -gt 0 ] && [ "$((iter * poll))" -le "$maxw" ]; } || return 1
+        nap "$poll" "$left"
     done
 }
 
@@ -397,25 +454,28 @@ recreate() {
     docker run -d --network host --env-file "$ENVF" --name "$NAME" --restart=unless-stopped "$1" >/dev/null 2>&1
 }
 
-# Returns 0 confirmed, 1 not confirmed, 2 not configured.
+# Returns 0 confirmed, 1 not confirmed, 2 not configured. The Connector must be
+# the one seen before the update (same id and remote network; else exactly one
+# Connector of that exact name), ALIVE, on exactly the new version, from a
+# complete, error-free API answer.
 confirm_twingate() {
     [ "$API_OK" = 1 ] || return 2
     ver=$(printf '%s' "$TO" | grep -Eo '[0-9]+(\.[0-9]+)+' | head -n 1)
     [ -n "$ver" ] || return 1
-    maxw="${TWINGATE_UPDATE_WAIT_SECS:-60}"
-    poll="${TWINGATE_UPDATE_POLL_SECS:-2}"
-    case "$maxw" in ''|*[!0-9]*) maxw=60 ;; esac
-    case "$poll" in ''|*[!0-9]*|0) poll=2 ;; esac
-    [ "$maxw" -le 60 ] || maxw=60
-    waited=0
+    maxw=$(secs "${TWINGATE_UPDATE_WAIT_SECS:-60}" 60 60)
+    poll=$(secs "${TWINGATE_UPDATE_POLL_SECS:-2}" 2 60)
+    t0=$(now); iter=0
     while :; do
-        if gql_fetch; then
-            ok=$(printf '%s' "$NODES" | jq -r --arg n "$NAME" --arg v "$ver" '[.[] | select(.name == $n and .state == "ALIVE" and ((.version // "") | contains($v)))] | length' 2>/dev/null) || ok=""
+        if gql_fetch && [ "$GQL_INCOMPLETE" != 1 ]; then
+            ok=$(printf '%s' "$NODES" | jq -r --arg n "$NAME" --arg v "$ver" --arg id "$SELF_ID" --arg rn "$SELF_RN" '
+              [.[] | select(.state == "ALIVE"
+                and (((.version // "") | sub("^Connector "; "")) == $v)
+                and (if $id != "" then (.id == $id and .remoteNetwork.id == $rn) else (.name == $n) end))] | length' 2>/dev/null) || ok=""
             [ "$ok" = 1 ] && return 0
         fi
-        [ "$waited" -lt "$maxw" ] || return 1
-        sleep "$poll"
-        waited=$((waited + poll))
+        left=$((maxw - ($(now) - t0))); iter=$((iter + 1))
+        { [ "$left" -gt 0 ] && [ "$((iter * poll))" -le "$maxw" ]; } || return 1
+        nap "$poll" "$left"
     done
 }
 
@@ -432,7 +492,7 @@ step "never prune images; the old image stays on the host"
 
 # ---- protected window: from here no signal may leave the Connector gone -------
 block_signals
-TMPD=$(mktemp -d) || die "cannot create private temp dir"
+TMPD=$(mktemp -d "$RUNDIR/run.XXXXXX") || die "cannot create private temp dir"
 chmod 700 "$TMPD" || die "cannot secure temp dir"
 ENVF="$TMPD/connector.env"
 printf '%s' "$INSPECT" | jq -r '.[0].Config.Env[] | select(startswith("TWINGATE_"))' >"$ENVF" 2>/dev/null || die "cannot build the env file"

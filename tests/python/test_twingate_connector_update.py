@@ -1,9 +1,10 @@
 """Tests for scripts/twingate-connector-update.sh (issue #220).
 
-The script runs against a FAKE `docker` (and a fake `curl`) that the script
-finds through its TWINGATE_UPDATE_BIN_DIR test seam. Both record their
-arguments and never touch a real engine, network or Twingate account.
-Tokens below are placeholders.
+The script runs against a FAKE `docker` (and a fake `curl`). The shipped script
+has no test seam: the harness writes a TEST-ONLY COPY of it in which exactly
+three fixed lines (PATH, LOCK_BASE, RUN_BASE) are rewritten to point at the
+fakes and at scratch dirs. Both fakes record their arguments and never touch a
+real engine, network or Twingate account. Tokens below are placeholders.
 """
 import json
 import os
@@ -29,6 +30,7 @@ API_KEY = "FAKE-API-KEY-not-real-4455"
 FAKE_DOCKER = r'''#!/bin/sh
 D="$FAKE_DIR"
 echo "$*" >>"$D/log"
+env >>"$D/envdump"
 hold() { touch "$D/$1"; i=0; while [ ! -f "$D/go" ] && [ "$i" -lt 300 ]; do sleep 0.1; i=$((i+1)); done; }
 case "$1" in
   inspect)
@@ -86,6 +88,7 @@ exit 0
 FAKE_CURL = r'''#!/bin/sh
 D="$FAKE_DIR"
 echo "$*" >>"$D/curl.argv"
+env >>"$D/envdump"
 cat >>"$D/curl.stdin"
 printf '\n---\n' >>"$D/curl.stdin"
 n=$(wc -l <"$D/curl.argv")
@@ -97,9 +100,32 @@ else printf '{}'; fi
 
 IMAGE_ENV = ["PATH=/usr/bin", "LANG=C.UTF-8"]
 
+PATH_LINE = 'PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"'
+
+
+def make_test_copy(dest, bin_dir, lock_base, run_base):
+    """Write a test-only copy of the script with three fixed lines rewritten."""
+    lines = SCRIPT.read_text().splitlines(keepends=True)
+    out, hits = [], {"path": 0, "lock": 0, "run": 0}
+    for line in lines:
+        if line.rstrip("\n") == PATH_LINE:
+            line = f'PATH="{bin_dir}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n'
+            hits["path"] += 1
+        elif line.startswith("LOCK_BASE="):
+            line = f'LOCK_BASE="{lock_base}"\n'
+            hits["lock"] += 1
+        elif line.startswith("RUN_BASE="):
+            line = f'RUN_BASE="{run_base}"\n'
+            hits["run"] += 1
+        out.append(line)
+    assert hits == {"path": 1, "lock": 1, "run": 1}, hits
+    dest.write_text("".join(out))
+    return dest
+
 
 def inspect_json(host=None, cfg=None, mounts=None):
     c = {
+        "Id": "abcdef123456" + "0" * 52,
         "Image": OLD_ID,
         "Config": {"Image": "twingate/connector:1",
                    "Env": ["PATH=/usr/bin", "LANG=C.UTF-8",
@@ -138,9 +164,11 @@ class Env:
         self.bin = tmp_path / "bin"
         self.tmp = tmp_path / "tmp"
         self.run_dir = tmp_path / "run"
-        for p in (self.d, self.bin, self.tmp, self.run_dir):
+        self.lock_base = tmp_path / "lock"
+        self.hostile = tmp_path / "hostile"
+        for p in (self.d, self.bin, self.tmp, self.run_dir, self.lock_base, self.hostile):
             p.mkdir()
-        self.run_dir.chmod(0o700)
+        self.script = make_test_copy(tmp_path / "script-under-test.sh", self.bin, self.lock_base, self.run_dir)
         for n, body in (("docker", FAKE_DOCKER), ("curl", FAKE_CURL)):
             f = self.bin / n
             f.write_text(body)
@@ -151,26 +179,30 @@ class Env:
         (self.d / "version").write_text("Connector 1.95.0\n")
         (self.d / "state").write_text("Up 3 days\n")
 
-    def environ(self, hook=True, **env):
+    def environ(self, **env):
+        # TMPDIR and XDG_RUNTIME_DIR point at HOSTILE dirs: the script must never use them.
         e = {"PATH": os.environ["PATH"], "FAKE_DIR": str(self.d),
              "FAKE_SECRET": SECRET, "TMPDIR": str(self.tmp), "HOME": str(self.root),
-             "XDG_RUNTIME_DIR": str(self.run_dir),
+             "XDG_RUNTIME_DIR": str(self.tmp),
              "HOST_LABEL": "host-test", "TWINGATE_UPDATE_WAIT_SECS": "2",
              "TWINGATE_UPDATE_POLL_SECS": "1"}
-        if hook:
-            e["TWINGATE_UPDATE_BIN_DIR"] = str(self.bin)
         e.update(env)
         return e
 
-    def run(self, *args, stdin="", hook=True, **env):
-        return subprocess.run(["sh", str(SCRIPT), *args], input=stdin, capture_output=True,
-                              text=True, env=self.environ(hook, **env), timeout=60,
+    def run(self, *args, stdin="", original=False, **env):
+        script = SCRIPT if original else self.script
+        return subprocess.run(["sh", str(script), *args], input=stdin, capture_output=True,
+                              text=True, env=self.environ(**env), timeout=60,
                               cwd=str(self.root))
 
     def start(self, *args, **env):
-        return subprocess.Popen(["sh", str(SCRIPT), *args], stdin=subprocess.DEVNULL,
+        return subprocess.Popen(["sh", str(self.script), *args], stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                env=self.environ(True, **env), cwd=str(self.root))
+                                env=self.environ(**env), cwd=str(self.root))
+
+    def envdump(self):
+        p = self.d / "envdump"
+        return p.read_text() if p.exists() else ""
 
     def wait_for(self, name, timeout=20):
         end = time.time() + timeout
@@ -185,7 +217,7 @@ class Env:
 
     def leftovers(self):
         found = []
-        for base in (self.tmp, self.run_dir):
+        for base in (self.tmp, self.run_dir, self.lock_base):
             for p in base.rglob("*"):
                 found.append(str(p.relative_to(self.root)))
         return found
@@ -249,21 +281,29 @@ def test_update_happy_path(env):
     assert env.leftovers() == []
 
 
-# --- finding 8: absolute PATH -------------------------------------------------
+# --- finding 8: absolute PATH; r2 finding 2: no test seam in production -------
 
 def test_inherited_path_and_cwd_are_not_used(env):
-    # a fake docker sits first on the INHERITED PATH and in the cwd; the script
-    # must not use either (only the TWINGATE_UPDATE_BIN_DIR seam is honored)
+    # a fake docker sits first on the INHERITED PATH and in the cwd; the shipped
+    # script must not use either
     shutil.copy(env.bin / "docker", env.root / "docker")
-    r = env.run("--dry-run", NAME, hook=False, PATH=f"{env.bin}::{os.environ['PATH']}")
+    r = env.run("--dry-run", NAME, original=True, PATH=f"{env.bin}::{os.environ['PATH']}")
     assert r.returncode == 2
     assert env.log() == []
 
 
-@pytest.mark.parametrize("bad", ["relative/bin", "/a:/b", "/a b"])
-def test_bin_dir_seam_must_be_one_absolute_path(env, bad):
-    r = env.run("--dry-run", NAME, TWINGATE_UPDATE_BIN_DIR=bad)
-    assert r.returncode == 2 and env.log() == []
+def test_no_bin_dir_seam_is_honored_by_the_shipped_script(env):
+    # r2 finding 2: an env var must never put a directory in front of the trusted PATH
+    r = env.run("--dry-run", NAME, original=True, TWINGATE_UPDATE_BIN_DIR=str(env.bin))
+    assert env.log() == [] and env.curl_argv() == ""
+    assert "TWINGATE_UPDATE_BIN_DIR" not in SCRIPT.read_text()
+
+
+def test_test_copy_differs_from_the_shipped_script_in_three_lines_only(env):
+    a = SCRIPT.read_text().splitlines()
+    b = env.script.read_text().splitlines()
+    assert len(a) == len(b)
+    assert len([1 for x, y in zip(a, b) if x != y]) == 3
 
 
 # --- finding 5: layout allowlist ----------------------------------------------
@@ -561,9 +601,9 @@ def test_only_a_twingate_env_file_exists_during_the_window(env):
 
 
 def test_head_n_1_leaves_no_secret_file_behind(env):
-    cmd = f'sh "{SCRIPT}" --yes {NAME} | head -n 1'
+    cmd = f'sh "{env.script}" --yes {NAME} | head -n 1'
     r = subprocess.run(["sh", "-c", cmd], capture_output=True, text=True, timeout=60,
-                       env=env.environ(True), cwd=str(env.root))
+                       env=env.environ(), cwd=str(env.root))
     assert len(r.stdout.splitlines()) == 1
     stops = [l for l in env.log() if l.startswith("stop")]
     # either nothing was touched, or the update ran to the end (never half way)
@@ -640,8 +680,8 @@ def test_two_runs_cannot_overlap(env):
 def test_stale_lock_is_taken_over(env):
     dead = subprocess.Popen(["sh", "-c", "exit 0"])
     dead.wait()
-    lock = env.run_dir / "twingate-connector-update" / "lock.d"
-    lock.mkdir(parents=True)
+    lock = env.lock_base / "twingate-connector-update.lock.d"
+    lock.mkdir()
     (lock / "pid").write_text(f"{dead.pid}\n")
     r = env.run("--yes", NAME)
     assert r.returncode == 0 and "stale lock" in r.stdout
@@ -649,8 +689,8 @@ def test_stale_lock_is_taken_over(env):
 
 
 def test_unreadable_lock_is_not_stolen(env):
-    lock = env.run_dir / "twingate-connector-update" / "lock.d"
-    lock.mkdir(parents=True)
+    lock = env.lock_base / "twingate-connector-update.lock.d"
+    lock.mkdir()
     r = env.run("--yes", NAME)
     assert r.returncode == 2 and changed(env) == []
 
@@ -882,6 +922,282 @@ def test_health_not_confirmed_is_stated_when_no_api(env):
     r = env.run("--yes", NAME)
     assert r.returncode == 0 and "result=updated" in r.stdout
     assert "NOT confirmed in Twingate" in r.stdout
+
+
+# --- round 2 (adversarial review r1) ------------------------------------------
+
+def hold_run(env, **kw):
+    (env.d / "hold").write_text("")
+    p = env.start("--yes", NAME, **kw)
+    env.wait_for("in_run")
+    return p
+
+
+def finish_run(env, p):
+    env.release()
+    try:
+        p.communicate(timeout=40)
+    finally:
+        if p.poll() is None:
+            p.kill()
+            p.communicate()
+
+
+# finding 1: poll interval and wait are canonical bounded integers
+
+@pytest.mark.parametrize("bad", ["08", "09", "007", "+5", "-1", "1e2", "99999", "100", "0", "x"])
+def test_malformed_poll_interval_never_bypasses_the_rollback(env, bad):
+    r = env.run("--yes", NAME, FAKE_NEW_STATUS="Up 1 second (unhealthy)", TWINGATE_UPDATE_POLL_SECS=bad)
+    assert r.returncode == 1, (r.stdout, r.stderr)
+    assert "result=rolled-back" in r.stdout
+    assert len(env.runs_d()) == 2
+    assert env.leftovers() == []
+
+
+def test_a_huge_poll_never_sleeps_past_the_wait(env):
+    t0 = time.time()
+    r = env.run("--yes", NAME, FAKE_NEW_STATUS="Up 1 second (unhealthy)",
+                TWINGATE_UPDATE_WAIT_SECS="3", TWINGATE_UPDATE_POLL_SECS="60")
+    assert r.returncode == 1
+    assert time.time() - t0 < 20
+
+
+# finding 3: every kept env entry must be one docker accepts
+
+BAD_ENV = [
+    "TWINGATE_BAD KEY=x",
+    "TWINGATE_TAB\tKEY=x",
+    "TWINGATE_X=a\rb",
+    "TWINGATE_X=" + "a" * 9000,
+    "TWINGATE_X=a\x00b",
+    "TWINGATE_=x",
+    "TWINGATE_BAD-KEY=x",
+]
+
+
+@pytest.mark.parametrize("entry", BAD_ENV, ids=["space", "tab", "cr", "long", "nul", "emptyname", "dash"])
+def test_invalid_env_entries_are_refused_before_the_stop(env, entry):
+    set_inspect(env, cfg={"Env": ["PATH=/usr/bin", f"TWINGATE_ACCESS_TOKEN={SECRET}", entry]})
+    r = env.run("--yes", NAME)
+    assert r.returncode == 2 and "malformed environment" in r.stderr
+    assert changed(env) == []
+    assert SECRET not in r.stdout + r.stderr
+
+
+def test_duplicate_env_keys_are_refused(env):
+    set_inspect(env, cfg={"Env": ["PATH=/usr/bin", f"TWINGATE_ACCESS_TOKEN={SECRET}", "TWINGATE_ACCESS_TOKEN=other"]})
+    r = env.run("--yes", NAME)
+    assert r.returncode == 2 and "duplicate" in r.stderr and changed(env) == []
+
+
+def test_a_long_but_legal_env_entry_is_kept(env):
+    set_inspect(env, cfg={"Env": ["PATH=/usr/bin", f"TWINGATE_ACCESS_TOKEN={SECRET}", "TWINGATE_X=" + "a" * 4000]})
+    r = env.run("--yes", NAME)
+    assert r.returncode == 0, r.stderr
+
+
+# finding 4: curl never reads a config file, never follows, never uses a proxy
+
+def curl_lines(env):
+    return [l for l in env.curl_argv().splitlines() if l]
+
+
+def test_every_curl_call_ignores_curlrc_redirects_and_proxies(env):
+    curl_out(env, [node(), node("connector-b")])
+    r = env.run("--yes", NAME, NOTIFY_WEBHOOK_URL=WEBHOOK, **API)
+    assert r.returncode == 0, r.stderr
+    lines = curl_lines(env)
+    assert len(lines) >= 3  # pre-check, post-check, notice
+    for l in lines:
+        assert l.split()[0] == "-q", l
+        assert "--max-redirs 0" in l and "--noproxy *" in l and "--proto =https" in l, l
+        assert " -L" not in l and "--location" not in l
+
+
+# finding 5: complete effective-config comparison
+
+DROPPED = [
+    ("host", {"PidsLimit": 64}),
+    ("host", {"OomKillDisable": True}),
+    ("host", {"OomScoreAdj": 500}),
+    ("host", {"CpuPeriod": 100000}),
+    ("host", {"CpusetCpus": "0-1"}),
+    ("host", {"MemorySwappiness": 10}),
+    ("host", {"CgroupnsMode": "host"}),
+    ("host", {"IpcMode": "host"}),
+    ("host", {"ShmSize": 1073741824}),
+    ("host", {"Runtime": "nvidia"}),
+    ("host", {"Init": True}),
+    ("host", {"MaskedPaths": ["/proc/custom"]}),
+    ("host", {"ReadonlyPaths": ["/etc"]}),
+    ("host", {"PortBindings": {"80/tcp": [{"HostPort": "80"}]}}),
+    ("host", {"VolumesFrom": ["other"]}),
+    ("host", {"CgroupParent": "custom.slice"}),
+    ("cfg", {"StopSignal": "SIGUSR1"}),
+    ("cfg", {"StopTimeout": 30}),
+    ("cfg", {"OpenStdin": True}),
+    ("cfg", {"Hostname": "custom-host"}),
+    ("cfg", {"Domainname": "example.invalid"}),
+    ("cfg", {"ExposedPorts": {"80/tcp": {}}}),
+    ("cfg", {"Volumes": {"/data": {}}}),
+]
+
+
+@pytest.mark.parametrize("kind,val", DROPPED, ids=[f"{k}-{json.dumps(v)[:40]}" for k, v in DROPPED])
+def test_settings_a_recreate_would_drop_are_refused(env, kind, val):
+    set_inspect(env, **{kind: val})
+    r = env.run("--yes", NAME)
+    assert r.returncode == 2 and "layout differs" in r.stderr
+    assert changed(env) == []
+
+
+def test_docker_default_values_are_not_refused(env):
+    host = {"CgroupnsMode": "private", "IpcMode": "private", "ShmSize": 67108864, "Runtime": "runc",
+            "ConsoleSize": [0, 0], "PortBindings": {}, "CpusetCpus": "", "OomKillDisable": False,
+            "PidsLimit": None, "MemorySwappiness": None, "OomScoreAdj": 0, "Isolation": "",
+            "MaskedPaths": ["/proc/kcore", "/sys/firmware"], "ReadonlyPaths": ["/proc/sys"]}
+    cfg = {"Hostname": "abcdef123456", "Domainname": "", "AttachStdout": False, "OpenStdin": False}
+    set_inspect(env, host=host, cfg=cfg)
+    r = env.run("--yes", NAME)
+    assert r.returncode == 0, r.stderr
+
+
+# finding 6: one lock for the whole host
+
+def test_the_lock_is_host_wide_not_per_environment(env):
+    p = hold_run(env)
+    try:
+        assert (env.lock_base / "twingate-connector-update.lock.d").is_dir()
+        n_before = len(env.log())
+        other_tmp = env.root / "other-tmp"
+        other_xdg = env.root / "other-xdg"
+        other_tmp.mkdir()
+        other_xdg.mkdir()
+        r2 = env.run("--yes", NAME, TMPDIR=str(other_tmp), XDG_RUNTIME_DIR=str(other_xdg))
+        assert r2.returncode == 2 and "in progress" in r2.stderr
+        assert len(env.log()) == n_before
+    finally:
+        finish_run(env, p)
+    assert p.returncode == 0
+    assert env.leftovers() == []
+
+
+def test_missing_lock_base_refuses(env):
+    env.lock_base.rmdir()
+    r = env.run("--yes", NAME)
+    assert r.returncode == 2 and "lock" in r.stderr and changed(env) == []
+
+
+# finding 7: tokens never go through the inherited TMPDIR or XDG_RUNTIME_DIR
+
+def test_inherited_tmpdir_and_xdg_runtime_dir_are_never_used(env):
+    p = hold_run(env)
+    try:
+        assert list(env.tmp.rglob("*")) == []  # hostile TMPDIR and XDG_RUNTIME_DIR
+        assert any(f.name == "connector.env" for f in env.run_dir.rglob("*"))
+    finally:
+        finish_run(env, p)
+    assert list(env.tmp.rglob("*")) == []
+    assert env.leftovers() == []
+
+
+def test_runtime_dir_with_loose_mode_is_refused(env):
+    d = env.run_dir / "twingate-connector-update"
+    d.mkdir()
+    d.chmod(0o755)
+    r = env.run("--yes", NAME)
+    assert r.returncode == 2 and "private" in r.stderr and changed(env) == []
+
+
+def test_runtime_dir_symlink_is_refused(env):
+    target = env.root / "elsewhere"
+    target.mkdir()
+    target.chmod(0o700)
+    (env.run_dir / "twingate-connector-update").symlink_to(target)
+    r = env.run("--yes", NAME)
+    assert r.returncode == 2 and changed(env) == []
+    assert list(target.iterdir()) == []
+
+
+# finding 8: the API key and webhook URL never reach a child's environment
+
+def test_api_key_and_webhook_url_are_not_exported_to_children(env):
+    curl_out(env, [node(), node("connector-b")])
+    r = env.run("--yes", NAME, NOTIFY_WEBHOOK_URL=WEBHOOK, **API)
+    assert r.returncode == 0, r.stderr
+    dump = env.envdump()
+    assert "FAKE_DIR" in dump  # the fakes did record their environments
+    assert API_KEY not in dump and "TWINGATE_API_KEY" not in dump
+    assert "FAKE-WEBHOOK-PATH" not in dump and "NOTIFY_WEBHOOK_URL" not in dump
+    assert API_KEY in env.curl_stdin()  # still delivered, only on curl's stdin
+
+
+def test_api_key_is_not_exported_in_a_dry_run(env):
+    curl_out(env, [node(), node("connector-b")])
+    env.run("--dry-run", NAME, **API)
+    assert API_KEY not in env.envdump() and "TWINGATE_API_KEY" not in env.envdump()
+
+
+# finding 9: post-check matches the exact Connector and an exact version
+
+def postcheck(env, nodes_or_raw):
+    curl_out(env, [node(), node("connector-b")], n=1)
+    if isinstance(nodes_or_raw, str):
+        (env.d / "curl.out").write_text(nodes_or_raw)
+    else:
+        curl_out(env, nodes_or_raw)
+    return env.run("--yes", NAME, **API)
+
+
+def test_postcheck_rejects_a_different_connector_with_the_same_name(env):
+    r = postcheck(env, [node(nid="some-other-id"), node("connector-b")])
+    assert r.returncode == 4 and "result=updated-unconfirmed" in r.stdout
+
+
+def test_postcheck_rejects_a_substring_version(env):
+    r = postcheck(env, [node(version="11.96.0"), node("connector-b")])
+    assert r.returncode == 4 and "result=updated-unconfirmed" in r.stdout
+
+
+def test_postcheck_rejects_an_answer_with_graphql_errors(env):
+    good = json.loads(gql([node(), node("connector-b")]))
+    good["errors"] = [{"message": "partial"}]
+    r = postcheck(env, json.dumps(good))
+    assert r.returncode == 4 and "result=updated-unconfirmed" in r.stdout
+
+
+def test_postcheck_rejects_a_network_change(env):
+    r = postcheck(env, [node(rn="other-net"), node("connector-b")])
+    assert r.returncode == 4
+
+
+def test_postcheck_accepts_the_same_connector_with_a_prefixed_exact_version(env):
+    r = postcheck(env, [node(version="Connector 1.96.0"), node("connector-b")])
+    assert r.returncode == 0 and "result=updated\n" in r.stdout
+
+
+# finding 10: API responses are size bounded
+
+def test_oversized_api_response_is_refused(env):
+    big = json.loads(gql([node(), node("connector-b")]))
+    big["pad"] = "x" * 2_000_000
+    (env.d / "curl.out").write_text(json.dumps(big))
+    r = env.run("--dry-run", NAME, **API)
+    assert "could not read Connector state" in r.stdout
+
+
+def test_api_response_just_under_the_bound_is_read(env):
+    ok = json.loads(gql([node(), node("connector-b")]))
+    ok["pad"] = "x" * 900_000
+    (env.d / "curl.out").write_text(json.dumps(ok))
+    r = env.run("--dry-run", NAME, **API)
+    assert "1 other Connector(s) ALIVE" in r.stdout
+
+
+def test_empty_api_answer_is_not_trusted(env):
+    (env.d / "curl.out").write_text("")
+    r = env.run("--dry-run", NAME, **API)
+    assert "could not read Connector state" in r.stdout
 
 
 # --- static checks -----------------------------------------------------------
