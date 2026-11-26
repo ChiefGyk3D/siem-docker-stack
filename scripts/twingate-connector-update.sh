@@ -17,8 +17,9 @@
 # back) INT, TERM, HUP, PIPE and QUIT are ignored so a signal cannot leave the
 # Connector gone. SIGKILL cannot be handled by any program.
 # PATH is fixed to the system directories; the inherited PATH is not used.
-# One run at a time per host (one host-wide lock dir under /run/lock, the same
-# for every user and every environment). Tokens and the lock never use the
+# One run at a time per host (one host-wide lock dir directly under /run, which
+# only root can write, so no other user can pre-create or squat it; real runs
+# need root, --dry-run does not). Tokens and the lock never use the
 # inherited TMPDIR or XDG_RUNTIME_DIR. TWINGATE_API_KEY and NOTIFY_WEBHOOK_URL
 # are copied into unexported shell variables and unset at once, so no child
 # process (docker, jq) inherits them.
@@ -50,8 +51,11 @@ unset TWINGATE_API_KEY
 NOTIFY_URL="${NOTIFY_WEBHOOK_URL:-}"
 unset NOTIFY_WEBHOOK_URL
 # Fixed, trusted locations. Never taken from the environment.
-LOCK_BASE="/run/lock"
-RUN_BASE="/run/user/$(id -u)"; [ "$(id -u)" != 0 ] || RUN_BASE="/run"
+# /run is writable by root only, so only root can create, pre-create or hold
+# the lock and the private runtime dir. Real runs need root (TRUSTED_UID).
+TRUSTED_UID=0
+LOCK_BASE="/run"
+RUN_BASE="/run"
 
 IMAGE_TAG="twingate/connector:1"
 ROLLBACK_TAG="twingate/connector:rollback-$$"
@@ -149,7 +153,7 @@ finish() {
     return "$2"
 }
 
-owned() { [ -n "$(find "$1" -maxdepth 0 -user "$(id -u)" 2>/dev/null)" ]; }
+owned() { [ -n "$(find "$1" -maxdepth 0 -user "$TRUSTED_UID" 2>/dev/null)" ]; }
 die() { say "refused: $1" >&2; exit 2; }
 warn() { say "WARNING: $*"; PRECHECK_WARN=1; }
 
@@ -183,17 +187,19 @@ command -v jq >/dev/null 2>&1 || die "jq not found"
 # Both live under fixed locations (LOCK_BASE, RUN_BASE); the environment
 # (TMPDIR, XDG_RUNTIME_DIR) is never consulted.
 if [ "$DRY" != 1 ]; then
-    private() { [ -d "$1" ] && [ ! -L "$1" ] && [ -n "$(find "$1" -maxdepth 0 -user "$(id -u)" -perm 700 2>/dev/null)" ]; }
-    [ -d "$RUN_BASE" ] && [ ! -L "$RUN_BASE" ] || die "no trusted runtime dir ($RUN_BASE); run it as root"
-    [ -d "$LOCK_BASE" ] && [ ! -L "$LOCK_BASE" ] || die "no host-wide lock dir ($LOCK_BASE); refusing to run without a lock"
+    [ "$(id -u)" = "$TRUSTED_UID" ] || die "a real run needs root (use sudo); --dry-run works without it"
+    private() { [ -d "$1" ] && [ ! -L "$1" ] && [ -n "$(find "$1" -maxdepth 0 -user "$TRUSTED_UID" -perm 700 2>/dev/null)" ]; }
+    [ -d "$RUN_BASE" ] && [ ! -L "$RUN_BASE" ] || die "no trusted runtime dir"
+    [ -d "$LOCK_BASE" ] && [ ! -L "$LOCK_BASE" ] || die "no host-wide lock dir; refusing to run without a lock"
     RUNDIR="$RUN_BASE/twingate-connector-update"
     LOCKD="$LOCK_BASE/twingate-connector-update.lock.d"
     if ! mkdir "$LOCKD" 2>/dev/null; then
-        [ -d "$LOCKD" ] && [ ! -L "$LOCKD" ] || die "cannot take the host-wide lock ($LOCKD)"
+        # An existing lock path not owned by root is hostile: never read, use or
+        # remove it, and the message names nothing taken from it.
+        { [ -d "$LOCKD" ] && [ ! -L "$LOCKD" ] && owned "$LOCKD"; } || die "the lock path is not a root-owned directory; refusing to use it"
         holder=$(cat "$LOCKD/pid" 2>/dev/null) || holder=""
         case "$holder" in ''|*[!0-9]*) die "another run holds the lock and its pid is unreadable ($LOCKD); if no run is active, remove that directory" ;; esac
         if kill -0 "$holder" 2>/dev/null; then die "another run is in progress (pid $holder)"; fi
-        owned "$LOCKD" || die "the stale lock $LOCKD is not owned by you; remove it by hand"
         say "removing a stale lock left by pid $holder"
         rm -f "$LOCKD/pid"
         rmdir "$LOCKD" 2>/dev/null

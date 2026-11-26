@@ -2,9 +2,12 @@
 
 The script runs against a FAKE `docker` (and a fake `curl`). The shipped script
 has no test seam: the harness writes a TEST-ONLY COPY of it in which exactly
-three fixed lines (PATH, LOCK_BASE, RUN_BASE) are rewritten to point at the
+four fixed lines (PATH, LOCK_BASE, RUN_BASE, TRUSTED_UID) are rewritten to point at the
 fakes and at scratch dirs. Both fakes record their arguments and never touch a
 real engine, network or Twingate account. Tokens below are placeholders.
+(A fourth line, TRUSTED_UID=0, is rewritten to the test user's uid because the
+tests do not run as root; a fake `find` reports chosen paths as owned by
+someone else to model an attacker-owned path.)
 """
 import json
 import os
@@ -100,13 +103,23 @@ else printf '{}'; fi
 
 IMAGE_ENV = ["PATH=/usr/bin", "LANG=C.UTF-8"]
 
+# Fake `find`: a path listed in $FAKE_DIR/foreign is reported as owned by another user.
+FAKE_FIND = r'''#!/bin/sh
+for a in "$@"; do
+  case "$a" in
+    /*) if [ -f "$FAKE_DIR/foreign" ] && grep -qxF "$a" "$FAKE_DIR/foreign"; then exit 0; fi ;;
+  esac
+done
+exec /usr/bin/find "$@"
+'''
+
 PATH_LINE = 'PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"'
 
 
 def make_test_copy(dest, bin_dir, lock_base, run_base):
     """Write a test-only copy of the script with three fixed lines rewritten."""
     lines = SCRIPT.read_text().splitlines(keepends=True)
-    out, hits = [], {"path": 0, "lock": 0, "run": 0}
+    out, hits = [], {"path": 0, "lock": 0, "run": 0, "uid": 0}
     for line in lines:
         if line.rstrip("\n") == PATH_LINE:
             line = f'PATH="{bin_dir}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n'
@@ -117,8 +130,11 @@ def make_test_copy(dest, bin_dir, lock_base, run_base):
         elif line.startswith("RUN_BASE="):
             line = f'RUN_BASE="{run_base}"\n'
             hits["run"] += 1
+        elif line.rstrip("\n") == "TRUSTED_UID=0":
+            line = f"TRUSTED_UID={os.getuid()}\n"
+            hits["uid"] += 1
         out.append(line)
-    assert hits == {"path": 1, "lock": 1, "run": 1}, hits
+    assert hits == {"path": 1, "lock": 1, "run": 1, "uid": 1}, hits
     dest.write_text("".join(out))
     return dest
 
@@ -169,7 +185,7 @@ class Env:
         for p in (self.d, self.bin, self.tmp, self.run_dir, self.lock_base, self.hostile):
             p.mkdir()
         self.script = make_test_copy(tmp_path / "script-under-test.sh", self.bin, self.lock_base, self.run_dir)
-        for n, body in (("docker", FAKE_DOCKER), ("curl", FAKE_CURL)):
+        for n, body in (("docker", FAKE_DOCKER), ("curl", FAKE_CURL), ("find", FAKE_FIND)):
             f = self.bin / n
             f.write_text(body)
             f.chmod(0o755)
@@ -299,11 +315,11 @@ def test_no_bin_dir_seam_is_honored_by_the_shipped_script(env):
     assert "TWINGATE_UPDATE_BIN_DIR" not in SCRIPT.read_text()
 
 
-def test_test_copy_differs_from_the_shipped_script_in_three_lines_only(env):
+def test_test_copy_differs_from_the_shipped_script_in_four_lines_only(env):
     a = SCRIPT.read_text().splitlines()
     b = env.script.read_text().splitlines()
     assert len(a) == len(b)
-    assert len([1 for x, y in zip(a, b) if x != y]) == 3
+    assert len([1 for x, y in zip(a, b) if x != y]) == 4
 
 
 # --- finding 5: layout allowlist ----------------------------------------------
@@ -1080,6 +1096,79 @@ def test_the_lock_is_host_wide_not_per_environment(env):
         finish_run(env, p)
     assert p.returncode == 0
     assert env.leftovers() == []
+
+
+LOCK_NAME = "twingate-connector-update.lock.d"
+
+
+def test_non_root_real_run_is_refused_with_a_clear_message(env):
+    # make the copy believe root (uid 0) is the trusted user; we are not root
+    t = env.script.read_text().replace(f"TRUSTED_UID={os.getuid()}", "TRUSTED_UID=0")
+    env.script.write_text(t)
+    if os.getuid() == 0:
+        pytest.skip("needs a non-root test user")
+    r = env.run("--yes", NAME)
+    assert r.returncode == 2 and "needs root" in r.stderr and changed(env) == []
+    r = env.run("--dry-run", NAME)
+    assert r.returncode == 0
+
+
+def test_attacker_owned_lock_path_is_not_used_and_gives_a_fixed_message(env):
+    lock = env.lock_base / LOCK_NAME
+    lock.mkdir()
+    (lock / "pid").write_text("ATTACKER-CONTROLLED-TEXT\n")
+    (env.d / "foreign").write_text(f"{lock}\n")
+    r = env.run("--yes", NAME)
+    assert r.returncode == 2 and "not a root-owned directory" in r.stderr
+    assert "ATTACKER-CONTROLLED-TEXT" not in r.stdout + r.stderr
+    assert changed(env) == []
+    assert (lock / "pid").read_text() == "ATTACKER-CONTROLLED-TEXT\n"  # untouched, not taken over
+
+
+def test_attacker_owned_lock_with_a_dead_pid_is_not_taken_over(env):
+    dead = subprocess.Popen(["sh", "-c", "exit 0"])
+    dead.wait()
+    lock = env.lock_base / LOCK_NAME
+    lock.mkdir()
+    (lock / "pid").write_text(f"{dead.pid}\n")
+    (env.d / "foreign").write_text(f"{lock}\n")
+    r = env.run("--yes", NAME)
+    assert r.returncode == 2 and "stale lock" not in r.stdout
+    assert changed(env) == [] and lock.is_dir()
+
+
+def test_attacker_symlink_at_the_lock_path_is_refused(env):
+    target = env.root / "elsewhere-lock"
+    target.mkdir()
+    (env.lock_base / LOCK_NAME).symlink_to(target)
+    r = env.run("--yes", NAME)
+    assert r.returncode == 2 and changed(env) == []
+    assert list(target.iterdir()) == []
+
+
+def test_root_owned_stale_lock_from_a_dead_pid_is_cleared(env):
+    dead = subprocess.Popen(["sh", "-c", "exit 0"])
+    dead.wait()
+    lock = env.lock_base / LOCK_NAME
+    lock.mkdir()
+    (lock / "pid").write_text(f"{dead.pid}\n")
+    r = env.run("--yes", NAME)
+    assert r.returncode == 0 and "stale lock" in r.stdout
+    assert env.leftovers() == []
+
+
+def test_a_live_holder_blocks(env):
+    live = subprocess.Popen(["sleep", "30"])
+    try:
+        lock = env.lock_base / LOCK_NAME
+        lock.mkdir()
+        (lock / "pid").write_text(f"{live.pid}\n")
+        r = env.run("--yes", NAME)
+        assert r.returncode == 2 and f"in progress (pid {live.pid})" in r.stderr
+        assert changed(env) == []
+    finally:
+        live.kill()
+        live.wait()
 
 
 def test_missing_lock_base_refuses(env):
