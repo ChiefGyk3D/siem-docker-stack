@@ -35,7 +35,16 @@ fail() {
 command -v pfSense-upgrade >/dev/null 2>&1 || fail "pfSense-upgrade not found"
 command -v pkg-static >/dev/null 2>&1 || fail "pkg-static not found"
 
-check_out=$(pfSense-upgrade -c 2>&1) || fail "pfSense-upgrade -c failed"
+# Exit 0 and exit 2 are the only understood exit codes. `pfSense-upgrade -c`
+# exits 2 when an update is pending (seen on a live firewall); any other code
+# (1, 3 and above) is a failure. Exit 2 additionally needs a recognized update
+# line below, or it fails closed.
+up_rc=0
+check_out=$(pfSense-upgrade -c 2>&1) || up_rc=$?
+case "$up_rc" in
+    0 | 2) ;;
+    *) fail "pfSense-upgrade -c failed" ;;
+esac
 pending=$(pkg-static version -qRl '<' 2>/dev/null) || fail "pkg-static version failed"
 
 core=0
@@ -61,7 +70,9 @@ esac
 
 # Every non-blank line must be a complete, known form (lowercased, trailing
 # punctuation removed): "your system is up to date" is healthy; "version X is
-# available" and "a new version ... is available" mean an update is pending.
+# available", "X version of pfSense is available" and "a new version ... is
+# available" mean an update is pending. ">>> ...done." progress lines are
+# ignored.
 # A mix of the two, or any other line, is an unknown result.
 healthy=0
 pending_core=0
@@ -72,6 +83,10 @@ while IFS= read -r l; do
     [ -n "$l" ] || continue
     case "$l" in
         "your system is up to date") healthy=1 ;;
+        ">>> "*"...done") ;;
+        [0-9]*" version of pfsense is available"*)
+            pending_core=1
+            case "$l" in *security*) security=true ;; esac ;;
         "version "*" is available"* | "a new version "*" is available"* | "new version available"*)
             pending_core=1
             case "$l" in *security*) security=true ;; esac ;;
@@ -80,6 +95,9 @@ while IFS= read -r l; do
 done <<EOF
 $lc
 EOF
+if [ "$up_rc" -eq 2 ] && [ "$pending_core" -eq 0 ]; then
+    fail "pfSense-upgrade exit 2 without a recognized update line"
+fi
 if [ "$healthy" -eq 1 ] && [ "$pending_core" -eq 1 ]; then
     fail "pfSense-upgrade output mixes healthy and update text"
 fi
