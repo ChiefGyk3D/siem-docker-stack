@@ -259,7 +259,7 @@ check failing or stale" apply to every mode.
 |-------|------------------|
 | `update_alert` | `true` marks an update-alerting rule: it matches the notification policy route with the 84h and 24h repeats, and its title belongs in `ALLOWED_ALERTNAMES` |
 | `severity` | `warning` or `critical`: the repeat interval, and the Pushover priority (1, or 2 for an allowlisted name with an urgent label) |
-| `phone` | `true` is the only way an alert reaches Pushover; any other value or no label keeps it off the phone (Discord is unaffected). Every update-pending rule for critical infrastructure (UniFi, pfSense, Twingate) sets `phone=true`, except the UniFi 24h warning, which is `phone=false` (Discord and Matrix only) so a UniFi update pages the phone only after 7 days pending; the poller-stale watchdog is also `phone=false` |
+| `phone` | `true` is the only way an alert reaches Pushover; any other value or no label keeps it off the phone (Discord is unaffected). The exact value per rule is in the table under "Update rule matrix" below; four rules are `phone=false`: the UniFi 24h warning, the pfSense 24h warning, the Twingate operator-managed rule and the UniFi poller-stale watchdog |
 | `alert_group` | Grouping and display (`updates` for these rules); no routing effect |
 | `update_security` | `true` marks a security release: emergency priority for allowlisted names |
 
@@ -277,7 +277,26 @@ policies), or copy it to `update-notification-policy.yml` if you have no
 tree yet. Repeat intervals: 84h for warning, 24h for critical (owner decision, issue #53: a fresh critical page daily, not hourly). Owner decision (issue
 #199): update alerts for critical infrastructure reach the phone and repeat at
 least twice a week until the update is applied, so no repeat interval may be
-longer than 84h. This supersedes the earlier P2 and `phone=false` ruling (#152). Refinement (owner, 2026-11-26, "wait 7 days first"): a UniFi pending update does not page the phone until it has been pending 7 days, so auto-patching devices usually finish first. The UniFi 24h warning is `phone=false`; the 7-day critical rule and the pfSense rules stay `phone=true`. Twingate (owner, 2026-11-26): critical infrastructure pages at least twice a week until updated, so the 7-day warning is `phone=true` (84h repeats), the 14-day critical pages daily, and only the operator-managed rule is `phone=false`.
+longer than 84h. This supersedes the earlier P2 and `phone=false` ruling (#152). Refinement (owner, 2026-11-26, "wait 7 days first"): a UniFi pending update does not page the phone until it has been pending 7 days, so auto-patching devices usually finish first. The UniFi 24h warning is `phone=false`; the UniFi 7-day critical rule stays `phone=true`. The pfSense 24h warning is also `phone=false` (P2, owner decision 2026-11-20, #152); the other pfSense rules are `phone=true`. Twingate (owner, 2026-11-26): critical infrastructure pages at least twice a week until updated, so the 7-day warning is `phone=true` (84h repeats), the 14-day critical pages daily, and only the operator-managed rule is `phone=false`.
+
+### Update rule matrix
+
+Every update rule as shipped in `docker/grafana/provisioning/alerting/update-alert-rules-*.yml`. The repeat interval comes from the notification policy by severity (84h for `warning`, 24h for `critical`), not from the rule. `tests/python/test_update_alerting.py` pins the `phone` column.
+
+| Rule uid | Severity | `for` | `phone` | Repeat |
+|----------|----------|-------|---------|--------|
+| `update-pfsense-pending-24h` | warning | 24h | false | 84h |
+| `update-pfsense-pending-7d` | critical | 168h | true | 24h |
+| `update-pfsense-security-pending` | critical | 10m | true | 24h |
+| `update-pfsense-check-failing` | critical | 10m | true | 24h |
+| `update-unifi-pending-24h` | warning | 0s (age in the query) | false | 84h |
+| `update-unifi-pending-7d` | critical | 0s (age in the query) | true | 24h |
+| `update-unifi-poller-stale` | warning | 5m | false | 84h |
+| `update-twingate-pending-7d` | warning | 0s (age in the query) | true | 84h |
+| `update-twingate-pending-14d` | critical | 0s (age in the query) | true | 24h |
+| `update-twingate-operator-behind` | warning | 0s (age in the query) | false | 84h |
+| `update-twingate-check-failing` | critical | 10m | true | 24h |
+| `update-twingate-connector-down` | critical | 15m | true | 24h |
 
 ## Webhook authentication
 
