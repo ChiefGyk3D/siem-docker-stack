@@ -37,7 +37,7 @@ missing simply scrapes nothing (Prometheus logs a harmless read error).
 
 | File | Job | Exporter / port |
 |------|-----|-----------------|
-| `node.json` | `node` | node_exporter on the SIEM host (:9100) |
+| `node.json` | `node` | node-exporter service (compose profile `node-exporter`) on the SIEM host (:9100) |
 | `twingate-ztna.json` | `twingate-ztna` | node_exporter on Twingate connectors (:9100) |
 | `unifi-controller.json` | `unifi-controller` | node_exporter on the UniFi controller (:9100) |
 | `Cryptocurrency.json` | `Cryptocurrency` | node_exporter (:9100) |
