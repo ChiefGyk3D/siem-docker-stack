@@ -27,6 +27,7 @@ query Prometheus and route through the n8n router.
 | Job | Host down | Disk over 85% |
 |-----|-----------|---------------|
 | `twingate-ztna`, `unifi-controller` (critical infrastructure) | `Infrastructure host down (critical)`: P1, critical, `phone=true`, 5m, no data = Alerting | `Infrastructure disk almost full (critical)`: P1, critical, `phone=true`, 5m, no data = Alerting. Ships paused |
+| `node` (the SIEM host, optional node_exporter) | none, see below | `Infrastructure disk almost full (critical)` (same rule, same phone behavior). Ships paused |
 | `Security`, `AI`, `Cryptocurrency` | `Infrastructure host down (warning)`: P2, warning, no phone, 5m, no data = Alerting | `Infrastructure disk almost full (warning)`: P2, warning, no phone, 5m, no data = OK |
 | `grafana`, `prometheus` | `Infrastructure host down (warning)` (same rule) | none (they are not node exporters) |
 | `Computers` | none | none |
@@ -60,17 +61,24 @@ has uid `PBFA97CFB590B2093`. Before enabling, check that a data source with uid
 only `PBFA97...`, change `datasourceUid` and the `uid` in query A of the four
 rules to it, nothing else.
 
-## The SIEM host itself is unmonitored
+## The SIEM host (job `node`)
 
-The SIEM host has no node_exporter, so no host-down or disk metric exists for it.
-These rules cannot see it. The owner must deploy a node_exporter on the SIEM host
-and add a scrape job, then decide its tier (it is critical infrastructure in
-practice). Nothing is deployed by this change.
+The optional node_exporter service (`docs/node-exporter.md`) gives the SIEM host a
+Prometheus job named `node`. It is in the critical disk rule only, with the same
+phone behavior as `twingate-ztna` and `unifi-controller`, because this host runs
+the alert engine and a full disk takes alerting down with it. The rule ships
+paused like the rest of the critical disk rule.
+
+It is deliberately NOT in either host-down rule. A Grafana rule cannot report its
+own host down while Grafana is dead: if the SIEM host dies, so does the rule that
+would say so. The external heartbeat observer (`docs/heartbeat.md`) is the signal
+for that case. Without the node_exporter the `node` job has no data, and the
+critical disk rule alerts on no data once unpaused, so deploy it first.
 
 ## Before enabling the critical disk rule
 
 The disk rules need `node_filesystem_size_bytes{job="twingate-ztna"}` and the
-same for `unifi-controller`. Check in Prometheus: `count by (job) (node_filesystem_size_bytes)`.
+same for `unifi-controller` and `node`. Check in Prometheus: `count by (job) (node_filesystem_size_bytes)`.
 If the critical jobs show up, set `isPaused: false` on `infra-disk-critical`. If
 they do not, those jobs are not node exporters: deploy node exporters on them
 first. Unpausing without the metric would page the phone at once, because no data
