@@ -120,7 +120,9 @@ EOL
     [ -n "$name$op$extra" ] || continue
     [ -n "$name" ] && [ -n "$op" ] && [ -z "$extra" ] || fail "unexpected pkg output field count"
     [ "$op" = "<" ] || fail "unexpected pkg output operator"
+    [ "${#name}" -le 128 ] || fail "package name too long"
     case "$name" in
+        -*) fail "package name starts with a hyphen" ;;
         *[!A-Za-z0-9._+,-]*) fail "unexpected characters in package name" ;;
         *-[0-9]*) ;;
         *) fail "unexpected package name shape" ;;

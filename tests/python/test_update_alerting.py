@@ -753,6 +753,14 @@ def test_pkg_classification(tmp_path, line, kind):
     "pfSense;touch-1.0   <\n",
     "pfSense-1.0`id`   <\n",
     "pfSense-1.0|x   <\n",
+    "pfSense-1.0$HOME   <\n",              # no spaces: only the $ guard can catch it
+    "pfSense-$(id)-1.0   <\n",
+    "pfSense-1.0;id   <\n",
+    "pfSense-1.0`   <\n",                  # lone backtick, no spaces in name
+    "-pfSense-1.0   <\n",                  # leading hyphen (option-like)
+    "--version-1.0   <\n",
+    "-n-1.0   <\n",
+    "a-1" + "0" * 126 + "   <\n",           # 129 chars: over the cap
     "*   <\n",
     "pfSense-*   <\n",
     "nginx   <\n",                          # no hyphen-digit version
@@ -765,6 +773,14 @@ def test_pkg_malformed_lines_fail_closed(tmp_path, pkg_out):
     r, _ = _run(tmp_path, "Your system is up to date", pkg_out)
     _assert_failure(r)
     assert not (tmp_path / "y").exists()
+
+
+def test_pkg_name_at_length_cap_passes(tmp_path):
+    name = "pfSense-1" + "0" * (128 - len("pfSense-1"))
+    assert len(name) == 128
+    r, _ = _run(tmp_path, "Your system is up to date", name + "   <\n")
+    assert r.returncode == 0
+    assert _metrics(r.stdout)[("core", "false")] == 1
 
 
 def test_docs_exist_and_cover_required_topics():
