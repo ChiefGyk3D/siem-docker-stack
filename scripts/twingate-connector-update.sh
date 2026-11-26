@@ -106,7 +106,7 @@ if [ "${TWINGATE_UPDATE_CLEAN_ENV:-}" != "1" ]; then
     # Read the script text ONCE and run the clean second stage from that text,
     # so the path is never opened a second time.
     SCRIPT_TEXT=$(cat -- "$SELF" 2>/dev/null) || early_die "cannot read this script"
-    [ -n "$SCRIPT_TEXT" ] && [ "$(printf '%s' "$SCRIPT_TEXT" | wc -c)" -lt 100000 ] || early_die "this script is empty or too large to restart"
+    if ! { [ -n "$SCRIPT_TEXT" ] && [ "$(printf '%s' "$SCRIPT_TEXT" | wc -c)" -lt 100000 ]; }; then early_die "this script is empty or too large to restart"; fi
     for v in "${TWINGATE_API_KEY:-}" "${TWINGATE_NETWORK_URL:-}" "${TWINGATE_UPDATE_WAIT_SECS:-}" \
         "${TWINGATE_UPDATE_POLL_SECS:-}" "${NOTIFY_WEBHOOK_URL:-}" "${NOTIFY_WEBHOOK_ALLOWED_HOSTS:-}" "${HOST_LABEL:-}"; do
         case "$v" in *"$NL"*) early_die "an input variable contains a newline" ;; esac
@@ -196,7 +196,7 @@ step() { if [ "$DRY" = 1 ]; then printf 'DRY-RUN would: %s\n' "$*"; else printf 
 # pass only a directory they created or have just proven root-owned and not a link.
 secure_rmdir() {
     for f in "$1"/*; do
-        [ -f "$f" ] && [ ! -L "$f" ] || continue
+        if ! { [ -f "$f" ] && [ ! -L "$f" ]; }; then continue; fi
         if command -v shred >/dev/null 2>&1; then shred -u "$f" >/dev/null 2>&1 || rm -f "$f"; else rm -f "$f"; fi
     done
     rm -rf "$1"
@@ -362,8 +362,8 @@ holder_live() {
 if [ "$DRY" != 1 ]; then
     [ "$(id -u)" = "$TRUSTED_UID" ] || die "a real run needs root (use sudo); --dry-run works without it"
     private() { [ -d "$1" ] && [ ! -L "$1" ] && [ -n "$(find "$1" -maxdepth 0 -user "$TRUSTED_UID" -perm 700 2>/dev/null)" ]; }
-    [ -d "$RUN_BASE" ] && [ ! -L "$RUN_BASE" ] || die "no trusted runtime dir"
-    [ -d "$LOCK_BASE" ] && [ ! -L "$LOCK_BASE" ] || die "no host-wide lock dir; refusing to run without a lock"
+    if ! { [ -d "$RUN_BASE" ] && [ ! -L "$RUN_BASE" ]; }; then die "no trusted runtime dir"; fi
+    if ! { [ -d "$LOCK_BASE" ] && [ ! -L "$LOCK_BASE" ]; }; then die "no host-wide lock dir; refusing to run without a lock"; fi
     LOCKD="$LOCK_BASE/twingate-connector-update.lock.d"
     if ! mkdir "$LOCKD" 2>/dev/null; then
         # An existing lock path not owned by root is hostile: never read, use or
