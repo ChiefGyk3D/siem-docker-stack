@@ -12,6 +12,7 @@ someone else to model an attacker-owned path.)
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import stat
@@ -28,10 +29,12 @@ OLD_ID = "sha256:" + "a" * 64
 NEW_ID = "sha256:" + "b" * 64
 SECRET = "FAKE-SECRET-TOKEN-not-real-9f8e7d"
 WEBHOOK = "https://hooks.example.invalid/notify/FAKE-WEBHOOK-PATH-123"
+HOOK = {"NOTIFY_WEBHOOK_URL": WEBHOOK, "NOTIFY_WEBHOOK_ALLOWED_HOSTS": "hooks.example.invalid"}
 API_KEY = "FAKE-API-KEY-not-real-4455"
 
 FAKE_DOCKER = r'''#!/bin/sh
-D="$FAKE_DIR"
+D="$(cd "$(dirname "$0")/.." && pwd)/fake"
+[ ! -f "$D/fakeenv" ] || . "$D/fakeenv"
 echo "$*" >>"$D/log"
 env >>"$D/envdump"
 hold() { touch "$D/$1"; i=0; while [ ! -f "$D/go" ] && [ "$i" -lt 300 ]; do sleep 0.1; i=$((i+1)); done; }
@@ -73,6 +76,7 @@ case "$1" in
     done
     stat -c '%a %n' "$(dirname "$envf")" "$envf" >>"$D/stat"
     cp "$envf" "$D/env_seen_$n"
+    python3 -I "$(dirname "$0")/envparse.py" "$envf" >"$D/env_parsed_$n"
     case "$last" in
       twingate/connector:1)
         [ ! -f "$D/hold" ] || hold in_run
@@ -89,28 +93,62 @@ exit 0
 '''
 
 FAKE_CURL = r'''#!/bin/sh
-D="$FAKE_DIR"
+D="$(cd "$(dirname "$0")/.." && pwd)/fake"
+[ ! -f "$D/fakeenv" ] || . "$D/fakeenv"
 echo "$*" >>"$D/curl.argv"
 env >>"$D/envdump"
 cat >>"$D/curl.stdin"
 printf '\n---\n' >>"$D/curl.stdin"
 n=$(wc -l <"$D/curl.argv")
 [ -z "$FAKE_CURL_FAIL" ] || exit 7
-if [ -f "$D/curl.out.$n" ]; then cat "$D/curl.out.$n"
-elif [ -f "$D/curl.out" ]; then cat "$D/curl.out"
-else printf '{}'; fi
+out=""; prev=""
+for a in "$@"; do
+  [ "$prev" = "-o" ] && out="$a"
+  prev="$a"
+done
+emit() {
+  if [ -f "$D/curl.out.$n" ]; then cat "$D/curl.out.$n"
+  elif [ -f "$D/curl.out" ]; then cat "$D/curl.out"
+  else printf '{}'; fi
+}
+if [ -n "$out" ]; then emit >"$out"; else emit; fi
+# a complete, valid body and THEN a transfer failure
+[ -z "$FAKE_CURL_FAIL_AFTER" ] || exit 7
 '''
 
 IMAGE_ENV = ["PATH=/usr/bin", "LANG=C.UTF-8"]
 
-# Fake `find`: a path listed in $FAKE_DIR/foreign is reported as owned by another user.
+# Fake `find`: a path listed in the fake dir/foreign is reported as owned by another user.
 FAKE_FIND = r'''#!/bin/sh
+FD="$(cd "$(dirname "$0")/.." && pwd)/fake"
 for a in "$@"; do
   case "$a" in
-    /*) if [ -f "$FAKE_DIR/foreign" ] && grep -qxF "$a" "$FAKE_DIR/foreign"; then exit 0; fi ;;
+    /*) if [ -f "$FD/foreign" ] && grep -qxF "$a" "$FD/foreign"; then exit 0; fi ;;
   esac
 done
 exec /usr/bin/find "$@"
+'''
+
+# A model of how `docker run --env-file` reads a file. It is deliberately
+# conservative: it trims leading whitespace of a line, skips blank and '#' lines,
+# splits at the first '=', trims trailing whitespace of the value and strips one
+# pair of matching surrounding quotes. Docker's own grammar may differ in some of
+# these points; the script must therefore accept only values that every such
+# reading returns unchanged.
+ENV_PARSER = r'''
+import json, sys
+out = []
+for line in open(sys.argv[1], encoding="utf-8").read().split("\n"):
+    line = line.lstrip()
+    if not line or line.startswith("#"):
+        continue
+    k, sep, v = line.partition("=")
+    if sep:
+        v = v.rstrip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+            v = v[1:-1]
+    out.append(k + sep + v)
+print(json.dumps(out))
 '''
 
 PATH_LINE = 'PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"'
@@ -185,6 +223,7 @@ class Env:
         for p in (self.d, self.bin, self.tmp, self.run_dir, self.lock_base, self.hostile):
             p.mkdir()
         self.script = make_test_copy(tmp_path / "script-under-test.sh", self.bin, self.lock_base, self.run_dir)
+        (self.bin / "envparse.py").write_text(ENV_PARSER)
         for n, body in (("docker", FAKE_DOCKER), ("curl", FAKE_CURL), ("find", FAKE_FIND)):
             f = self.bin / n
             f.write_text(body)
@@ -197,13 +236,17 @@ class Env:
 
     def environ(self, **env):
         # TMPDIR and XDG_RUNTIME_DIR point at HOSTILE dirs: the script must never use them.
-        e = {"PATH": os.environ["PATH"], "FAKE_DIR": str(self.d),
+        e = {"PATH": os.environ["PATH"],
              "FAKE_SECRET": SECRET, "TMPDIR": str(self.tmp), "HOME": str(self.root),
              "XDG_RUNTIME_DIR": str(self.tmp),
              "HOST_LABEL": "host-test", "TWINGATE_UPDATE_WAIT_SECS": "2",
              "TWINGATE_UPDATE_POLL_SECS": "1"}
         e.update(env)
-        return e
+        # FAKE_* settings go to the fakes through a file, not the environment,
+        # because the script clears its environment before it runs them.
+        fake = {k: v for k, v in e.items() if k.startswith("FAKE_")}
+        (self.d / "fakeenv").write_text("".join(f"{k}={shlex.quote(v)}\n" for k, v in fake.items()))
+        return {k: v for k, v in e.items() if not k.startswith("FAKE_")}
 
     def run(self, *args, stdin="", original=False, **env):
         script = SCRIPT if original else self.script
@@ -601,7 +644,7 @@ def test_only_a_twingate_env_file_exists_during_the_window(env):
         names = sorted(f.name for f in files)
         assert "connector.env" in names
         for f in files:
-            if f.name == "pid":  # the lock
+            if f.name in ("pid", "start", "ident", "rundir"):  # the lock state
                 continue
             text = f.read_text()
             assert "HostConfig" not in text and "{" not in text, f.name
@@ -762,7 +805,7 @@ def test_unknown_version_needs_yes(env):
 # --- webhook notice ----------------------------------------------------------
 
 def test_webhook_notice(env):
-    r = env.run("--yes", NAME, NOTIFY_WEBHOOK_URL=WEBHOOK)
+    r = env.run("--yes", NAME, **HOOK)
     assert r.returncode == 0 and "notice sent" in r.stdout
     assert "FAKE-WEBHOOK-PATH" not in env.curl_argv()
     assert "FAKE-WEBHOOK-PATH" not in r.stdout + r.stderr
@@ -779,12 +822,12 @@ def test_webhook_http_refused(env):
 
 
 def test_webhook_failure_never_fails_update(env):
-    r = env.run("--yes", NAME, NOTIFY_WEBHOOK_URL=WEBHOOK, FAKE_CURL_FAIL="1")
+    r = env.run("--yes", NAME, FAKE_CURL_FAIL="1", **HOOK)
     assert r.returncode == 0 and "notice failed" in r.stdout
 
 
 def test_no_webhook_in_dry_run(env):
-    env.run("--dry-run", NAME, NOTIFY_WEBHOOK_URL=WEBHOOK)
+    env.run("--dry-run", NAME, **HOOK)
     assert env.curl_argv() == ""
 
 
@@ -906,9 +949,15 @@ def test_network_url_good_forms(env, url):
 
 
 def test_api_key_with_odd_characters_is_refused(env):
-    r = env.run("--dry-run", NAME, TWINGATE_API_KEY='k"\nheader = "X: y',
+    r = env.run("--dry-run", NAME, TWINGATE_API_KEY='k"; header = "X: y',
                 TWINGATE_NETWORK_URL="example-net.twingate.com")
     assert "pre-check skipped" in r.stdout and env.curl_argv() == ""
+
+
+def test_an_input_with_a_newline_is_refused_before_anything_runs(env):
+    r = env.run("--dry-run", NAME, TWINGATE_API_KEY='k"\nheader = "X: y',
+                TWINGATE_NETWORK_URL="example-net.twingate.com")
+    assert r.returncode == 2 and env.curl_argv() == "" and env.log() == []
 
 
 # --- finding 9: health in Twingate ---------------------------------------------
@@ -1020,7 +1069,7 @@ def curl_lines(env):
 
 def test_every_curl_call_ignores_curlrc_redirects_and_proxies(env):
     curl_out(env, [node(), node("connector-b")])
-    r = env.run("--yes", NAME, NOTIFY_WEBHOOK_URL=WEBHOOK, **API)
+    r = env.run("--yes", NAME, **HOOK, **API)
     assert r.returncode == 0, r.stderr
     lines = curl_lines(env)
     assert len(lines) >= 3  # pre-check, post-check, notice
@@ -1157,20 +1206,6 @@ def test_root_owned_stale_lock_from_a_dead_pid_is_cleared(env):
     assert env.leftovers() == []
 
 
-def test_a_live_holder_blocks(env):
-    live = subprocess.Popen(["sleep", "30"])
-    try:
-        lock = env.lock_base / LOCK_NAME
-        lock.mkdir()
-        (lock / "pid").write_text(f"{live.pid}\n")
-        r = env.run("--yes", NAME)
-        assert r.returncode == 2 and f"in progress (pid {live.pid})" in r.stderr
-        assert changed(env) == []
-    finally:
-        live.kill()
-        live.wait()
-
-
 def test_missing_lock_base_refuses(env):
     env.lock_base.rmdir()
     r = env.run("--yes", NAME)
@@ -1212,10 +1247,10 @@ def test_runtime_dir_symlink_is_refused(env):
 
 def test_api_key_and_webhook_url_are_not_exported_to_children(env):
     curl_out(env, [node(), node("connector-b")])
-    r = env.run("--yes", NAME, NOTIFY_WEBHOOK_URL=WEBHOOK, **API)
+    r = env.run("--yes", NAME, **HOOK, **API)
     assert r.returncode == 0, r.stderr
     dump = env.envdump()
-    assert "FAKE_DIR" in dump  # the fakes did record their environments
+    assert "PATH=" in dump  # the fakes did record their environments
     assert API_KEY not in dump and "TWINGATE_API_KEY" not in dump
     assert "FAKE-WEBHOOK-PATH" not in dump and "NOTIFY_WEBHOOK_URL" not in dump
     assert API_KEY in env.curl_stdin()  # still delivered, only on curl's stdin
@@ -1334,3 +1369,329 @@ def test_shellcheck_missing_locally_falls_back_to_syntax_check(monkeypatch):
     monkeypatch.setattr(shutil, "which", lambda name: None)
     monkeypatch.delenv("CI", raising=False)
     test_script_shellcheck_clean()
+
+
+# =============================================================================
+# Round 3 (Daybreak round 2 findings R2-1 .. R2-7)
+# =============================================================================
+
+HOSTILE_ENV = {
+    "DOCKER_HOST": "tcp://127.0.0.1:1", "DOCKER_CONTEXT": "evil", "DOCKER_CONFIG": "/nonexistent-evil",
+    "DOCKER_TLS_VERIFY": "1", "DOCKER_CERT_PATH": "/nonexistent-evil", "SSL_CERT_FILE": "/nonexistent-evil",
+    "SSL_CERT_DIR": "/nonexistent-evil", "CURL_CA_BUNDLE": "/nonexistent-evil",
+    "https_proxy": "http://127.0.0.1:1", "HTTPS_PROXY": "http://127.0.0.1:1", "ALL_PROXY": "http://127.0.0.1:1",
+    "XDG_CONFIG_HOME": "/nonexistent-evil", "XDG_DATA_HOME": "/nonexistent-evil",
+    "LD_PRELOAD": "/nonexistent-evil.so", "CURL_HOME": "/nonexistent-evil",
+}
+
+
+def dump_names(env):
+    names = set()
+    for line in env.envdump().splitlines():
+        m = re.match(r"([A-Za-z_][A-Za-z0-9_]*)=", line)
+        if m:
+            names.add(m.group(1))
+    return names
+
+
+# --- R2-1: the whole environment is cleared -------------------------------------
+
+def test_docker_and_curl_never_see_the_callers_environment(env):
+    curl_out(env, [node(), node("connector-b")])
+    r = env.run("--yes", NAME, **HOOK, **API, **HOSTILE_ENV)
+    assert r.returncode == 0, r.stderr
+    dump = env.envdump()
+    assert "PATH=" in dump  # both fakes recorded their environment
+    names = dump_names(env)
+    assert not (names & (set(HOSTILE_ENV) - {"DOCKER_HOST", "DOCKER_CONFIG"})), names & set(HOSTILE_ENV)
+    assert "tcp://127.0.0.1:1" not in dump and "nonexistent-evil" not in dump
+    assert "DOCKER_HOST=unix:///var/run/docker.sock" in dump
+    assert f"DOCKER_CONFIG={env.run_dir}/twingate-connector-update/docker-config" in dump
+    assert f"HOME={env.run_dir}/twingate-connector-update/home" in dump
+    assert "XDG_RUNTIME_DIR" not in names and "TMPDIR" not in names
+    assert env.leftovers() == []
+
+
+def test_an_environment_that_was_not_cleared_is_refused(env):
+    # a caller that claims the environment is clean while it holds more is refused
+    r = env.run("--yes", NAME, TWINGATE_UPDATE_CLEAN_ENV="1", SSL_CERT_FILE="/nonexistent-evil")
+    assert r.returncode == 2 and "not cleared" in r.stderr
+    assert env.log() == []
+
+
+def test_docker_config_and_home_dirs_are_private_and_empty_during_the_run(env):
+    (env.d / "hold").write_text("")
+    p = env.start("--yes", NAME)
+    try:
+        env.wait_for("in_run")
+        base = env.run_dir / "twingate-connector-update"
+        for d in ("docker-config", "home"):
+            assert stat.S_IMODE((base / d).stat().st_mode) == 0o700
+            assert list((base / d).iterdir()) == []
+        env.release()
+        p.communicate(timeout=40)
+    finally:
+        if p.poll() is None:
+            p.kill()
+            p.communicate()
+    assert env.leftovers() == []
+
+
+# --- R2-2: a SIGKILL leftover is removed by the next run ---------------------------
+
+def kill_hard_during_recreate(env):
+    (env.d / "hold").write_text("")
+    p = env.start("--yes", NAME)
+    env.wait_for("in_run")
+    left = list(env.run_dir.glob("twingate-connector-update/run.*/connector.env"))
+    assert len(left) == 1
+    os.kill(p.pid, signal.SIGKILL)
+    p.communicate()
+    env.release()  # let the orphaned fake docker finish
+    time.sleep(0.3)
+    (env.d / "hold").unlink()
+    (env.d / "go").unlink()
+    for f in list(env.d.glob("in_*")):
+        f.unlink()
+    return left[0]
+
+
+def test_sigkill_leftover_run_dir_is_securely_removed_by_the_next_run(env):
+    leftover = kill_hard_during_recreate(env)
+    assert leftover.exists() and SECRET in leftover.read_text()
+    r = env.run("--yes", NAME)
+    assert r.returncode == 0, r.stderr
+    assert "stale lock" in r.stdout and "private dir left by the dead run" in r.stdout
+    assert not leftover.exists() and not leftover.parent.exists()
+    assert env.leftovers() == []
+
+
+def test_a_recorded_run_dir_outside_the_runtime_dir_is_never_removed(env):
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    victim = env.root / "victim"
+    victim.mkdir()
+    (victim / "keep.txt").write_text("keep")
+    lock = env.lock_base / LOCK_NAME
+    lock.mkdir()
+    (lock / "pid").write_text(f"{dead.pid}\n")
+    (lock / "rundir").write_text(f"{victim}\n")
+    r = env.run("--yes", NAME)
+    assert r.returncode == 0, r.stderr
+    assert (victim / "keep.txt").read_text() == "keep"
+
+
+def test_a_recorded_run_dir_that_is_a_symlink_is_never_removed(env):
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    victim = env.root / "victim2"
+    victim.mkdir()
+    (victim / "keep.txt").write_text("keep")
+    base = env.run_dir / "twingate-connector-update"
+    base.mkdir(mode=0o700)
+    (base / "run.1234").symlink_to(victim)
+    lock = env.lock_base / LOCK_NAME
+    lock.mkdir()
+    (lock / "pid").write_text(f"{dead.pid}\n")
+    (lock / "rundir").write_text(f"{base}/run.1234\n")
+    r = env.run("--yes", NAME)
+    assert r.returncode == 0, r.stderr
+    assert (victim / "keep.txt").read_text() == "keep"
+
+
+# --- R2-3: env values must survive docker's env-file grammar ------------------------
+
+def parsed_env(env):
+    files = sorted(env.d.glob("env_parsed_*"))
+    assert files, "the fake docker never parsed an env file"
+    return json.loads(files[0].read_text())
+
+
+def test_env_file_round_trips_through_the_env_file_parser(env):
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.sig-_abc=="
+    envs = ["PATH=/usr/bin", "LANG=C.UTF-8", f"TWINGATE_ACCESS_TOKEN={jwt}",
+            "TWINGATE_REFRESH_TOKEN=a.b-c_d", "TWINGATE_NETWORK=example-net", "TWINGATE_LOG_LEVEL=3",
+            "TWINGATE_LABEL_HOSTNAME=host.example.invalid", "TWINGATE_EMPTY="]
+    set_inspect(env, cfg={"Env": envs})
+    r = env.run("--yes", NAME)
+    assert r.returncode == 0, r.stderr
+    assert parsed_env(env) == [e for e in envs if e.startswith("TWINGATE_")]
+
+
+HOSTILE_VALUES = [
+    '"quoted"', "'single'", "back\\slash", "dollar$HOME", "has space", "hash#tag", " leading", "trailing ",
+    "tab\there", "back`tick`", "semi;colon", "paren(x)", "\\n", "x\\", "a b ", "${X}", "~", "=",
+]
+
+
+@pytest.mark.parametrize("value", [v for v in HOSTILE_VALUES if v not in ("~", "=")],
+                         ids=lambda v: repr(v))
+def test_values_that_could_change_meaning_in_an_env_file_are_refused(env, value):
+    envs = ["PATH=/usr/bin", "LANG=C.UTF-8", f"TWINGATE_ACCESS_TOKEN={SECRET}", f"TWINGATE_NETWORK={value}"]
+    set_inspect(env, cfg={"Env": envs})
+    r = env.run("--yes", NAME)
+    assert r.returncode == 2 and "not safe for an env file" in r.stderr, r.stderr
+    assert changed(env) == []
+    assert SECRET not in r.stdout + r.stderr
+
+
+def test_the_env_file_model_does_change_hostile_values():
+    # proves the parser model bites: quoting and edge whitespace are not preserved
+    altered = set()
+    for v in HOSTILE_VALUES:
+        entry = f"TWINGATE_NETWORK={v}"
+        out = subprocess.run(["python3", "-I", "-c", ENV_PARSER.replace("sys.argv[1]", "'/dev/stdin'")],
+                             input=entry, capture_output=True, text=True).stdout
+        if json.loads(out) != [entry]:
+            altered.add(v)
+    assert {'"quoted"', "'single'", "trailing ", "a b "} <= altered
+
+
+# --- R2-4: hostname and attach fields --------------------------------------------
+
+def test_a_hostname_equal_to_the_host_name_is_refused(env):
+    import socket
+    set_inspect(env, cfg={"Hostname": socket.gethostname()})
+    r = env.run("--yes", NAME)
+    assert r.returncode == 2 and "hostname override" in r.stderr
+    assert changed(env) == []
+
+
+def test_the_container_id_default_hostname_is_accepted(env):
+    set_inspect(env, cfg={"Hostname": "abcdef123456"})
+    r = env.run("--yes", NAME)
+    assert r.returncode == 0, r.stderr
+
+
+@pytest.mark.parametrize("field", ["AttachStdin", "AttachStdout", "AttachStderr"])
+def test_attach_fields_must_match_a_detached_run(env, field):
+    set_inspect(env, cfg={field: True})
+    r = env.run("--yes", NAME)
+    assert r.returncode == 2 and "attach settings differ" in r.stderr
+    assert changed(env) == []
+
+
+# --- R2-5: curl's own exit status decides -----------------------------------------
+
+def test_precheck_ignores_a_valid_body_when_curl_fails_afterwards(env):
+    curl_out(env, [node(), node("connector-b")])
+    r = env.run("--dry-run", NAME, FAKE_CURL_FAIL_AFTER="1", **API)
+    assert "could not read Connector state" in r.stdout
+    assert "other Connector(s) ALIVE" not in r.stdout
+
+
+def test_postcheck_ignores_a_valid_body_when_curl_fails_afterwards(env):
+    curl_out(env, [node(version="1.96.0"), node("connector-b")])
+    r = env.run("--yes", "--force", NAME, FAKE_CURL_FAIL_AFTER="1", **API)
+    assert r.returncode == 4 and "result=updated-unconfirmed" in r.stdout
+    assert "Twingate confirms" not in r.stdout
+
+
+# --- R2-6: the webhook needs an explicit trusted host list --------------------------
+
+def test_no_allowlist_means_no_notice_but_the_update_succeeds(env):
+    r = env.run("--yes", NAME, NOTIFY_WEBHOOK_URL=WEBHOOK)
+    assert r.returncode == 0 and "result=updated" in r.stdout
+    assert "NOTIFY_WEBHOOK_ALLOWED_HOSTS is not set" in r.stdout
+    assert env.curl_argv() == ""
+
+
+def test_an_allowed_host_matches_case_insensitively_with_a_port(env):
+    r = env.run("--yes", NAME, NOTIFY_WEBHOOK_URL="https://Hooks.Example.Invalid:8443/x",
+                NOTIFY_WEBHOOK_ALLOWED_HOSTS="other.example.invalid, hooks.example.invalid".replace(" ", ""))
+    assert r.returncode == 0 and "notice sent" in r.stdout
+
+
+BAD_HOSTS = [
+    ("https://127.0.0.1/x", "127.0.0.1"),
+    ("https://169.254.169.254/x", "169.254.169.254"),
+    ("https://10.0.0.5:9443/admin", "10.0.0.5"),
+    ("https://2130706433/x", "2130706433"),
+    ("https://0x7f.0.0.1/x", "0x7f.0.0.1"),
+    ("https://[::1]/x", "::1"),
+    ("https://[::1]:9443/x", "[::1]"),
+    ("https://localhost/x", "localhost"),
+    ("https://a.localhost/x", "a.localhost"),
+    ("https://intranet/x", "intranet"),
+    ("https://user@hooks.example.invalid/x", "hooks.example.invalid"),
+    ("https://hooks.example.invalid:8a/x", "hooks.example.invalid"),
+    ("https://hooks.example.invalid/x", "*.example.invalid"),
+    ("https://hooks.example.invalid/x", "example.invalid"),
+    ("https://hooks.example.invalid/x", "*"),
+    ("https://evil.example.invalid/x", "hooks.example.invalid"),
+    ("https://hooks.example.invalid.evil.invalid/x", "hooks.example.invalid"),
+]
+
+
+@pytest.mark.parametrize("url,allowed", BAD_HOSTS, ids=[u for u, _ in BAD_HOSTS])
+def test_untrusted_webhook_hosts_get_no_request(env, url, allowed):
+    r = env.run("--yes", NAME, NOTIFY_WEBHOOK_URL=url, NOTIFY_WEBHOOK_ALLOWED_HOSTS=allowed)
+    assert r.returncode == 0 and "result=updated" in r.stdout
+    assert "notice skipped" in r.stdout and "notice sent" not in r.stdout
+    assert env.curl_argv() == ""
+
+
+# --- R2-7: lock identity is PID + start time + updater identity --------------------
+
+def proc_start_time(pid):
+    st = open(f"/proc/{pid}/stat").read()
+    return st.rsplit(") ", 1)[1].split(" ")[19]
+
+
+def spawn_holder(env, token="tok123"):
+    """A live process that looks like an updater: script path in argv, token in env."""
+    p = subprocess.Popen(["sh", "-c", "sleep 30; true", str(env.script)],
+                         env={"PATH": os.environ["PATH"], "TWINGATE_UPDATE_RUN_TOKEN": token})
+    for _ in range(100):  # wait for the exec
+        if str(env.script) in open(f"/proc/{p.pid}/cmdline").read():
+            break
+        time.sleep(0.02)
+    return p
+
+
+def write_lock(env, pid, start, script, token):
+    lock = env.lock_base / LOCK_NAME
+    lock.mkdir()
+    (lock / "pid").write_text(f"{pid}\n")
+    (lock / "start").write_text(f"{start}\n")
+    (lock / "ident").write_text(f"script={script}\ntoken={token}\n")
+    return lock
+
+
+def test_a_live_holder_with_matching_identity_blocks(env):
+    live = spawn_holder(env)
+    try:
+        write_lock(env, live.pid, proc_start_time(live.pid), env.script, "tok123")
+        r = env.run("--yes", NAME)
+        assert r.returncode == 2 and f"in progress (pid {live.pid})" in r.stderr
+        assert changed(env) == []
+    finally:
+        live.kill()
+        live.wait()
+
+
+def test_a_reused_pid_with_a_different_start_time_is_stale(env):
+    live = spawn_holder(env)
+    try:
+        write_lock(env, live.pid, "1", env.script, "tok123")
+        r = env.run("--yes", NAME)
+        assert r.returncode == 0 and "stale lock" in r.stdout, r.stderr
+    finally:
+        live.kill()
+        live.wait()
+
+
+@pytest.mark.parametrize("which", ["script", "token", "no-ident"])
+def test_a_live_pid_that_is_not_this_updater_is_stale(env, which):
+    live = spawn_holder(env)
+    try:
+        lock = write_lock(env, live.pid, proc_start_time(live.pid),
+                          "/not/this/script.sh" if which == "script" else env.script,
+                          "wrongtoken" if which == "token" else "tok123")
+        if which == "no-ident":
+            (lock / "ident").unlink()
+        r = env.run("--yes", NAME)
+        assert r.returncode == 0 and "stale lock" in r.stdout, r.stderr
+    finally:
+        live.kill()
+        live.wait()

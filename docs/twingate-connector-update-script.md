@@ -32,13 +32,34 @@ run can be active per host: one lock directory,
 If that path exists and is not a real directory owned by root (or is a
 symlink), the script treats it as hostile: it never reads, uses or removes it
 and stops with a fixed message that quotes nothing from it (remove the path as
-root after looking at it). A lock left by a dead root-run process is taken
-over; a live holder blocks a second run. The env file lives in a private
+root after looking at it). The lock records the process id, the
+process start time (field 22 of `/proc/<pid>/stat`) and an updater identity (this
+script's path, which must appear in the process's command line, and a random run
+token, which must appear in its environment). A holder is live only if all of
+them match; a reused process id with another start time or identity is stale.
+A lock left by a dead run is taken over, and the private run directory that the
+lock recorded (and only that one: it must sit directly under
+`/run/twingate-connector-update`, be a real directory owned by root and not a
+symlink) is shredded and removed first, so a SIGKILL cannot leave the env file
+behind past the next run. A live holder blocks a second run. The env file lives in a private
 directory `/run/twingate-connector-update` that must be a real directory (no
 symlink), owned by root, mode 700, or the run refuses.
-`TWINGATE_API_KEY` and `NOTIFY_WEBHOOK_URL` are copied into unexported shell
-variables and removed from the environment at once, so `docker` and `jq` never
+The whole environment is cleared. At start the script re-executes itself under
+`env -i` with a fixed `PATH`, `LANG=C`, `DOCKER_HOST=unix:///var/run/docker.sock`,
+a `DOCKER_CONFIG` of its own (an empty root-only directory,
+`/run/twingate-connector-update/docker-config`) and a `HOME` of its own (an empty
+root-only directory, `/run/twingate-connector-update/home`). `DOCKER_CONTEXT`,
+`DOCKER_TLS_VERIFY`, `DOCKER_CERT_PATH`, `SSL_CERT_FILE`, `SSL_CERT_DIR`,
+`CURL_CA_BUNDLE`, the proxy variables, `XDG_*` and everything else the caller had
+set never reach `docker`, `curl` or `jq`, so an environment-preserving `sudo`
+rule cannot point the script at a different daemon. Only the documented inputs
+(`TWINGATE_API_KEY`, `TWINGATE_NETWORK_URL`, `TWINGATE_UPDATE_WAIT_SECS`,
+`TWINGATE_UPDATE_POLL_SECS`, `NOTIFY_WEBHOOK_URL`, `NOTIFY_WEBHOOK_ALLOWED_HOSTS`,
+`HOST_LABEL`) are read, once, and handed to the new process on a private file
+descriptor, never in argv; none of them may contain a newline (the run is
+refused). They live in unexported shell variables, so `docker` and `jq` never
 see them; the key reaches only the single `curl` call that needs it, on stdin.
+The restarted process refuses to run if its environment holds any other name.
 `TWINGATE_UPDATE_WAIT_SECS` and `TWINGATE_UPDATE_POLL_SECS` must be plain
 integers 1 to 60 without a sign or leading zero; anything else uses the default.
 
@@ -58,15 +79,21 @@ Every other `HostConfig` field must be empty or one of Docker's own defaults
 64 MiB, `Runtime` runc, the default masked and read-only paths); anything else
 (`PidsLimit`, `OomScoreAdj`, `CpusetCpus`, `Init`, port bindings, ...) is
 refused, as is any `Config` field that differs from the image (stop signal and
-timeout, exposed ports, volumes, domain name, open stdin, a hostname that is
-neither the container id prefix nor the host's).
+timeout, exposed ports, volumes, domain name, open stdin, any `AttachStdin`,
+`AttachStdout` or `AttachStderr` other than a detached run's `false`, and any
+hostname other than the container id prefix Docker generates by default; a
+hostname equal to the host's is not accepted, because the recreate command does
+not pass `--hostname`).
    User, entrypoint, command, healthcheck, working dir and labels are compared
    with the old image's own config (`docker image inspect`), so values the
    image sets itself are fine. Every environment entry must contain `=` and no
    newline, CR or NUL; every `TWINGATE_*` entry that will be written must have a
    name of letters, digits and `_` (no whitespace), be at most 8192 bytes, and
-   appear only once, so Docker accepts the env file for the update and for the
-   rollback. Variables that are not `TWINGATE_*` must come from the image. It
+   appear only once, and its value may use only `A-Z a-z 0-9 . _ ~ : / + @ , = -`.
+   Quotes, backslashes, `$`, spaces, `#`, backticks and leading or trailing
+   whitespace are refused, because an env file can read them differently from the
+   bytes the container has now; with the allowed characters the file always gives
+   back exactly the original `Config.Env` entry. Variables that are not `TWINGATE_*` must come from the image. It
    prints why and changes nothing.
 2. The old image must exist locally (`docker image inspect <id>`); if it does
    not, it refuses, because a rollback would be impossible.
@@ -79,9 +106,12 @@ neither the container id prefix nor the host's).
    warning (including a skipped or failed check) aborts under `--yes` with exit
    3 unless `--force` is given. Without the API settings it prints a reminder.
    Every `curl` starts with `-q` (no `.curlrc`), uses `--max-redirs 0`,
-   `--noproxy '*'` and `--proto =https`, and the Admin API answer is limited to
-   1 MiB, must be HTTP success, must have no GraphQL `errors` and must carry the
-   Connector list, or the check counts as failed.
+   `--noproxy '*'` and `--proto =https`. The Admin API answer goes to a file in
+   a private directory (no pipeline, so curl's own exit status is kept): it is
+   read only if curl exited 0, it is limited to 1 MiB, must be HTTP success, must
+   have no GraphQL `errors` and must carry the Connector list, or the check
+   counts as failed. This holds for the pre-check and the post-check; a complete
+   body followed by a curl failure is not trusted.
    The GraphQL field names (`name`, `state`, `version`, `remoteNetwork { id }`)
    follow `docs/twingate-connector-update.md`; they were not checked against a
    live network.
@@ -130,9 +160,16 @@ and sends no notice.
 
 ## Notice
 
-If `NOTIFY_WEBHOOK_URL` is set in the environment (https only; it is passed to
-`curl` on stdin, never in argv, and never printed), a short JSON notice is POSTed
-with a 5 s timeout:
+If `NOTIFY_WEBHOOK_URL` is set (https only; it is passed to `curl` on stdin,
+never in argv, and never printed) AND `NOTIFY_WEBHOOK_ALLOWED_HOSTS` lists the
+trusted webhook hosts, a short JSON notice is POSTed with a 5 s timeout.
+`NOTIFY_WEBHOOK_ALLOWED_HOSTS` is a comma-separated list of exact host names (no
+wildcards, no default). The URL's host must equal one entry (case-insensitive;
+an optional numeric port is allowed). IP literals of any kind (IPv4 in any
+spelling, IPv6, bracketed), `localhost`, `*.localhost`, host names without a dot,
+and URLs with userinfo are always refused. With no allowlist the notice is
+skipped with a message and the update still succeeds. This keeps the root-run
+script from POSTing to services that only the host can reach.
 
 ```json
 {"host-label": "...", "connector": "...", "from": "...", "to": "...", "result": "updated"}
@@ -145,7 +182,10 @@ the label (default: short hostname). A failed notice never fails the update.
 ## Tests
 
 `tests/python/test_twingate_connector_update.py` runs the script against a fake
-`docker` and `curl` that record their arguments and environments; nothing
+`docker` and `curl` that record their arguments and environments (the fakes read
+their own settings from a file next to them, since the script clears its
+environment; one fake `docker` also parses the env file with a conservative model
+of the env-file grammar and the tests compare the result with `Config.Env`); nothing
 touches a real engine. The shipped script has no test seam: the test harness
 writes a test-only copy in which exactly four fixed lines (`PATH`,
 `LOCK_BASE`, `RUN_BASE`, `TRUSTED_UID`) point at the fakes, at scratch directories and at the test user (the tests do not run as root), and a

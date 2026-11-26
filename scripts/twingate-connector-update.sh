@@ -24,9 +24,22 @@
 # are copied into unexported shell variables and unset at once, so no child
 # process (docker, jq) inherits them.
 #
+# The whole environment is cleared: at start the script re-executes itself under
+# `env -i` with a fixed PATH, LANG=C, DOCKER_HOST=unix:///var/run/docker.sock,
+# and a DOCKER_CONFIG and HOME of its own (empty root-only dirs under /run).
+# Only the inputs listed below are carried over, once, through a private file
+# descriptor (never argv). DOCKER_*, SSL_CERT_*, CURL_CA_BUNDLE, proxy and XDG_*
+# variables from the caller never reach docker, curl or jq.
+#
 # Environment (all optional, never put secrets in argv):
 #   NOTIFY_WEBHOOK_URL   https URL; a short JSON notice is POSTed at the end
 #                        (5 s timeout). A failed notice never fails the update.
+#                        Sent only if NOTIFY_WEBHOOK_ALLOWED_HOSTS is set.
+#   NOTIFY_WEBHOOK_ALLOWED_HOSTS
+#                        comma-separated exact host names (no wildcards, no
+#                        default). The URL host must match one entry. IP
+#                        literals, localhost and names without a dot are
+#                        refused. Unset: the notice is skipped.
 #   HOST_LABEL           label for the notice (default: short hostname)
 #   TWINGATE_API_KEY, TWINGATE_NETWORK_URL
 #                        if both set, a read-only Admin API pre-check looks at
@@ -43,19 +56,78 @@
 umask 077
 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export PATH
+
+early_die() { printf 'refused: %s\n' "$1" >&2; exit 2; }
+NL='
+'
+# ---- clean environment --------------------------------------------------------
+# First run: collect the documented inputs and re-exec under `env -i`. The
+# inputs travel on fd 3 (a heredoc), so secrets never appear in argv.
+if [ "${TWINGATE_UPDATE_CLEAN_ENV:-}" != "1" ]; then
+    SELF="$0"
+    case "$SELF" in
+        */*) ;;
+        *) [ -f "./$SELF" ] && SELF="./$SELF" ;;
+    esac
+    [ -f "$SELF" ] || early_die "cannot locate this script to restart it with a clean environment"
+    for v in "${TWINGATE_API_KEY:-}" "${TWINGATE_NETWORK_URL:-}" "${TWINGATE_UPDATE_WAIT_SECS:-}" \
+        "${TWINGATE_UPDATE_POLL_SECS:-}" "${NOTIFY_WEBHOOK_URL:-}" "${NOTIFY_WEBHOOK_ALLOWED_HOSTS:-}" "${HOST_LABEL:-}"; do
+        case "$v" in *"$NL"*) early_die "an input variable contains a newline" ;; esac
+    done
+    RUN_TOKEN=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n') || RUN_TOKEN=""
+    case "$RUN_TOKEN" in ''|*[!0-9a-f]*) early_die "cannot create a run token" ;; esac
+    exec env -i PATH="$PATH" LC_ALL=C LANG=C TWINGATE_UPDATE_CLEAN_ENV=1 \
+        TWINGATE_UPDATE_RUN_TOKEN="$RUN_TOKEN" sh "$SELF" "$@" 3<<EOF
+TWINGATE_API_KEY=${TWINGATE_API_KEY:-}
+TWINGATE_NETWORK_URL=${TWINGATE_NETWORK_URL:-}
+TWINGATE_UPDATE_WAIT_SECS=${TWINGATE_UPDATE_WAIT_SECS:-}
+TWINGATE_UPDATE_POLL_SECS=${TWINGATE_UPDATE_POLL_SECS:-}
+NOTIFY_WEBHOOK_URL=${NOTIFY_WEBHOOK_URL:-}
+NOTIFY_WEBHOOK_ALLOWED_HOSTS=${NOTIFY_WEBHOOK_ALLOWED_HOSTS:-}
+HOST_LABEL=${HOST_LABEL:-}
+EOF
+fi
+# Second run: the environment must hold nothing but the fixed names.
+for n in $(env | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p'); do
+    case "$n" in
+        PATH|LC_ALL|LANG|TWINGATE_UPDATE_CLEAN_ENV|TWINGATE_UPDATE_RUN_TOKEN|PWD|OLDPWD|SHLVL|_|DOCKER_HOST|DOCKER_CONFIG|HOME) ;;
+        *) early_die "the environment was not cleared; refusing to run" ;;
+    esac
+done
+RUN_TOKEN="${TWINGATE_UPDATE_RUN_TOKEN:-}"
+case "$RUN_TOKEN" in ''|*[!0-9a-f]*) early_die "missing run token" ;; esac
+SELF="$0"
+case "$SELF" in */*) ;; *) SELF="./$SELF" ;; esac
+# Read the inputs once; only these names are accepted.
+API_KEY_V=""; NET_URL=""; IN_WAIT=""; IN_POLL=""; NOTIFY_URL=""; NOTIFY_ALLOWED=""; IN_LABEL=""
+while IFS= read -r line <&3; do
+    case "$line" in
+        TWINGATE_API_KEY=*) API_KEY_V="${line#*=}" ;;
+        TWINGATE_NETWORK_URL=*) NET_URL="${line#*=}" ;;
+        TWINGATE_UPDATE_WAIT_SECS=*) IN_WAIT="${line#*=}" ;;
+        TWINGATE_UPDATE_POLL_SECS=*) IN_POLL="${line#*=}" ;;
+        NOTIFY_WEBHOOK_URL=*) NOTIFY_URL="${line#*=}" ;;
+        NOTIFY_WEBHOOK_ALLOWED_HOSTS=*) NOTIFY_ALLOWED="${line#*=}" ;;
+        HOST_LABEL=*) IN_LABEL="${line#*=}" ;;
+    esac
+done
+exec 3<&-
+unset TWINGATE_UPDATE_RUN_TOKEN
 LC_ALL=C
-export LC_ALL
-# Secrets: keep them in unexported variables so no child process inherits them.
-API_KEY_V="${TWINGATE_API_KEY:-}"
-unset TWINGATE_API_KEY
-NOTIFY_URL="${NOTIFY_WEBHOOK_URL:-}"
-unset NOTIFY_WEBHOOK_URL
+LANG=C
+export LC_ALL LANG
 # Fixed, trusted locations. Never taken from the environment.
 # /run is writable by root only, so only root can create, pre-create or hold
 # the lock and the private runtime dir. Real runs need root (TRUSTED_UID).
 TRUSTED_UID=0
 LOCK_BASE="/run"
 RUN_BASE="/run"
+# docker talks to the local socket only, with a config dir and HOME of its own
+# (empty, root-only dirs under the runtime dir; see the lock block below).
+DOCKER_HOST="unix:///var/run/docker.sock"
+DOCKER_CONFIG="$RUN_BASE/twingate-connector-update/docker-config"
+HOME="$RUN_BASE/twingate-connector-update/home"
+export DOCKER_HOST DOCKER_CONFIG HOME
 
 IMAGE_TAG="twingate/connector:1"
 ROLLBACK_TAG="twingate/connector:rollback-$$"
@@ -84,17 +156,24 @@ GQL_INCOMPLETE=0
 say() { printf '%s\n' "$*"; }
 step() { if [ "$DRY" = 1 ]; then printf 'DRY-RUN would: %s\n' "$*"; else printf '==> %s\n' "$*"; fi; }
 
+# secure_rmdir DIR: shred every regular file in DIR, then remove DIR. Callers
+# pass only a directory they created or have just proven root-owned and not a link.
+secure_rmdir() {
+    for f in "$1"/*; do
+        [ -f "$f" ] && [ ! -L "$f" ] || continue
+        if command -v shred >/dev/null 2>&1; then shred -u "$f" >/dev/null 2>&1 || rm -f "$f"; else rm -f "$f"; fi
+    done
+    rm -rf "$1"
+}
+
 cleanup() {
     if [ -n "$TMPD" ] && [ -d "$TMPD" ] && [ "$KEEP_TMPD" != 1 ]; then
-        for f in "$TMPD"/*; do
-            [ -f "$f" ] || continue
-            if command -v shred >/dev/null 2>&1; then shred -u "$f" >/dev/null 2>&1 || rm -f "$f"; else rm -f "$f"; fi
-        done
-        rm -rf "$TMPD"
+        secure_rmdir "$TMPD"
     fi
     if [ "$LOCKED" = 1 ] && [ -n "$LOCKD" ]; then
+        rmdir "$RUNDIR/docker-config" "$RUNDIR/home" 2>/dev/null
         [ -z "$RUNDIR" ] || rmdir "$RUNDIR" 2>/dev/null
-        rm -f "$LOCKD/pid"
+        rm -f "$LOCKD/pid" "$LOCKD/start" "$LOCKD/ident" "$LOCKD/rundir"
         rmdir "$LOCKD" 2>/dev/null
         LOCKED=0
     fi
@@ -121,6 +200,7 @@ notify() {
     # $1 = result. Never fails the update, never prints the URL.
     [ "$DRY" = 1 ] && return 0
     [ -n "$NOTIFY_URL" ] || return 0
+    [ -n "$NOTIFY_ALLOWED" ] || { say "notice skipped: NOTIFY_WEBHOOK_ALLOWED_HOSTS is not set (no default; list the trusted webhook host names)"; return 0; }
     case "$NOTIFY_URL" in
         https://[A-Za-z0-9]*) ;;
         *) say "notice skipped: NOTIFY_WEBHOOK_URL is not an https URL"; return 0 ;;
@@ -128,11 +208,43 @@ notify() {
     case "$NOTIFY_URL" in
         *[!A-Za-z0-9._~:/?\&=%+@,\;-]*) say "notice skipped: NOTIFY_WEBHOOK_URL has unexpected characters"; return 0 ;;
     esac
+    # Host check: exact match against the allowlist; never an IP literal,
+    # localhost, a userinfo URL or a name without a dot.
+    auth="${NOTIFY_URL#https://}"
+    auth="${auth%%[/?#]*}"
+    case "$auth" in
+        *@*|*\[*) say "notice skipped: NOTIFY_WEBHOOK_URL host is not allowed"; return 0 ;;
+    esac
+    whost="${auth%%:*}"
+    wport=""
+    [ "$whost" = "$auth" ] || wport="${auth#*:}"
+    case "$wport" in *[!0-9]*) say "notice skipped: NOTIFY_WEBHOOK_URL has a bad port"; return 0 ;; esac
+    whost=$(printf '%s' "$whost" | tr '[:upper:]' '[:lower:]')
+    case "$whost" in
+        *.*) ;;
+        *) say "notice skipped: NOTIFY_WEBHOOK_URL host is not allowed"; return 0 ;;
+    esac
+    case "$whost" in
+        *[!a-z0-9.-]*|.*|*..*|*-.*|localhost|*.localhost) say "notice skipped: NOTIFY_WEBHOOK_URL host is not allowed"; return 0 ;;
+    esac
+    # The last label must be letters only: this rejects every IPv4 spelling
+    # (dotted, octal, hex, decimal) and any IP literal.
+    case "${whost##*.}" in
+        ''|*[!a-z]*) say "notice skipped: NOTIFY_WEBHOOK_URL host is not allowed"; return 0 ;;
+    esac
+    hostok=0
+    oldifs="$IFS"; IFS=","; set -f
+    for entry in $NOTIFY_ALLOWED; do
+        entry=$(printf '%s' "$entry" | tr '[:upper:]' '[:lower:]')
+        [ "$entry" = "$whost" ] && hostok=1
+    done
+    set +f; IFS="$oldifs"
+    [ "$hostok" = 1 ] || { say "notice skipped: the NOTIFY_WEBHOOK_URL host is not in NOTIFY_WEBHOOK_ALLOWED_HOSTS"; return 0; }
     if ! command -v curl >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
         say "notice skipped: curl or jq missing"
         return 0
     fi
-    label="${HOST_LABEL:-$(hostname -s 2>/dev/null || echo host)}"
+    label="${IN_LABEL:-$(hostname -s 2>/dev/null || echo host)}"
     body=$(jq -nc --arg h "$label" --arg c "$NAME" --arg f "$FROM" --arg t "$TO" --arg r "$1" \
         '{"host-label":$h,connector:$c,from:$f,to:$t,result:$r}') || { say "notice skipped"; return 0; }
     # URL goes to curl on stdin (config), not argv.
@@ -186,12 +298,36 @@ command -v jq >/dev/null 2>&1 || die "jq not found"
 # ---- private runtime dir and host-wide lock (real runs only) -----------------
 # Both live under fixed locations (LOCK_BASE, RUN_BASE); the environment
 # (TMPDIR, XDG_RUNTIME_DIR) is never consulted.
+RUNDIR="$RUN_BASE/twingate-connector-update"
+# proc_start PID: field 22 of /proc/PID/stat (process start time). The command
+# name (field 2) may contain spaces and parentheses, so cut after the last ')'.
+proc_start() {
+    [ -r "/proc/$1/stat" ] || return 1
+    st=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+    rest="${st##*) }"
+    printf '%s\n' "$rest" | cut -d' ' -f20
+}
+# holder_live PID: a lock holder counts as live only if the PID exists AND its
+# start time, command line (this script's path) and run token all match what
+# the lock recorded. A reused PID never matches, so it is stale.
+holder_live() {
+    kill -0 "$1" 2>/dev/null || return 1
+    [ -r "/proc/$1/stat" ] || return 0
+    cur=$(proc_start "$1") || return 0
+    rec=$(cat "$LOCKD/start" 2>/dev/null) || return 1
+    [ -n "$rec" ] && [ "$cur" = "$rec" ] || return 1
+    rec_script=$(sed -n 's/^script=//p' "$LOCKD/ident" 2>/dev/null | head -n 1)
+    rec_token=$(sed -n 's/^token=//p' "$LOCKD/ident" 2>/dev/null | head -n 1)
+    [ -n "$rec_script" ] && [ -n "$rec_token" ] || return 1
+    tr '\0' '\n' <"/proc/$1/cmdline" 2>/dev/null | grep -qxF -- "$rec_script" || return 1
+    tr '\0' '\n' <"/proc/$1/environ" 2>/dev/null | grep -qxF -- "TWINGATE_UPDATE_RUN_TOKEN=$rec_token" || return 1
+    return 0
+}
 if [ "$DRY" != 1 ]; then
     [ "$(id -u)" = "$TRUSTED_UID" ] || die "a real run needs root (use sudo); --dry-run works without it"
     private() { [ -d "$1" ] && [ ! -L "$1" ] && [ -n "$(find "$1" -maxdepth 0 -user "$TRUSTED_UID" -perm 700 2>/dev/null)" ]; }
     [ -d "$RUN_BASE" ] && [ ! -L "$RUN_BASE" ] || die "no trusted runtime dir"
     [ -d "$LOCK_BASE" ] && [ ! -L "$LOCK_BASE" ] || die "no host-wide lock dir; refusing to run without a lock"
-    RUNDIR="$RUN_BASE/twingate-connector-update"
     LOCKD="$LOCK_BASE/twingate-connector-update.lock.d"
     if ! mkdir "$LOCKD" 2>/dev/null; then
         # An existing lock path not owned by root is hostile: never read, use or
@@ -199,16 +335,44 @@ if [ "$DRY" != 1 ]; then
         { [ -d "$LOCKD" ] && [ ! -L "$LOCKD" ] && owned "$LOCKD"; } || die "the lock path is not a root-owned directory; refusing to use it"
         holder=$(cat "$LOCKD/pid" 2>/dev/null) || holder=""
         case "$holder" in ''|*[!0-9]*) die "another run holds the lock and its pid is unreadable ($LOCKD); if no run is active, remove that directory" ;; esac
-        if kill -0 "$holder" 2>/dev/null; then die "another run is in progress (pid $holder)"; fi
+        if holder_live "$holder"; then die "another run is in progress (pid $holder)"; fi
         say "removing a stale lock left by pid $holder"
-        rm -f "$LOCKD/pid"
+        # The dead run may have left its private dir (with the env file) behind
+        # after a SIGKILL. Remove only the recorded root-owned, non-link dir.
+        old_run=$(cat "$LOCKD/rundir" 2>/dev/null) || old_run=""
+        case "$old_run" in
+            "$RUNDIR"/run.*)
+                case "${old_run#"$RUNDIR"/}" in
+                    */*|*..*) ;;
+                    *) if [ -d "$old_run" ] && [ ! -L "$old_run" ] && owned "$old_run"; then
+                           say "removing the private dir left by the dead run"
+                           secure_rmdir "$old_run"
+                       fi ;;
+                esac ;;
+        esac
+        rm -f "$LOCKD/pid" "$LOCKD/start" "$LOCKD/ident" "$LOCKD/rundir"
         rmdir "$LOCKD" 2>/dev/null
         mkdir "$LOCKD" 2>/dev/null || die "cannot take the lock"
     fi
     LOCKED=1
+    # PID plus start time plus an updater-specific identity (this script's path
+    # and a random token that sits in this process's environment).
     printf '%s\n' "$$" >"$LOCKD/pid"
+    proc_start "$$" >"$LOCKD/start"
+    printf 'script=%s\ntoken=%s\n' "$SELF" "$RUN_TOKEN" >"$LOCKD/ident"
     mkdir -m 700 "$RUNDIR" 2>/dev/null
     private "$RUNDIR" || die "runtime dir $RUNDIR is not a private (mode 700) directory owned by you"
+    mkdir -m 700 "$RUNDIR/docker-config" "$RUNDIR/home" 2>/dev/null
+    if ! private "$RUNDIR/docker-config" || ! private "$RUNDIR/home"; then
+        die "docker config or home dir under $RUNDIR is not a private directory owned by you"
+    fi
+    # Per-run private dir: recorded in the lock BEFORE it is created, so a
+    # SIGKILL can never leave an unrecorded dir.
+    TMPD="$RUNDIR/run.$$"
+    printf '%s\n' "$TMPD" >"$LOCKD/rundir"
+    mkdir -m 700 "$TMPD" 2>/dev/null || die "cannot create private temp dir"
+else
+    TMPD=$(mktemp -d) || die "cannot create a temp dir"
 fi
 
 # ---- inspect and layout allowlist -------------------------------------------
@@ -228,11 +392,10 @@ esac
 IMGI=$(docker image inspect "$OLD_ID" 2>/dev/null) || die "the running image $OLD_ID is not present on this host, so a rollback would be impossible. Nothing was changed."
 IMG0=$(printf '%s' "$IMGI" | jq -ce 'if type=="array" and length==1 then .[0] else error("bad") end' 2>/dev/null) || die "cannot read the running image's config. Nothing was changed."
 
-HOSTN=$(hostname 2>/dev/null) || HOSTN=""
 LOGDRV=$(docker info --format '{{.LoggingDriver}}' 2>/dev/null | head -n 1) || LOGDRV=""
 case "$LOGDRV" in ''|*[!A-Za-z0-9._-]*) LOGDRV="json-file" ;; esac
 
-why=$(printf '%s' "$INSPECT" | jq -r --arg img "$IMAGE_TAG" --arg logdrv "$LOGDRV" --arg hostn "$HOSTN" --argjson i "$IMG0" '
+why=$(printf '%s' "$INSPECT" | jq -r --arg img "$IMAGE_TAG" --arg logdrv "$LOGDRV" --argjson i "$IMG0" '
   def blank: . == null or . == [] or . == {} or . == "" or . == 0 or . == false;
   def norm: if blank then null else . end;
   def handled_host: ["NetworkMode","RestartPolicy","Binds","Privileged","CapAdd","CapDrop","SecurityOpt","PidMode","UsernsMode","ReadonlyRootfs","Memory","MemorySwap","MemoryReservation","CpuShares","NanoCpus","CpuQuota","LogConfig","Dns","DnsSearch","DnsOptions","ExtraHosts","Tmpfs","Ulimits","Devices","DeviceCgroupRules","DeviceRequests","Sysctls","GroupAdd","AutoRemove"];
@@ -285,10 +448,12 @@ why=$(printf '%s' "$INSPECT" | jq -r --arg img "$IMAGE_TAG" --arg logdrv "$LOGDR
       (if ($hostextra | length) > 0 then "host settings a recreate would drop: " + ($hostextra | join(",")) else empty end),
       (if ($cc.OpenStdin == true or $cc.StdinOnce == true) then "stdin open" else empty end),
       (if ($cc.Domainname | norm) != null then "domain name override" else empty end),
-      (if ($cc.Hostname | norm) != null and $cc.Hostname != ($c.Id // "")[0:12] and $cc.Hostname != $hostn and $cc.Hostname != ($hostn | split(".")[0]) then "hostname override" else empty end),
+      (if ($cc.Hostname | norm) != null and $cc.Hostname != ($c.Id // "")[0:12] then "hostname override (only the container-ID default is accepted)" else empty end),
+      (if ($cc.AttachStdin // false) != false or ($cc.AttachStdout // false) != false or ($cc.AttachStderr // false) != false then "attach settings differ from a detached run" else empty end),
       (if ($cfgextra | length) > 0 then "container settings a recreate would drop: " + ($cfgextra | join(",")) else empty end),
       (if ($env | map(select((type != "string") or hasbyte(10) or hasbyte(13) or hasbyte(0) or (contains("=") | not))) | length) > 0 then "malformed environment entry (newline, CR, NUL or missing =)" else empty end),
       (if ($kept | map(select(test("^TWINGATE_[A-Za-z0-9_]+=") | not)) | length) > 0 then "malformed environment entry (invalid variable name)" else empty end),
+      (if ($kept | map(select(sub("^[^=]*="; "") | test("^[A-Za-z0-9._~:/+@,=-]*\\z") | not)) | length) > 0 then "environment value not safe for an env file (only A-Za-z0-9 . _ ~ : / + @ , = - are allowed)" else empty end),
       (if ($kept | map(select(utf8bytelength > 8192)) | length) > 0 then "malformed environment entry (line too long)" else empty end),
       (if ($kept | map(sub("=.*$"; "")) | (length) != (unique | length)) then "malformed environment entry (duplicate variable)" else empty end),
       (if ($env | map(select(type == "string" and startswith("TWINGATE_"))) | length) == 0 then "no TWINGATE_ environment" else empty end),
@@ -298,8 +463,8 @@ why=$(printf '%s' "$INSPECT" | jq -r --arg img "$IMAGE_TAG" --arg logdrv "$LOGDR
 
 # ---- Twingate Admin API (read only) -----------------------------------------
 api_setup() {
-    [ -n "$API_KEY_V" ] && [ -n "${TWINGATE_NETWORK_URL:-}" ] || return 1
-    v="${TWINGATE_NETWORK_URL#https://}"
+    [ -n "$API_KEY_V" ] && [ -n "$NET_URL" ] || return 1
+    v="${NET_URL#https://}"
     sub="${v%.twingate.com}"
     if [ "$sub" = "$v" ] || [ -z "$sub" ]; then
         warn "TWINGATE_NETWORK_URL is not <network>.twingate.com; pre-check skipped. Confirm the other Connector is ALIVE yourself."; return 0
@@ -324,11 +489,22 @@ gql_fetch() {
         body=$(jq -nc --arg c "$cursor" '{query:"query($after: String) { connectors(first: 100, after: $after) { pageInfo { hasNextPage endCursor } edges { node { id name state version remoteNetwork { id } } } } }",variables:{after:(if $c=="" then null else $c end)}}') || return 1
         # curl: -q first (no .curlrc), no redirects, no proxy, https only, hard
         # size cap. The key goes to this one curl on stdin (a config), never
-        # into the environment or argv. head -c bounds what the shell captures.
-        resp=$(printf 'url = "%s/api/graphql/"\nheader = "X-API-KEY: %s"\n' "$API_URL" "$API_KEY_V" |
-            curl -q -sS --fail -K - --proto '=https' --max-redirs 0 --noproxy '*' --max-filesize "$MAX_BYTES" --max-time 10 -X POST -H 'Content-Type: application/json' --data "$body" 2>/dev/null |
-            head -c "$((MAX_BYTES + 1))") || return 1
-        [ -n "$resp" ] && [ "${#resp}" -le "$MAX_BYTES" ] || return 1
+        # into the environment or argv. The output goes to a file in the private
+        # dir so curl's exit status is not lost; its size is checked below.
+        apif="$TMPD/api.out"
+        rm -f "$apif"
+        printf 'url = "%s/api/graphql/"\nheader = "X-API-KEY: %s"\n' "$API_URL" "$API_KEY_V" |
+            curl -q -sS --fail -K - --proto '=https' --max-redirs 0 --noproxy '*' --max-filesize "$MAX_BYTES" --max-time 10 -X POST -H 'Content-Type: application/json' --data "$body" -o "$apif" 2>/dev/null
+        crc=$?
+        # Trust the output only if curl itself exited 0 (no pipeline here, so the
+        # status is curl's own), and only within the byte bound.
+        if [ "$crc" != 0 ] || [ ! -f "$apif" ] || [ -L "$apif" ]; then rm -f "$apif"; return 1; fi
+        sz=$(wc -c <"$apif" 2>/dev/null) || sz=""
+        case "$sz" in ''|*[!0-9]*) rm -f "$apif"; return 1 ;; esac
+        if [ "$sz" -gt "$MAX_BYTES" ] || [ "$sz" -eq 0 ]; then rm -f "$apif"; return 1; fi
+        resp=$(cat "$apif") || { rm -f "$apif"; return 1; }
+        rm -f "$apif"
+        [ -n "$resp" ] || return 1
         printf '%s' "$resp" | jq -e '(.errors // null) == null and (.data.connectors.edges | type) == "array"' >/dev/null 2>&1 || return 1
         got=$(printf '%s' "$resp" | jq -c '[.data.connectors.edges[].node]' 2>/dev/null) || return 1
         NODES=$(jq -nc --argjson a "$NODES" --argjson b "$got" '$a + $b' 2>/dev/null) || return 1
@@ -437,8 +613,8 @@ now() { date +%s 2>/dev/null || echo 0; }
 nap() { if [ "$2" -lt "$1" ]; then sleep "$2"; else sleep "$1"; fi; }
 
 wait_healthy() {
-    maxw=$(secs "${TWINGATE_UPDATE_WAIT_SECS:-60}" 60 60)
-    poll=$(secs "${TWINGATE_UPDATE_POLL_SECS:-2}" 2 60)
+    maxw=$(secs "${IN_WAIT:-60}" 60 60)
+    poll=$(secs "${IN_POLL:-2}" 2 60)
     t0=$(now); iter=0
     while :; do
         st=$(docker ps --filter "name=^${NAME_RE}\$" --format '{{.Status}}' 2>/dev/null) || st=""
@@ -468,8 +644,8 @@ confirm_twingate() {
     [ "$API_OK" = 1 ] || return 2
     ver=$(printf '%s' "$TO" | grep -Eo '[0-9]+(\.[0-9]+)+' | head -n 1)
     [ -n "$ver" ] || return 1
-    maxw=$(secs "${TWINGATE_UPDATE_WAIT_SECS:-60}" 60 60)
-    poll=$(secs "${TWINGATE_UPDATE_POLL_SECS:-2}" 2 60)
+    maxw=$(secs "${IN_WAIT:-60}" 60 60)
+    poll=$(secs "${IN_POLL:-2}" 2 60)
     t0=$(now); iter=0
     while :; do
         if gql_fetch && [ "$GQL_INCOMPLETE" != 1 ]; then
@@ -498,8 +674,6 @@ step "never prune images; the old image stays on the host"
 
 # ---- protected window: from here no signal may leave the Connector gone -------
 block_signals
-TMPD=$(mktemp -d "$RUNDIR/run.XXXXXX") || die "cannot create private temp dir"
-chmod 700 "$TMPD" || die "cannot secure temp dir"
 ENVF="$TMPD/connector.env"
 printf '%s' "$INSPECT" | jq -r '.[0].Config.Env[] | select(startswith("TWINGATE_"))' >"$ENVF" 2>/dev/null || die "cannot build the env file"
 chmod 600 "$ENVF"
