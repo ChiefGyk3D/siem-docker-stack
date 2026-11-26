@@ -106,17 +106,33 @@ if [ "$healthy" -eq 0 ] && [ "$pending_core" -eq 0 ]; then
 fi
 core=$pending_core
 
-# One package name per line; no word splitting or globbing.
-while IFS= read -r name; do
-    [ -n "$name" ] || continue
+# One package per line, the real `pkg-static version -qRl '<'` shape:
+#   <name>-<version><padding spaces>  <
+# Exactly two whitespace-separated fields, the second exactly "<". The first
+# is validated strictly. No word splitting or globbing (read, quoted case).
+while IFS= read -r line; do
+    name=""
+    op=""
+    extra=""
+    read -r name op extra <<EOL
+$line
+EOL
+    [ -n "$name$op$extra" ] || continue
+    if [ -z "$name" ] || [ -z "$op" ] || [ -n "$extra" ]; then
+        fail "unexpected pkg output field count"
+    fi
+    [ "$op" = "<" ] || fail "unexpected pkg output operator"
+    [ "${#name}" -le 128 ] || fail "package name too long"
     case "$name" in
-        *[!A-Za-z0-9._+-]*) fail "unexpected characters in package name" ;;
+        -*) fail "package name starts with a hyphen" ;;
+        *[!A-Za-z0-9._+,-]*) fail "unexpected characters in package name" ;;
         *-[0-9]*) ;;
         *) fail "unexpected package name shape" ;;
     esac
     case "$name" in
         pfSense-kernel-*) kernel=1 ;;
-        pfSense-[0-9]* | pfSense-base-* | pfSense-rc-*) core=1 ;;
+        pfSense-[0-9]* | pfSense-base-* | pfSense-boot-* | pfSense-default-config-* | \
+            pfSense-system-* | pfSense-repoc-* | pfSense-rc-* | php*-pfSense-module-*) core=1 ;;
         *) package=1 ;;
     esac
 done <<EOF

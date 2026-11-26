@@ -604,7 +604,7 @@ def test_up_to_date_and_exact_argv(tmp_path):
 
 
 def test_core_update_pending(tmp_path):
-    r, _ = _run(tmp_path, "Version 99.9 is available\n", "pfSense-99.9\n")
+    r, _ = _run(tmp_path, "Version 99.9 is available\n", "pfSense-99.9   <\n")
     m = _metrics(r.stdout)
     assert m[("core", "false")] == 1 and m[("core", "true")] == 0
     assert m[("kernel", "false")] == 0 and m[("package", "false")] == 0
@@ -612,14 +612,14 @@ def test_core_update_pending(tmp_path):
 
 def test_kernel_and_package_pending(tmp_path):
     r, _ = _run(tmp_path, "Your system is up to date",
-                "pfSense-kernel-pfSense-99.9\npfSense-pkg-Telegraf-1.2\n")
+                "pfSense-kernel-pfSense-99.9   <\npfSense-pkg-Telegraf-1.2   <\n")
     m = _metrics(r.stdout)
     assert m[("kernel", "false")] == 1 and m[("package", "false")] == 1
     assert m[("core", "false")] == 0
 
 
 def test_security_flag(tmp_path):
-    r, _ = _run(tmp_path, "Version 99.9 is available (security update)\n", "pfSense-99.9\n")
+    r, _ = _run(tmp_path, "Version 99.9 is available (security update)\n", "pfSense-99.9 <\n")
     m = _metrics(r.stdout)
     assert m[("core", "true")] == 1 and m[("core", "false")] == 0
 
@@ -689,13 +689,98 @@ def test_missing_tools_is_a_failure(tmp_path):
     _assert_failure(r)
 
 
-def test_glob_and_odd_names_are_not_expanded_and_fail_closed(tmp_path):
+REAL_PKG = """nginx-1.30.6_16,3                  <
+pfSense-26.07.1                    <
+pfSense-base-26.07.1               <
+pfSense-boot-26.07.1               <
+pfSense-default-config-26.07.1     <
+pfSense-kernel-pfSense-26.07.1     <
+pfSense-pkg-Nexus-26.07.1_3        <
+pfSense-pkg-System_Patches-2.3.6   <
+pfSense-repoc-20261117.174617      <
+pfSense-system-26.07.1             <
+php85-8.5.12                       <
+php85-bcmath-8.5.12                <
+php85-pdo_sqlite-8.5.12            <
+php85-pfSense-module-26.07.1       <
+"""
+
+
+def test_real_pkg_version_output_is_classified(tmp_path):
+    # Captured from a live firewall on 2026-11-26 (issue #215): name-version,
+    # padding, then "<".
+    r, _ = _run(tmp_path, "Your system is up to date", REAL_PKG)
+    assert r.returncode == 0
+    m = _metrics(r.stdout)
+    assert m.pop("ok") == 1
+    assert m[("core", "false")] == 1 and m[("kernel", "false")] == 1
+    assert m[("package", "false")] == 1 and m[("core", "true")] == 0
+
+
+@pytest.mark.parametrize("line,kind", [
+    ("nginx-1.30.6_16,3   <", "package"),
+    ("php85-8.5.12   <", "package"),
+    ("pfSense-pkg-Nexus-26.07.1_3   <", "package"),
+    ("pfSense-26.07.1   <", "core"),
+    ("pfSense-base-26.07.1   <", "core"),
+    ("pfSense-boot-26.07.1   <", "core"),
+    ("pfSense-default-config-26.07.1   <", "core"),
+    ("pfSense-system-26.07.1   <", "core"),
+    ("pfSense-repoc-20261117.174617   <", "core"),
+    ("pfSense-rc-26.07.1   <", "core"),
+    ("php85-pfSense-module-26.07.1   <", "core"),
+    ("pfSense-kernel-pfSense-26.07.1   <", "kernel"),
+    ("pfSense-kernel-pfSense-26.07.1\t<", "kernel"),
+])
+def test_pkg_classification(tmp_path, line, kind):
+    r, _ = _run(tmp_path, "Your system is up to date", line + "\n")
+    assert r.returncode == 0
+    m = _metrics(r.stdout)
+    got = {k for k in ("core", "kernel", "package") if m[(k, "false")] == 1}
+    assert got == {kind}
+
+
+@pytest.mark.parametrize("pkg_out", [
+    "pfSense-99.9\n",                       # old bare shape: no "<"
+    "pfSense-99.9   >\n",                   # wrong operator
+    "pfSense-99.9   <   extra\n",           # extra field
+    "pfSense-99.9   =\n",
+    "pfSense-99.9   <<\n",
+    "pfSense-99.9   <\r\n",                  # carriage return
+    "pfSense-99.9   <\nnginx\n",            # second line has one field
+    "pfSense-99.9   <\nx;touch y   <\n",    # newline injection of a metacharacter
+    "pfSense-99.9   <\n$(touch y)   <\n",
+    "pfSense;touch-1.0   <\n",
+    "pfSense-1.0`id`   <\n",
+    "pfSense-1.0|x   <\n",
+    "pfSense-1.0$HOME   <\n",              # no spaces: only the $ guard can catch it
+    "pfSense-$(id)-1.0   <\n",
+    "pfSense-1.0;id   <\n",
+    "pfSense-1.0`   <\n",                  # lone backtick, no spaces in name
+    "-pfSense-1.0   <\n",                  # leading hyphen (option-like)
+    "--version-1.0   <\n",
+    "-n-1.0   <\n",
+    "a-1" + "0" * 126 + "   <\n",           # 129 chars: over the cap
+    "*   <\n",
+    "pfSense-*   <\n",
+    "nginx   <\n",                          # no hyphen-digit version
+    "nginx-abc   <\n",
+    "pfSense-99.9 <   <\n",
+    "   <\n",
+])
+def test_pkg_malformed_lines_fail_closed(tmp_path, pkg_out):
     (tmp_path / "pfSense-99.9").write_text("x", encoding="utf-8")
-    r, _ = _run(tmp_path, "Your system is up to date", "*\n")
+    r, _ = _run(tmp_path, "Your system is up to date", pkg_out)
     _assert_failure(r)
-    r, _ = _run(tmp_path, "Your system is up to date", "pkg;touch x\n")
-    _assert_failure(r)
-    assert not (tmp_path / "x").exists()
+    assert not (tmp_path / "y").exists()
+
+
+def test_pkg_name_at_length_cap_passes(tmp_path):
+    name = "pfSense-1" + "0" * (128 - len("pfSense-1"))
+    assert len(name) == 128
+    r, _ = _run(tmp_path, "Your system is up to date", name + "   <\n")
+    assert r.returncode == 0
+    assert _metrics(r.stdout)[("core", "false")] == 1
 
 
 def test_docs_exist_and_cover_required_topics():
