@@ -1,5 +1,9 @@
 [
   {
-    "targets": ["host.docker.internal:9100"]
+    "targets": ["node-exporter:9100"],
+    "labels": {
+      "instance_name": "siem-host",
+      "role": "siem"
+    }
   }
 ]
