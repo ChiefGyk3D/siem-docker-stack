@@ -118,7 +118,9 @@ while IFS= read -r line; do
 $line
 EOL
     [ -n "$name$op$extra" ] || continue
-    [ -n "$name" ] && [ -n "$op" ] && [ -z "$extra" ] || fail "unexpected pkg output field count"
+    if [ -z "$name" ] || [ -z "$op" ] || [ -n "$extra" ]; then
+        fail "unexpected pkg output field count"
+    fi
     [ "$op" = "<" ] || fail "unexpected pkg output operator"
     [ "${#name}" -le 128 ] || fail "package name too long"
     case "$name" in
