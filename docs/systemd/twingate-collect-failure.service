@@ -7,8 +7,24 @@ Description=Notice: the Twingate collector run failed
 
 [Service]
 Type=oneshot
+# Not root: a transient unprivileged account is enough to write to the journal socket.
+DynamicUser=yes
 ExecStart=/usr/bin/logger -p user.err -t twingate-collect "collector run failed; see journalctl -u twingate-collect.service"
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+CapabilityBoundingSet=
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+LimitCORE=0

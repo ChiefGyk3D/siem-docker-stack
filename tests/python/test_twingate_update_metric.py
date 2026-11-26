@@ -474,3 +474,43 @@ def test_docs_cover_twingate_collector_and_management_modes():
     assert "unlisted" in flat.lower() or "not listed" in flat.lower()
     # placeholders only: no real key shape or network name
     assert not re.search(r"\b[A-Za-z0-9_-]{40,}\b", text.split("### Twingate data")[1].split("### Label taxonomy")[0])
+
+
+# --- review round 1 hardening --------------------------------------------------
+
+@pytest.mark.parametrize("info", [None, {}, {"endCursor": "x"}, {"hasNextPage": "false"}, {"hasNextPage": None}, []])
+def test_missing_or_malformed_page_info_fails_closed(info):
+    page = conn_page([node("only-one", "1.96.0")])
+    if info is None:
+        del page["data"]["connectors"]["pageInfo"]
+    else:
+        page["data"]["connectors"]["pageInfo"] = info
+    rc, out, _, _ = run([page], [LATEST])
+    assert_failed_closed(rc, out)
+
+
+def test_truncated_release_pagination_fails_closed():
+    endless = [tags_page("1.95.0", nxt="still-more")] * 50
+    rc, out, _, f = run([conn_page([node("a", "1.95.0")])], endless)
+    assert_failed_closed(rc, out)
+    assert len(f.get_calls) == tm.MAX_TAG_PAGES
+
+
+def test_release_pagination_ending_on_the_last_allowed_page_is_accepted():
+    pages = [tags_page("1.95.0", nxt="more")] * (tm.MAX_TAG_PAGES - 1) + [tags_page("1.96.0")]
+    rc, out, _, _ = run([conn_page([node("a", "1.95.0")])], pages)
+    assert rc == 0
+
+
+def test_an_expected_connector_missing_from_the_inventory_fails_closed():
+    two = {"TWINGATE_EXPECTED_CONNECTORS": '["a", "b"]'}
+    rc, out, _, _ = run([conn_page([node("a", "1.96.0")])], [LATEST], extra_env=two)
+    assert_failed_closed(rc, out)
+    rc, out, _, _ = run([conn_page([node("a", "1.96.0"), node("b", "1.96.0")])], [LATEST], extra_env=two)
+    assert rc == 0 and "twingate_update_check_success value=1i" in lines(out)
+
+
+@pytest.mark.parametrize("bad", ["not json", '{"a": 1}', "[1]", '[""]'])
+def test_bad_expected_connectors_config_fails_closed(bad):
+    rc, out, _, _ = run([conn_page([node("a", "1.96.0")])], [LATEST], extra_env={"TWINGATE_EXPECTED_CONNECTORS": bad})
+    assert_failed_closed(rc, out)

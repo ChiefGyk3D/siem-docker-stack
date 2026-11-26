@@ -510,15 +510,19 @@ printf '%s' 'twingate_wo' | doppler secrets set TWINGATE_INFLUX_USER --project h
 
 2. Create the write-only InfluxDB account, `twingate_wo`, with write on the
    `telegraf` database only (the same pattern as `unpoller_wo`). The SQL is read
-   from stdin and its output is discarded, so the password is never in an
-   argument or on the screen:
+   from stdin and its output is discarded. The `influx` client reads the login
+   from its `INFLUX_USERNAME` and `INFLUX_PASSWORD` environment variables (set as a
+   prefix inside the container's shell, so no password is in any process argument;
+   that the deployed InfluxDB 1.x client honors them is not verified here: if it
+   answers with an authorization error, stop and report it, and do not fall back
+   to a `-password` argument or a password in a command line):
 
 ```
-siem-run bash -c 'docker exec -i influxdb sh -c '\''influx -username "$INFLUXDB_ADMIN_USER" -password "$INFLUXDB_ADMIN_PASSWORD"'\'' > /dev/null <<EOSQL
+siem-run bash -c 'docker exec -i influxdb sh -c '\''INFLUX_USERNAME="$INFLUXDB_ADMIN_USER" INFLUX_PASSWORD="$INFLUXDB_ADMIN_PASSWORD" influx'\'' > /dev/null <<EOSQL
 CREATE USER "$TWINGATE_INFLUX_USER" WITH PASSWORD '\''$TWINGATE_INFLUX_PASSWORD'\''
 GRANT WRITE ON "telegraf" TO "$TWINGATE_INFLUX_USER"
 EOSQL'
-docker exec influxdb sh -c 'influx -username "$INFLUXDB_ADMIN_USER" -password "$INFLUXDB_ADMIN_PASSWORD" -execute "SHOW GRANTS FOR twingate_wo"'
+docker exec influxdb sh -c 'INFLUX_USERNAME="$INFLUXDB_ADMIN_USER" INFLUX_PASSWORD="$INFLUXDB_ADMIN_PASSWORD" influx -execute "SHOW GRANTS FOR twingate_wo"'
 ```
 
    Check: the last command lists `telegraf WRITE` and no other database.
@@ -552,7 +556,7 @@ scripts/live-deploy/twingate-collect; echo "exit=$?"
    through the Grafana read account (never the write account):
 
 ```
-docker exec influxdb sh -c 'influx -username "$GRAFANA_INFLUX_USER" -password "$GRAFANA_INFLUX_PASSWORD" -database telegraf -execute "SELECT last(value) FROM twingate_update_check_success"'
+docker exec influxdb sh -c 'INFLUX_USERNAME="$GRAFANA_INFLUX_USER" INFLUX_PASSWORD="$GRAFANA_INFLUX_PASSWORD" influx -database telegraf -execute "SELECT last(value) FROM twingate_update_check_success"'
 ```
 
    Expected: one row with value 1 and a recent time. Then, in Grafana, open the
@@ -583,7 +587,19 @@ How a cleanly stopped Connector appears: the Twingate Admin API still lists it w
 a state other than `ALIVE`, so the collector writes `twingate_connector_up` value 0
 (the series does not go missing) while `twingate_update_check_success` stays 1. The
 rule "Twingate Connector not ALIVE" fires after 15 minutes once it is unpaused. A
-Connector that is deleted in Twingate disappears from the data instead.
+Connector that is deleted in Twingate disappears from the data instead. To catch that, set
+`TWINGATE_EXPECTED_CONNECTORS` in the secret manager config to a JSON array of the
+Connector names (for example `["connector-a","connector-b"]`): when any listed
+name is missing from the API answer, the check fails closed and writes
+`twingate_update_check_success value=0i`. Update the list when you retire a
+Connector on purpose. An API answer without a valid `pageInfo`, or a Docker Hub
+release list that is still paging after the page cap, also fails the check.
+
+Secrets per stage: `twingate-collect` runs the collector with only the Twingate API
+key and network URL (plus the management and expected-Connector settings), and the
+writer with only the InfluxDB login; every other inherited variable is dropped
+before each program starts, and core dumps are off (`ulimit -c 0` and
+`LimitCORE=0`). The failure notice runs as a transient unprivileged user.
 
 A dead collector does not look green: the check rule "Twingate update check failing
 or stale" has `noDataState: Alerting`, reads a 6 hour window and fires on a 0 or on

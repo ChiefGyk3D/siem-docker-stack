@@ -25,5 +25,6 @@ ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 LockPersonality=yes
+LimitCORE=0
 # The doppler CLI keeps a small cache; give it a private writable place inside the sandbox.
 # (--fallback-readonly in siem-run uses the token directory under the read-only home.)

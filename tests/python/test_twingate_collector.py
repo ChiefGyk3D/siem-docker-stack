@@ -181,10 +181,13 @@ def tree(tmp_path):
     }.items():
         (live / name).write_text("#!/usr/bin/env bash\n" + body)
     (live / "twingate-influx-write.py").write_text(
-        "import os, sys\n"
+        "import json, os, resource, sys\n"
         "data = sys.stdin.read()\n"
-        "open(os.environ['OUT'], 'a').write(data)\n"
-        "sys.exit(int(os.environ.get('WRITER_RC', '0')))\n")
+        "open(%r, 'a').write(data)\n"
+        "json.dump({'env': sorted(os.environ), 'core': resource.getrlimit(resource.RLIMIT_CORE)}, open(%r, 'w'))\n"
+        "rc = %r\n"
+        "sys.exit(int(open(rc).read()) if os.path.exists(rc) else 0)\n"
+        % (str(tmp_path / "out.txt"), str(tmp_path / "writer-seen.json"), str(tmp_path / "writer-rc")))
     for p in live.iterdir():
         p.chmod(0o755)
     return tmp_path
@@ -192,11 +195,13 @@ def tree(tmp_path):
 
 def set_collector(tree, text, rc):
     (tree / "scripts" / "twingate-update-metric.py").write_text(
-        "import sys\nsys.stdout.write(%r)\nsys.exit(%d)\n" % (text, rc))
+        "import json, os, resource, sys\n"
+        "json.dump({'env': sorted(os.environ), 'core': resource.getrlimit(resource.RLIMIT_CORE)}, open(%r, 'w'))\n"
+        "sys.stdout.write(%r)\nsys.exit(%d)\n" % (str(tree / "collector-seen.json"), text, rc))
 
 
 def run_wrapper(tree, **env_extra):
-    env = {"PATH": os.environ["PATH"], "OUT": str(tree / "out.txt")}
+    env = {"PATH": os.environ["PATH"]}
     env.update(env_extra)
     p = subprocess.run([str(tree / "scripts" / "live-deploy" / "twingate-collect")], capture_output=True,
                        text=True, env=env, timeout=30)
@@ -219,7 +224,8 @@ def test_wrapper_collector_failure_is_nonzero_but_failure_line_still_lands(tree)
 
 def test_wrapper_writer_failure_is_nonzero(tree):
     set_collector(tree, GOOD, 0)
-    p, _ = run_wrapper(tree, WRITER_RC="1")
+    (tree / "writer-rc").write_text("1")
+    p, _ = run_wrapper(tree)
     assert p.returncode != 0
 
 
@@ -234,9 +240,39 @@ def test_wrapper_zero_lines_from_collector_is_nonzero(tree, fake):
 def test_wrapper_uses_pipefail_and_passes_no_values_in_argv():
     src = WRAPPER.read_text(encoding="utf-8")
     assert re.search(r"(?m)^set -[a-z]*o pipefail|^set -o pipefail", src)
-    assert "TWINGATE_INFLUX_PASSWORD" not in src and "TWINGATE_API_KEY" not in src
+    # the secret names appear only as allowlist words: never expanded or assigned (so never in argv)
+    assert not re.search(r"\$\{?TWINGATE_(INFLUX_PASSWORD|API_KEY)|TWINGATE_(INFLUX_PASSWORD|API_KEY)=", src)
     assert "siem-run" in src and "python3 -I" in src
     assert stat.S_IMODE(WRAPPER.stat().st_mode) & 0o111
+
+
+SECRETS = {"TWINGATE_API_KEY": "k", "TWINGATE_NETWORK_URL": "https://x.twingate.com",
+           "TWINGATE_INFLUX_USER": USER, "TWINGATE_INFLUX_PASSWORD": PASSWORD,
+           "DOPPLER_TOKEN": "FAKE-token", "UNRELATED_SECRET": "FAKE"}
+
+
+def seen(tree, name):
+    import json
+    return json.loads((tree / name).read_text())
+
+
+def test_each_stage_receives_only_its_own_secrets(tree):
+    set_collector(tree, GOOD, 0)
+    p, _ = run_wrapper(tree, **SECRETS)
+    assert p.returncode == 0
+    col, wr = seen(tree, "collector-seen.json")["env"], seen(tree, "writer-seen.json")["env"]
+    assert "TWINGATE_API_KEY" in col and "TWINGATE_NETWORK_URL" in col
+    assert not {"TWINGATE_INFLUX_USER", "TWINGATE_INFLUX_PASSWORD", "DOPPLER_TOKEN", "UNRELATED_SECRET"} & set(col)
+    assert "TWINGATE_INFLUX_USER" in wr and "TWINGATE_INFLUX_PASSWORD" in wr
+    assert not {"TWINGATE_API_KEY", "TWINGATE_NETWORK_URL", "DOPPLER_TOKEN", "UNRELATED_SECRET"} & set(wr)
+
+
+def test_core_dumps_are_disabled_for_both_stages(tree):
+    set_collector(tree, GOOD, 0)
+    p, _ = run_wrapper(tree)
+    assert p.returncode == 0
+    assert seen(tree, "collector-seen.json")["core"] == [0, 0]
+    assert seen(tree, "writer-seen.json")["core"] == [0, 0]
 
 
 # ---- systemd units ---------------------------------------------------------------------
@@ -252,6 +288,7 @@ def test_service_unit_is_a_hardened_oneshot_with_a_failure_hook():
         assert needle in s, needle
     assert "ExecStart=" in s and "twingate-collect" in s
     assert "PASSWORD" not in s and "API_KEY" not in s     # no secret value in a unit file
+    assert "LimitCORE=0" in s
 
 
 def test_timer_is_hourly_persistent_and_jittered():
@@ -263,6 +300,18 @@ def test_timer_is_hourly_persistent_and_jittered():
 def test_failure_unit_exists_and_logs_only_fixed_text():
     s = unit("twingate-collect-failure.service")
     assert "Type=oneshot" in s and "journalctl -u twingate-collect.service" in s
+    assert re.search(r"(?m)^(DynamicUser=yes|User=(?!root\b)\S+)", s) and not re.search(r"(?m)^User=root", s)
+    for needle in ("NoNewPrivileges=yes", "CapabilityBoundingSet=\n", "PrivateNetwork=yes", "RestrictAddressFamilies=AF_UNIX\n",
+                   "SystemCallFilter=@system-service", "LimitCORE=0"):
+        assert needle in s, needle
+
+
+def test_runbook_and_alerting_docs_never_put_a_password_in_a_command_argument():
+    docs = [REPO_ROOT / "docs" / "live-deploy-runbook.md", REPO_ROOT / "docs" / "update-alerting.md"]
+    text = "\n".join(d.read_text(encoding="utf-8") for d in docs)
+    assert "INFLUX_PASSWORD=" in text                      # something was collected: the env form is used
+    for m in re.finditer(r"(?m)^[^#\n]*\s-(?:password|p)\s+\S*(?:PASSWORD|KEY|TOKEN)\S*", text):
+        raise AssertionError("password in argv: " + m.group(0)[:60])
 
 
 # ---- rules: a dead collector must not look green ---------------------------------------

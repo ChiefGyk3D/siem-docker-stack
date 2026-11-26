@@ -12,6 +12,10 @@ Environment (never argv, never printed, never logged):
   TWINGATE_CONNECTOR_MANAGED_BY_FILE   optional path to a JSON object
   TWINGATE_CONNECTOR_MANAGED_BY        optional inline JSON object (used only
                                        when no file is set)
+  TWINGATE_EXPECTED_CONNECTORS         optional JSON array of Connector names that
+                                       must all be present; a missing one fails
+                                       the check (a deleted Connector must not
+                                       just vanish from the metrics)
 The JSON object maps a Connector name to how it is updated: "docker",
 "systemd" (both manual, so they page) or "operator" (the Kubernetes Operator
 updates it, so it never pages). A name that is not listed is "docker".
@@ -144,6 +148,20 @@ def load_management(env):
     return cfg
 
 
+def load_expected(env):
+    """Names that must appear in the inventory. Empty when nothing is configured."""
+    raw = env.get("TWINGATE_EXPECTED_CONNECTORS")
+    if not raw:
+        return set()
+    if not isinstance(raw, str) or len(raw.encode("utf-8")) > MAX_CONFIG_BYTES:
+        raise CheckError("bad expected connectors")
+    val = json.loads(raw)
+    if (not isinstance(val, list) or len(val) > MAX_CONFIG_ENTRIES
+            or not all(isinstance(x, str) and 0 < len(x) <= 128 for x in val)):
+        raise CheckError("bad expected connectors")
+    return set(val)
+
+
 def latest_releases(get):
     """Every released x.y.z version Docker Hub lists (floating tags are ignored)."""
     versions = set()
@@ -157,6 +175,8 @@ def latest_releases(get):
                 versions.add(parse_version(name))
         if not data.get("next"):
             break
+    else:
+        raise CheckError("release list truncated")
     if not versions:
         raise CheckError("no release versions found")
     return versions
@@ -179,7 +199,9 @@ def fetch_connectors(post, url, api_key):
         if len(nodes) > MAX_CONNECTORS:
             raise CheckError("too many connectors")
         info = conns.get("pageInfo")
-        if not isinstance(info, dict) or not info.get("hasNextPage"):
+        if not isinstance(info, dict) or not isinstance(info.get("hasNextPage"), bool):
+            raise CheckError("bad page info")
+        if not info["hasNextPage"]:
             if not nodes:
                 raise CheckError("no connectors returned")
             return nodes
@@ -201,11 +223,14 @@ def safe_tag(name, seen):
 
 def collect(env, post, get):
     management = load_management(env)
+    expected = load_expected(env)
     api_key = env.get("TWINGATE_API_KEY")
     if not api_key or not isinstance(api_key, str):
         raise CheckError("missing key")
     url = api_url(env.get("TWINGATE_NETWORK_URL"))
     nodes = fetch_connectors(post, url, api_key)
+    if not expected <= {n.get("name") for n in nodes}:
+        raise CheckError("expected connector missing")
     releases = latest_releases(get)
     out, seen = [], set()
     for n in nodes:

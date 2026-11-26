@@ -10,11 +10,31 @@
 # the writer still stores that line (so the health rule goes red quickly) and the run still
 # exits non-zero. Zero lines, a 401 or any non-2xx write also exit non-zero.
 #
+# Each stage gets only its own secrets: stage_run drops every inherited variable that is not on
+# that stage's list before the program starts (no value is ever put on a command line). The
+# collector sees the Twingate API key and network URL; the writer sees the InfluxDB login.
+# Core dumps are disabled (ulimit -c 0) because both stages hold credentials.
+#
 # Environment (all optional): SIEM_CONFIG_DIR (see siem-run), INFLUX_URL, TWINGATE_INFLUX_DB.
 set -euo pipefail
+ulimit -c 0
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO="$(cd "$HERE/../.." && pwd -P)"
 
-"$HERE/siem-run" python3 -I "$REPO/scripts/twingate-update-metric.py" |
-    "$HERE/siem-run" python3 -I "$HERE/twingate-influx-write.py"
+COLLECTOR_VARS="PATH LANG LC_ALL SSL_CERT_FILE SSL_CERT_DIR TWINGATE_API_KEY TWINGATE_NETWORK_URL TWINGATE_CONNECTOR_MANAGED_BY_FILE TWINGATE_CONNECTOR_MANAGED_BY TWINGATE_EXPECTED_CONNECTORS"
+WRITER_VARS="PATH LANG LC_ALL SSL_CERT_FILE SSL_CERT_DIR INFLUX_URL TWINGATE_INFLUX_DB TWINGATE_INFLUX_USER TWINGATE_INFLUX_PASSWORD"
+
+# stage_run "<allowed names>" COMMAND...: siem-run, then unset everything not allowed, then exec.
+stage_run() {
+    local allow="$1"
+    shift
+    "$HERE/siem-run" bash -c 'allow=" $1 "; shift
+for v in $(compgen -e); do
+    case "$allow" in *" $v "*) ;; *) unset "$v" 2>/dev/null || true ;; esac
+done
+exec "$@"' stage "$allow" "$@"
+}
+
+stage_run "$COLLECTOR_VARS" python3 -I "$REPO/scripts/twingate-update-metric.py" |
+    stage_run "$WRITER_VARS" python3 -I "$HERE/twingate-influx-write.py"
