@@ -1,23 +1,32 @@
 # Twingate collector, step 2 of 3: the check (issue #222). Started by step 1 on success.
 # Runs twingate-update-metric.py as its own dynamic user. Its only secrets are the collector
-# credential "env" (the Twingate key and settings), which systemd copies in from the file step 1
-# wrote. The secret manager's token, the staging directory and every home directory are
-# invisible to it. Its standard output (line protocol, no secret) goes to a file that step 3 reads.
+# credential "env" (the Twingate key and settings) and the generation's "manifest", which systemd
+# copies in from the root-owned generation step 1 published (/run/twingate-collect/current/).
+# The secret manager's token, the staging directories and every home directory are invisible to
+# it. Its standard output (line protocol, no secret) goes to a file in THIS unit's own runtime
+# directory, which this unit's dynamic user owns; PID 1 hands it to step 3 as a credential. The
+# directive is "truncate:", so a short failure output replaces a longer earlier one completely.
+# The first line of the output is the run id header; step 3 refuses output from another run.
 # The check exits non-zero when it fails but still prints its failure lines; step 3 runs either way.
 [Unit]
 Description=Twingate collector step 2: check the Connectors
+After=twingate-collect.service
 OnSuccess=twingate-collect-write.service
 OnFailure=twingate-collect-write.service twingate-collect-failure.service
 
 [Service]
 Type=oneshot
 DynamicUser=yes
-LoadCredential=env:/run/twingate-collect/collector.json
-StandardOutput=file:/run/twingate-collect/metrics.lp
+LoadCredential=env:/run/twingate-collect/current/collector.json
+LoadCredential=manifest:/run/twingate-collect/current/manifest.json
+RuntimeDirectory=twingate-collect-metric
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+StandardOutput=truncate:%t/twingate-collect-metric/metrics.lp
 ExecStart=/usr/bin/python3 -I /opt/siem/scripts/live-deploy/twingate-stage.py collector
 TimeoutStartSec=120
 UMask=0077
-InaccessiblePaths=/etc/siem /run/twingate-collect /root
+InaccessiblePaths=/etc/siem /run/twingate-collect /run/twingate-broker /root
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
@@ -32,4 +41,6 @@ RestrictNamespaces=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 LockPersonality=yes
 SystemCallArchitectures=native
+ProtectProc=invisible
+ProcSubset=pid
 LimitCORE=0

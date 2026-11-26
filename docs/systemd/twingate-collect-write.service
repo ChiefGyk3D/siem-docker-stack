@@ -1,25 +1,29 @@
 # Twingate collector, step 3 of 3: the InfluxDB write (issue #222). Started by step 2, whether
 # the check passed or failed, so a failed check still stores its success=0 line. Runs the
-# writer as its own dynamic user with only the InfluxDB login (credential "env") and the check's
-# output (credential "metrics"). It cannot read the Twingate key or the secret manager token.
-# Afterwards the staging directory, which holds both secret files, is removed (ExecStopPost with
-# "+" runs as root, on a fixed path).
+# writer as its own dynamic user with only the InfluxDB login (credential "env"), the generation
+# "manifest" and the check's output (credential "metrics"). It cannot read the Twingate key or the
+# secret manager token, and it refuses input whose run id differs from the manifest's. Before it
+# starts, a root-run command records which generation it consumes (claim); afterwards a root-run
+# command removes exactly that generation (cleanup) and nothing newer.
 [Unit]
 Description=Twingate collector step 3: write the metrics to InfluxDB
+After=twingate-collect-metric.service
 OnFailure=twingate-collect-failure.service
 
 [Service]
 Type=oneshot
 DynamicUser=yes
-LoadCredential=env:/run/twingate-collect/writer.json
-LoadCredential=metrics:/run/twingate-collect/metrics.lp
+LoadCredential=env:/run/twingate-collect/current/writer.json
+LoadCredential=manifest:/run/twingate-collect/current/manifest.json
+LoadCredential=metrics:/run/twingate-collect-metric/metrics.lp
+ExecStartPre=+/usr/bin/python3 -I /opt/siem/scripts/live-deploy/twingate-generation.py claim --dest /run/twingate-collect
 # Add Environment=INFLUX_URL=... or Environment=TWINGATE_INFLUX_DB=... if the defaults
 # (http://127.0.0.1:8086, telegraf) do not fit.
 ExecStart=/usr/bin/python3 -I /opt/siem/scripts/live-deploy/twingate-stage.py writer
-ExecStopPost=+/usr/bin/rm -rf -- /run/twingate-collect
+ExecStopPost=+/usr/bin/python3 -I /opt/siem/scripts/live-deploy/twingate-generation.py cleanup --dest /run/twingate-collect
 TimeoutStartSec=60
 UMask=0077
-InaccessiblePaths=/etc/siem /run/twingate-collect /root
+InaccessiblePaths=/etc/siem /run/twingate-collect /run/twingate-broker /run/twingate-collect-metric /root
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
@@ -34,4 +38,6 @@ RestrictNamespaces=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 LockPersonality=yes
 SystemCallArchitectures=native
+ProtectProc=invisible
+ProcSubset=pid
 LimitCORE=0

@@ -379,7 +379,7 @@ groups:
         isPaused: true
         annotations:
           summary: "Twingate returned a Connector that is not on the expected list"
-          description: "The collector counts Connectors from the Twingate Admin API that are not named in TWINGATE_EXPECTED_CONNECTORS (metric twingate_unexpected_connector, above 0 for at least two runs in 3 hours). If it is a new Connector on purpose, add its name to the list; if not, investigate it in the Twingate admin console."
+          description: "The collector counts Connectors from the Twingate Admin API that are not named in TWINGATE_EXPECTED_CONNECTORS (metric twingate_unexpected_connector, above 0 in every sample of the last 3 hours, with at least two samples; a Connector that stays unexpected is noticed up to about 3 hours after it first appears, and one that goes away sooner is not alerted). If it is a new Connector on purpose, add its name to the list; if not, investigate it in the Twingate admin console."
         labels:
           severity: "warning"
           tier: "P2"

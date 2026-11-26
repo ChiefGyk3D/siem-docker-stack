@@ -2,6 +2,8 @@
 the systemd units, the docs and the rule data-gap settings. Everything runs against a fake
 InfluxDB on loopback; the user, password and network values below are placeholders."""
 import base64
+import hashlib
+import importlib.util
 import json
 import http.server
 import os
@@ -401,7 +403,6 @@ def test_broker_unit_is_the_only_one_that_receives_the_service_token():
     s = unit("twingate-collect.service")
     assert "Type=oneshot" in s and "OnFailure=twingate-collect-failure.service" in s
     assert "OnSuccess=twingate-collect-metric.service" in s
-    assert re.search(r"(?m)^User=siem-broker$", s) and not re.search(r"(?m)^User=root", s)
     assert "LoadCredential=doppler-token:/etc/siem/doppler-token" in s
     for needle in HARDEN:
         assert needle in s, needle
@@ -410,6 +411,22 @@ def test_broker_unit_is_the_only_one_that_receives_the_service_token():
     assert "SIEM_TOKEN_FILE=%d/doppler-token" in exec_line and "HOME=" not in exec_line
     assert "twingate-fetch-secrets.py" in exec_line
     assert "PASSWORD=" not in s and "API_KEY=" not in s                 # no secret value in a unit file
+
+
+def test_broker_runs_as_a_dynamic_user_with_hidden_processes_and_no_reusable_account():
+    # R4-2: a static account lets any other process under it read the token and the fetched secrets
+    s = unit("twingate-collect.service")
+    assert re.search(r"(?m)^DynamicUser=yes$", s)
+    assert not re.search(r"(?m)^User=", s) and not re.search(r"(?m)^Group=", s)
+    assert re.search(r"(?m)^ProtectProc=invisible$", s) and re.search(r"(?m)^ProcSubset=pid$", s)
+    assert "siem-broker" not in s and "siem-broker" not in " ".join(unit(n) for n in STAGE_UNITS)
+    # its own runtime directory is removed by systemd when the unit stops (no Preserve)
+    assert re.search(r"(?m)^RuntimeDirectory=twingate-broker$", s) and "RuntimeDirectoryPreserve" not in s
+    for name in ("twingate-collect-metric.service", "twingate-collect-write.service"):
+        assert re.search(r"(?m)^ProtectProc=invisible$", unit(name)), name
+    docs = (REPO_ROOT / "docs" / "live-deploy-runbook.md").read_text(encoding="utf-8")
+    section = docs.split("## 10. Twingate collector")[1].split("\n## ")[0]
+    assert "useradd" not in section and "userdel" not in section        # no account is created or kept
 
 
 @pytest.mark.parametrize("name", sorted(STAGE_UNITS))
@@ -424,7 +441,7 @@ def test_stage_units_run_as_their_own_user_and_cannot_reach_the_token(name):
     assert "/etc/siem" in inacc and "/run/twingate-collect" in inacc
     # the only credential from the staging area is this stage's own file
     loads = re.findall(r"(?m)^LoadCredential=(\S+)$", s)
-    assert any(l == "env:/run/twingate-collect/" + fname for l in loads), loads
+    assert any(l == "env:/run/twingate-collect/current/" + fname for l in loads), loads
     other = {"collector.json", "writer.json"} - {fname}
     for l in loads:
         assert not any(o in l for o in other), l
@@ -437,11 +454,45 @@ def test_stage_units_chain_runs_the_writer_even_when_the_check_fails():
     m, w = unit("twingate-collect-metric.service"), unit("twingate-collect-write.service")
     assert "OnSuccess=twingate-collect-write.service" in m
     assert re.search(r"(?m)^OnFailure=twingate-collect-write.service twingate-collect-failure.service$", m)
-    assert "StandardOutput=file:/run/twingate-collect/metrics.lp" in m
-    assert "LoadCredential=metrics:/run/twingate-collect/metrics.lp" in w
     assert "OnFailure=twingate-collect-failure.service" in w
-    # both secret files are removed after the last step, on a fixed path, by the privileged + hook
-    assert "ExecStopPost=+/usr/bin/rm -rf -- /run/twingate-collect\n" in w
+    assert "LoadCredential=metrics:/run/twingate-collect-metric/metrics.lp" in w
+
+
+def test_metric_output_lives_in_the_metric_units_own_runtime_directory_and_is_truncated():
+    # R4-1: the output file must sit in a directory the metric unit's own user owns, never under the
+    # broker's directory; R4-4: "truncate:" (not "file:") so a short result replaces a long one
+    m = unit("twingate-collect-metric.service")
+    assert re.search(r"(?m)^DynamicUser=yes$", m) and re.search(r"(?m)^RuntimeDirectory=twingate-collect-metric$", m)
+    assert re.search(r"(?m)^RuntimeDirectoryPreserve=yes$", m)             # PID 1 reads it after this unit ends
+    out = re.search(r"(?m)^StandardOutput=(.*)$", m).group(1)
+    assert out == "truncate:%t/twingate-collect-metric/metrics.lp", out
+    assert not out.startswith("file:") and "twingate-collect/" not in out and "twingate-broker" not in out
+    assert "twingate-collect-metric" not in re.search(r"(?m)^InaccessiblePaths=(.*)$", m).group(1)
+    # the writer's credential names exactly that path, and the directory is not preserved for anyone else
+    assert "LoadCredential=metrics:/run/twingate-collect-metric/metrics.lp" in unit("twingate-collect-write.service")
+
+
+def test_runs_are_ordered_so_a_new_broker_waits_for_the_previous_chain():
+    b = unit("twingate-collect.service")
+    after = re.search(r"(?m)^After=(.*)$", b).group(1).split()
+    assert "twingate-collect-metric.service" in after and "twingate-collect-write.service" in after
+    assert "twingate-collect.service" in re.search(r"(?m)^After=(.*)$", unit("twingate-collect-metric.service")).group(1).split()
+    assert "twingate-collect-metric.service" in re.search(r"(?m)^After=(.*)$", unit("twingate-collect-write.service")).group(1).split()
+
+
+def test_units_publish_claim_and_clean_up_by_generation_and_never_by_a_fixed_directory():
+    b, w = unit("twingate-collect.service"), unit("twingate-collect-write.service")
+    gen = "/usr/bin/python3 -I /opt/siem/scripts/live-deploy/twingate-generation.py "
+    assert "ExecStartPre=+" + gen + "purge --dest /run/twingate-collect\n" in b
+    assert "ExecStartPost=+" + gen + "publish --src /run/twingate-broker --dest /run/twingate-collect\n" in b
+    assert "ExecStopPost=+" + gen + "purge --dest /run/twingate-collect --if-failed\n" in b
+    assert "ExecStartPre=+" + gen + "claim --dest /run/twingate-collect\n" in w
+    assert "ExecStopPost=+" + gen + "cleanup --dest /run/twingate-collect\n" in w
+    assert "rm -rf" not in w and "rm -rf" not in b
+    for name in STAGE_UNITS:
+        s = unit(name)
+        assert "LoadCredential=manifest:/run/twingate-collect/current/manifest.json" in s, name
+        assert re.search(r"LoadCredential=env:/run/twingate-collect/current/\w+\.json", s), name
 
 
 # ---- the broker boundary: fetch helper and stage wrapper (issue #222, review round 4) ----
@@ -456,27 +507,105 @@ def run_fetch(env):
                           stdin=subprocess.DEVNULL, timeout=30)
 
 
-def test_fetch_writes_one_private_file_per_stage_and_never_the_service_token(tmp_path):
+RUN_ID = re.compile(r"^[0-9a-f]{32}$")
+
+
+def generations(d):
+    return sorted(x for x in d.iterdir() if RUN_ID.match(x.name))
+
+
+def test_fetch_writes_one_generation_with_a_manifest_and_never_the_service_token(tmp_path):
     d = tmp_path / "stage"
     d.mkdir()
     env = dict(SECRETS_INJECTED, TWINGATE_STAGE_DIR=str(d), DOPPLER_TOKEN=TOKEN, DOPPLER_CONFIG="c")
     p = run_fetch(env)
     assert p.returncode == 0 and not leaks(p) and TOKEN not in p.stdout + p.stderr
-    col, wri = json.loads((d / "collector.json").read_text()), json.loads((d / "writer.json").read_text())
-    assert set(col) == {"TWINGATE_API_KEY", "TWINGATE_NETWORK_URL", "TWINGATE_EXPECTED_CONNECTORS"}
-    assert set(wri) == {"TWINGATE_INFLUX_USER", "TWINGATE_INFLUX_PASSWORD"}
-    for f in d.iterdir():
+    (gen,) = generations(d)
+    col, wri = json.loads((gen / "collector.json").read_text()), json.loads((gen / "writer.json").read_text())
+    assert set(col["secrets"]) == {"TWINGATE_API_KEY", "TWINGATE_NETWORK_URL", "TWINGATE_EXPECTED_CONNECTORS"}
+    assert set(wri["secrets"]) == {"TWINGATE_INFLUX_USER", "TWINGATE_INFLUX_PASSWORD"}
+    manifest = json.loads((gen / "manifest.json").read_text())
+    assert manifest["run_id"] == gen.name == col["run_id"] == wri["run_id"] and RUN_ID.match(manifest["run_id"])
+    assert manifest["files"] == {n: hashlib.sha256((gen / n).read_bytes()).hexdigest() for n in ("collector.json", "writer.json")}
+    for f in gen.iterdir():
         text = f.read_text()
         assert stat.S_IMODE(f.stat().st_mode) == 0o600, f.name
         assert TOKEN not in text and "evil" not in text and "UNRELATED" not in text
-    assert sorted(x.name for x in d.iterdir()) == ["collector.json", "writer.json"]
+    assert stat.S_IMODE(gen.stat().st_mode) == 0o700
+    assert sorted(x.name for x in gen.iterdir()) == ["collector.json", "manifest.json", "writer.json"]
+
+
+def test_each_fetch_uses_a_new_random_run_id_and_removes_the_previous_generation(tmp_path):
+    d = tmp_path / "stage"
+    d.mkdir()
+    old = d / ("a" * 32)
+    old.mkdir()
+    (old / "writer.json").write_text('{"run_id": "old", "secrets": {"TWINGATE_INFLUX_PASSWORD": "OLD"}}')
+    env = dict(SECRETS_INJECTED, TWINGATE_STAGE_DIR=str(d))
+    assert run_fetch(env).returncode == 0
+    (first,) = generations(d)
+    assert first.name != "a" * 32 and not old.exists()
+    assert run_fetch(env).returncode == 0
+    (second,) = generations(d)
+    assert second.name != first.name
+
+
+def load_module(path, name):
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_partial_fetch_failure_removes_the_whole_generation_and_any_earlier_one(tmp_path, monkeypatch):
+    # R4-3: a failure after the first file was written must leave nothing behind, old or new
+    fetch = load_module(FETCH, "twingate_fetch_under_test")
+    d = tmp_path / "stage"
+    d.mkdir()
+    old = d / ("b" * 32)
+    old.mkdir()
+    (old / "writer.json").write_text("OLD-WRITER")
+    (d / "doppler-cfg").mkdir()
+    calls = []
+    real = fetch.write_private
+
+    def flaky(directory, name, data):
+        calls.append(name)
+        if len(calls) == 2:
+            raise OSError("disk full")
+        return real(directory, name, data)
+
+    monkeypatch.setattr(fetch, "write_private", flaky)
+    for k, v in dict(SECRETS_INJECTED, TWINGATE_STAGE_DIR=str(d)).items():
+        monkeypatch.setenv(k, v)
+    assert fetch.main() == 1 and len(calls) == 2
+    assert not generations(d) and (d / "doppler-cfg").is_dir()          # only unrelated state remains
+    assert not old.exists()
 
 
 def test_fetch_fails_closed_without_a_directory_or_without_any_secret(tmp_path):
     assert run_fetch({"PATH": "/usr/bin"}).returncode != 0                      # no stage directory
     assert run_fetch({"PATH": "/usr/bin", "TWINGATE_STAGE_DIR": str(tmp_path / "nope")}).returncode != 0
     p = run_fetch({"PATH": "/usr/bin", "TWINGATE_STAGE_DIR": str(tmp_path), "DOPPLER_TOKEN": TOKEN})
-    assert p.returncode != 0 and not list(tmp_path.glob("*.json"))              # nothing left behind
+    assert p.returncode != 0 and not generations(tmp_path)                      # nothing left behind
+
+
+def make_generation(cred, run_id, secrets_by_file, header_id=None, metrics=None):
+    """Write the credential files a stage unit would see for one generation."""
+    files = {n: json.dumps({"run_id": run_id, "secrets": s}).encode() for n, s in secrets_by_file.items()}
+    manifest = {"version": 1, "run_id": run_id, "files": {n: hashlib.sha256(b).hexdigest() for n, b in files.items()}}
+    cred.mkdir(exist_ok=True)
+    (cred / "manifest").write_text(json.dumps(manifest))
+    for n, b in files.items():
+        (cred / "env").write_bytes(b)      # one stage file is delivered as "env"
+    if metrics is not None:
+        (cred / "metrics").write_text("# twingate-run %s\n" % (header_id or run_id) + metrics)
+    return manifest
+
+
+RID_A, RID_B = "a1" * 16, "b2" * 16
+COL_SECRETS = {"TWINGATE_API_KEY": "k", "TWINGATE_NETWORK_URL": "https://x.twingate.com"}
+WRI_SECRETS = {"TWINGATE_INFLUX_USER": USER, "TWINGATE_INFLUX_PASSWORD": PASSWORD}
 
 
 @pytest.fixture
@@ -504,20 +633,21 @@ def run_stage(script, stage, cred, extra_env=None):
 
 def test_stage_process_sees_only_its_own_secrets_and_never_the_service_token(stage_tree):
     root, script, cred = stage_tree
-    (cred / "env").write_text(json.dumps({"TWINGATE_API_KEY": "k", "TWINGATE_NETWORK_URL": "https://x.twingate.com"}))
-    assert run_stage(script, "collector", cred).returncode == 0
+    make_generation(cred, RID_A, {"collector.json": COL_SECRETS})
+    p = run_stage(script, "collector", cred)
+    assert p.returncode == 0
+    assert p.stdout == "# twingate-run %s\n" % RID_A                      # the header the writer will check
     seen = json.loads((root / "collector-saw.json").read_text())["env"]
     assert set(seen) == {"PATH", "LC_ALL", "TWINGATE_API_KEY", "TWINGATE_NETWORK_URL", "SSL_CERT_FILE"}
     assert seen["PATH"] == "/usr/bin:/bin"
     assert TOKEN not in json.dumps(seen)
-    # the credential directory holds nothing but the stage's own file: no token file to open
-    assert [f.name for f in cred.iterdir()] == ["env"]
+    # the credential directory holds nothing from the broker's token: no token file to open
+    assert sorted(f.name for f in cred.iterdir()) == ["env", "manifest"]
 
 
 def test_writer_stage_gets_the_check_output_on_stdin_and_only_the_influx_login(stage_tree):
     root, script, cred = stage_tree
-    (cred / "env").write_text(json.dumps({"TWINGATE_INFLUX_USER": USER, "TWINGATE_INFLUX_PASSWORD": PASSWORD}))
-    (cred / "metrics").write_text(GOOD)
+    make_generation(cred, RID_A, {"writer.json": WRI_SECRETS}, metrics=GOOD)
     assert run_stage(script, "writer", cred, {"INFLUX_URL": "http://127.0.0.1:8086", "TWINGATE_API_KEY": "k"}).returncode == 0
     saw = json.loads((root / "writer-saw.json").read_text())
     assert saw["stdin"] == GOOD and "TWINGATE_API_KEY" not in saw["env"] and "TWINGATE_NETWORK_URL" not in saw["env"]
@@ -525,17 +655,212 @@ def test_writer_stage_gets_the_check_output_on_stdin_and_only_the_influx_login(s
     assert PASSWORD not in json.dumps(saw["argv"])
 
 
+def test_generation_replay_is_refused_at_every_stage(stage_tree):
+    # R4-3: stale credentials from an earlier generation must never be consumed
+    root, script, cred = stage_tree
+    # (1) a writer.json from run A next to the manifest of run B
+    make_generation(cred, RID_A, {"writer.json": WRI_SECRETS}, metrics=GOOD)
+    stale = (cred / "env").read_bytes()
+    make_generation(cred, RID_B, {"writer.json": {"TWINGATE_INFLUX_USER": USER, "TWINGATE_INFLUX_PASSWORD": "NEW"}}, metrics=GOOD)
+    (cred / "env").write_bytes(stale)
+    assert run_stage(script, "writer", cred).returncode != 0 and not (root / "writer-saw.json").exists()
+    # (2) the right credentials but the check output of the previous run
+    make_generation(cred, RID_B, {"writer.json": WRI_SECRETS}, header_id=RID_A, metrics=GOOD)
+    p = run_stage(script, "writer", cred)
+    assert p.returncode != 0 and not (root / "writer-saw.json").exists() and not leaks(p)
+    # (3) a stage file that carries another run id even though its digest was recorded
+    body = json.dumps({"run_id": RID_A, "secrets": WRI_SECRETS}).encode()
+    make_generation(cred, RID_B, {"writer.json": WRI_SECRETS}, metrics=GOOD)
+    manifest = json.loads((cred / "manifest").read_text())
+    manifest["files"]["writer.json"] = hashlib.sha256(body).hexdigest()
+    (cred / "manifest").write_text(json.dumps(manifest))
+    (cred / "env").write_bytes(body)
+    assert run_stage(script, "writer", cred).returncode != 0
+    # (4) the manifest is missing, malformed or carries a bad id; the check output is missing or empty
+    make_generation(cred, RID_A, {"writer.json": WRI_SECRETS}, metrics=GOOD)
+    (cred / "manifest").unlink()
+    assert run_stage(script, "writer", cred).returncode != 0
+    make_generation(cred, "not-a-run-id", {"writer.json": WRI_SECRETS}, metrics=GOOD)
+    assert run_stage(script, "writer", cred).returncode != 0
+    make_generation(cred, RID_A, {"writer.json": WRI_SECRETS}, metrics=GOOD)
+    (cred / "metrics").write_text("# twingate-run %s\n" % RID_A)         # header only, no lines
+    assert run_stage(script, "writer", cred).returncode != 0
+    (cred / "metrics").write_text(GOOD)                                    # no header at all
+    assert run_stage(script, "writer", cred).returncode != 0
+    assert not (root / "writer-saw.json").exists()
+    # the collector refuses a file that does not match its manifest too
+    make_generation(cred, RID_A, {"collector.json": COL_SECRETS})
+    (cred / "env").write_text(json.dumps({"run_id": RID_A, "secrets": {"TWINGATE_API_KEY": "tampered"}}))
+    assert run_stage(script, "collector", cred).returncode != 0 and not (root / "collector-saw.json").exists()
+
+
+def test_a_short_check_output_replaces_a_longer_earlier_one_when_opened_as_truncate(tmp_path, stage_tree):
+    # R4-4: "truncate:" opens with O_TRUNC; the unit's output is then exactly the new header and lines.
+    # (systemd's "file:" opens without O_TRUNC, which leaves the old tail; both are modelled here.)
+    root, script, cred = stage_tree
+    make_generation(cred, RID_A, {"collector.json": COL_SECRETS})
+    out = tmp_path / "metrics.lp"
+    long_old = ("# twingate-run %s\n" % RID_B) + GOOD * 3
+    for flags, expect_clean in ((os.O_WRONLY | os.O_TRUNC, True), (os.O_WRONLY, False)):
+        out.write_text(long_old)
+        fd = os.open(out, flags)
+        env = {"CREDENTIALS_DIRECTORY": str(cred), "PATH": "/usr/bin"}
+        p = subprocess.run([sys.executable, "-I", str(script), "collector"], env=env, stdout=fd, stderr=subprocess.PIPE,
+                           stdin=subprocess.DEVNULL, timeout=30)
+        os.close(fd)
+        assert p.returncode == 0
+        text = out.read_text()
+        assert text.startswith("# twingate-run %s\n" % RID_A)
+        assert (text == "# twingate-run %s\n" % RID_A) is expect_clean       # without O_TRUNC the old tail survives
+        assert (GOOD not in text) is expect_clean
+
+
 def test_stage_refuses_a_credential_that_holds_a_foreign_name_or_is_malformed(stage_tree):
     root, script, cred = stage_tree
     for body in ({"TWINGATE_INFLUX_PASSWORD": PASSWORD},              # the writer's secret, offered to the collector
-                 {"DOPPLER_TOKEN": TOKEN}, {"LD_PRELOAD": "/evil.so"}, {"TWINGATE_API_KEY": 1}, ["x"]):
-        (cred / "env").write_text(json.dumps(body))
+                 {"DOPPLER_TOKEN": TOKEN}, {"LD_PRELOAD": "/evil.so"}, {"TWINGATE_API_KEY": 1}):
+        make_generation(cred, RID_A, {"collector.json": body})
         p = run_stage(script, "collector", cred)
         assert p.returncode != 0 and not (root / "collector-saw.json").exists() and not leaks(p), body
+    make_generation(cred, RID_A, {"collector.json": COL_SECRETS})
     (cred / "env").write_text("not json")
     assert run_stage(script, "collector", cred).returncode != 0
     assert run_stage(script, "other", cred).returncode != 0
     assert run_stage(script, "collector", cred, {"CREDENTIALS_DIRECTORY": "relative"}).returncode != 0
+
+
+# ---- the root-side generation helper (publish, claim, cleanup, purge) -------------------
+
+GENERATION = REPO_ROOT / "scripts" / "live-deploy" / "twingate-generation.py"
+
+
+def run_gen(*args, env=None):
+    return subprocess.run([sys.executable, "-I", str(GENERATION), *args], capture_output=True, text=True,
+                          stdin=subprocess.DEVNULL, timeout=30, env=env or {"PATH": "/usr/bin"})
+
+
+def broker_generation(src, **extra):
+    """Run the fetch helper into src (the broker's runtime directory) and return the generation."""
+    src.mkdir(exist_ok=True)
+    assert run_fetch(dict(SECRETS_INJECTED, TWINGATE_STAGE_DIR=str(src), **extra)).returncode == 0
+    return generations(src)[0]
+
+
+@pytest.fixture
+def gen_dirs(tmp_path):
+    src, dest = tmp_path / "broker", tmp_path / "collect"
+    return src, dest
+
+
+def test_publish_copies_one_valid_generation_and_points_current_at_it(gen_dirs):
+    src, dest = gen_dirs
+    g = broker_generation(src)
+    p = run_gen("publish", "--src", str(src), "--dest", str(dest))
+    assert p.returncode == 0, p.stderr
+    assert (dest / "current").is_symlink() and os.readlink(dest / "current") == g.name
+    assert stat.S_IMODE(dest.stat().st_mode) == 0o700
+    for n in ("collector.json", "writer.json", "manifest.json"):
+        assert (dest / g.name / n).read_bytes() == (g / n).read_bytes()
+        assert stat.S_IMODE((dest / g.name / n).stat().st_mode) == 0o600
+    assert not list(dest.glob("*.tmp"))
+
+
+def test_publish_refuses_a_mismatched_tampered_missing_or_ambiguous_generation_and_leaves_nothing(gen_dirs):
+    src, dest = gen_dirs
+    g = broker_generation(src)
+    (g / "writer.json").write_text(json.dumps({"run_id": g.name, "secrets": {"TWINGATE_INFLUX_PASSWORD": "swapped"}}))
+    assert run_gen("publish", "--src", str(src), "--dest", str(dest)).returncode != 0      # digest mismatch
+    assert not generations(dest) and not (dest / "current").exists()
+    g2 = broker_generation(tmp := src.parent / "b2")
+    (g2 / "manifest.json").unlink()
+    assert run_gen("publish", "--src", str(tmp), "--dest", str(dest)).returncode != 0      # no manifest
+    g3 = broker_generation(tmp3 := src.parent / "b3")
+    (tmp3 / ("c" * 32)).mkdir()
+    assert run_gen("publish", "--src", str(tmp3), "--dest", str(dest)).returncode != 0     # two generations
+    g4 = broker_generation(tmp4 := src.parent / "b4")
+    manifest = json.loads((g4 / "manifest.json").read_text())
+    manifest["run_id"] = "d" * 32
+    (g4 / "manifest.json").write_text(json.dumps(manifest))
+    assert run_gen("publish", "--src", str(tmp4), "--dest", str(dest)).returncode != 0     # id differs from the directory
+    (src.parent / "empty").mkdir()
+    assert run_gen("publish", "--src", str(src.parent / "empty"), "--dest", str(dest)).returncode != 0
+    assert not generations(dest) and not (dest / "current").exists()
+
+
+def test_publish_does_not_follow_a_symlink_planted_in_the_generation(gen_dirs, tmp_path):
+    src, dest = gen_dirs
+    g = broker_generation(src)
+    secret = tmp_path / "elsewhere"
+    secret.write_text("x" * 10)
+    (g / "writer.json").unlink()
+    (g / "writer.json").symlink_to(secret)
+    assert run_gen("publish", "--src", str(src), "--dest", str(dest)).returncode != 0
+    assert not generations(dest)
+
+
+def test_publish_requires_a_private_destination_owned_by_the_caller(gen_dirs):
+    src, dest = gen_dirs
+    broker_generation(src)
+    dest.mkdir(mode=0o755)
+    dest.chmod(0o755)
+    assert run_gen("publish", "--src", str(src), "--dest", str(dest)).returncode != 0
+    assert not generations(dest)
+
+
+def test_a_new_publish_removes_every_older_generation_but_keeps_the_claimed_one(gen_dirs):
+    src, dest = gen_dirs
+    first = broker_generation(src)
+    assert run_gen("publish", "--src", str(src), "--dest", str(dest)).returncode == 0
+    assert run_gen("claim", "--dest", str(dest)).returncode == 0
+    shutil.rmtree(src)
+    second = broker_generation(src)
+    assert run_gen("publish", "--src", str(src), "--dest", str(dest)).returncode == 0
+    assert sorted(x.name for x in generations(dest)) == sorted([first.name, second.name])     # claimed one stays
+    assert os.readlink(dest / "current") == second.name
+    assert run_gen("cleanup", "--dest", str(dest)).returncode == 0
+    assert [x.name for x in generations(dest)] == [second.name] and (dest / "current").is_symlink()
+
+
+def test_a_late_cleanup_never_deletes_a_newer_generation(gen_dirs):
+    # R4-3: the writer of run 1 finishes after run 2 was published
+    src, dest = gen_dirs
+    first = broker_generation(src)
+    assert run_gen("publish", "--src", str(src), "--dest", str(dest)).returncode == 0
+    assert run_gen("claim", "--dest", str(dest)).returncode == 0
+    shutil.rmtree(src)
+    second = broker_generation(src)
+    assert run_gen("publish", "--src", str(src), "--dest", str(dest)).returncode == 0
+    assert run_gen("cleanup", "--dest", str(dest)).returncode == 0          # run 1's late cleanup
+    assert (dest / second.name / "writer.json").exists() and os.readlink(dest / "current") == second.name
+    assert not (dest / first.name).exists() and not (dest / "claim").exists()
+    assert run_gen("cleanup", "--dest", str(dest)).returncode == 0          # nothing claimed: removes nothing
+    assert (dest / second.name).exists()
+
+
+def test_cleanup_removes_the_consumed_generation_and_the_current_pointer(gen_dirs):
+    src, dest = gen_dirs
+    g = broker_generation(src)
+    assert run_gen("publish", "--src", str(src), "--dest", str(dest)).returncode == 0
+    assert run_gen("claim", "--dest", str(dest)).returncode == 0
+    assert run_gen("cleanup", "--dest", str(dest)).returncode == 0
+    assert not generations(dest) and not (dest / "current").is_symlink() and not (dest / "claim").exists()
+    assert run_gen("claim", "--dest", str(dest)).returncode != 0            # nothing to claim: the writer fails closed
+
+
+def test_purge_after_a_failed_broker_removes_leftover_credentials_but_not_after_success(gen_dirs):
+    src, dest = gen_dirs
+    broker_generation(src)
+    assert run_gen("publish", "--src", str(src), "--dest", str(dest)).returncode == 0
+    ok = run_gen("purge", "--dest", str(dest), "--if-failed", env={"PATH": "/usr/bin", "SERVICE_RESULT": "success"})
+    assert ok.returncode == 0 and len(generations(dest)) == 1               # a good run keeps its generation
+    for env in ({"PATH": "/usr/bin", "SERVICE_RESULT": "timeout"}, {"PATH": "/usr/bin"}):    # missing counts as failed
+        assert len(generations(dest)) == 1
+        assert run_gen("purge", "--dest", str(dest), "--if-failed", env=env).returncode == 0
+        assert not generations(dest) and not (dest / "current").is_symlink()
+        shutil.rmtree(src)
+        broker_generation(src)
+        assert run_gen("publish", "--src", str(src), "--dest", str(dest)).returncode == 0
+    assert run_gen("purge", "--dest", str(dest)).returncode == 0 and not generations(dest)   # start-of-run purge
 
 
 def test_only_the_broker_unit_mentions_the_token_path_besides_siem_run():

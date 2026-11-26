@@ -245,7 +245,7 @@ API does not return is written as `twingate_connector_up` value 0 (so the "not A
 rule fires) and the check fails; a returned Connector that is not on the list is counted
 in `twingate_unexpected_connector` without failing the check (the warning rule "Twingate unexpected Connector" alerts on it). Duplicate names or ids and
 a repeated page cursor also fail the check. The units start from an empty environment, and each stage receives only its own secrets as
-a credential file; the secret manager's token is not readable by either stage (runbook section 10).
+a credential file from a per-run generation that it checks against a manifest; the broker is a dynamic user and the secret manager's token is not readable by either stage (runbook section 10, including the minimum systemd version, 249).
 
 A cleanly stopped Connector is still listed by the Admin API, so
 `twingate_connector_up` becomes 0 (it does not go missing). A dead collector does not
@@ -280,7 +280,7 @@ the phone, and because the weekly digest lists every alert that fired, they
 show up there. Behind for 14 days means the Operator itself is stuck. The
 manual rules read only `managed_by` other than `operator`, so the two sets
 never overlap. The rules "Twingate Connector not ALIVE" and "Twingate update
-check failing or stale" apply to every mode. "Twingate unexpected Connector" (`severity=warning`, `phone=false`) fires when the collector counts a Connector that is not on the expected list in two or more runs within 3 hours; both its no-data and error states alert, so a missing metric never looks like a clean inventory (a silent collector also trips the stale rule, which is the accepted duplicate).
+check failing or stale" apply to every mode. "Twingate unexpected Connector" (`severity=warning`, `phone=false`) fires when `twingate_unexpected_connector` is above 0 in every sample of the last 3 hours and there are at least two samples (the rule takes the minimum over the window), so a Connector that stays unexpected is noticed up to about 3 hours after it first appears, once the last zero sample ages out, and one that goes away again sooner is recorded but not alerted; both its no-data and error states alert, so a missing metric never looks like a clean inventory (a silent collector also trips the stale rule, which is the accepted duplicate).
 
 ### Label taxonomy
 
