@@ -119,9 +119,10 @@ def test_build_credentials_shapes(setup):
     assert json.loads(p["data"]["json"]) == {"body": {"token": "tok", "user": "usr"}}
 
 
-def test_credential_id_map_covers_the_three_names(setup):
+def test_credential_id_map_covers_the_known_names(setup):
     ids = setup.credential_id_map()
-    assert set(ids) == {"grafana-webhook-auth", "pushover-api", setup.DISCORD_NAME}
+    assert set(ids) == {"grafana-webhook-auth", "pushover-api", setup.DISCORD_NAME, "matrix-bot-auth"}
+    assert ids["matrix-bot-auth"] == setup.CRED_MATRIX_ID
     assert ids["grafana-webhook-auth"] == setup.CRED_HEADER_ID and ids["pushover-api"] == setup.CRED_PUSHOVER_ID
 
 
@@ -298,7 +299,8 @@ def test_grafana_deploy_stage_prints_the_plan(tmp_path):
     env = _stage_dirs(tmp_path)
     r = _run("grafana-deploy.py", ["--stage"], env)
     assert r.returncode == 0, r.stderr
-    assert r.stdout.strip() == "staged files ok; router path length 35"
+    assert r.stdout.strip().splitlines()[0] == "staged files ok; router path length 35"
+    assert "INFLUX_URL in effect: http://influxdb:8086" in r.stdout
 
 
 def test_grafana_deploy_ships_the_heartbeat_rule_file(gdeploy):
@@ -451,3 +453,85 @@ def test_cli_refuses_a_bad_error_workflow_id_before_touching_docker(tmp_path):
     r = _run("n8n-setup-alert-router.py", ["--workflow", str(ROUTER), "--error-workflow-id"],
              {"SIEM_CONFIG_DIR": str(tmp_path)})
     assert r.returncode != 0 and "needs an id" in r.stderr
+
+
+# --- issue #53: matrix credential and the weekly digest import ------------------------
+
+DIGEST = REPO_ROOT / "n8n" / "weekly-update-digest.json"
+
+
+def digest():
+    return json.loads(DIGEST.read_text(encoding="utf-8"))
+
+
+def test_build_matrix_credential_shape(setup):
+    cred = setup.build_matrix_credential("tok" + "9" * 10)
+    assert cred["name"] == "matrix-bot-auth" and cred["type"] == "httpCustomAuth" and cred["id"] == setup.CRED_MATRIX_ID
+    assert json.loads(cred["data"]["json"]) == {"headers": {"Authorization": "Bearer tok" + "9" * 10}}
+
+
+def test_build_credentials_without_matrix_is_unchanged(setup):
+    assert {c["name"] for c in setup.build_credentials("S" * 8, "t", "u")} == {"grafana-webhook-auth", "pushover-api"}
+
+
+def test_matrix_token_never_reaches_argv_or_output(setup, monkeypatch, capsys):  # GUARD
+    seen = {}
+
+    def fake(script, payload):
+        seen["script"], seen["payload"] = script, payload
+        return 0, ["Successfully imported 1 credential."]
+
+    monkeypatch.setattr(setup, "docker_in", fake)
+    monkeypatch.setenv("MATRIX_BOT_TOKEN", "MATRIXSECRET-0123456789")
+    assert setup.matrix_credentials() == 0
+    assert "MATRIXSECRET" not in seen["script"] and "MATRIXSECRET" in seen["payload"]
+    assert "MATRIXSECRET" not in capsys.readouterr().out
+    assert [c["name"] for c in json.loads(seen["payload"])] == ["matrix-bot-auth"]
+
+
+def test_matrix_credentials_need_the_token(setup, monkeypatch):
+    monkeypatch.delenv("MATRIX_BOT_TOKEN", raising=False)
+    with pytest.raises(SystemExit):
+        setup.matrix_credentials()
+
+
+def test_check_with_matrix_reports_presence_only(tmp_path):
+    r = _run("n8n-setup-alert-router.py", ["--check", "--with-matrix"],
+             {"GRAFANA_WEBHOOK_SECRET": "x" * 12, "PUSHOVER_API_KEY": "y" * 12, "PUSHOVER_USER_KEY": "z" * 12,
+              "MATRIX_BOT_TOKEN": "m" * 12})
+    assert r.returncode == 0 and "MATRIX_BOT_TOKEN: present" in r.stdout
+    assert "m" * 12 not in r.stdout + r.stderr
+
+
+def test_patch_digest_workflow_imports_inactive_with_mapped_credentials(setup):
+    out = setup.patch_digest_workflow(digest(), error_workflow_id="0123456789abcdef")
+    assert out["active"] is False and re.fullmatch(r"[0-9a-f]{16}", out["id"])
+    assert out["settings"]["errorWorkflow"] == "0123456789abcdef"
+    ids = setup.credential_id_map()
+    seen = {c["name"]: c["id"] for n in out["nodes"] for c in (n.get("credentials") or {}).values()}
+    assert {"matrix-bot-auth", setup.DISCORD_NAME} <= set(seen)
+    assert all(ids[name] == cid for name, cid in seen.items())
+    assert not any(v == "YOUR_CREDENTIAL_ID" for v in seen.values())
+
+
+def test_patch_digest_workflow_drops_the_placeholder_error_id_and_keeps_the_repo_file(setup):
+    before = DIGEST.read_text(encoding="utf-8")
+    out = setup.patch_digest_workflow(digest())
+    assert "errorWorkflow" not in out["settings"]
+    assert setup.patch_digest_workflow(digest(), reuse_id="0123456789abcdef")["id"] == "0123456789abcdef"
+    with pytest.raises(ValueError):
+        setup.patch_digest_workflow(digest(), reuse_id="nope")
+    assert DIGEST.read_text(encoding="utf-8") == before
+
+
+def test_cli_digest_flag_refuses_a_bad_id_before_touching_docker(tmp_path):
+    r = _run("n8n-setup-alert-router.py", ["--digest-workflow", str(DIGEST), "nothex"], {})
+    assert r.returncode != 0 and "16 hex" in r.stderr
+
+
+def test_runbook_documents_issue_53_n8n_changes():
+    text = " ".join((REPO_ROOT / "docs" / "live-deploy-runbook.md").read_text(encoding="utf-8").split())
+    for needle in ("matrix-bot-auth", "--with-matrix", "MATRIX_BOT_TOKEN", "--digest-workflow",
+                   "weekly-update-digest.json", "MATRIX_HOMESERVER", "MATRIX_ROOM_ID", "not secrets"):
+        assert needle in text, needle
+    assert "—" not in text
