@@ -2,36 +2,44 @@
 # host-update-metric.sh - print pending OS updates of a Debian-family host as InfluxDB line
 # protocol. Issue #219. Same contract and fail-closed style as pfsense-update-metric.sh.
 #
-# Usage: HOST_LABEL=<label> host-update-metric.sh <critical|standard>
-#        host-update-metric.sh <critical|standard> <label>
+# Usage: HOST_LABEL=<label> host-update-metric.sh [--max-lists-age-days=N] <critical|standard>
+#        host-update-metric.sh [--max-lists-age-days=N] <critical|standard> <label>
+# N is a whole number from 1 to 30 (default 3): the oldest apt package lists the check accepts.
 #
 # READ-ONLY and UNPRIVILEGED. It never runs apt update, never opens the network, never uses sudo.
 # The only commands that look at the host are:
-#   apt-get -s -o Debug::NoLocking=1 dist-upgrade   (simulation, LC_ALL=C)
+#   env -i PATH=/usr/bin:/bin LC_ALL=C APT_CONFIG=/dev/null /usr/bin/apt-get -s
+#       -o Debug::NoLocking=1 dist-upgrade   (simulation; no caller APT_* or DPKG_* variable reaches it)
 #   test -e /var/run/reboot-required
 #   a bounded read of /var/log/unattended-upgrades/unattended-upgrades.log (and its .1)
-# plus date, stat, id, tail, grep, timeout, mv and chmod on its own private state directory.
+#   stat of /var/lib/apt/periodic/update-success-stamp and of the files in /var/lib/apt/lists
+# plus date, stat, id, head, tail, grep, timeout, env, mv and chmod on its own private state directory.
+# It refuses to run as uid 0.
 #
 # Success (exit 0), tags host=<label>,tier=<tier> on every line:
 #   host_update_pending,kind=package,security=false value=<n>i   (non-security packages)
 #   host_update_pending,kind=package,security=true value=<n>i    (security packages)
+#   host_update_held_back value=<n>i                             (apt "not upgraded" count, NOT pending)
 #   host_reboot_required value=0i|1i
+#   host_update_lists_age_seconds value=<n>i                     (newest apt list or update stamp)
 #   host_unattended_last_run_age_seconds value=<n>i
 #   host_update_oldest_pending_age_seconds value=<n>i            (only when state_ok is 1)
 #   host_update_state_ok value=1i|0i
 #   host_update_check_success value=1i
 #
 # Failure (anything below is not understood or not readable, including an unattended-upgrades age
-# that cannot be determined): prints only `host_update_check_success value=0i` (with the tags when
-# label and tier are valid) and exits 1. Zero-valued update metrics are never printed after a
+# that cannot be determined, or apt lists that are missing or older than the maximum): prints only `host_update_check_success value=0i` (with the tags when
+# label and tier are valid) and exits 1; an EXIT trap prints it too on any unexpected internal
+# error. Zero-valued update metrics are never printed after a
 # failure, so a broken check cannot look healthy.
 #
 # The first-seen state is separate: if it is lost, unreadable, owned by someone else, has the wrong
 # mode or is corrupt, the check itself still succeeds, host_update_state_ok is 0 and NO oldest-age
 # metric is printed (never a 0 age). See docs/host-update-collector.md.
 #
-# Test hooks (absolute paths, defaults in the code): HOST_UPDATE_APT_GET, HOST_UPDATE_REBOOT_FILE,
-# HOST_UPDATE_UU_LOG, HOST_UPDATE_STATE_DIR.
+# There are no test hooks: every path below is fixed. The tests rewrite the fixed default lines in a
+# scratch copy of this file. The state directory is $STATE_DIRECTORY (set by systemd), else
+# ${XDG_STATE_HOME:-$HOME/.local/state}/host-update-metric.
 
 PATH=/usr/bin:/bin
 export PATH
@@ -42,15 +50,41 @@ umask 077
 nl='
 '
 tags=""
+finished=0
 
 fail() {
+    finished=1
     echo "host-update-metric: $1" >&2
     printf 'host_update_check_success%s value=0i\n' "$tags"
     exit 1
 }
 
+# Any exit that did not go through fail() or the success path (a shell arithmetic error, a signal)
+# still prints the failure line (the EXIT trap below).
+trap 'if [ "$finished" -ne 1 ]; then finished=1; echo "host-update-metric: internal error" >&2; printf "host_update_check_success%s value=0i\n" "$tags"; exit 1; fi' EXIT # MUTATE:exit-trap
+trap 'exit 1' HUP INT TERM
+
+# Canonical non-negative integer: 0 or [1-9][0-9]*, at most 11 digits. A leading zero would be
+# read as octal (or an error) by shell arithmetic.
+is_uint() {
+    case "$1" in
+        0) return 0 ;;
+        "" | 0* | *[!0-9]*) return 1 ;; # MUTATE:uint
+    esac
+    [ "${#1}" -le 11 ]
+}
+
 # ---------------------------------------------------------------- arguments
-[ "$#" -ge 1 ] && [ "$#" -le 2 ] || fail "usage: host-update-metric.sh <critical|standard> [label]"
+max_days=3
+case "${1-}" in
+    --max-lists-age-days=*)
+        max_days=${1#--max-lists-age-days=}
+        shift
+        is_uint "$max_days" && [ "$max_days" -ge 1 ] && [ "$max_days" -le 30 ] ||
+            fail "--max-lists-age-days must be a whole number from 1 to 30" # MUTATE:lists-arg
+        ;;
+esac
+[ "$#" -ge 1 ] && [ "$#" -le 2 ] || fail "usage: host-update-metric.sh [--max-lists-age-days=N] <critical|standard> [label]"
 tier=$1
 label=${HOST_LABEL-}
 if [ "$#" -eq 2 ]; then
@@ -71,11 +105,25 @@ case "$label" in
 esac
 tags=",host=$label,tier=$tier"
 
+# Paths are fixed. The tests rewrite these lines in a scratch copy of this script.
+id_bin=/usr/bin/id
+reboot_file=/var/run/reboot-required
+uu_log=/var/log/unattended-upgrades/unattended-upgrades.log
+apt_bin=/usr/bin/apt-get
+stamp_file=/var/lib/apt/periodic/update-success-stamp
+lists_dir=/var/lib/apt/lists
+
+me=$("$id_bin" -u 2>/dev/null) || fail "cannot determine the user id"
+is_uint "$me" || fail "unexpected user id"
+[ "$me" -ne 0 ] || fail "refusing to run as root (uid 0); use an unprivileged user" # MUTATE:root
+now=$(date +%s 2>/dev/null) || fail "date failed"
+is_uint "$now" || fail "non-numeric time"
+
 valid_version() {
     # $1 candidate; Debian version characters only
     [ -n "$1" ] && [ "${#1}" -le 128 ] || return 1
     case "$1" in
-        *[!A-Za-z0-9.+:~_-]*) return 1 ;;
+        *[!A-Za-z0-9.+:~_-]*) return 1 ;; # MUTATE:version-charset
     esac
     return 0
 }
@@ -88,18 +136,14 @@ abs_path() {
 }
 
 # ---------------------------------------------------------------- reboot required
-reboot_file=${HOST_UPDATE_REBOOT_FILE:-/var/run/reboot-required}
-abs_path "$reboot_file" || fail "reboot file path must be absolute"
 [ -d "${reboot_file%/*}/." ] || fail "reboot file directory is not readable"
 reboot=0
 [ -e "$reboot_file" ] && reboot=1
 
 # ---------------------------------------------------------------- unattended-upgrades age
-uu_log=${HOST_UPDATE_UU_LOG:-/var/log/unattended-upgrades/unattended-upgrades.log}
-abs_path "$uu_log" || fail "unattended-upgrades log path must be absolute"
-uu_re='^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2},[0-9]{3} INFO (All upgrades installed|No packages found that can be upgraded unattended and no pending auto-removals)$'
+uu_re='^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2},[0-9]{3} INFO (All upgrades installed|No packages found that can be upgraded unattended and no pending auto-removals)$' # MUTATE:uu-anchor
 last=""
-for f in "$uu_log" "$uu_log.1"; do
+for f in "$uu_log" "$uu_log.1"; do # MUTATE:uu-fallback
     [ -f "$f" ] && [ -r "$f" ] || continue
     last=$(tail -c 1048576 "$f" 2>/dev/null | grep -a -E "$uu_re" | tail -n 1)
     [ -n "$last" ] && break
@@ -111,34 +155,59 @@ case "$stamp" in
     [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]" "[0-9][0-9]:[0-9][0-9]:[0-9][0-9]) ;;
     *) fail "unparsable unattended-upgrades timestamp" ;;
 esac
-now=$(date +%s 2>/dev/null) || fail "date failed"
 last_ts=$(date -d "$stamp" +%s 2>/dev/null) || fail "unattended-upgrades timestamp not understood"
-case "$now$last_ts" in
-    *[!0-9]* | "") fail "non-numeric time" ;;
-esac
+is_uint "$last_ts" || fail "non-numeric time"
 uu_age=$((now - last_ts))
 [ "$uu_age" -ge 0 ] || fail "unattended-upgrades timestamp is in the future"
 
+# ---------------------------------------------------------------- apt list freshness
+# This script never refreshes the lists, so stale, empty or wiped lists would report "nothing
+# pending". The age is the newest of the apt update stamp and the non-empty list files; no usable
+# source, or an age over the maximum, fails the whole check.
+newest=""
+if [ -f "$stamp_file" ] && [ ! -L "$stamp_file" ]; then
+    m=$(stat -c %Y "$stamp_file" 2>/dev/null) || m=""
+    if is_uint "$m"; then newest=$m; fi
+fi
+for f in "$lists_dir"/*_Packages* "$lists_dir"/*_Release "$lists_dir"/*_InRelease; do
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    [ -s "$f" ] || continue # MUTATE:lists-nonempty
+    m=$(stat -c %Y "$f" 2>/dev/null) || continue
+    is_uint "$m" || continue
+    if [ -z "$newest" ] || [ "$m" -gt "$newest" ]; then newest=$m; fi # MUTATE:lists-newest
+done
+[ -n "$newest" ] || fail "no apt list stamp or package list file found" # MUTATE:lists-missing
+lists_age=$((now - newest))
+[ "$lists_age" -ge 0 ] || lists_age=0 # MUTATE:lists-clamp
+[ "$lists_age" -le $((max_days * 86400)) ] || fail "apt package lists are older than $max_days days" # MUTATE:lists-stale
+
 # ---------------------------------------------------------------- apt simulation
-apt_bin=${HOST_UPDATE_APT_GET:-/usr/bin/apt-get}
-abs_path "$apt_bin" || fail "apt-get path must be absolute"
+abs_path "$apt_bin" || fail "apt-get path must be absolute" # MUTATE:apt-abs
 [ -x "$apt_bin" ] || fail "apt-get not found"
-apt_out=$(timeout 120 "$apt_bin" -s -o Debug::NoLocking=1 dist-upgrade 2>/dev/null) || fail "apt-get simulation failed" # MUTATE:apt-rc
-[ "${#apt_out}" -le 4194304 ] || fail "apt-get output too large"
+# No caller APT_* or DPKG_* variable reaches apt. The exit status travels in a last marker line and
+# the output is bounded (4 MiB) while it is read, so a huge output never sits in memory.
+apt_out=$({
+    timeout -k 10 120 env -i PATH=/usr/bin:/bin LC_ALL=C APT_CONFIG=/dev/null "$apt_bin" -s -o Debug::NoLocking=1 dist-upgrade </dev/null 2>/dev/null # MUTATE:apt-env
+    printf '\nAPT_RC=%s\n' "$?"
+} | head -c 4194305) # MUTATE:apt-bound
+apt_rc=${apt_out##*"$nl"}
+[ "$apt_rc" = "APT_RC=0" ] || fail "apt-get simulation failed or its output is too large" # MUTATE:apt-rc
+apt_out=${apt_out%"$nl"*}
 
 pend_sec=0
 pend_other=0
 n_inst=0
 n_lines=0
 summary_total=""
+n_held=0
 keys=""
 while IFS= read -r line; do
     n_lines=$((n_lines + 1))
-    [ "$n_lines" -le 50000 ] || fail "apt-get output has too many lines"
+    [ "$n_lines" -le 50000 ] || fail "apt-get output has too many lines" # MUTATE:line-cap
     case "$line" in
         "Inst "*)
             n_inst=$((n_inst + 1))
-            [ "$n_inst" -le 1000 ] || fail "too many pending packages"
+            [ "$n_inst" -le 1000 ] || fail "too many pending packages" # MUTATE:inst-cap
             rest=${line#Inst }
             name=${rest%% *}
             [ "$name" != "$rest" ] || fail "malformed Inst line"
@@ -182,15 +251,18 @@ while IFS= read -r line; do
             arch=${arch#\[}
             arch=${arch%\]}
             case "$arch" in
-                "" | *[!a-z0-9-]*) fail "bad architecture" ;;
+                "" | *[!a-z0-9-]*) fail "bad architecture" ;; # MUTATE:arch-charset
             esac
             inner=${inner% *}
             new=${inner%% *}
             origins=${inner#"$new "}
             [ "$origins" != "$inner" ] && [ -n "$origins" ] || fail "missing origin"
             valid_version "$new" || fail "bad candidate version"
+            # An origin label with unexpected characters is counted as non-security, not a failure.
+            # A repository can label itself "security"; that is accepted (see the doc).
+            origin_ok=1
             case "$origins" in
-                *[!A-Za-z0-9._:/+,\ -]*) fail "unexpected characters in origin" ;;
+                *[!A-Za-z0-9._:/+,\ -]*) origin_ok=0 ;; # MUTATE:origin-label
             esac
             case "$nl$keys" in
                 *"$nl$name $new$nl"*) fail "duplicate package in simulation" ;;
@@ -199,30 +271,32 @@ while IFS= read -r line; do
             # Security by origin: an archive whose label is a security origin and whose suite
             # (the part after the last slash) ends in -security. The package name is never read.
             is_sec=0
-            oldifs=$IFS
-            IFS=,
-            set -f
-            # shellcheck disable=SC2086 # intentional split on commas, globbing is off
-            set -- $origins
-            set +f
-            IFS=$oldifs
-            for o in "$@"; do
-                o=${o# }
-                case "$o" in
-                    *:*)
-                        org=${o%%:*}
-                        suite=${o#*:}
-                        suite=${suite##*/}
-                        case "$org" in
-                            Debian-Security | Ubuntu | UbuntuESM | UbuntuESMApps)
-                                case "$suite" in
-                                    *-security) is_sec=1 ;;
-                                esac
-                                ;;
-                        esac
-                        ;;
-                esac
-            done
+            if [ "$origin_ok" -eq 1 ]; then
+                oldifs=$IFS
+                IFS=,
+                set -f
+                # shellcheck disable=SC2086 # intentional split on commas, globbing is off
+                set -- $origins
+                set +f
+                IFS=$oldifs
+                for o in "$@"; do
+                    o=${o# }
+                    case "$o" in
+                        *:*)
+                            org=${o%%:*}
+                            suite=${o#*:}
+                            suite=${suite##*/}
+                            case "$org" in
+                                Debian-Security | Ubuntu | UbuntuESM | UbuntuESMApps)
+                                    case "$suite" in
+                                        *-security) is_sec=1 ;;
+                                    esac
+                                    ;;
+                            esac
+                            ;;
+                    esac
+                done
+            fi
             if [ "$is_sec" -eq 1 ]; then
                 pend_sec=$((pend_sec + 1))
             else
@@ -234,9 +308,11 @@ while IFS= read -r line; do
             n_up=${line%% upgraded, *}
             tmp=${line#*" upgraded, "}
             n_new=${tmp%% newly installed, *}
-            case "$n_up$n_new" in
-                *[!0-9]* | "") fail "malformed summary line" ;;
-            esac
+            tmp=${tmp#*" to remove and "}
+            n_held=${tmp%" not upgraded."} # MUTATE:held-back
+            is_uint "$n_up" || fail "malformed summary line"
+            is_uint "$n_new" || fail "malformed summary line"
+            is_uint "$n_held" || fail "malformed summary line"
             summary_total=$((n_up + n_new))
             ;;
         "Conf "* | "Remv "* | "Reading "* | "Building "* | "Calculating "* | "NOTE: "* | \
@@ -256,17 +332,16 @@ EOF
 # Never fails the check; sets state_ok and, only when the state is trustworthy, oldest_age.
 state_ok=0
 oldest_age=""
-state_dir=${HOST_UPDATE_STATE_DIR:-}
-if [ -z "$state_dir" ] && [ -n "${HOME-}" ]; then
+state_dir=""
+if [ -n "${STATE_DIRECTORY-}" ]; then
+    # systemd sets this (StateDirectory=); with several directories it is colon separated.
+    state_dir=${STATE_DIRECTORY%%:*}
+elif [ -n "${HOME-}" ]; then
     state_dir=${XDG_STATE_HOME:-$HOME/.local/state}/host-update-metric
 fi
 
 state_run() {
-    abs_path "$state_dir" || return 1
-    me=$(id -u 2>/dev/null) || return 1
-    case "$me" in
-        "" | *[!0-9]*) return 1 ;;
-    esac
+    abs_path "$state_dir" || return 1 # MUTATE:state-abs
     first_run=0
     if [ -L "$state_dir" ]; then
         return 1
@@ -286,10 +361,8 @@ state_run() {
         [ -f "$sfile" ] || return 1
         [ "$(stat -c '%u %a' "$sfile" 2>/dev/null)" = "$me 600" ] || return 1
         size=$(stat -c '%s' "$sfile" 2>/dev/null) || return 1
-        case "$size" in
-            "" | *[!0-9]*) return 1 ;;
-        esac
-        [ "$size" -le 262144 ] || return 1
+        is_uint "$size" || return 1
+        [ "$size" -le 262144 ] || return 1 # MUTATE:state-size
         header=1
         count=0
         while IFS= read -r l || [ -n "$l" ]; do
@@ -299,7 +372,7 @@ state_run() {
                 continue
             fi
             count=$((count + 1))
-            [ "$count" -le 1000 ] || return 1
+            [ "$count" -le 1000 ] || return 1 # MUTATE:state-count
             s_name=${l%% *}
             s_rest=${l#* }
             [ "$s_name" != "$l" ] || return 1
@@ -311,10 +384,7 @@ state_run() {
             esac
             [ "${#s_name}" -le 128 ] || return 1
             valid_version "$s_ver" || return 1
-            case "$s_epoch" in
-                "" | *[!0-9]*) return 1 ;;
-            esac
-            [ "${#s_epoch}" -le 11 ] || return 1
+            is_uint "$s_epoch" || return 1 # MUTATE:state-uint
             [ "$s_epoch" -le $((now + 86400)) ] || return 1
             case "$nl$old_text" in
                 *"$nl$s_name $s_ver "*) return 1 ;;
@@ -334,7 +404,9 @@ state_run() {
         e=""
         case "$nl$old_text" in
             *"$nl$k "*)
-                e=${old_text#*"$k "}
+                # Anchored at a line start: the key "foo 2 " must not match inside "libfoo 2 ".
+                e=$nl$old_text
+                e=${e#*"$nl$k "} # MUTATE:state-anchor
                 e=${e%%"$nl"*}
                 ;;
         esac
@@ -348,7 +420,7 @@ $keys
 EOK
     tmpf="$state_dir/.first-seen.$$"
     if ! (
-        set -C
+        set -C # MUTATE:noclobber
         printf '%s' "$new_text" >"$tmpf"
     ) 2>/dev/null; then
         rm -f "$tmpf" 2>/dev/null
@@ -363,7 +435,7 @@ EOK
         oldest_age=0
     else
         oldest_age=$((now - oldest))
-        [ "$oldest_age" -ge 0 ] || oldest_age=0
+        [ "$oldest_age" -ge 0 ] || oldest_age=0 # MUTATE:oldest-clamp
     fi
     return 0
 }
@@ -375,8 +447,11 @@ else
 fi
 
 # ---------------------------------------------------------------- output
+finished=1
 printf 'host_update_pending%s,kind=package,security=false value=%di\n' "$tags" "$pend_other"
 printf 'host_update_pending%s,kind=package,security=true value=%di\n' "$tags" "$pend_sec"
+printf 'host_update_held_back%s value=%di\n' "$tags" "$n_held"
+printf 'host_update_lists_age_seconds%s value=%di\n' "$tags" "$lists_age"
 printf 'host_reboot_required%s value=%di\n' "$tags" "$reboot"
 printf 'host_unattended_last_run_age_seconds%s value=%di\n' "$tags" "$uu_age"
 if [ "$state_ok" -eq 1 ] && [ -n "$oldest_age" ]; then
