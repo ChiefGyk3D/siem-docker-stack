@@ -11,7 +11,18 @@ Usage:
   siem-run python3 -I n8n-setup-alert-router.py --check
   siem-run python3 -I n8n-setup-alert-router.py --credentials
   siem-run python3 -I n8n-setup-alert-router.py --error-workflow handler.json [HANDLER_ID]
+  siem-run python3 -I n8n-setup-alert-router.py --check --with-matrix
+  siem-run python3 -I n8n-setup-alert-router.py --credentials --with-matrix
+  siem-run python3 -I n8n-setup-alert-router.py --digest-workflow weekly-update-digest.json [WORKFLOW_ID] [--error-workflow-id HANDLER_ID]
   siem-run python3 -I n8n-setup-alert-router.py --workflow router.json [WORKFLOW_ID] [--pushover-on] [--error-workflow-id HANDLER_ID]
+
+--credentials --with-matrix (the flag adds, it does not replace) also creates the
+Custom Auth credential matrix-bot-auth: the bearer token comes from the environment value
+MATRIX_BOT_TOKEN and goes to n8n over stdin like the other secrets (never argv, never
+printed). --digest-workflow imports n8n/weekly-update-digest.json inactive with its
+credential ids mapped; import the error handler first and pass its id, as for the router.
+MATRIX_HOMESERVER and MATRIX_ROOM_ID are not secrets and not handled here: they are
+pass-through lines (names only) in the n8n container environment of the compose file.
 
 Import order: the error handler first (--error-workflow prints its id), then the
 router with that id (--workflow ... --error-workflow-id ID), so the router's
@@ -28,6 +39,8 @@ Environment (all optional, the current values are the defaults):
                           (default: grafana)
   N8N_CRED_HEADER_ID      id for the grafana-webhook-auth credential (default: gfwebhookauth01)
   N8N_CRED_PUSHOVER_ID    id for the pushover-api credential (default: pushoverapi0001)
+  N8N_CRED_MATRIX_ID      id for the matrix-bot-auth credential (default: matrixbotauth01)
+  MATRIX_BOT_TOKEN        only with --with-matrix: the Matrix bot's access token (secret)
   N8N_CRED_DISCORD_ID     id of the existing Discord webhook credential in n8n
                           (default: dscwhk1479574998; an n8n internal id, not a secret)
   N8N_DISCORD_CRED_NAME   name of that credential (default: Discord Webhook Alerts)
@@ -53,6 +66,7 @@ PATH_FILE = os.path.join(CONFIG_DIR, "router-path")
 EXPIRY_PATH_FILE = os.path.join(CONFIG_DIR, "expiry-path")
 CRED_HEADER_ID = os.environ.get("N8N_CRED_HEADER_ID", "gfwebhookauth01")
 CRED_PUSHOVER_ID = os.environ.get("N8N_CRED_PUSHOVER_ID", "pushoverapi0001")
+CRED_MATRIX_ID = os.environ.get("N8N_CRED_MATRIX_ID", "matrixbotauth01")
 CRED_DISCORD_ID = os.environ.get("N8N_CRED_DISCORD_ID", "dscwhk1479574998")
 DISCORD_NAME = os.environ.get("N8N_DISCORD_CRED_NAME", "Discord Webhook Alerts")
 NEW_NAME = os.environ.get("N8N_ROUTER_NAME", "Grafana SOAR — Alert Router (authenticated)")
@@ -122,12 +136,23 @@ def build_credentials(secret, token, user):
     ]
 
 
+def build_matrix_credential(token):
+    """The Custom Auth credential the weekly digest's Matrix node uses: one Authorization header."""
+    return {
+        "id": CRED_MATRIX_ID,
+        "name": "matrix-bot-auth",
+        "type": "httpCustomAuth",
+        "data": {"json": json.dumps({"headers": {"Authorization": "Bearer " + token}})},
+    }
+
+
 def credential_id_map():
     """Credential name -> the n8n credential id this tooling creates or expects."""
     return {
         "grafana-webhook-auth": CRED_HEADER_ID,
         "pushover-api": CRED_PUSHOVER_ID,
         DISCORD_NAME: CRED_DISCORD_ID,
+        "matrix-bot-auth": CRED_MATRIX_ID,
     }
 
 
@@ -255,6 +280,28 @@ def patch_error_workflow(wf, reuse_id="", new_id=None):
     return wf
 
 
+def patch_digest_workflow(wf, reuse_id="", error_workflow_id="", new_id=None):
+    """Return the weekly update digest workflow patched for import (inactive, credential ids mapped).
+    The committed placeholder errorWorkflow id is dropped unless a real handler id is given."""
+    check_id(reuse_id)
+    check_id(error_workflow_id, "error workflow id")
+    for key in STRIP_KEYS:
+        wf.pop(key, None)
+    wf["id"] = reuse_id or new_id or secrets.token_hex(8)
+    wf["active"] = False
+    settings = wf.setdefault("settings", {})
+    if error_workflow_id:
+        settings["errorWorkflow"] = error_workflow_id
+    else:
+        settings.pop("errorWorkflow", None)
+    ids = credential_id_map()
+    for node in wf["nodes"]:
+        for cred in (node.get("credentials") or {}).values():
+            if cred.get("name") in ids:
+                cred["id"] = ids[cred["name"]]
+    return wf
+
+
 def parse_workflow_args(rest):
     """Parse the arguments after the workflow file: (reuse_id, pushover_on, error_workflow_id)."""
     reuse_id, error_id, pushover_on, i = "", "", False, 0
@@ -326,10 +373,11 @@ def patch_workflow(wf, reuse_id="", pushover_on=False, origin="", webhook_path="
 
 # ---- command line ----------------------------------------------------------------
 
-def check():
-    for name in NEEDED:
+def check(with_matrix=False):
+    names = NEEDED + (("MATRIX_BOT_TOKEN",) if with_matrix else ())
+    for name in names:
         print("%s: %s" % (name, "present" if os.environ.get(name) else "MISSING"))
-    return 0 if all(os.environ.get(n) for n in NEEDED) else 1
+    return 0 if all(os.environ.get(n) for n in names) else 1
 
 
 def credentials():
@@ -340,6 +388,36 @@ def credentials():
     for ln in lines[:6]:
         print(ln[:160])
     print("credentials import exit code:", rc)
+    return rc
+
+
+def matrix_credentials():
+    """Create only matrix-bot-auth. The token is read from the environment and sent over stdin."""
+    cred = build_matrix_credential(need("MATRIX_BOT_TOKEN"))
+    script = "cat > /tmp/cred.json && n8n import:credentials --input=/tmp/cred.json; rc=$?; rm -f /tmp/cred.json; exit $rc"
+    rc, lines = docker_in(script, json.dumps([cred]))
+    for ln in lines[:6]:
+        print(ln[:160])
+    print("matrix credential import exit code:", rc)
+    return rc
+
+
+def digest_workflow(path, reuse_id="", error_workflow_id=""):
+    try:
+        check_id(reuse_id)
+        check_id(error_workflow_id, "error workflow id")
+    except ValueError as err:
+        sys.exit(str(err))
+    with open(path, encoding="utf-8") as handle:
+        wf = json.load(handle)
+    wf = patch_digest_workflow(wf, reuse_id, error_workflow_id)
+    script = "cat > /tmp/dg.json && n8n import:workflow --input=/tmp/dg.json; rc=$?; rm -f /tmp/dg.json; exit $rc"
+    rc, lines = docker_in(script, json.dumps([wf]))
+    for ln in lines[:6]:
+        print(ln[:160])
+    print("digest workflow import exit code:", rc)
+    print("digest workflow id:", wf["id"])
+    print("digest workflow active: False (activate it in n8n after you check it)")
     return rc
 
 
@@ -405,10 +483,19 @@ def workflow(path, reuse_id="", pushover_on=False, error_workflow_id=""):
 
 
 def main(argv):
-    if argv[:1] == ["--check"]:
-        return check()
-    if argv[:1] == ["--credentials"]:
-        return credentials()
+    if argv[:1] == ["--check"] and argv[1:] in ([], ["--with-matrix"]):
+        return check(bool(argv[1:]))
+    if argv[:1] == ["--credentials"] and argv[1:] in ([], ["--with-matrix"]):
+        rc = credentials()
+        return rc if rc or not argv[1:] else matrix_credentials()
+    if argv[:1] == ["--digest-workflow"] and len(argv) >= 2:
+        try:
+            reuse_id, _unused, error_id = parse_workflow_args(argv[2:])
+        except ValueError as err:
+            sys.exit(str(err))
+        if _unused:
+            sys.exit("--pushover-on does not apply to the digest workflow")
+        return digest_workflow(argv[1], reuse_id, error_id)
     if argv[:1] == ["--error-workflow"] and len(argv) >= 2:
         return error_workflow(argv[1], argv[2] if len(argv) > 2 else "")
     if argv[:1] == ["--workflow"] and len(argv) >= 2:

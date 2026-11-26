@@ -314,7 +314,7 @@ def test_a_missing_file_aborts_before_any_write(gd, env, capsys):  # GUARD
 
 def test_stage_flag_keeps_its_one_line_output(gd, env, capsys):
     code, out, _ = run(gd, capsys, ["--stage"])
-    assert code == 0 and out.strip() == "staged files ok; router path length 35"
+    assert code == 0 and out.strip().splitlines()[0] == "staged files ok; router path length 35"
     assert not env.alert.exists()
 
 def test_command_line_default_is_a_dry_run(tmp_path):
@@ -629,7 +629,12 @@ def test_the_script_never_names_docker_or_the_compose_file_in_code(gd):  # GUARD
     import ast
     tree = _script_tree()
     docstring = ast.get_docstring(tree, clean=False)
+    # print_restart_step only prints advice text for the owner (issue #53); it starts nothing.
+    advice = {id(n) for f in ast.walk(tree) if isinstance(f, ast.FunctionDef) and f.name == "print_restart_step"
+              for n in ast.walk(f)}
     for node in ast.walk(tree):
+        if id(node) in advice:
+            continue
         if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value != docstring:
             low = node.value.lower()
             assert "docker" not in low and "compose" not in low and "webhook_secret" not in low, node.value[:60]
@@ -780,3 +785,117 @@ def test_the_docstring_says_only_what_is_true(gd):  # GUARD
         assert stale not in head, stale
     assert "partial" in head and "by hand" in head and "no atomicity" in head
 
+
+
+# ---- issue #53: keep what the live box needs --------------------------------------
+
+TWINGATE = "update-alert-rules-twingate.yml"
+DS_LIVE = """apiVersion: 1
+datasources:
+  - name: InfluxDB-pfSense-alerts
+    uid: influxdb-pfsense
+    type: influxdb
+    url: {url}
+    database: pfsense
+
+  - name: InfluxDB-UniFi-alerts
+    uid: influxdb-unifi
+    type: influxdb
+    url: {url}
+    database: unpoller
+
+  - name: InfluxDB-Twingate-alerts
+    uid: influxdb-twingate
+    type: influxdb
+    url: http://192.0.2.9:8086
+    database: twingate
+"""
+
+def _influx(gd, monkeypatch, url=None):
+    monkeypatch.setattr(gd, "INFLUX_URL_SET", url is not None)
+    monkeypatch.setattr(gd, "INFLUX_URL", url or "http://influxdb:8086")
+
+def test_optional_rule_file_is_deployed_when_staged_and_skipped_when_absent(gd, env, capsys, monkeypatch):
+    _influx(gd, monkeypatch)
+    assert TWINGATE in gd.OPTIONAL_FILES and not set(gd.OPTIONAL_FILES) & set(gd.FILES)
+    code, out, _ = run(gd, capsys, ["--apply"])
+    assert code == 0 and not (env.alert / TWINGATE).exists() and TWINGATE not in out
+    (env.stage / TWINGATE).write_text("apiVersion: 1\n", encoding="utf-8")
+    (env.stage / TWINGATE).chmod(0o644)
+    code, out, _ = run(gd, capsys, ["--apply"])
+    assert code == 0 and (env.alert / TWINGATE).read_text(encoding="utf-8") == "apiVersion: 1\n"
+
+def test_optional_rule_file_is_on_the_allowlist(gd, env):
+    (env.stage / TWINGATE).write_text("apiVersion: 1\n", encoding="utf-8")
+    (env.stage / TWINGATE).chmod(0o644)
+    assert gd.read_staged(str(env.stage), TWINGATE) == "apiVersion: 1\n"
+
+def test_live_twingate_datasource_is_kept_on_apply(gd, env, capsys, monkeypatch):  # GUARD
+    _influx(gd, monkeypatch, "http://192.0.2.7:8086")
+    (env.tmp / "ds.yml").write_text(DS_LIVE.format(url="http://192.0.2.7:8086"), encoding="utf-8")
+    code, _, _ = run(gd, capsys, ["--apply"])
+    text = (env.tmp / "ds.yml").read_text(encoding="utf-8")
+    assert code == 0
+    assert "uid: influxdb-twingate" in text and "database: twingate" in text and "http://192.0.2.9:8086" in text
+    assert "uid: influxdb-pfsense" in text and "uid: influxdb-unifi" in text
+    assert text.count("uid: influxdb-twingate") == 1
+    code, out, _ = run(gd, capsys, ["--apply"])
+    assert "datasources" not in out.split("files replaced:")[-1] or "alerting-influx" not in out
+
+def test_no_twingate_datasource_is_invented(gd, env, capsys, monkeypatch):
+    _influx(gd, monkeypatch)
+    run(gd, capsys, ["--apply"])
+    assert "influxdb-twingate" not in (env.tmp / "ds.yml").read_text(encoding="utf-8")
+
+@pytest.mark.parametrize("args", [["--stage"], [], ["--apply"]])
+def test_influx_url_in_effect_is_printed(gd, env, capsys, monkeypatch, args):
+    _influx(gd, monkeypatch, "http://192.0.2.7:8086")
+    code, out, _ = run(gd, capsys, args)
+    assert code == 0 and "INFLUX_URL in effect: http://192.0.2.7:8086 (from the environment)" in out
+
+def test_influx_url_default_is_labelled(gd, env, capsys, monkeypatch):
+    _influx(gd, monkeypatch)
+    _, out, _ = run(gd, capsys, ["--stage"])
+    assert "INFLUX_URL in effect: http://influxdb:8086 (default; INFLUX_URL is not set)" in out
+
+def test_apply_refuses_unset_influx_url_when_live_url_differs(gd, env, capsys, monkeypatch):  # GUARD
+    _influx(gd, monkeypatch)
+    live = DS_LIVE.format(url="http://192.0.2.7:8086")
+    (env.tmp / "ds.yml").write_text(live, encoding="utf-8")
+    code, out, err = run(gd, capsys, ["--apply"])
+    assert code != 0 and "INFLUX_URL" in err and "refusing" in err
+    assert (env.tmp / "ds.yml").read_text(encoding="utf-8") == live and not env.alert.exists()
+    assert "192.0.2.7" not in err
+
+def test_stage_and_dry_run_warn_but_do_not_refuse(gd, env, capsys, monkeypatch):
+    _influx(gd, monkeypatch)
+    (env.tmp / "ds.yml").write_text(DS_LIVE.format(url="http://192.0.2.7:8086"), encoding="utf-8")
+    for args in (["--stage"], []):
+        code, out, _ = run(gd, capsys, args)
+        assert code == 0 and "WARNING: INFLUX_URL is not set" in out
+
+def test_apply_proceeds_when_unset_and_live_url_is_the_default_or_absent(gd, env, capsys, monkeypatch):
+    _influx(gd, monkeypatch)
+    (env.tmp / "ds.yml").write_text(DS_LIVE.format(url="http://influxdb:8086"), encoding="utf-8")
+    assert run(gd, capsys, ["--apply"])[0] == 0
+
+def test_apply_proceeds_when_influx_url_is_set_explicitly(gd, env, capsys, monkeypatch):
+    _influx(gd, monkeypatch, "http://192.0.2.7:8086")
+    (env.tmp / "ds.yml").write_text(DS_LIVE.format(url="http://192.0.2.7:8086"), encoding="utf-8")
+    assert run(gd, capsys, ["--apply"])[0] == 0
+
+@pytest.mark.parametrize("args", [[], ["--apply"]])
+def test_restart_step_is_printed_and_never_run(gd, env, capsys, monkeypatch, args):  # GUARD
+    _influx(gd, monkeypatch)
+    code, out, _ = run(gd, capsys, args)
+    assert code == 0
+    assert "docker compose up -d grafana" in out and "may not re-read" in out
+    assert "docker restart grafana" in out
+    assert env.calls == []
+
+def test_runbook_documents_issue_53_grafana_changes():
+    text = " ".join((REPO_ROOT / "docs" / "live-deploy-runbook.md").read_text(encoding="utf-8").split())
+    for needle in (TWINGATE, "influxdb-twingate", "INFLUX_URL in effect", "refuses --apply",
+                   "docker restart grafana", "may not re-read"):
+        assert needle in text, needle
+    assert "—" not in text

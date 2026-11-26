@@ -89,6 +89,8 @@ the n8n container without that volume loses all of them:
 | The imported workflow (with the router code and constants) | Workflow | `n8n-setup-alert-router.py --workflow` |
 | The imported error handler workflow | Workflow (Error Trigger) | `n8n-setup-alert-router.py --error-workflow` |
 | The private webhook path | Value in the workflow and in the Grafana contact point | A new one is generated on first import and saved to `router-path` in the config directory |
+| Credential `matrix-bot-auth` (optional, for the weekly digest) | Custom Auth with an `Authorization: Bearer <token>` header | `MATRIX_BOT_TOKEN=... n8n-setup-alert-router.py --credentials --with-matrix` |
+| The imported weekly update digest workflow (optional) | Workflow, imported inactive | `n8n-setup-alert-router.py --digest-workflow n8n/weekly-update-digest.json` |
 | The Discord webhook credential | Existing credential, used by the router's Discord nodes | Not recreated here: it is part of the original n8n setup |
 
 Details that were learned live:
@@ -106,6 +108,21 @@ Details that were learned live:
   webhook is registered: `docker restart n8n`.
 - The imported workflow is inactive (`active: false`). Activate it in n8n after
   you check it, or publish through the CLI, then restart.
+- The Matrix credential is created only with `--with-matrix` (together with
+  `--credentials`; `--check --with-matrix` also reports `MATRIX_BOT_TOKEN`). The
+  token comes from the secret manager through `siem-run` as the environment value
+  `MATRIX_BOT_TOKEN`, goes to n8n over stdin like the other secrets, and is never
+  on argv and never printed. Add `MATRIX_BOT_TOKEN` to the names `siem-run` injects.
+- `--digest-workflow n8n/weekly-update-digest.json [ID] [--error-workflow-id HANDLER_ID]`
+  imports the weekly digest inactive and maps its Discord and `matrix-bot-auth`
+  credential ids. Import the error handler first and pass its id, as for the
+  router. Without the id the placeholder `errorWorkflow` setting is removed. It
+  stays inactive until you activate it in n8n.
+- `MATRIX_HOMESERVER` and `MATRIX_ROOM_ID` are not secrets. The digest reads them
+  as `$env` values, so they are pass-through lines (names only) in the `n8n:`
+  service `environment:` list of the compose file, like the other n8n variables;
+  the values live in the secret manager or the compose environment, never in git.
+  Recreate the n8n container after adding them.
 - Pass `--pushover-on` to switch the `PUSHOVER_ENABLED` constant on. Leave it
   off until the checks below pass.
 
@@ -235,7 +252,10 @@ line and the Grafana restart are manual steps (steps 4 and 5 below).
 1. Stage the files: copy these files from `docker/grafana/provisioning/alerting/`
    to `SIEM_STAGE_DIR`: `contact-points.yml`, `update-alert-rules-unifi.yml`,
    `update-alert-rules-pfsense.yml`, `heartbeat-alert-rule.yml` and
-   `notification-failure-alert-rule.yml`. For the P1 email channel also copy
+   `notification-failure-alert-rule.yml`. Also copy `update-alert-rules-twingate.yml`
+   when the Twingate rules exist in the repo: it is in the script's `OPTIONAL_FILES`
+   list, deployed when staged and skipped when absent (a new rule file the live box
+   needs is a one-line add to that list). For the P1 email channel also copy
    `email-contact-point.yml.example` and `email-notification-policy.yml.example`;
    they are only deployed when you name them (below).
 2. Dry run. This is the default, so no flag is needed. It changes nothing:
@@ -249,7 +269,18 @@ changed` and one line per file: `create`, `unchanged` or `overwrite`. For every
 file that would be overwritten it prints only the number of lines added and
 removed, never file content and never a hash (live files can hold credentials,
 and a hash of a guessable file is a guessing aid); variable names are listed for
-example files. `--stage` is the shorter check and prints only the first line.
+example files. `--stage` is the shorter check and prints the first line and the
+`INFLUX_URL` lines.
+
+Every run (`--stage`, dry run, `--apply`) prints `INFLUX_URL in effect: <url>` and
+whether it came from the environment or is the default. The datasource file is
+rewritten from fixed text, so the deploy keeps a live `influxdb-twingate`
+datasource (its block is carried over unchanged) and never invents one. If
+`INFLUX_URL` is unset but the live datasource file gives the pfSense or UniFi
+datasource another URL than the default, the stage and dry run print a `WARNING`
+and the script refuses --apply (fail closed, nothing is changed): set `INFLUX_URL` to the
+live URL to keep it, or to the default on purpose. The check is a read-only
+compare of the live file with the default; the script never guesses a URL.
 
 It refuses, with a plain message and a nonzero exit code, if a staged file or the
 `router-path` file is owned by someone else or writable by group or others (use
@@ -355,7 +386,17 @@ must not reach any other service. Do not run `docker compose config` to check th
 result: it prints resolved values, including secrets, to your terminal.
 
 5. Manual: recreate only Grafana. Grafana loads provisioning files only at
-   startup, so this restart is what makes it read the new files. The values the
+   startup, and `docker compose up -d grafana` may not re-read them: it does
+   nothing when the service definition is unchanged. When only the provisioning
+   files changed (no compose or environment change), restart the container; the
+   script prints this exact step on every run and never runs it:
+
+```
+docker restart grafana
+```
+
+   When the compose file or its environment changed too (step 4), the
+   recreate below is needed. Either way this restart is what makes Grafana read the new files. The values the
    compose file needs come from the one Doppler dev config (`DEV_CONFIG` is the
    config name; see `docs/owner-runbook.md`, Q1):
 

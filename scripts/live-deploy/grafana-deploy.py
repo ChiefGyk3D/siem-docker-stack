@@ -3,16 +3,18 @@
 it under siem-run on the host. It only writes files. It never starts docker and
 never reads the compose file: the compose pass-through line and the Grafana
 restart are manual steps (docs/live-deploy-runbook.md, section 5, steps 4 and 5).
-It prints only file names, line counts, backup names, variable names and the length
-of the router path. It never prints file content, hashes or environment values.
+It prints only file names, line counts, backup names, variable names, the length
+of the router path and the INFLUX_URL in effect (a validated plain http(s) URL, no
+credentials). It never prints file content, hashes or other environment values.
 
 What it deploys (existing files are replaced only after a backup):
   1. Folder grafana/provisioning/alerting with the contact point, the UniFi
-     rules, the (paused) pfSense rules, the heartbeat rule and the notification
-     failure rule. The contact point URL gets the private webhook path of the
+     rules, the (paused) pfSense rules, the heartbeat rule, the notification
+     failure rule and, when it is staged, the Twingate rules (OPTIONAL_FILES). The contact point URL gets the private webhook path of the
      authenticated n8n router.
   2. One datasource file with two extra InfluxDB datasources carrying the ids the
-     rules expect (same databases, no change to the existing datasources).
+     rules expect (same databases, no change to the existing datasources). A live
+     "influxdb-twingate" datasource in that file is kept as it is.
 
 Usage: siem-run python3 -I grafana-deploy.py [--dry-run | --stage | --apply]
                                               [--include-example NAME ...]
@@ -40,6 +42,10 @@ Environment (all optional, the current values are the defaults):
   INFLUX_URL          URL the two added datasources use (default: http://influxdb:8086).
                       Set it to the real InfluxDB container address if another stack's
                       service named influxdb makes the name ambiguous (see the runbook).
+                      Every run prints "INFLUX_URL in effect". --apply refuses when it is
+                      unset but the live datasource file has another URL (set it to keep
+                      that URL, or to the default on purpose).
+  GRAFANA_CONTAINER   container name used in the printed restart step (default: grafana)
 
 What this script guarantees:
   - Files come from an explicit allowlist (no globbing).
@@ -93,11 +99,19 @@ STAGE = os.environ.get("SIEM_STAGE_DIR") or os.path.join(os.path.expanduser("~")
 CONFIG_DIR = os.environ.get("SIEM_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".config", "doppler-siem")
 PATH_FILE = os.path.join(CONFIG_DIR, "router-path")
 WEBHOOK_BASE = os.environ.get("N8N_WEBHOOK_BASE", "http://n8n").rstrip("/")
-INFLUX_URL = os.environ.get("INFLUX_URL", "http://influxdb:8086")
+DEFAULT_INFLUX_URL = "http://influxdb:8086"
+INFLUX_URL = os.environ.get("INFLUX_URL") or DEFAULT_INFLUX_URL
+INFLUX_URL_SET = bool(os.environ.get("INFLUX_URL"))
+_CONTAINER = os.environ.get("GRAFANA_CONTAINER", "")
+GRAFANA_CONTAINER = _CONTAINER if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", _CONTAINER) else "grafana"
 ALERT_DIR = SIEM + "/grafana/provisioning/alerting"
 DS_FILE = SIEM + "/grafana/provisioning/datasources/alerting-influx.yml"
 FILES = ("contact-points.yml", "update-alert-rules-unifi.yml", "update-alert-rules-pfsense.yml",
          "heartbeat-alert-rule.yml", "notification-failure-alert-rule.yml")
+# Deployed only when staged (a missing one is skipped, not an error). Adding a rule
+# file the live box needs is a one-line add here.
+OPTIONAL_FILES = ("update-alert-rules-twingate.yml",)
+KEEP_DATASOURCE_UIDS = ("influxdb-twingate",)
 # Examples stay inactive unless named with --include-example. Maps the staged
 # example name to the name it gets in the alerting folder.
 EXAMPLE_FILES = {
@@ -147,13 +161,59 @@ def valid_url(url):
     port = hit.group(1)
     return port is None or (PORT.fullmatch(port) is not None and int(port) <= 65535)
 
-def datasources_yaml(url=None):
+def datasources_yaml(url=None, keep=""):
     """Content of the extra-datasources provisioning file. The URL goes into YAML
-    unquoted, so only a plain http(s) URL is accepted (ValueError otherwise)."""
+    unquoted, so only a plain http(s) URL is accepted (ValueError otherwise). keep is
+    the verbatim text of live datasources to carry over (see kept_datasources)."""
     url = url or INFLUX_URL
     if not valid_url(url):
         raise ValueError("INFLUX_URL is not a plain http(s) URL")
-    return DATASOURCES.format(url=url)
+    text = DATASOURCES.format(url=url)
+    if keep:
+        text += "\n" + keep
+    return text
+
+def datasource_blocks(text):
+    """Split a datasource provisioning file into (uid, block text) pairs, one per
+    "  - " list item. The uid is "" when a block has none."""
+    blocks, cur = [], None
+    for line in (text or "").split("\n"):
+        if line.startswith("  - "):
+            cur = [line]
+            blocks.append(cur)
+        elif cur is not None and (line.startswith("    ") or not line.strip()):
+            cur.append(line)
+        else:
+            cur = None
+    out = []
+    for blk in blocks:
+        body = "\n".join(blk).rstrip("\n") + "\n"
+        hit = re.search(r"^\s+uid:\s*([A-Za-z0-9_.-]+)\s*$", body, re.M)
+        out.append((hit.group(1) if hit else "", body))
+    return out
+
+def live_influx_urls(text):
+    """URLs the live file gives the two datasources this script writes."""
+    urls = []
+    for uid, body in datasource_blocks(text):
+        if uid in ("influxdb-pfsense", "influxdb-unifi"):
+            hit = re.search(r"^\s+url:\s*(\S+)\s*$", body, re.M)
+            if hit:
+                urls.append(hit.group(1))
+    return urls
+
+def kept_datasources(old_text):
+    """Live datasources this script must not drop (KEEP_DATASOURCE_UIDS), verbatim."""
+    return "\n".join(body for uid, body in datasource_blocks(old_text) if uid in KEEP_DATASOURCE_UIDS)
+
+def influx_url_problem(old_text):
+    """Message when INFLUX_URL is unset but the live file uses another URL, else ""."""
+    if INFLUX_URL_SET:
+        return ""
+    if any(u != DEFAULT_INFLUX_URL for u in live_influx_urls(old_text)):
+        return ("INFLUX_URL is not set but the live datasource file uses a different URL for the "
+                "InfluxDB datasources; this would reset it to the default")
+    return ""
 
 def valid_router_path(path):
     return bool(ROUTER_PATH.fullmatch(path or ""))
@@ -282,7 +342,7 @@ def read_in(path, name, strict=False):
 
 def read_staged(stage_dir, name):
     """Read one allowlisted staged file. Names off the allowlist are refused."""
-    if name not in FILES and name not in EXAMPLE_FILES:
+    if name not in FILES and name not in OPTIONAL_FILES and name not in EXAMPLE_FILES:
         raise GuardError("unexpected file name (not on the allowlist)")
     got = read_in(stage_dir, name, strict=True)
     if got is None:
@@ -294,7 +354,8 @@ def plan_files(stage_dir, alert_dir, router_path, examples=()):
     items = []
     dfd = open_dir(alert_dir)
     try:
-        for name in tuple(FILES) + tuple(examples):
+        optional = [n for n in OPTIONAL_FILES if read_in(stage_dir, n, strict=True) is not None]
+        for name in tuple(FILES) + tuple(optional) + tuple(examples):
             text = read_staged(stage_dir, name)
             if name == "contact-points.yml":
                 try:
@@ -494,20 +555,36 @@ def router_path():
         raise GuardError("router path file looks wrong")
     return path
 
+def print_restart_step():
+    """Tell the owner how to make Grafana read the files. This script never runs it."""
+    print("Grafana loads provisioning files only at startup. `docker compose up -d grafana` may not re-read "
+          "them: it does nothing when the service definition is unchanged.")
+    print("Restart step for the owner (this script never runs it): docker restart %s" % GRAFANA_CONTAINER)
+    print("If the compose file or its environment changed too, recreate instead: see "
+          "docs/live-deploy-runbook.md, section 5, step 5.")
+
 def run(argv):
     mode, examples = parse_args(argv)
     path = router_path()
     items = plan_files(STAGE, ALERT_DIR, path, examples)
     print("staged files ok; router path length %d" % len(path))
-    if mode == "stage":
-        return 0
     ds_name = os.path.basename(DS_FILE)
     ds_got = read_in(os.path.dirname(DS_FILE), ds_name)
+    ds_old = ds_got[0] if ds_got else None
+    print("INFLUX_URL in effect: %s (%s)" % (
+        INFLUX_URL, "from the environment" if INFLUX_URL_SET else "default; INFLUX_URL is not set"))
+    problem = influx_url_problem(ds_old)
+    if problem:
+        print("WARNING: " + problem + " (--apply refuses until INFLUX_URL is set)")
+        if mode == "apply":
+            raise GuardError("refusing to apply: " + problem + ". Set INFLUX_URL to the URL you want "
+                             "(the live one to keep it) and run again; nothing was changed")
+    if mode == "stage":
+        return 0
     try:
-        ds_new = datasources_yaml()
+        ds_new = datasources_yaml(keep=kept_datasources(ds_old))
     except ValueError as err:
         raise GuardError(str(err))
-    ds_old = ds_got[0] if ds_got else None
     stamp = timestamp()
     if mode == "dry":
         print("dry run: nothing is changed; add --apply to write these files")
@@ -517,6 +594,7 @@ def run(argv):
     for name in sorted(EXAMPLE_FILES):
         if name not in examples:
             print("file %s: skipped (inactive; name it with --include-example to deploy it)" % name)
+    print_restart_step()
     if mode == "dry":
         return 0
 
@@ -540,9 +618,9 @@ def run(argv):
     print("files replaced:")
     for w in done:
         print("  " + w["name"])
-    print("Grafana loads provisioning files only at startup. The remaining steps (a pass-through line in the "
-          "grafana service environment, then a restart) are done by hand: follow "
-          "docs/live-deploy-runbook.md, section 5, steps 4 and 5.")
+    print("The remaining steps (a pass-through line in the grafana service environment, then a restart) "
+          "are done by hand: follow docs/live-deploy-runbook.md, section 5, steps 4 and 5. "
+          "The restart step is printed above (Restart step for the owner).")
     return 0
 
 
