@@ -81,9 +81,12 @@ Every other `HostConfig` field must be empty or one of Docker's own defaults
 refused, as is any `Config` field that differs from the image (stop signal and
 timeout, exposed ports, volumes, domain name, open stdin, any `AttachStdin`,
 `AttachStdout` or `AttachStderr` other than a detached run's `false`, and any
-hostname other than the container id prefix Docker generates by default; a
-hostname equal to the host's is not accepted, because the recreate command does
-not pass `--hostname`).
+hostname other than Docker's default. With host networking and no UTS mode
+the default is the host's own hostname (Docker's daemon sets it when no
+`--hostname` is given), so that value is accepted, and only because the
+network mode is exactly `host` and `UTSMode` is empty; the container id prefix
+is accepted too; any other hostname is refused, because the recreate command
+does not pass `--hostname`).
    User, entrypoint, command, healthcheck, working dir and labels are compared
    with the old image's own config (`docker image inspect`), so values the
    image sets itself are fine. Every environment entry must contain `=` and no
@@ -191,3 +194,17 @@ writes a test-only copy in which exactly four fixed lines (`PATH`,
 `LOCK_BASE`, `RUN_BASE`, `TRUSTED_UID`) point at the fakes, at scratch directories and at the test user (the tests do not run as root), and a
 test checks that the copy differs from the shipped file in those lines only. The shellcheck test fails (never skips) in CI when
 shellcheck is missing and falls back to `sh -n` locally.
+
+## Confirming the layout on a real host
+
+Run the script with `--dry-run` against a real Connector. It reads the
+container's configuration, prints whether the layout check passes (or the
+reasons it does not) and changes nothing. It prints no secret values.
+
+```
+sudo ./scripts/twingate-connector-update.sh --dry-run <container-name>
+```
+
+If it reports `hostname override`, compare `docker inspect -f '{{.Config.Hostname}}' <container-name>`
+with `uname -n` on the host; they should match for a Connector created without
+`--hostname`.

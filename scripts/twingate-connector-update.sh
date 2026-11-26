@@ -394,8 +394,11 @@ IMG0=$(printf '%s' "$IMGI" | jq -ce 'if type=="array" and length==1 then .[0] el
 
 LOGDRV=$(docker info --format '{{.LoggingDriver}}' 2>/dev/null | head -n 1) || LOGDRV=""
 case "$LOGDRV" in ''|*[!A-Za-z0-9._-]*) LOGDRV="json-file" ;; esac
+# Docker gives a host-networked container with no --hostname the HOST's hostname
+# (moby daemon/container.go), so that value is the default for NetworkMode host.
+HOSTNAME_HOST=$(uname -n 2>/dev/null) || HOSTNAME_HOST=""
 
-why=$(printf '%s' "$INSPECT" | jq -r --arg img "$IMAGE_TAG" --arg logdrv "$LOGDRV" --argjson i "$IMG0" '
+why=$(printf '%s' "$INSPECT" | jq -r --arg img "$IMAGE_TAG" --arg logdrv "$LOGDRV" --arg hosthn "$HOSTNAME_HOST" --argjson i "$IMG0" '
   def blank: . == null or . == [] or . == {} or . == "" or . == 0 or . == false;
   def norm: if blank then null else . end;
   def handled_host: ["NetworkMode","RestartPolicy","Binds","Privileged","CapAdd","CapDrop","SecurityOpt","PidMode","UsernsMode","ReadonlyRootfs","Memory","MemorySwap","MemoryReservation","CpuShares","NanoCpus","CpuQuota","LogConfig","Dns","DnsSearch","DnsOptions","ExtraHosts","Tmpfs","Ulimits","Devices","DeviceCgroupRules","DeviceRequests","Sysctls","GroupAdd","AutoRemove"];
@@ -448,7 +451,9 @@ why=$(printf '%s' "$INSPECT" | jq -r --arg img "$IMAGE_TAG" --arg logdrv "$LOGDR
       (if ($hostextra | length) > 0 then "host settings a recreate would drop: " + ($hostextra | join(",")) else empty end),
       (if ($cc.OpenStdin == true or $cc.StdinOnce == true) then "stdin open" else empty end),
       (if ($cc.Domainname | norm) != null then "domain name override" else empty end),
-      (if ($cc.Hostname | norm) != null and $cc.Hostname != ($c.Id // "")[0:12] then "hostname override (only the container-ID default is accepted)" else empty end),
+      (if ($cc.Hostname | norm) != null and $cc.Hostname != ($c.Id // "")[0:12]
+          and (($h.NetworkMode == "host" and ($h.UTSMode | blank) and $hosthn != "" and $cc.Hostname == $hosthn) | not)
+        then "hostname override (only the default is accepted: the host name with host networking, else the container-ID prefix)" else empty end),
       (if ($cc.AttachStdin // false) != false or ($cc.AttachStdout // false) != false or ($cc.AttachStderr // false) != false then "attach settings differ from a detached run" else empty end),
       (if ($cfgextra | length) > 0 then "container settings a recreate would drop: " + ($cfgextra | join(",")) else empty end),
       (if ($env | map(select((type != "string") or hasbyte(10) or hasbyte(13) or hasbyte(0) or (contains("=") | not))) | length) > 0 then "malformed environment entry (newline, CR, NUL or missing =)" else empty end),

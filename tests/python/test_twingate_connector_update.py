@@ -1549,9 +1549,31 @@ def test_the_env_file_model_does_change_hostile_values():
 
 # --- R2-4: hostname and attach fields --------------------------------------------
 
-def test_a_hostname_equal_to_the_host_name_is_refused(env):
+def test_a_host_equal_hostname_is_accepted_with_host_networking(env):
     import socket
     set_inspect(env, cfg={"Hostname": socket.gethostname()})
+    r = env.run("--yes", NAME)
+    assert r.returncode == 0, r.stderr
+
+
+def test_a_host_equal_hostname_is_refused_without_host_networking(env):
+    import socket
+    set_inspect(env, host={"NetworkMode": "bridge"}, cfg={"Hostname": socket.gethostname()})
+    r = env.run("--yes", NAME)
+    assert r.returncode == 2 and "hostname override" in r.stderr
+    assert changed(env) == []
+
+
+def test_a_host_equal_hostname_is_refused_with_a_uts_mode(env):
+    import socket
+    set_inspect(env, host={"UTSMode": "host"}, cfg={"Hostname": socket.gethostname()})
+    r = env.run("--yes", NAME)
+    assert r.returncode == 2 and "hostname override" in r.stderr
+    assert changed(env) == []
+
+
+def test_a_custom_hostname_is_still_refused_with_host_networking(env):
+    set_inspect(env, cfg={"Hostname": "custom-host"})
     r = env.run("--yes", NAME)
     assert r.returncode == 2 and "hostname override" in r.stderr
     assert changed(env) == []
