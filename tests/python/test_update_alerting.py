@@ -494,7 +494,26 @@ def test_notification_policy_repeats():
     routes = root["routes"][0]["routes"]
     rep = {next(m for m in r["object_matchers"] if m[0] == "severity")[2]: r["repeat_interval"]
            for r in routes}
-    assert rep == {"warning": "4h", "critical": "1h"}
+    assert rep == {"warning": "84h", "critical": "1h"}
+    # owner decision (#199): never less often than twice a week (84h)
+    for sev, val in rep.items():
+        assert val.endswith("h") and int(val[:-1]) <= 84, sev
+
+
+def test_pending_update_rules_all_push_to_the_phone():
+    # #199: every pending rule pages, except the two 24h warnings. UniFi: owner decision
+    # 2026-11-26 ("wait 7 days first"), auto-patching devices usually finish first.
+    # pfSense 24h: P2 by owner decision 2026-11-20 (#152, already on master). The 7d
+    # critical and the pfSense security rule page.
+    pending = [r for _, _, r in _rules() if r["labels"]["alert_group"] == "updates"
+               and "poller" not in r["uid"]]
+    assert len(pending) >= 6
+    for r in pending:
+        want = "false" if r["uid"] in {"update-unifi-pending-24h", "update-pfsense-pending-24h"} else "true"
+        assert r["labels"]["phone"] == want, r["uid"]
+    uids = {r["uid"] for r in pending}
+    assert {"update-unifi-pending-24h", "update-unifi-pending-7d"} <= uids
+    assert any(u.startswith("update-pfsense") for u in uids)
 
 
 def test_contact_point_is_webhook_to_router():
@@ -1282,7 +1301,8 @@ def test_graph_malformed_notice_pushes_when_enabled():
 def test_every_update_rule_sets_the_phone_label_explicitly():
     seen = 0
     for _, _, rule in _rules():
-        # the poller-stale rule and the two 24h rules (P2, owner decision 2026-11-20, issue #152) stay off the phone
+        # the poller-stale rule and the two 24h rules (P2, owner decision 2026-11-20, issue #152) stay off the phone;
+        # the UniFi 24h rule is also quiet by owner decision 2026-11-26 (7-day wait, issue #199)
         p2 = {"update-unifi-poller-stale", "update-unifi-pending-24h", "update-pfsense-pending-24h"}
         want = "false" if rule["uid"] in p2 else "true"
         assert rule["labels"].get("phone") == want, rule["uid"]
@@ -1310,6 +1330,7 @@ def test_docs_have_the_label_taxonomy_and_health_notes():
         assert label in text, label
     flat = " ".join(text.split())
     assert "stay off the phone until they carry `phone=true`" in flat
+    assert "84h" in flat and "twice a week" in flat
     assert "heartbeat" in flat.lower() and "not part of this change" in flat.lower()
 
 

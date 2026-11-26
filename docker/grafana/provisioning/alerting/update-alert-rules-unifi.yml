@@ -29,6 +29,9 @@
 # error state for about seven hours with nothing alerting. The rule "UniFi poller
 # data stale" watches that the poller still writes. All these rules carry
 # `phone` explicitly: "true" pushes to the phone, "false" stays off it.
+# The 24h warning is phone "false" (Discord and Matrix only): owner decision
+# 2026-11-26, a UniFi update does not page the phone until it has been pending
+# 7 days, so auto-patching devices usually finish first. The 7-day critical pages.
 # Repeat intervals come from the notification policy
 # (update-notification-policy.yml.example).
 apiVersion: 1
