@@ -632,6 +632,48 @@ def test_upgrade_check_failure_is_a_failure_not_healthy(tmp_path):
     _assert_failure(r)
 
 
+REAL_PENDING = (">>> Updating repositories metadata...done.\n"
+                "26.07.2 version of pfSense is available")
+
+
+def test_real_exit_2_pending_output_is_core_pending(tmp_path):
+    # Captured from a live firewall on 2026-11-26 (issue #206).
+    r, _ = _run(tmp_path, REAL_PENDING, "", upgrade_rc=2)
+    assert r.returncode == 0
+    m = _metrics(r.stdout)
+    assert m.pop("ok") == 1
+    assert m[("core", "false")] == 1 and m[("core", "true")] == 0
+    assert m[("kernel", "false")] == 0 and m[("package", "false")] == 0
+
+
+def test_exit_2_security_line_sets_security_true(tmp_path):
+    r, _ = _run(tmp_path, REAL_PENDING + " (security update)", "", upgrade_rc=2)
+    m = _metrics(r.stdout)
+    assert m[("core", "true")] == 1 and m[("core", "false")] == 0
+
+
+@pytest.mark.parametrize("out,rc", [
+    (REAL_PENDING, 1),
+    (REAL_PENDING, 3),
+    (REAL_PENDING, 127),
+    ("Your system is up to date", 2),
+    (">>> Updating repositories metadata...done.", 2),
+    ("", 2),
+    (">>> Updating repositories metadata...done.\nsomething odd happened\n26.07.2 version of pfSense is available", 2),
+    (">>> Updating repositories metadata...failed.\n26.07.2 version of pfSense is available", 2),
+    (">>> Fetching metadata\n26.07.2 version of pfSense is available", 2),
+    (">>> Updating repositories metadata...done.\nWarning: mirror slow\n26.07.2 version of pfSense is available", 2),
+    ("Your system is up to date\n26.07.2 version of pfSense is available", 2),
+    ("Your system is up to date\n26.07.2 version of pfSense is available", 0),
+    ("Error: repository unreachable\n26.07.2 version of pfSense is available", 2),
+    ("", 0),
+    (">>> Updating repositories metadata...done.", 0),
+])
+def test_exit_2_and_progress_changes_stay_fail_closed(tmp_path, out, rc):
+    r, _ = _run(tmp_path, out, "", upgrade_rc=rc)
+    _assert_failure(r)
+
+
 def test_pkg_static_failure_is_a_failure_not_healthy(tmp_path):
     r, _ = _run(tmp_path, "Your system is up to date", "", pkg_rc=1)
     _assert_failure(r)

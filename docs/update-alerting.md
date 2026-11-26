@@ -140,6 +140,15 @@ non-zero; that is why the health rule also alerts on missing data. The
 `security` tag is a best-effort match on the word "security" in the
 `pfSense-upgrade -c` text.
 
+`pfSense-upgrade -c` exits 2 when an update is pending. Real output seen on a
+live firewall (2026-11-26) was two lines, `>>> Updating repositories
+metadata...done.` and `26.07.2 version of pfSense is available`, with exit 2.
+The script reads that as core pending (`core=1`, health 1). `>>> ...done.`
+progress lines are ignored. Everything else still fails closed: exit 2 without
+a recognized "version of pfSense is available" line, exit codes other than 0
+and 2, any other unknown line, error or warning wording, empty output, and
+healthy text mixed with update text.
+
 Telegraf exec input for the firewall:
 
 ```toml
