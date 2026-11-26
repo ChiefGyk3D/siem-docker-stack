@@ -20,7 +20,7 @@ DOC = REPO_ROOT / "docs" / "update-digest.md"
 NOW = "2026-11-30T12:00:00.000Z"  # Monday 07:00 America/New_York
 COLLECTORS = ["UniFi Collector", "OS Packages Collector", "Twingate Collector", "pfSense Collector"]
 FIELD_SOURCES = ["unifi", "os", "twingate", "pfsense"]
-ZWSP = "​"
+ZWSP = "\u200b"
 
 
 def _wf():
@@ -58,7 +58,8 @@ def _run(js, ctx, static=None, now=NOW):
 
 def _ok_run(js, ctx, **kw):
     r = _run(js, ctx, **kw)
-    assert r.returncode == 0, r.stderr
+    if r.returncode != 0:
+        raise RuntimeError("node failed (a broken mutant must not count as caught): " + r.stderr[-400:])
     return json.loads(r.stdout)
 
 
@@ -368,7 +369,7 @@ def test_mutant_unknown_status_treated_as_ok_is_caught():
     assert "const status = ok ? j.status : 'failed';" in n["parameters"]["jsCode"]
     n["parameters"]["jsCode"] = n["parameters"]["jsCode"].replace("const status = ok ? j.status : 'failed';",
                                                                    "const status = ok ? j.status : 'ok';")
-    with pytest.raises((AssertionError, Exception)):
+    with pytest.raises(AssertionError):
         check_failed_source_not_zero(wf)
 
 
@@ -378,7 +379,7 @@ def test_mutant_failed_counted_as_checked_is_caught():
     assert "if (s.status !== 'ok') {" in n["parameters"]["jsCode"]
     n["parameters"]["jsCode"] = n["parameters"]["jsCode"].replace("if (s.status !== 'ok') {",
                                                                    "if (s.status === 'not-deployed') {")
-    with pytest.raises((AssertionError, Exception)):
+    with pytest.raises(AssertionError):
         check_failed_source_not_zero(wf)
 
 
@@ -416,7 +417,7 @@ def test_mutant_quiet_week_swallowed_is_caught():
 
 HOSTILE = [
     "@everyone", "@here", "<@123456789012345678>", "<@&123>", "<#123>", "[click](https://x.test)",
-    "**bold**", "`code`", "~~s~~", "|spoiler|", "> quote", "# head", "a\nb\r\nc\x00d‮e",
+    "**bold**", "`code`", "~~s~~", "|spoiler|", "> quote", "# head", "a\nb\r\nc\x00d\u202ee",
     {"nested": "obj"}, ["list"], None, 12345, True,
 ]
 
@@ -436,8 +437,8 @@ def _hostile_sources():
 def check_sanitized(wf):
     j = _build(wf, _hostile_sources())
     for text in (j["description"], j["matrixBody"], j["title"]):
-        assert not re.search(r"@(?!​)", text), "a mention survived: " + text[:300]
-        assert "\x00" not in text and "‮" not in text
+        assert not re.search(r"@(?!\u200b)", text), "a mention survived: " + text[:300]
+        assert "\x00" not in text and "\u202e" not in text
         assert "[object Object]" not in text
     d = j["description"]
     assert not re.search(r"(?<!\\)<[@#]", d), "an unescaped mention or channel token survived"
@@ -457,7 +458,8 @@ def test_all_device_package_version_text_is_sanitized():
 def _mutate_build(old, new):
     wf = _wf()
     n = _node(wf, "Build Digest")
-    assert old in n["parameters"]["jsCode"], old
+    if old not in n["parameters"]["jsCode"]:
+        raise RuntimeError("mutation anchor not found: " + old)
     n["parameters"]["jsCode"] = n["parameters"]["jsCode"].replace(old, new)
     return wf
 
@@ -473,7 +475,7 @@ def test_mutant_markdown_not_escaped_is_caught():
 
 
 def test_mutant_non_string_not_coerced_is_caught():
-    with pytest.raises(Exception):
+    with pytest.raises(AssertionError):
         check_sanitized(_mutate_build("else if (v !== null && v !== undefined) s = '(invalid)';",
                                       "else if (v !== null && v !== undefined) s = JSON.stringify(v);"))
 
@@ -552,6 +554,6 @@ def test_doc_names_env_and_credentials_with_placeholders_only():
     for needle in ("MATRIX_HOMESERVER", "MATRIX_ROOM_ID", "matrix-bot-auth", "Discord Webhook Alerts",
                    "not-deployed", "America/New_York", "14 days", "never"):
         assert needle in text, needle
-    assert "—" not in text, "no em dashes"
+    assert "\u2014" not in text, "no em dashes"
     assert not re.search(r"![A-Za-z0-9]{10,}:[A-Za-z0-9.-]+", text), "no real room id"
     assert not re.search(r"syt_[A-Za-z0-9]+", text), "no token"
