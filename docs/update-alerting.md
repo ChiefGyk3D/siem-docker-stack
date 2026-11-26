@@ -135,7 +135,7 @@ Metric `pfsense_update_pending`: gauge, `value` 0 or 1, tags `kind`
 `pfsense_update_check_success`: 1 when both checks ran, 0 when one failed.
 On success the script prints all six update series plus the health metric. On
 any failure (a missing or failing `pfSense-upgrade -c` or
-`pkg-static version -qRl '<'`, or an unexpected package name) it prints only
+`pkg-static version -qRl '<'`, or an unexpected package line) it prints only
 `pfsense_update_check_success value=0i` and exits non-zero, never zero-valued
 update metrics. Telegraf may drop the output of a command that exits
 non-zero; that is why the health rule also alerts on missing data. The
