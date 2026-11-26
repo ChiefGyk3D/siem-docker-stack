@@ -136,7 +136,7 @@ It must be an absolute path. Rules:
 - the directory is owned by the running user, mode `700`, and not a symlink; the file `first-seen`
   is a regular file, owned by the same user, mode `600`, at most 256 KiB and 1000 entries
 - the format is a header `host-update-state v1` and lines `<package> <candidate-version> <epoch>`;
-  any other line, a duplicate, a future timestamp, a bad name or a non-canonical number (a leading
+  any other line, a duplicate, a bad name or a non-canonical number (a leading
   zero) makes the whole file unreadable. A package is matched to its first-seen line by the exact
   `<package> <candidate-version>` pair at the start of a line (`foo` never matches `libfoo`)
 - it is written to a temporary file in the same directory and renamed into place
@@ -146,10 +146,20 @@ It must be an absolute path. Rules:
   run is `state_ok=1` with a clock that restarts at that moment (the age is understated after a
   loss; the `state_ok=0` run is the signal). A pre-created directory therefore shows `state_ok=0`
   once on the very first run
+- if any first-seen time (a package or a held-back entry) is more than 60 seconds **in the future**
+  (a clock set back, or a planted file), the whole file is distrusted: the script prints
+  `state_ok=0` and no age, discards every stored time and re-seeds the file from the current
+  time, so the next run is `state_ok=1`. A future time is never turned into an age of `0`. Up to
+  60 seconds ahead is accepted as clock jitter and gives age `0`
 - if the file is **unreadable or corrupt**, or the directory or file has the wrong owner or mode, the
   script prints `state_ok=0`, no age, and does **not** overwrite anything: an operator must look at
   it and delete the file to re-seed
 - a state problem never turns the check itself into a failure
+
+The metrics are written in one step and only after every value is known. If that write fails (a
+full disk, a closed pipe), the script exits non-zero and does not exit 0 with a partial set; gate
+every health conclusion on a fresh `host_update_check_success == 1`, because a killed process or a
+closed output can still leave no data at all.
 
 Alert rule suggestions: page on `host_update_check_success == 0` or missing data; on
 `host_update_state_ok == 0`; on `host_update_oldest_pending_age_seconds > 604800` (7 days); on

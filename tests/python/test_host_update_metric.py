@@ -130,13 +130,19 @@ class Env:
         p.write_text("".join(lines), encoding="utf-8")
         return p
 
-    def run(self, args=("standard",), label="host-a", extra=None, apt_rc=0, script=None):
+    def run(self, args=("standard",), label="host-a", extra=None, apt_rc=0, script=None, stdout_to=None):
         self.rc.write_text(f"{apt_rc}\n")
         env = {"PATH": "/usr/bin:/bin", "STATE_DIRECTORY": str(self.state_dir)}
         if label is not None:
             env["HOST_LABEL"] = label
         env.update(extra or {})
-        return subprocess.run(["/bin/sh", str(script or self.script), *args], capture_output=True, text=True,
+        cmd = ["/bin/sh", str(script or self.script), *args]
+        if stdout_to is not None:
+            # stdout goes to a path such as /dev/full, where every write fails
+            with open(stdout_to, "wb") as sink:
+                return subprocess.run(cmd, stdout=sink, stderr=subprocess.PIPE, text=True,
+                                      env=env, timeout=120, check=False, cwd=str(self.tmp))
+        return subprocess.run(cmd, capture_output=True, text=True,
                               env=env, timeout=120, check=False, cwd=str(self.tmp))
 
     def calls(self):
@@ -897,13 +903,62 @@ def test_new_version_of_same_package_restarts_the_clock(env):
     assert m[("host_update_oldest_pending_age_seconds", None, None)] < 120
 
 
-def test_oldest_age_is_clamped_at_zero(env):
+def test_oldest_age_is_clamped_at_zero_within_clock_jitter(env):
     now = int(time.time())
-    write_state(env, [("foo", "2", now + 3600)])
+    write_state(env, [("foo", "2", now + 30)])
     env.set_apt(apt_out([inst("foo", "1", "2", DEB_UPD)]))
     r = env.run()
     assert val(r, "host_update_state_ok") == 1
     assert val(r, "host_update_oldest_pending_age_seconds") == 0
+
+
+def assert_future_state_reseeded(env, r, key):
+    m = parse(r.stdout)
+    assert r.returncode == 0
+    assert m[("host_update_state_ok", None, None)] == 0
+    assert ("host_update_oldest_pending_age_seconds", None, None) not in m
+    assert m[("host_update_check_success", None, None)] == 1
+    text = (env.state_dir / "first-seen").read_text()
+    times = [int(ln.rsplit(" ", 1)[1]) for ln in text.splitlines()[1:]]
+    assert key in text and times and max(times) <= int(time.time()) + 5, text
+    # the next run trusts the re-seeded clock and reports a small age
+    r2 = env.run()
+    assert val(r2, "host_update_state_ok") == 1
+    assert val(r2, "host_update_oldest_pending_age_seconds") < 120
+
+
+@pytest.mark.parametrize("ahead", [3600, 2 * DAY, 4000000000 - 1700000000])
+def test_future_first_seen_is_untrusted_and_reseeded(env, ahead):
+    write_state(env, [("foo", "2", int(time.time()) + ahead)])
+    env.set_apt(apt_out([inst("foo", "1", "2", DEB_UPD)]))
+    assert_future_state_reseeded(env, env.run(), "foo 2 ")
+
+
+def test_future_first_seen_among_valid_entries_distrusts_all(env):
+    now = int(time.time())
+    write_state(env, [("foo", "2", now - 8 * DAY), ("bar", "1", now + 3600)])
+    env.set_apt(apt_out([inst("foo", "1", "2", DEB_UPD), inst("bar", "0", "1", DEB_UPD)]))
+    r = env.run()
+    assert_future_state_reseeded(env, r, "foo 2 ")
+    assert str(now - 8 * DAY) not in (env.state_dir / "first-seen").read_text()
+
+
+def test_future_held_back_first_seen_is_untrusted_and_reseeded(env):
+    write_state(env, [("held-back:foo", "0", int(time.time()) + 3600)])
+    env.set_apt(kept_back(["foo"], 1))
+    assert_future_state_reseeded(env, env.run(), "held-back:foo 0 ")
+
+
+def test_output_write_failure_is_not_success(env):
+    r = env.run(stdout_to="/dev/full")
+    assert r.returncode != 0, "a failed write of the metrics must not exit 0"
+    # a reader that went away (closed pipe) is not success either
+    p = subprocess.Popen(["/bin/sh", str(env.script), "standard"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         env={"PATH": "/usr/bin:/bin", "STATE_DIRECTORY": str(env.state_dir), "HOST_LABEL": "host-a"},
+                         cwd=str(env.tmp))
+    p.stdout.close()
+    p.communicate(timeout=60)
+    assert p.returncode != 0
 
 
 def test_state_file_lost_emits_no_age_and_state_ok_zero(env):
@@ -953,14 +1008,13 @@ def test_relative_state_directory_is_rejected(env):
     "host-update-state v1\nfoo 2 99999999999999999999\n",
     "host-update-state v1\nFOO;x 2 1700000000\n",
     "host-update-state v1\nfoo 2 1700000000 extra\n",
-    "host-update-state v1\nfoo 2 4000000000\n",  # far future
     "host-update-state v1\nfoo 2 1700000000\nfoo 2 1700000001\n",  # duplicate key
     "host-update-state v1\n\n",
     "host-update-state v1\nfoo 2 -5\n",
     "host-update-state v1\nfoo 2 01700000000\n",  # leading zero
     "host-update-state v1\nfoo 2 08\n",
     "host-update-state v1\nfoo 2 00\n",
-], ids=["no-header", "two-fields", "nan", "huge", "bad-name", "extra", "future", "dup", "blank", "negative",
+], ids=["no-header", "two-fields", "nan", "huge", "bad-name", "extra", "dup", "blank", "negative",
         "leading-zero", "leading-zero-8", "double-zero"])
 def test_corrupt_state_emits_no_age_and_is_not_overwritten(env, content):
     f = env.state_dir / "first-seen"
@@ -1281,9 +1335,25 @@ def guard_noclobber(r, env):
     return (env.tmp / "victim").read_text() == "victim\n" and guard_state_untrusted(r, env)
 
 
-def sc_oldest_clamp(env):
+def sc_future_state(env):
     f = env.state_dir / "first-seen"
     f.write_text(f"host-update-state v1\nfoo 2 {int(time.time()) + 3600}\n")
+    f.chmod(0o600)
+    env.set_apt(apt_out([inst("foo", "1", "2", DEB_UPD)]))
+    return {}
+
+
+def sc_output_full(env):
+    return {"stdout_to": "/dev/full"}
+
+
+def guard_nonzero_exit(r, env):
+    return r.returncode != 0
+
+
+def sc_oldest_clamp(env):
+    f = env.state_dir / "first-seen"
+    f.write_text(f"host-update-state v1\nfoo 2 {int(time.time()) + 30}\n")
     f.chmod(0o600)
     env.set_apt(apt_out([inst("foo", "1", "2", DEB_UPD)]))
     return {}
@@ -1432,6 +1502,8 @@ MUTANTS = {
     "root": (':', sc_root, guard_failed),
     "uint": ('"") return 1 ;;', sc_leading_zero_state, guard_state_untrusted),
     "state-uint": (':', sc_leading_zero_state, guard_state_untrusted),
+    "state-future": (':', sc_future_state, guard_state_untrusted),
+    "output-check": ('printf \'%s\\n\' "$payload"', sc_output_full, guard_nonzero_exit),
     "state-lost": (':', sc_state_lost, guard_state_untrusted),
     "state-dir-mode": (':', sc_dir_mode, guard_state_untrusted),
     "state-parse": (':', sc_corrupt, guard_state_untrusted),

@@ -80,11 +80,12 @@ case "${1-}" in
     --max-lists-age-days=*)
         max_days=${1#--max-lists-age-days=}
         shift
-        is_uint "$max_days" && [ "$max_days" -ge 1 ] && [ "$max_days" -le 30 ] ||
+        if ! is_uint "$max_days" || [ "$max_days" -lt 1 ] || [ "$max_days" -gt 30 ]; then
             fail "--max-lists-age-days must be a whole number from 1 to 30" # MUTATE:lists-arg
+        fi
         ;;
 esac
-[ "$#" -ge 1 ] && [ "$#" -le 2 ] || fail "usage: host-update-metric.sh [--max-lists-age-days=N] <critical|standard> [label]"
+if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then fail "usage: host-update-metric.sh [--max-lists-age-days=N] <critical|standard> [label]"; fi
 tier=$1
 label=${HOST_LABEL-}
 if [ "$#" -eq 2 ]; then
@@ -121,7 +122,7 @@ is_uint "$now" || fail "non-numeric time"
 
 valid_version() {
     # $1 candidate; Debian version characters only
-    [ -n "$1" ] && [ "${#1}" -le 128 ] || return 1
+    if [ -z "$1" ] || [ "${#1}" -gt 128 ]; then return 1; fi
     case "$1" in
         *[!A-Za-z0-9.+:~_-]*) return 1 ;; # MUTATE:version-charset
     esac
@@ -144,9 +145,9 @@ reboot=0
 uu_re='^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2},[0-9]{3} INFO (All upgrades installed|No packages found that can be upgraded unattended and no pending auto-removals)$' # MUTATE:uu-anchor
 last=""
 for f in "$uu_log" "$uu_log.1"; do # MUTATE:uu-fallback
-    [ -f "$f" ] && [ -r "$f" ] || continue
+    if [ ! -f "$f" ] || [ ! -r "$f" ]; then continue; fi
     last=$(tail -c 1048576 "$f" 2>/dev/null | grep -a -E "$uu_re" | tail -n 1)
-    [ -n "$last" ] && break
+    if [ -n "$last" ]; then break; fi
 done
 # An age that cannot be determined is a failure, never 0.
 [ -n "$last" ] || fail "no successful unattended-upgrades run found" # MUTATE:unknown-age
@@ -178,7 +179,7 @@ fi
 oldest_sec=""
 oldest_all=""
 for f in "$lists_dir"/*_Release "$lists_dir"/*_InRelease; do
-    [ -f "$f" ] && [ ! -L "$f" ] || continue # MUTATE:lists-symlink
+    if [ ! -f "$f" ] || [ -L "$f" ]; then continue; fi # MUTATE:lists-symlink
     [ -s "$f" ] || continue # MUTATE:lists-nonempty
     m=$(stat -c %Y "$f" 2>/dev/null) || continue
     is_uint "$m" || continue
@@ -253,7 +254,7 @@ while IFS= read -r line; do
             rest=${line#Inst }
             name=${rest%% *}
             [ "$name" != "$rest" ] || fail "malformed Inst line"
-            [ -n "$name" ] && [ "${#name}" -le 128 ] || fail "bad package name length"
+            if [ -z "$name" ] || [ "${#name}" -gt 128 ]; then fail "bad package name length"; fi
             case "$name" in
                 [!a-z0-9]* | *[!a-z0-9+.:-]*) fail "unexpected characters in package name" ;; # MUTATE:name-charset
             esac
@@ -298,7 +299,7 @@ while IFS= read -r line; do
             inner=${inner% *}
             new=${inner%% *}
             origins=${inner#"$new "}
-            [ "$origins" != "$inner" ] && [ -n "$origins" ] || fail "missing origin"
+            if [ "$origins" = "$inner" ] || [ -z "$origins" ]; then fail "missing origin"; fi
             valid_version "$new" || fail "bad candidate version"
             # An origin label with unexpected characters is counted as non-security, not a failure.
             # A repository can label itself "security"; that is accepted (see the doc).
@@ -408,11 +409,12 @@ state_run() {
         chmod 700 "$state_dir" 2>/dev/null || return 1
         first_run=1
     fi
-    [ -d "$state_dir" ] && [ ! -L "$state_dir" ] || return 1
+    if [ ! -d "$state_dir" ] || [ -L "$state_dir" ]; then return 1; fi
     [ "$(stat -c '%u %a' "$state_dir" 2>/dev/null)" = "$me 700" ] || return 1 # MUTATE:state-dir-mode
     sfile=$state_dir/first-seen
     old_text=""
     seed_only=0
+    future=0
     if [ -L "$sfile" ]; then
         return 1
     elif [ -e "$sfile" ]; then
@@ -443,13 +445,19 @@ state_run() {
             [ "${#s_name}" -le 128 ] || return 1
             valid_version "$s_ver" || return 1
             is_uint "$s_epoch" || return 1 # MUTATE:state-uint
-            [ "$s_epoch" -le $((now + 86400)) ] || return 1
+            # A first-seen time after now (beyond clock jitter) cannot be true: do not trust the file.
+            if [ "$s_epoch" -gt $((now + 60)) ]; then future=1; fi # MUTATE:state-future
             case "$nl$old_text" in
                 *"$nl$s_name $s_ver "*) return 1 ;;
             esac
             old_text="$old_text$s_name $s_ver $s_epoch$nl"
         done <"$sfile"
         [ "$header" -eq 0 ] || return 1
+        if [ "$future" -eq 1 ]; then
+            # Forget every stored time and start the clocks again from now; this run reports no age.
+            old_text=""
+            seed_only=1
+        fi
     elif [ "$first_run" -eq 0 ]; then
         # The directory exists but the file is gone: the clock is lost. Re-seed it below, but
         # report state_ok 0 and no age for this run.
@@ -505,16 +513,22 @@ else
 fi
 
 # ---------------------------------------------------------------- output
+# The whole payload is built first and written in one checked step; success is declared only after
+# the write succeeded. A failed write exits non-zero, so a partial metric set cannot look healthy.
+emit_all() {
+    printf 'host_update_pending%s,kind=package,security=false value=%di\n' "$tags" "$pend_other"
+    printf 'host_update_pending%s,kind=package,security=true value=%di\n' "$tags" "$pend_sec"
+    printf 'host_update_held_back%s value=%di\n' "$tags" "$n_held"
+    printf 'host_update_lists_age_seconds%s value=%di\n' "$tags" "$lists_age"
+    printf 'host_reboot_required%s value=%di\n' "$tags" "$reboot"
+    printf 'host_unattended_last_run_age_seconds%s value=%di\n' "$tags" "$uu_age"
+    if [ "$state_ok" -eq 1 ] && [ -n "$oldest_age" ]; then
+        printf 'host_update_oldest_pending_age_seconds%s value=%di\n' "$tags" "$oldest_age"
+    fi
+    printf 'host_update_state_ok%s value=%di\n' "$tags" "$state_ok"
+    printf 'host_update_check_success%s value=1i' "$tags"
+}
+payload=$(emit_all)
+if ! printf '%s\n' "$payload"; then exit 1; fi # MUTATE:output-check
 finished=1
-printf 'host_update_pending%s,kind=package,security=false value=%di\n' "$tags" "$pend_other"
-printf 'host_update_pending%s,kind=package,security=true value=%di\n' "$tags" "$pend_sec"
-printf 'host_update_held_back%s value=%di\n' "$tags" "$n_held"
-printf 'host_update_lists_age_seconds%s value=%di\n' "$tags" "$lists_age"
-printf 'host_reboot_required%s value=%di\n' "$tags" "$reboot"
-printf 'host_unattended_last_run_age_seconds%s value=%di\n' "$tags" "$uu_age"
-if [ "$state_ok" -eq 1 ] && [ -n "$oldest_age" ]; then
-    printf 'host_update_oldest_pending_age_seconds%s value=%di\n' "$tags" "$oldest_age"
-fi
-printf 'host_update_state_ok%s value=%di\n' "$tags" "$state_ok"
-printf 'host_update_check_success%s value=1i\n' "$tags"
 exit 0
