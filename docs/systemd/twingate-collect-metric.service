@@ -1,0 +1,35 @@
+# Twingate collector, step 2 of 3: the check (issue #222). Started by step 1 on success.
+# Runs twingate-update-metric.py as its own dynamic user. Its only secrets are the collector
+# credential "env" (the Twingate key and settings), which systemd copies in from the file step 1
+# wrote. The secret manager's token, the staging directory and every home directory are
+# invisible to it. Its standard output (line protocol, no secret) goes to a file that step 3 reads.
+# The check exits non-zero when it fails but still prints its failure lines; step 3 runs either way.
+[Unit]
+Description=Twingate collector step 2: check the Connectors
+OnSuccess=twingate-collect-write.service
+OnFailure=twingate-collect-write.service twingate-collect-failure.service
+
+[Service]
+Type=oneshot
+DynamicUser=yes
+LoadCredential=env:/run/twingate-collect/collector.json
+StandardOutput=file:/run/twingate-collect/metrics.lp
+ExecStart=/usr/bin/python3 -I /opt/siem/scripts/live-deploy/twingate-stage.py collector
+TimeoutStartSec=120
+UMask=0077
+InaccessiblePaths=/etc/siem /run/twingate-collect /root
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+CapabilityBoundingSet=
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+SystemCallArchitectures=native
+LimitCORE=0

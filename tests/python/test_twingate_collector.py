@@ -391,17 +391,172 @@ def unit(name):
     return (SYSTEMD / name).read_text(encoding="utf-8")
 
 
-def test_service_unit_is_a_hardened_oneshot_with_a_failure_hook():
+HARDEN = ("NoNewPrivileges=yes", "ProtectSystem=strict", "ProtectHome=yes", "PrivateTmp=yes",
+          "CapabilityBoundingSet=\n", "LimitCORE=0")
+STAGE_UNITS = {"twingate-collect-metric.service": ("collector.json", "collector"),
+               "twingate-collect-write.service": ("writer.json", "writer")}
+
+
+def test_broker_unit_is_the_only_one_that_receives_the_service_token():
     s = unit("twingate-collect.service")
     assert "Type=oneshot" in s and "OnFailure=twingate-collect-failure.service" in s
-    for needle in ("NoNewPrivileges=yes", "ProtectSystem=strict", "ProtectHome=read-only", "PrivateTmp=yes"):
+    assert "OnSuccess=twingate-collect-metric.service" in s
+    assert re.search(r"(?m)^User=siem-broker$", s) and not re.search(r"(?m)^User=root", s)
+    assert "LoadCredential=doppler-token:/etc/siem/doppler-token" in s
+    for needle in HARDEN:
         assert needle in s, needle
-    assert "ExecStart=" in s and "twingate-collect" in s
     exec_line = re.search(r"(?m)^ExecStart=(.*)$", s).group(1)
-    assert exec_line.startswith("/usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C HOME="), exec_line   # first bash starts clean
-    assert "DOPPLER" not in s
-    assert "PASSWORD" not in s and "API_KEY" not in s     # no secret value in a unit file
-    assert "LimitCORE=0" in s
+    assert exec_line.startswith("/usr/bin/env -i "), exec_line          # first command starts clean
+    assert "SIEM_TOKEN_FILE=%d/doppler-token" in exec_line and "HOME=" not in exec_line
+    assert "twingate-fetch-secrets.py" in exec_line
+    assert "PASSWORD=" not in s and "API_KEY=" not in s                 # no secret value in a unit file
+
+
+@pytest.mark.parametrize("name", sorted(STAGE_UNITS))
+def test_stage_units_run_as_their_own_user_and_cannot_reach_the_token(name):
+    s = unit(name)
+    fname, stage = STAGE_UNITS[name]
+    assert re.search(r"(?m)^DynamicUser=yes$", s) and not re.search(r"(?m)^User=", s)
+    for needle in HARDEN + ("PrivateDevices=yes", "RestrictNamespaces=yes"):
+        assert needle in s, needle
+    # the token path, the staging directory and every home directory are unreachable inside the unit
+    inacc = re.search(r"(?m)^InaccessiblePaths=(.*)$", s).group(1).split()
+    assert "/etc/siem" in inacc and "/run/twingate-collect" in inacc
+    # the only credential from the staging area is this stage's own file
+    loads = re.findall(r"(?m)^LoadCredential=(\S+)$", s)
+    assert any(l == "env:/run/twingate-collect/" + fname for l in loads), loads
+    other = {"collector.json", "writer.json"} - {fname}
+    for l in loads:
+        assert not any(o in l for o in other), l
+    for forbidden in ("doppler-token", "DOPPLER", "SIEM_CONFIG_DIR", "SIEM_TOKEN_FILE", "/home", "siem-run", "EnvironmentFile"):
+        assert forbidden not in s, forbidden
+    assert "twingate-stage.py " + stage in s
+
+
+def test_stage_units_chain_runs_the_writer_even_when_the_check_fails():
+    m, w = unit("twingate-collect-metric.service"), unit("twingate-collect-write.service")
+    assert "OnSuccess=twingate-collect-write.service" in m
+    assert re.search(r"(?m)^OnFailure=twingate-collect-write.service twingate-collect-failure.service$", m)
+    assert "StandardOutput=file:/run/twingate-collect/metrics.lp" in m
+    assert "LoadCredential=metrics:/run/twingate-collect/metrics.lp" in w
+    assert "OnFailure=twingate-collect-failure.service" in w
+    # both secret files are removed after the last step, on a fixed path, by the privileged + hook
+    assert "ExecStopPost=+/usr/bin/rm -rf -- /run/twingate-collect\n" in w
+
+
+# ---- the broker boundary: fetch helper and stage wrapper (issue #222, review round 4) ----
+
+FETCH = REPO_ROOT / "scripts" / "live-deploy" / "twingate-fetch-secrets.py"
+STAGE = REPO_ROOT / "scripts" / "live-deploy" / "twingate-stage.py"
+TOKEN = "FAKE-service-token-not-real"
+
+
+def run_fetch(env):
+    return subprocess.run([sys.executable, "-I", str(FETCH)], env=env, capture_output=True, text=True,
+                          stdin=subprocess.DEVNULL, timeout=30)
+
+
+def test_fetch_writes_one_private_file_per_stage_and_never_the_service_token(tmp_path):
+    d = tmp_path / "stage"
+    d.mkdir()
+    env = dict(SECRETS_INJECTED, TWINGATE_STAGE_DIR=str(d), DOPPLER_TOKEN=TOKEN, DOPPLER_CONFIG="c")
+    p = run_fetch(env)
+    assert p.returncode == 0 and not leaks(p) and TOKEN not in p.stdout + p.stderr
+    col, wri = json.loads((d / "collector.json").read_text()), json.loads((d / "writer.json").read_text())
+    assert set(col) == {"TWINGATE_API_KEY", "TWINGATE_NETWORK_URL", "TWINGATE_EXPECTED_CONNECTORS"}
+    assert set(wri) == {"TWINGATE_INFLUX_USER", "TWINGATE_INFLUX_PASSWORD"}
+    for f in d.iterdir():
+        text = f.read_text()
+        assert stat.S_IMODE(f.stat().st_mode) == 0o600, f.name
+        assert TOKEN not in text and "evil" not in text and "UNRELATED" not in text
+    assert sorted(x.name for x in d.iterdir()) == ["collector.json", "writer.json"]
+
+
+def test_fetch_fails_closed_without_a_directory_or_without_any_secret(tmp_path):
+    assert run_fetch({"PATH": "/usr/bin"}).returncode != 0                      # no stage directory
+    assert run_fetch({"PATH": "/usr/bin", "TWINGATE_STAGE_DIR": str(tmp_path / "nope")}).returncode != 0
+    p = run_fetch({"PATH": "/usr/bin", "TWINGATE_STAGE_DIR": str(tmp_path), "DOPPLER_TOKEN": TOKEN})
+    assert p.returncode != 0 and not list(tmp_path.glob("*.json"))              # nothing left behind
+
+
+@pytest.fixture
+def stage_tree(tmp_path):
+    """The stage wrapper next to stand-in programs that record what they can see."""
+    live = tmp_path / "repo" / "scripts" / "live-deploy"
+    live.mkdir(parents=True)
+    shutil.copy(STAGE, live / "twingate-stage.py")
+    probe = ("import json, os, sys\n"
+             "json.dump({'env': dict(os.environ), 'stdin': sys.stdin.read(), 'argv': sys.argv}, open(%r, 'w'))\n")
+    (tmp_path / "repo" / "scripts" / "twingate-update-metric.py").write_text(probe % str(tmp_path / "collector-saw.json"))
+    (live / "twingate-influx-write.py").write_text(probe % str(tmp_path / "writer-saw.json"))
+    cred = tmp_path / "cred"
+    cred.mkdir()
+    return tmp_path, live / "twingate-stage.py", cred
+
+
+def run_stage(script, stage, cred, extra_env=None):
+    env = {"CREDENTIALS_DIRECTORY": str(cred), "PATH": "/evil", "BASH_ENV": "/evil", "LD_PRELOAD": "/evil.so",
+           "DOPPLER_TOKEN": TOKEN, "HOME": "/root", "SSL_CERT_FILE": "/etc/ssl/ok.pem"}
+    env.update(extra_env or {})
+    return subprocess.run([sys.executable, "-I", str(script), stage], env=env, capture_output=True, text=True,
+                          stdin=subprocess.DEVNULL, timeout=30)
+
+
+def test_stage_process_sees_only_its_own_secrets_and_never_the_service_token(stage_tree):
+    root, script, cred = stage_tree
+    (cred / "env").write_text(json.dumps({"TWINGATE_API_KEY": "k", "TWINGATE_NETWORK_URL": "https://x.twingate.com"}))
+    assert run_stage(script, "collector", cred).returncode == 0
+    seen = json.loads((root / "collector-saw.json").read_text())["env"]
+    assert set(seen) == {"PATH", "LC_ALL", "TWINGATE_API_KEY", "TWINGATE_NETWORK_URL", "SSL_CERT_FILE"}
+    assert seen["PATH"] == "/usr/bin:/bin"
+    assert TOKEN not in json.dumps(seen)
+    # the credential directory holds nothing but the stage's own file: no token file to open
+    assert [f.name for f in cred.iterdir()] == ["env"]
+
+
+def test_writer_stage_gets_the_check_output_on_stdin_and_only_the_influx_login(stage_tree):
+    root, script, cred = stage_tree
+    (cred / "env").write_text(json.dumps({"TWINGATE_INFLUX_USER": USER, "TWINGATE_INFLUX_PASSWORD": PASSWORD}))
+    (cred / "metrics").write_text(GOOD)
+    assert run_stage(script, "writer", cred, {"INFLUX_URL": "http://127.0.0.1:8086", "TWINGATE_API_KEY": "k"}).returncode == 0
+    saw = json.loads((root / "writer-saw.json").read_text())
+    assert saw["stdin"] == GOOD and "TWINGATE_API_KEY" not in saw["env"] and "TWINGATE_NETWORK_URL" not in saw["env"]
+    assert saw["env"]["INFLUX_URL"] == "http://127.0.0.1:8086" and TOKEN not in json.dumps(saw)
+    assert PASSWORD not in json.dumps(saw["argv"])
+
+
+def test_stage_refuses_a_credential_that_holds_a_foreign_name_or_is_malformed(stage_tree):
+    root, script, cred = stage_tree
+    for body in ({"TWINGATE_INFLUX_PASSWORD": PASSWORD},              # the writer's secret, offered to the collector
+                 {"DOPPLER_TOKEN": TOKEN}, {"LD_PRELOAD": "/evil.so"}, {"TWINGATE_API_KEY": 1}, ["x"]):
+        (cred / "env").write_text(json.dumps(body))
+        p = run_stage(script, "collector", cred)
+        assert p.returncode != 0 and not (root / "collector-saw.json").exists() and not leaks(p), body
+    (cred / "env").write_text("not json")
+    assert run_stage(script, "collector", cred).returncode != 0
+    assert run_stage(script, "other", cred).returncode != 0
+    assert run_stage(script, "collector", cred, {"CREDENTIALS_DIRECTORY": "relative"}).returncode != 0
+
+
+def test_only_the_broker_unit_mentions_the_token_path_besides_siem_run():
+    files = list(SYSTEMD.glob("twingate-*")) + [p for p in (REPO_ROOT / "scripts").rglob("twingate-*")
+                                                  if "__pycache__" not in p.parts and p.suffix in ("", ".py")]
+    assert len(files) >= 8                                                     # something was collected
+    holders = sorted(p.name for p in files if p.is_file() and "doppler-token" in p.read_text(encoding="utf-8"))
+    assert holders == ["twingate-collect.service"], holders
+
+
+def test_unexpected_connector_rule_alerts_on_repeated_runs_fail_closed_and_stays_off_the_phone():
+    data = yaml.safe_load(RULES.read_text(encoding="utf-8"))
+    r = next(r for g in data["groups"] for r in g["rules"] if r["uid"] == "update-twingate-unexpected-connector")
+    assert r["title"] == "Twingate unexpected Connector" and r["isPaused"] is True
+    assert r["noDataState"] == "Alerting" and r["execErrState"] == "Alerting"
+    assert r["labels"]["severity"] == "warning" and r["labels"]["phone"] == "false"
+    queries = " ".join(d["model"].get("query", "") for d in r["data"])
+    assert queries.count('"twingate_unexpected_connector"') == 2 and "min(" in queries and "count(" in queries
+    expr = next(d for d in r["data"] if d["refId"] == "C")["model"]["expression"]
+    assert expr == "$B > 0 && $Nc >= 2"
+    assert all(d["relativeTimeRange"]["from"] == 10800 for d in r["data"] if d["refId"] in ("A", "N"))
 
 
 def test_timer_is_hourly_persistent_and_jittered():
@@ -432,7 +587,7 @@ def test_runbook_and_alerting_docs_never_put_a_password_in_a_command_argument():
 def test_every_twingate_rule_alerts_on_missing_data_and_errors_and_stays_paused():
     data = yaml.safe_load(RULES.read_text(encoding="utf-8"))
     rules = [r for g in data["groups"] for r in g["rules"]]
-    assert len(rules) == 5
+    assert len(rules) == 6
     for r in rules:
         assert r["noDataState"] == "Alerting" and r["execErrState"] == "Alerting", r["uid"]
         assert r["isPaused"] is True, r["uid"]          # not unpaused by #222

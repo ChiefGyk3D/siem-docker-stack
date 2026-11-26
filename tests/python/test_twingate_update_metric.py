@@ -403,7 +403,7 @@ def test_rules_ship_paused_with_alerting_error_states():
     rs = rules()
     assert set(rs) == {"update-twingate-pending-7d", "update-twingate-pending-14d",
                        "update-twingate-operator-behind", "update-twingate-check-failing",
-                       "update-twingate-connector-down"}
+                       "update-twingate-connector-down", "update-twingate-unexpected-connector"}
     for uid, r in rs.items():
         assert r["isPaused"] is True, uid
         assert r["noDataState"] == "Alerting" and r["execErrState"] == "Alerting", uid
@@ -473,7 +473,7 @@ def test_every_rule_title_is_in_the_router_allowlist():
     js = next(n["parameters"]["jsCode"] for n in wf["nodes"] if "ALLOWED_ALERTNAMES" in n.get("parameters", {}).get("jsCode", ""))
     listed = set(re.findall(r"'([^']*)'", re.search(r"const ALLOWED_ALERTNAMES = \[(.*?)\];", js, re.S).group(1)))
     titles = {r["title"] for r in rules().values()}
-    assert len(titles) == 5 and titles <= listed
+    assert len(titles) == 6 and titles <= listed
 
 
 def test_docs_cover_twingate_collector_and_management_modes():

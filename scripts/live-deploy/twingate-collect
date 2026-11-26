@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Collect the Twingate Connector update metrics and write them to InfluxDB. Issue #222.
 #
+# BENCH RUNNER ONLY. Production runs as three systemd units (docs/systemd/twingate-collect*.service)
+# so the stages cannot read the secret manager's token. This script runs both stages as the
+# calling user, so the environment clean-up below is hygiene, not a boundary.
+#
 # Runs twingate-update-metric.py (Twingate API key from the secret manager) and pipes its
 # line protocol to twingate-influx-write.py (write-only InfluxDB account, also from the
 # secret manager). Both run under siem-run, so no value is on a command line or printed.

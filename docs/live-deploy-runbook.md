@@ -556,9 +556,11 @@ separate step after the landing check below passes.
 
 | File | Role |
 |------|------|
-| `scripts/live-deploy/twingate-collect` | Re-executes itself under `env -i`, then runs `twingate-update-metric.py` and pipes its line protocol to the writer, each under `siem-run` with only its own secrets; exits non-zero if either stage fails (pipefail) or nothing is written |
+| `scripts/live-deploy/twingate-fetch-secrets.py` | Broker step: runs under `siem-run`, receives only the Twingate secret names and writes one private credential file per stage; prints counts only |
+| `scripts/live-deploy/twingate-stage.py` | Stage wrapper: loads the stage's own credential file, checks the names against an allowlist, builds a clean environment and replaces itself with the collector or the writer |
+| `scripts/live-deploy/twingate-collect` | Manual single-process runner for a bench test (not a security boundary, see "Why a broker" below): re-executes itself under `env -i`, runs the collector and pipes its output to the writer, each under `siem-run`; exits non-zero if either stage fails or nothing is written |
 | `scripts/live-deploy/twingate-influx-write.py` | Stdlib writer: one POST to `/write?db=telegraf&precision=s`, Basic auth, 5 s timeout, no redirects, no retry; prints only counts and the HTTP status |
-| `docs/systemd/twingate-collect.service`, `.timer`, `twingate-collect-failure.service` | Hourly oneshot with sandboxing, and a journal notice when a run fails |
+| `docs/systemd/twingate-collect.service`, `twingate-collect-metric.service`, `twingate-collect-write.service`, `.timer`, `twingate-collect-failure.service` | Hourly chain of three sandboxed oneshots (broker, check, write) and a journal notice when any step fails |
 
 Owner steps (placeholders in angle brackets; the InfluxDB admin credentials are
 read inside the container from its own environment, so they are never typed):
@@ -601,37 +603,37 @@ docker exec influxdb sh -c 'INFLUX_USERNAME="$INFLUXDB_ADMIN_USER" INFLUX_PASSWO
 
    Check: the last command lists `telegraf WRITE` and no other database.
 
-3. Install the units (replace `<user>` and the checkout path in
-   `twingate-collect.service` first; its `ExecStart` starts the wrapper through
-   `/usr/bin/env -i` with a fixed `PATH`, `LC_ALL`, `HOME` and `SIEM_CONFIG_DIR`,
-   so even the first bash starts clean). The timer is installed but not enabled yet:
+3. Put the secret manager's read-only service token where only root can read it, create the
+   broker account and install the units (replace `/opt/siem` with the checkout path in the
+   three service files first). The token must be a read-only service token scoped to the one
+   config, `prd_network`. The token is typed at the prompt of `read -rs`, so it is in no
+   history and no argument. If you used the old per-user token file, delete it after this step:
 
 ```
-sudo install -m 644 docs/systemd/twingate-collect.service docs/systemd/twingate-collect-failure.service docs/systemd/twingate-collect.timer /etc/systemd/system/
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin siem-broker
+sudo install -d -m 700 -o root -g root /etc/siem
+read -rs -p 'service token: ' T; echo; printf '%s' "$T" | sudo sh -c 'umask 277; cat > /etc/siem/doppler-token'; unset T
+sudo install -m 644 docs/systemd/twingate-collect.service docs/systemd/twingate-collect-metric.service docs/systemd/twingate-collect-write.service docs/systemd/twingate-collect-failure.service docs/systemd/twingate-collect.timer /etc/systemd/system/
+sudo systemd-analyze verify /etc/systemd/system/twingate-collect.service /etc/systemd/system/twingate-collect-metric.service /etc/systemd/system/twingate-collect-write.service
 sudo systemctl daemon-reload
 ```
 
-4. Dry run: the collector alone, nothing is written. It prints one line per metric
-   (Connector names appear, no secret). It runs the same way the wrapper starts it:
-   an empty environment, only the collector's secret names, absolute paths:
+   The chain uses `OnSuccess=`, which needs systemd 249 or newer (`systemctl --version`).
+
+4. First run of the whole chain (broker, then check, then write), then the landing check:
 
 ```
-env -i PATH=/usr/local/bin:/usr/bin:/bin LC_ALL=C HOME="$HOME" SIEM_ONLY_SECRETS=TWINGATE_API_KEY,TWINGATE_NETWORK_URL,TWINGATE_CONNECTOR_MANAGED_BY_FILE,TWINGATE_CONNECTOR_MANAGED_BY,TWINGATE_EXPECTED_CONNECTORS scripts/live-deploy/siem-run /usr/bin/env -u DOPPLER_TOKEN -u DOPPLER_CONFIG -u DOPPLER_ENVIRONMENT -u DOPPLER_PROJECT -u HOME -u SIEM_ONLY_SECRETS PATH=/usr/bin:/bin /usr/bin/python3 -I scripts/twingate-update-metric.py
+sudo systemctl start twingate-collect.service
+journalctl -u twingate-collect.service -u twingate-collect-metric.service -u twingate-collect-write.service --since '-5min' --no-pager
 ```
 
-   Expected: `twingate_connector_behind` and `twingate_connector_up` lines for each
-   Connector, `twingate_unexpected_connector value=0i` (the count of Connectors the API
-   returned that are not on your list), `twingate_update_check_success value=1i`, exit code 0.
-
-5. First run, then the landing check:
-
-```
-scripts/live-deploy/twingate-collect; echo "exit=$?"
-```
-
-   Expected: `twingate-influx-write: lines=<n> status=204` and `exit=0`. A 401 means
-   the account or password is wrong; the run exits non-zero. Read the point back
-   through the Grafana read account (never the write account):
+   Expected: `twingate-fetch: files=2 secrets=<n>`, the collector's lines
+   (`twingate_connector_behind` and `twingate_connector_up` per Connector,
+   `twingate_unexpected_connector value=0i`, `twingate_update_check_success value=1i`),
+   `twingate-influx-write: lines=<n> status=204`, and `/run/twingate-collect` gone afterwards
+   (`sudo ls /run/twingate-collect` fails). A 401 from the writer means the account or
+   password is wrong. Read the point back through the Grafana read account (never the write
+   account):
 
 ```
 docker exec influxdb sh -c 'INFLUX_USERNAME="$GRAFANA_INFLUX_USER" INFLUX_PASSWORD="$GRAFANA_INFLUX_PASSWORD" influx -database telegraf -execute "SELECT last(value) FROM twingate_update_check_success"'
@@ -644,6 +646,17 @@ docker exec influxdb sh -c 'INFLUX_USERNAME="$GRAFANA_INFLUX_USER" INFLUX_PASSWO
    datasources, so confirm on the live box that the test passes (InfluxDB has auth
    on) before anyone unpauses the rules.
 
+5. Prove the boundary on the live host. Neither stage account can open the token:
+
+```
+sudo systemd-run --wait --pipe -p DynamicUser=yes -p InaccessiblePaths=/etc/siem /usr/bin/test ! -r /etc/siem/doppler-token; echo "exit=$?"
+sudo -u siem-broker /usr/bin/test ! -r /etc/siem/doppler-token; echo "exit=$?"
+```
+
+   Expected: both print `exit=0` (the token is not readable by a dynamic user inside the
+   sandbox, and not readable by the broker account outside its unit; the broker only has it
+   through `LoadCredential=`).
+
 6. Enable the timer:
 
 ```
@@ -655,8 +668,9 @@ systemctl list-timers twingate-collect.timer
    `status=0/SUCCESS` and `journalctl -u twingate-collect.service` shows only the
    counts line.
 
-Rollback: `sudo systemctl disable --now twingate-collect.timer`, delete the three
-unit files from `/etc/systemd/system/` and run `sudo systemctl daemon-reload`. To
+Rollback: `sudo systemctl disable --now twingate-collect.timer`, delete the five
+unit files from `/etc/systemd/system/`, run `sudo systemctl daemon-reload`, then remove
+`/etc/siem/doppler-token` and the `siem-broker` account (`sudo userdel siem-broker`). To
 remove the account, run `DROP USER "twingate_wo"` as the InfluxDB admin and delete
 the two names from the secret manager. Points already written are harmless and can
 stay.
@@ -672,22 +686,45 @@ duplicates, and when any listed name is missing from the API answer. In that las
 case it also writes `twingate_connector_up value=0i` for each missing name (with its
 `managed_by` tag), so the existing rule "Twingate Connector not ALIVE" fires for it.
 A Connector that the API returns but you did not list is not an error: it is counted in
-`twingate_unexpected_connector` and still gets its normal metrics, so a new Connector
-is noticed. Update the list when you add or retire a Connector on purpose. The check
+`twingate_unexpected_connector` and still gets its normal metrics. The rule "Twingate
+unexpected Connector" (warning, `phone=false`, paused with the others) fires when the count
+is above 0 in at least two runs within 3 hours, so a new Connector is noticed. Update the list when you add or retire a Connector on purpose. The check
 also fails on a duplicate Connector name or id, a repeated page cursor, a page that
 adds nothing while more pages are promised, an API answer without a valid `pageInfo`,
 or a Docker Hub release list that is still paging after the page cap.
 
-Secrets per stage: the unit starts `twingate-collect` through `/usr/bin/env -i`, and
-the wrapper's first action is another `env -i` re-execution with a short allowlist, so
-`BASH_ENV`, `ENV`, exported shell functions, `PATH`, `LD_*` and `PYTHON*` from a caller
-never go further. Each stage is then started as `env -i ... siem-run /usr/bin/env -u
-DOPPLER_... python3 -I`: `siem-run` asks the secret manager for only that stage's
-names (`SIEM_ONLY_SECRETS`, passed to `doppler run --only-secrets`), the secret-manager
-service token reaches only `siem-run` and the CLI it runs, and no shell holds the
-secrets. The collector gets the Twingate API key, network URL and its optional
-settings; the writer gets only the InfluxDB login. Commands use absolute paths, and core
-dumps are off (`ulimit -c 0` and `LimitCORE=0`). The failure notice runs as a transient
+Why a broker (issue #222, review round 3): clearing environment variables does not
+stop a process that runs as the same user from opening that user's files, so a collector
+that shared a user with the token file could read the secret manager's service token. The
+design options were (a) a separate broker identity that fetches the secrets and hands each
+stage its own credential file, (b) sandboxing the stages while the token stays in the same
+user's home, and (c) documenting the residual risk. This runbook uses (a), with the sandbox
+of (b) as a second layer. The token is a root-owned file (`/etc/siem/doppler-token`, mode
+400) that systemd passes only to `twingate-collect.service` as a credential (`LoadCredential=`);
+that unit runs as `siem-broker`, fetches only the seven Twingate names
+(`SIEM_ONLY_SECRETS`) and writes `collector.json` and `writer.json` (mode 600) into
+`/run/twingate-collect`, a tmpfs directory that only the broker account can enter. The check and
+the writer are separate units, each a dynamic user with `InaccessiblePaths=/etc/siem
+/run/twingate-collect`, `ProtectHome=yes` and no capabilities; systemd copies exactly one
+secret file into each as a credential. The collector therefore never holds the InfluxDB login,
+the writer never holds the Twingate key, and neither can open the token (a compromise of
+either stage cannot read it from any path). The check's output reaches the writer as the
+`metrics` credential. If the check fails it still prints its `success=0` lines, and
+`OnFailure=` starts the writer anyway. After the writer finishes, `ExecStopPost=+` removes the
+whole `/run/twingate-collect` directory. A step that fails before then leaves its files in
+that tmpfs directory (unreadable to everyone but the broker account and root) until the next
+run replaces them or the host reboots. Residual risk: root, or a compromise of the broker
+unit or of `siem-run`/the CLI, still reaches the token. Reduce that blast radius by using a
+read-only service token scoped to the single config `prd_network`, and rotate it if the host
+is suspected. `twingate-collect` (the script) remains for bench runs from a terminal and is
+not a boundary: it runs both stages as the calling user.
+
+Starting clean: the broker's `ExecStart` runs through `/usr/bin/env -i` with a short list of
+names, so unit defaults and caller variables never reach `siem-run`. The stage wrapper
+builds the stage's environment from scratch (fixed `PATH` and `LC_ALL`, the credential's
+allowlisted names, and for the writer `INFLUX_URL`, `TWINGATE_INFLUX_DB` and the CA
+variables) and refuses any credential that holds another name. Commands use absolute
+paths, and core dumps are off (`LimitCORE=0`). The failure notice runs as a transient
 unprivileged user.
 
 A dead collector does not look green: the check rule "Twingate update check failing

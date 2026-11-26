@@ -1,0 +1,37 @@
+# Twingate collector, step 3 of 3: the InfluxDB write (issue #222). Started by step 2, whether
+# the check passed or failed, so a failed check still stores its success=0 line. Runs the
+# writer as its own dynamic user with only the InfluxDB login (credential "env") and the check's
+# output (credential "metrics"). It cannot read the Twingate key or the secret manager token.
+# Afterwards the staging directory, which holds both secret files, is removed (ExecStopPost with
+# "+" runs as root, on a fixed path).
+[Unit]
+Description=Twingate collector step 3: write the metrics to InfluxDB
+OnFailure=twingate-collect-failure.service
+
+[Service]
+Type=oneshot
+DynamicUser=yes
+LoadCredential=env:/run/twingate-collect/writer.json
+LoadCredential=metrics:/run/twingate-collect/metrics.lp
+# Add Environment=INFLUX_URL=... or Environment=TWINGATE_INFLUX_DB=... if the defaults
+# (http://127.0.0.1:8086, telegraf) do not fit.
+ExecStart=/usr/bin/python3 -I /opt/siem/scripts/live-deploy/twingate-stage.py writer
+ExecStopPost=+/usr/bin/rm -rf -- /run/twingate-collect
+TimeoutStartSec=60
+UMask=0077
+InaccessiblePaths=/etc/siem /run/twingate-collect /root
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+CapabilityBoundingSet=
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+SystemCallArchitectures=native
+LimitCORE=0

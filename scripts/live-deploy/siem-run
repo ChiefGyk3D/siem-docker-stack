@@ -14,6 +14,11 @@
 #                     so they are normally unnecessary. Example values are
 #                     "homelab" and "prd_network"; override them for your setup.
 #
+#   SIEM_TOKEN_FILE   path of the token file when it is not "$SIEM_CONFIG_DIR/token" (the
+#                     Twingate broker unit hands it over as a systemd credential, so the file
+#                     itself lives outside any home directory). The config directory is then
+#                     created (mode 700) if it is missing.
+#
 #   SIEM_ONLY_SECRETS comma-separated secret names. When set, only those secrets are injected
 #                     (doppler run --only-secrets) and a name missing from the config is not
 #                     an error here: the program that needs it fails closed itself.
@@ -23,12 +28,17 @@ set -euo pipefail
 
 CFG="${SIEM_CONFIG_DIR:-$HOME/.config/doppler-siem}"
 
-if [ ! -r "$CFG/token" ]; then
+TOKEN_FILE="${SIEM_TOKEN_FILE:-$CFG/token}"
+if [ ! -r "$TOKEN_FILE" ]; then
     echo "siem-run: token file missing or unreadable" >&2
     exit 2
 fi
+if [ -n "${SIEM_TOKEN_FILE:-}" ]; then
+    mkdir -p "$CFG"
+    chmod 700 "$CFG"
+fi
 
-DOPPLER_TOKEN="$(cat "$CFG/token")"
+DOPPLER_TOKEN="$(cat "$TOKEN_FILE")"
 export DOPPLER_TOKEN
 unset BASH_ENV ENV
 only=()

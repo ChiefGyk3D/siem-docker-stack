@@ -1,34 +1,43 @@
-# Twingate Connector update collector (issue #222). Install by hand; see
-# docs/live-deploy-runbook.md, section "Twingate collector". Replace /opt/siem with the
-# checkout of this repository and <user> with the account that owns the secret-manager
-# token file. No secret value belongs in this file: siem-run reads the token from
-# <home>/.config/doppler-siem/token.
+# Twingate collector, step 1 of 3: the secret broker (issue #222). Install by hand; see
+# docs/live-deploy-runbook.md, section "Twingate collector". Replace /opt/siem with the checkout
+# of this repository.
+#
+# The secret manager's service token is a root-owned file (/etc/siem/doppler-token, mode 400).
+# systemd copies it into this unit's private credential directory (LoadCredential=), readable
+# only by this unit. This unit fetches only the Twingate secrets and writes them as two
+# credential files for the other two units. The collector and the writer run as their own
+# dynamic users and can reach neither this token nor each other's secrets. No secret value
+# belongs in this file.
 [Unit]
-Description=Collect Twingate Connector update metrics into InfluxDB
+Description=Twingate collector step 1: fetch the stage secrets
 Wants=network-online.target
 After=network-online.target
+OnSuccess=twingate-collect-metric.service
 OnFailure=twingate-collect-failure.service
 
 [Service]
 Type=oneshot
-User=<user>
-# The first bash starts with an empty environment (env -i) and only what is listed here:
-# a fixed PATH, LC_ALL, HOME and SIEM_CONFIG_DIR. Add INFLUX_URL=... or TWINGATE_INFLUX_DB=...
-# to this line if the defaults (http://127.0.0.1:8086, telegraf) do not fit. The service
-# token is read by siem-run from the token file and reaches nothing else; no secret value
-# and no secret name belongs on this line.
-ExecStart=/usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C HOME=/home/<user> SIEM_CONFIG_DIR=/home/<user>/.config/doppler-siem /opt/siem/scripts/live-deploy/twingate-collect
+User=siem-broker
+LoadCredential=doppler-token:/etc/siem/doppler-token
+RuntimeDirectory=twingate-collect
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+# The first command starts with an empty environment (env -i); only these names are set.
+ExecStart=/usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LC_ALL=C SIEM_TOKEN_FILE=%d/doppler-token SIEM_CONFIG_DIR=%t/twingate-collect/doppler-cfg TWINGATE_STAGE_DIR=%t/twingate-collect SIEM_ONLY_SECRETS=TWINGATE_API_KEY,TWINGATE_NETWORK_URL,TWINGATE_CONNECTOR_MANAGED_BY_FILE,TWINGATE_CONNECTOR_MANAGED_BY,TWINGATE_EXPECTED_CONNECTORS,TWINGATE_INFLUX_USER,TWINGATE_INFLUX_PASSWORD /opt/siem/scripts/live-deploy/siem-run /usr/bin/python3 -I /opt/siem/scripts/live-deploy/twingate-fetch-secrets.py
 TimeoutStartSec=120
+UMask=0077
 NoNewPrivileges=yes
 ProtectSystem=strict
-ProtectHome=read-only
+ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
+CapabilityBoundingSet=
 ProtectKernelTunables=yes
+ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
+RestrictNamespaces=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 LockPersonality=yes
+SystemCallArchitectures=native
 LimitCORE=0
-# The doppler CLI keeps a small cache; give it a private writable place inside the sandbox.
-# (--fallback-readonly in siem-run uses the token directory under the read-only home.)
