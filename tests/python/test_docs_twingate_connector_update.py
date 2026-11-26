@@ -57,3 +57,20 @@ def test_alerting_doc_links_it():
 @pytest.mark.parametrize("bad", ["host 10.1.2.3 up", "mail me@example.com", "tok " + "a" * 40, "h " + "ab12" * 16])
 def test_guard_bites(bad):
     assert secret_findings(bad)
+
+
+SCRIPT_DOC = REPO_ROOT / "docs" / "twingate-connector-update-script.md"
+ROOT_FROM_CHECKOUT = re.compile(r"sudo\s+(?:\./)?scripts/twingate-connector-update\.sh")
+
+
+def test_script_doc_never_shows_a_root_run_from_a_checkout():
+    t = SCRIPT_DOC.read_text()
+    assert "/usr/local/sbin/twingate-connector-update" in t  # collected something real
+    assert not ROOT_FROM_CHECKOUT.search(t)
+    assert "EVERY invocation as root, a dry run included, is refused" in " ".join(t.split())
+
+
+@pytest.mark.parametrize("bad", ["sudo ./scripts/twingate-connector-update.sh --dry-run x",
+                                 "sudo scripts/twingate-connector-update.sh --dry-run x"])
+def test_checkout_guard_bites(bad):
+    assert ROOT_FROM_CHECKOUT.search(bad)

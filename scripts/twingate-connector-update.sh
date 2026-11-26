@@ -61,6 +61,28 @@ export PATH
 early_die() { printf 'refused: %s\n' "$1" >&2; exit 2; }
 NL='
 '
+# acl_present PATH: succeeds (0) when PATH has an extended ACL OR when that
+# cannot be determined (fail closed). Mode bits alone do not show a POSIX ACL
+# that gives another user write access. Two detections, no extra package needed
+# for the first: (1) the long listing of the mode ends in a plus sign when an
+# extended ACL exists (GNU ls); (2) where getfacl is installed, anything beyond
+# the three base entries (named users or groups, mask, default entries) counts.
+# Other extended attributes (security.*, user.*) do not change who may write a
+# file, so they are not checked; the ACL attributes are the ones that do.
+acl_present() {
+    _l=$(ls -ldn -- "$1" 2>/dev/null) || return 0
+    case "$_l" in
+        [-d]?????????+*) return 0 ;;
+        [-d]?????????" "*|[-d]?????????.*) ;;
+        *) return 0 ;;
+    esac
+    if command -v getfacl >/dev/null 2>&1; then
+        _x=$(getfacl -p -c -- "$1" 2>/dev/null) || return 0
+        _x=$(printf '%s\n' "$_x" | sed -n '/^user::/d;/^group::/d;/^other::/d;/^$/d;p')
+        if [ -n "$_x" ]; then return 0; fi
+    fi
+    return 1
+}
 # ---- clean environment --------------------------------------------------------
 # First run: collect the documented inputs and re-exec under `env -i`. The
 # inputs travel on fd 3 (a heredoc), so secrets never appear in argv.
@@ -75,7 +97,7 @@ if [ "${TWINGATE_UPDATE_CLEAN_ENV:-}" != "1" ]; then
     # absolute and physical (the directory through `pwd -P`; the file itself must
     # not be a link), then require the file and EVERY directory up to / to be
     # owned by root and not group- or world-writable. A real run refuses
-    # otherwise; --dry-run continues with a warning.
+    # otherwise, and so does a --dry-run as root; only a non-root --dry-run warns.
     PATH_OK=1
     PATH_WHY=""
     SELF_DIR=$(cd "$(dirname -- "$SELF")" 2>/dev/null && pwd -P) || SELF_DIR=""
@@ -92,12 +114,21 @@ if [ "${TWINGATE_UPDATE_CLEAN_ENV:-}" != "1" ]; then
                 PATH_OK=0; PATH_WHY="this script or one of its parent directories is not owned by root or is group- or world-writable; install it in a root-owned location such as /usr/local/sbin (mode 0755 root:root)"
                 break
             fi
+            if acl_present "$p"; then
+                PATH_OK=0; PATH_WHY="this script or one of its parent directories has an extended access control list (ACL) or its ACL cannot be checked; install it in a root-owned location such as /usr/local/sbin (mode 0755 root:root, no ACL)"
+                break
+            fi
             [ "$p" = "/" ] && break
             p="${p%/*}"
             [ -n "$p" ] || p="/"
         done
     fi
     if [ "$PATH_OK" != 1 ]; then
+        # As root (the trusted user) EVERY invocation, a dry run included, is
+        # refused: this shell is already reading the file, so a dry run as root
+        # from an untrusted path would execute it as root. Only an unprivileged
+        # dry run (which runs nothing as root) may continue, with a warning.
+        if [ "$(id -u)" = "$TRUSTED_UID" ]; then early_die "$PATH_WHY"; fi
         case " $* " in
             *" --dry-run "*) printf 'WARNING: %s (a real run would refuse)\n' "$PATH_WHY" >&2 ;;
             *) early_die "$PATH_WHY" ;;
@@ -194,12 +225,24 @@ step() { if [ "$DRY" = 1 ]; then printf 'DRY-RUN would: %s\n' "$*"; else printf 
 
 # secure_rmdir DIR: shred every regular file in DIR, then remove DIR. Callers
 # pass only a directory they created or have just proven root-owned and not a link.
+# It refuses (returns 1, removes nothing further) when DIR holds a mount point:
+# the listing that descends into mounts must equal the one that stays on one
+# filesystem (find -xdev). The removal itself also stays on one filesystem and
+# never follows links.
 secure_rmdir() {
+    _all=$(find "$1" -mindepth 1 2>/dev/null)
+    _one=$(find "$1" -mindepth 1 -xdev 2>/dev/null)
+    if [ "$_all" != "$_one" ]; then
+        printf 'refused: %s holds a mount point; not removing it\n' "$1" >&2
+        return 1
+    fi
     for f in "$1"/*; do
         if ! { [ -f "$f" ] && [ ! -L "$f" ]; }; then continue; fi
         if command -v shred >/dev/null 2>&1; then shred -u "$f" >/dev/null 2>&1 || rm -f "$f"; else rm -f "$f"; fi
     done
-    rm -rf "$1"
+    # The check above found no mount point, so the plain form is a safe fallback
+    # where rm lacks --one-file-system.
+    rm -rf --one-file-system -- "$1" 2>/dev/null || rm -rf -- "$1"
 }
 
 cleanup() {

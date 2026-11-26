@@ -133,12 +133,39 @@ for a in "$@"; do
     /*) if [ -f "$FD/foreign" ] && grep -qxF "$a" "$FD/foreign"; then exit 0; fi ;;
   esac
 done
+# fake/mnt names a directory modelled as a nested mount: a one-filesystem
+# (-xdev) listing does not descend into it.
+case " $* " in
+  *" -xdev "*) if [ -f "$FD/mnt" ]; then exec /usr/bin/find "$@" ! -path "$(cat "$FD/mnt")/*"; fi ;;
+esac
 # The test tree is not root-owned, so a trust query is answered "trusted" here;
 # the lists above model the attacker-controlled ones.
 case " $* " in
   *" /022 "*) for a in "$@"; do case "$a" in /*) echo "$a"; exit 0 ;; esac; done ;;
 esac
 exec /usr/bin/find "$@"
+'''
+
+# Fake `ls`: a path listed in fake/acl gets the plus sign after its mode, as GNU ls
+# shows for an extended ACL. Everything else is the real ls.
+FAKE_LS = r'''#!/bin/sh
+FD="$(cd "$(dirname "$0")/.." && pwd)/fake"
+for last in "$@"; do :; done
+if [ -f "$FD/acl" ] && grep -qxF "$last" "$FD/acl"; then
+  /bin/ls "$@" | sed 's/^\(.\{10\}\)/\1+/'
+  exit 0
+fi
+exec /bin/ls "$@"
+'''
+
+# Fake `getfacl`: a path listed in fake/getfacl reports a named-user entry.
+FAKE_GETFACL = r'''#!/bin/sh
+FD="$(cd "$(dirname "$0")/.." && pwd)/fake"
+for last in "$@"; do :; done
+if [ -f "$FD/getfacl_fail" ]; then exit 1; fi
+printf 'user::rwx\n'
+if [ -f "$FD/getfacl" ] && grep -qxF "$last" "$FD/getfacl"; then printf 'user:someone:rwx\nmask::rwx\n'; fi
+printf 'group::r-x\nother::r-x\n'
 '''
 
 # A model of how `docker run --env-file` reads a file. It is deliberately
@@ -236,7 +263,8 @@ class Env:
             p.mkdir()
         self.script = make_test_copy(tmp_path / "script-under-test.sh", self.bin, self.lock_base, self.run_dir)
         (self.bin / "envparse.py").write_text(ENV_PARSER)
-        for n, body in (("docker", FAKE_DOCKER), ("curl", FAKE_CURL), ("find", FAKE_FIND)):
+        for n, body in (("docker", FAKE_DOCKER), ("curl", FAKE_CURL), ("find", FAKE_FIND),
+                        ("ls", FAKE_LS), ("getfacl", FAKE_GETFACL)):
             f = self.bin / n
             f.write_text(body)
             f.chmod(0o755)
@@ -1821,11 +1849,92 @@ def test_untrusted_script_path_or_ancestor_is_refused(env, which, listfile, reas
     assert env.leftovers() == []
 
 
-def test_untrusted_script_path_only_warns_for_a_dry_run(env):
+def test_untrusted_script_path_only_warns_for_an_unprivileged_dry_run(env):
+    # TRUSTED_UID=0 in this copy: the test user is not the trusted user (not root)
+    t = env.script.read_text().replace(f"TRUSTED_UID={os.getuid()}", "TRUSTED_UID=0")
+    env.script.write_text(t)
     (env.d / "gw").write_text(os.path.dirname(os.path.realpath(env.script)) + "\n")
     r = env.run("--dry-run", NAME)
     assert r.returncode == 0, r.stderr
     assert "WARNING" in r.stderr and "would refuse" in r.stderr
+    assert changed(env) == []
+
+
+@pytest.mark.parametrize("listfile", ["gw", "foreign", "acl", "getfacl"])
+@pytest.mark.parametrize("args", [("--dry-run",), ("--dry-run", "--yes"), ("--yes",), ()])
+def test_every_invocation_as_the_trusted_user_from_an_untrusted_path_is_refused(env, listfile, args):
+    (env.d / listfile).write_text(os.path.dirname(os.path.realpath(env.script)) + "\n")
+    r = env.run(*args, NAME)
+    assert r.returncode == 2
+    assert "WARNING" not in r.stderr
+    assert env.log() == []
+
+
+def test_a_root_dry_run_from_an_untrusted_copy_executes_none_of_its_code(env):
+    # The marker line sits after the path check: it must never run when refused.
+    marker = env.root / "executed-marker"
+    t = env.script.read_text()
+    anchor = "    SCRIPT_TEXT=$(cat -- \"$SELF\""
+    assert t.count(anchor) == 1
+    env.script.write_text(t.replace(anchor, f": >{shlex.quote(str(marker))}\n" + anchor, 1))
+    (env.d / "gw").write_text(os.path.dirname(os.path.realpath(env.script)) + "\n")
+    r = env.run("--dry-run", NAME)
+    assert r.returncode == 2
+    assert not marker.exists()
+    # control: with a trusted path the same marker line does run, so the probe is live
+    (env.d / "gw").write_text("")
+    r = env.run("--dry-run", NAME)
+    assert marker.exists(), r.stderr
+
+
+def _chain(env):
+    c = _ancestors(os.path.realpath(env.script))
+    return {"file": c[0], "dir": c[1], "parent": c[2], "root": c[-1]}
+
+
+@pytest.mark.parametrize("which", ["file", "dir", "parent", "root"])
+@pytest.mark.parametrize("listfile", ["acl", "getfacl"])
+def test_an_extended_acl_on_the_script_or_any_ancestor_is_refused(env, which, listfile):
+    (env.d / listfile).write_text(_chain(env)[which] + "\n")
+    r = env.run("--yes", NAME)
+    assert r.returncode == 2
+    assert "access control list" in r.stderr and "/usr/local/sbin" in r.stderr
+    assert env.log() == []
+    assert env.leftovers() == []
+
+
+def test_acl_check_fails_closed_when_getfacl_fails(env):
+    (env.d / "getfacl_fail").write_text("")
+    r = env.run("--yes", NAME)
+    assert r.returncode == 2
+    assert "access control list" in r.stderr
+    assert env.log() == []
+
+
+def test_acl_check_fails_closed_when_the_listing_cannot_be_read(env):
+    (env.bin / "ls").write_text("#!/bin/sh\nexit 1\n")
+    r = env.run("--yes", NAME)
+    assert r.returncode == 2
+    assert "access control list" in r.stderr
+
+
+def test_no_acl_means_the_path_check_passes(env):
+    r = env.run("--yes", NAME)
+    assert r.returncode == 0, r.stderr
+
+
+def test_a_nested_mount_in_a_reset_directory_is_never_descended_into(env):
+    rd = env.run_dir / "twingate-connector-update"
+    mnt = rd / "docker-config" / "mnt"
+    mnt.mkdir(parents=True)
+    (rd / "home").mkdir()
+    rd.chmod(0o700)
+    (mnt / "precious").write_text("x")
+    (env.d / "mnt").write_text(str(mnt) + "\n")
+    r = env.run("--yes", NAME)
+    assert r.returncode != 0
+    assert (mnt / "precious").exists()
+    assert "mount point" in r.stderr
     assert changed(env) == []
 
 

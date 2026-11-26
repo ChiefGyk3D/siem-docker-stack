@@ -8,14 +8,28 @@ written; this page stands alone and is meant to be merged into that one's
 Owner decision 2026-11-26: Connector updates stay a one-command action that the
 owner runs on each host, one host at a time. There are no automatic updates.
 
-## Install location (required for a real run)
+## Install location (required for every run as root)
 
 The script restarts itself in a cleared environment, so it must live where only
 root can change it. It makes its own path absolute (the directory is resolved
 with `pwd -P`; the file itself must not be a symbolic link) and then requires
-the file and every directory above it, up to `/`, to be owned by root and not
-group- or world-writable. A real run refuses with a fixed message otherwise.
-`--dry-run` still works, with a warning. The restart does not reopen the path:
+the file and every directory above it, up to `/`, to be owned by root, not
+group- or world-writable, and free of an extended ACL. ACLs are detected by the
+plus sign that the long listing (`ls -ldn`) shows after the mode when an
+extended ACL exists, which needs no extra package; where `getfacl` is installed
+it is checked as well (anything beyond the three base entries counts). If the
+listing or `getfacl` cannot be read, the path is treated as untrusted. Other
+extended attributes (`security.*`, `user.*`) do not change who may write a file,
+so they are not checked.
+
+The check runs inside the script, after the shell has started reading it, so
+EVERY invocation as root, a dry run included, is refused with a fixed message
+when the path fails; a root dry run from a checkout is not a supported pattern.
+A non-root `--dry-run` from an untrusted path only warns, because nothing runs
+as root; in practice it also needs access to the Docker socket (docker group),
+and it is best run from the installed path too. A real run is always refused
+from an untrusted path.
+The restart does not reopen the path:
 the script text is read once, after that check, and the clean second stage runs
 from that text (`sh -c`), so a file swapped between the two stages is never
 executed. Install it, for example:
@@ -32,15 +46,15 @@ Running it from a checkout that a non-root user can write to is refused.
 Run it on the Connector's own host, for one Connector at a time:
 
 ```bash
-scripts/twingate-connector-update.sh --dry-run <connector-name>   # read-only preview
-scripts/twingate-connector-update.sh <connector-name>             # asks before changing anything
-scripts/twingate-connector-update.sh --yes <connector-name>       # no prompt
-scripts/twingate-connector-update.sh --yes --force <connector-name>  # also ignore pre-check warnings
+sudo /usr/local/sbin/twingate-connector-update --dry-run <connector-name>   # read-only preview
+sudo /usr/local/sbin/twingate-connector-update <connector-name>             # asks before changing anything
+sudo /usr/local/sbin/twingate-connector-update --yes <connector-name>       # no prompt
+sudo /usr/local/sbin/twingate-connector-update --yes --force <connector-name>  # also ignore pre-check warnings
 ```
 
 `<connector-name>` is the container name (letters, digits, `_`, `.`, `-`; max 63).
 Needs `docker` and `jq` on the host. A real run needs root and refuses as any
-other user with a clear message; `--dry-run` works for everyone. `PATH` is fixed
+other user with a clear message; `--dry-run` works without root only for a user who can reach the Docker socket. `PATH` is fixed
 to the system directories
 (`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`); the inherited
 `PATH`, `TMPDIR` and `XDG_RUNTIME_DIR` are never used, and there is no environment variable that changes which programs run. Only one
@@ -66,7 +80,7 @@ The whole environment is cleared. At start the script re-executes itself under
 `env -i` with a fixed `PATH`, `LANG=C`, `DOCKER_HOST=unix:///var/run/docker.sock`,
 a `DOCKER_CONFIG` of its own (a root-only directory, emptied by the script each run,
 `/run/twingate-connector-update/docker-config`) and a `HOME` of its own (an empty
-root-only directory, `/run/twingate-connector-update/home`). `DOCKER_CONTEXT`,
+root-only directory, `/run/twingate-connector-update/home`). The two directories are removed with a routine that stays on one filesystem and never follows links; if either holds a mount point the run refuses and removes nothing. `DOCKER_CONTEXT`,
 `DOCKER_TLS_VERIFY`, `DOCKER_CERT_PATH`, `SSL_CERT_FILE`, `SSL_CERT_DIR`,
 `CURL_CA_BUNDLE`, the proxy variables, `XDG_*` and everything else the caller had
 set never reach `docker`, `curl` or `jq`, so an environment-preserving `sudo`
@@ -220,7 +234,7 @@ container's configuration, prints whether the layout check passes (or the
 reasons it does not) and changes nothing. It prints no secret values.
 
 ```
-sudo ./scripts/twingate-connector-update.sh --dry-run <container-name>
+sudo /usr/local/sbin/twingate-connector-update --dry-run <container-name>
 ```
 
 If it reports `hostname override`, compare `docker inspect -f '{{.Config.Hostname}}' <container-name>`
