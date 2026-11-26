@@ -2,6 +2,7 @@
 the systemd units, the docs and the rule data-gap settings. Everything runs against a fake
 InfluxDB on loopback; the user, password and network values below are placeholders."""
 import base64
+import json
 import http.server
 import os
 import re
@@ -26,6 +27,11 @@ GOOD = ("twingate_connector_behind,connector=c1,managed_by=docker value=0i\n"
         "twingate_connector_up,connector=c1,managed_by=docker value=1i\n"
         "twingate_update_check_success value=1i\n")
 FAIL_LINE = "twingate_update_check_success value=0i\n"
+SECRETS_INJECTED = {"TWINGATE_API_KEY": "k", "TWINGATE_NETWORK_URL": "https://x.twingate.com",
+                    "TWINGATE_EXPECTED_CONNECTORS": '["c1"]', "TWINGATE_INFLUX_USER": USER,
+                    "TWINGATE_INFLUX_PASSWORD": PASSWORD,
+                    # names a stage must never receive, even if the secret config holds them
+                    "PATH": "/evil", "BASH_ENV": "/evil", "UNRELATED_SECRET": "FAKE", "LD_PRELOAD": "/evil.so"}
 
 
 class Fake:
@@ -176,10 +182,20 @@ def tree(tmp_path):
     live = tmp_path / "scripts" / "live-deploy"
     live.mkdir(parents=True)
     shutil.copy(WRAPPER, live / "twingate-collect")
-    for name, body in {
-        "siem-run": 'exec "$@"\n',
-    }.items():
-        (live / name).write_text("#!/usr/bin/env bash\n" + body)
+    # A stand-in for siem-run: records what it was given, then injects only the secrets named in
+    # SIEM_ONLY_SECRETS (as the secret manager's only-secrets flag does) plus the service-token variables.
+    (live / "siem-run").write_text(
+        "#!/usr/bin/python3\n"
+        "import json, os, sys\n"
+        "inject = json.load(open(%r))\n"
+        "only = [x for x in os.environ.get('SIEM_ONLY_SECRETS', '').split(',') if x]\n"
+        "open(%r, 'a').write(json.dumps({'only': only, 'env': dict(os.environ)}) + '\\n')\n"
+        "env = dict(os.environ)\n"
+        "env.update({k: v for k, v in inject.items() if k in only})\n"
+        "env.update({'DOPPLER_TOKEN': 'FAKE-token', 'DOPPLER_CONFIG': 'c', 'DOPPLER_PROJECT': 'p', 'DOPPLER_ENVIRONMENT': 'e'})\n"
+        "os.execve(sys.argv[1], sys.argv[1:], env)\n"
+        % (str(tmp_path / "inject.json"), str(tmp_path / "siemrun.jsonl")))
+    (tmp_path / "inject.json").write_text(json.dumps(SECRETS_INJECTED))
     (live / "twingate-influx-write.py").write_text(
         "import json, os, resource, sys\n"
         "data = sys.stdin.read()\n"
@@ -203,8 +219,8 @@ def set_collector(tree, text, rc):
 def run_wrapper(tree, **env_extra):
     env = {"PATH": os.environ["PATH"]}
     env.update(env_extra)
-    p = subprocess.run([str(tree / "scripts" / "live-deploy" / "twingate-collect")], capture_output=True,
-                       text=True, env=env, timeout=30)
+    p = subprocess.run(["/usr/bin/bash", str(tree / "scripts" / "live-deploy" / "twingate-collect")],
+                       capture_output=True, text=True, env=env, timeout=30)
     out = tree / "out.txt"
     return p, (out.read_text() if out.exists() else "")
 
@@ -242,7 +258,7 @@ def test_wrapper_uses_pipefail_and_passes_no_values_in_argv():
     assert re.search(r"(?m)^set -[a-z]*o pipefail|^set -o pipefail", src)
     # the secret names appear only as allowlist words: never expanded or assigned (so never in argv)
     assert not re.search(r"\$\{?TWINGATE_(INFLUX_PASSWORD|API_KEY)|TWINGATE_(INFLUX_PASSWORD|API_KEY)=", src)
-    assert "siem-run" in src and "python3 -I" in src
+    assert "siem-run" in src and " -I " in src and "/usr/bin/python3" in src
     assert stat.S_IMODE(WRAPPER.stat().st_mode) & 0o111
 
 
@@ -252,8 +268,13 @@ SECRETS = {"TWINGATE_API_KEY": "k", "TWINGATE_NETWORK_URL": "https://x.twingate.
 
 
 def seen(tree, name):
-    import json
     return json.loads((tree / name).read_text())
+
+
+def siemrun_calls(tree):
+    """What siem-run itself saw, per stage ('collector' or 'writer'): the only place a token may be."""
+    calls = [json.loads(x) for x in (tree / "siemrun.jsonl").read_text().splitlines()]
+    return {("collector" if "TWINGATE_API_KEY" in c["only"] else "writer"): c for c in calls}
 
 
 def test_each_stage_receives_only_its_own_secrets(tree):
@@ -261,10 +282,99 @@ def test_each_stage_receives_only_its_own_secrets(tree):
     p, _ = run_wrapper(tree, **SECRETS)
     assert p.returncode == 0
     col, wr = seen(tree, "collector-seen.json")["env"], seen(tree, "writer-seen.json")["env"]
-    assert "TWINGATE_API_KEY" in col and "TWINGATE_NETWORK_URL" in col
+    assert "TWINGATE_API_KEY" in col and "TWINGATE_NETWORK_URL" in col and "TWINGATE_EXPECTED_CONNECTORS" in col
     assert not {"TWINGATE_INFLUX_USER", "TWINGATE_INFLUX_PASSWORD", "DOPPLER_TOKEN", "UNRELATED_SECRET"} & set(col)
     assert "TWINGATE_INFLUX_USER" in wr and "TWINGATE_INFLUX_PASSWORD" in wr
     assert not {"TWINGATE_API_KEY", "TWINGATE_NETWORK_URL", "DOPPLER_TOKEN", "UNRELATED_SECRET"} & set(wr)
+
+
+def test_the_service_token_reaches_only_siem_run_and_each_stage_gets_only_its_own_secret_names(tree):
+    set_collector(tree, GOOD, 0)
+    p, _ = run_wrapper(tree, **SECRETS)
+    assert p.returncode == 0, p.stderr
+    calls = siemrun_calls(tree)
+    # siem-run is asked for exactly that stage's secrets and nothing else
+    assert set(calls["collector"]["only"]) == {"TWINGATE_API_KEY", "TWINGATE_NETWORK_URL",
+                                               "TWINGATE_CONNECTOR_MANAGED_BY_FILE",
+                                               "TWINGATE_CONNECTOR_MANAGED_BY", "TWINGATE_EXPECTED_CONNECTORS"}
+    assert set(calls["writer"]["only"]) == {"TWINGATE_INFLUX_USER", "TWINGATE_INFLUX_PASSWORD"}
+    for stage_name, c in calls.items():
+        # the caller's own secrets never entered siem-run's environment
+        assert not {"TWINGATE_API_KEY", "TWINGATE_INFLUX_PASSWORD", "UNRELATED_SECRET", "DOPPLER_TOKEN"} & set(c["env"]), stage_name
+        assert c["env"]["PATH"].startswith("/usr/local/bin:/usr/bin") and c["env"]["LC_ALL"] == "C"
+    col, wr = seen(tree, "collector-seen.json")["env"], seen(tree, "writer-seen.json")["env"]
+    for env in (col, wr):
+        assert not [n for n in env if n.startswith("DOPPLER_")] and "SIEM_ONLY_SECRETS" not in env
+        assert not {"BASH_ENV", "LD_PRELOAD", "UNRELATED_SECRET", "HOME", "SIEM_CONFIG_DIR"} & set(env)
+
+
+def test_the_collector_receives_the_expected_inventory_and_the_writer_does_not(tree):
+    set_collector(tree, GOOD, 0)
+    p, _ = run_wrapper(tree)
+    assert p.returncode == 0
+    assert "TWINGATE_EXPECTED_CONNECTORS" in seen(tree, "collector-seen.json")["env"]
+    assert "TWINGATE_EXPECTED_CONNECTORS" not in seen(tree, "writer-seen.json")["env"]
+
+
+def hostile_env(tree):
+    """Startup controls and look-alike commands a caller (or a secret config) might set."""
+    evil = tree / "evil"
+    evil.mkdir()
+    marker = tree / "PWNED"
+    for name in ("bash", "python3", "env", "doppler", "cat", "dirname", "siem-run"):
+        f = evil / name
+        f.write_text("#!/bin/sh\necho %s >> %s\n" % (name, marker))
+        f.chmod(0o755)
+    (evil / "sitecustomize.py").write_text("open(%r, 'a').write('pythonpath\\n')\n" % str(marker))
+    hook = tree / "hook.sh"
+    hook.write_text("echo hook >> %s\n/usr/bin/env | /usr/bin/cut -d= -f1 | /usr/bin/sort > %s\n" % (marker, tree / "hook-env.txt"))
+    return {"PATH": str(evil) + ":" + os.environ["PATH"], "BASH_ENV": str(hook), "ENV": str(hook),
+            "PYTHONPATH": str(evil), "PYTHONHOME": str(evil), "PYTHONSTARTUP": str(hook), "PYTHONUSERBASE": str(evil),
+            "PYTHONINSPECT": "1", "SHELLOPTS": "allexport", "BASHOPTS": "xpg_echo", "LD_PRELOAD": "/nonexistent/evil.so",
+            "BASH_FUNC_dirname%%": "() { echo func >> %s; command dirname \"$@\"; }" % marker,
+            "BASH_FUNC_cd%%": "() { echo func-cd >> %s; builtin cd \"$@\"; }" % marker,
+            "TWINGATE_COLLECT_CLEAN": "0"}, marker
+
+
+def test_hostile_startup_controls_path_and_python_variables_do_not_reach_any_stage(tree):
+    set_collector(tree, GOOD, 0)
+    hostile, marker = hostile_env(tree)
+    p, sent = run_wrapper(tree, **hostile, **SECRETS)
+    assert p.returncode == 0 and sent == GOOD, p.stderr
+    # no look-alike command or Python startup file ran; only the first bash, which runs before siem-run
+    # injects anything, may have sourced BASH_ENV (the unit avoids even that by starting through env -i)
+    hits = marker.read_text().split() if marker.exists() else []
+    assert not [h for h in hits if h not in ("hook", "func", "func-cd")], hits
+    bad = {"BASH_ENV", "ENV", "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE", "PYTHONINSPECT", "SHELLOPTS",
+           "BASHOPTS", "LD_PRELOAD", "BASH_FUNC_dirname%%", "BASH_FUNC_cd%%", "TWINGATE_COLLECT_CLEAN"}
+    for stage_name, c in siemrun_calls(tree).items():
+        assert not bad & set(c["env"]), (stage_name, sorted(bad & set(c["env"])))
+        assert c["env"]["PATH"] == "/usr/local/bin:/usr/bin:/bin", c["env"]["PATH"]
+    for name in ("collector-seen.json", "writer-seen.json"):
+        env = seen(tree, name)["env"]
+        assert not bad & set(env), (name, sorted(bad & set(env)))
+        assert not [n for n in env if n.startswith(("PYTHON", "LD_", "BASH"))], env
+        assert "PATH" in env and "evil" not in "".join(env)
+
+
+def test_started_through_env_i_like_the_unit_no_hook_runs_at_all(tree):
+    set_collector(tree, GOOD, 0)
+    hostile, marker = hostile_env(tree)
+    p = subprocess.run(["/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "LC_ALL=C",
+                        str(tree / "scripts" / "live-deploy" / "twingate-collect")],
+                       capture_output=True, text=True, timeout=30, env=hostile)    # env -i drops all of it
+    assert p.returncode == 0, p.stderr
+    assert not marker.exists()
+
+
+def test_wrapper_start_unsets_startup_controls_and_uses_absolute_commands():
+    src = WRAPPER.read_text(encoding="utf-8")
+    first = src.index('exec "$ENV_BIN" -i')
+    assert src.index("set -euo pipefail") < first < src.index("HERE=")        # the re-exec is the first action
+    assert re.search(r"(?m)^unset BASH_ENV ENV$", src) and "set +o allexport" in src
+    assert "ENV_BIN=/usr/bin/env" in src and "PYTHON=/usr/bin/python3" in src
+    assert "/usr/bin/bash --noprofile --norc" in src
+    assert "-u DOPPLER_TOKEN" in src
 
 
 def test_core_dumps_are_disabled_for_both_stages(tree):
@@ -287,6 +397,9 @@ def test_service_unit_is_a_hardened_oneshot_with_a_failure_hook():
     for needle in ("NoNewPrivileges=yes", "ProtectSystem=strict", "ProtectHome=read-only", "PrivateTmp=yes"):
         assert needle in s, needle
     assert "ExecStart=" in s and "twingate-collect" in s
+    exec_line = re.search(r"(?m)^ExecStart=(.*)$", s).group(1)
+    assert exec_line.startswith("/usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C HOME="), exec_line   # first bash starts clean
+    assert "DOPPLER" not in s
     assert "PASSWORD" not in s and "API_KEY" not in s     # no secret value in a unit file
     assert "LimitCORE=0" in s
 
@@ -349,3 +462,15 @@ def test_docs_give_owner_steps_rollback_and_stopped_connector_behavior():
     rb = (REPO_ROOT / "docs" / "live-deploy-runbook.md").read_text(encoding="utf-8")
     assert not re.search(r"doppler secrets set[^\n]*PASSWORD=\S", rb)        # value never on a command line
     assert "> /dev/null" in rb
+
+
+def test_docs_say_the_expected_inventory_is_required_and_name_the_extras_metric():
+    for name in ("live-deploy-runbook.md", "update-alerting.md"):
+        text = (REPO_ROOT / "docs" / name).read_text(encoding="utf-8")
+        flat = " ".join(text.split())
+        for needle in ("TWINGATE_EXPECTED_CONNECTORS", "twingate_unexpected_connector", "empty environment" if name == "update-alerting.md" else "env -i"):
+            assert needle in flat, (name, needle)
+        assert "optional" not in flat.lower().split("twingate_expected_connectors")[1][:200], name
+        assert "—" not in text
+    rb = (REPO_ROOT / "docs" / "live-deploy-runbook.md").read_text(encoding="utf-8")
+    assert "## 10. Twingate collector" in rb and "REQUIRES the expected Connector inventory" in " ".join(rb.split())

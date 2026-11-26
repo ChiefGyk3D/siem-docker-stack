@@ -14,6 +14,10 @@
 #                     so they are normally unnecessary. Example values are
 #                     "homelab" and "prd_network"; override them for your setup.
 #
+#   SIEM_ONLY_SECRETS comma-separated secret names. When set, only those secrets are injected
+#                     (doppler run --only-secrets) and a name missing from the config is not
+#                     an error here: the program that needs it fails closed itself.
+#
 # Usage: siem-run COMMAND [ARGS...]
 set -euo pipefail
 
@@ -26,4 +30,9 @@ fi
 
 DOPPLER_TOKEN="$(cat "$CFG/token")"
 export DOPPLER_TOKEN
-exec doppler run --config-dir "$CFG" --no-check-version --fallback-readonly -- "$@"
+unset BASH_ENV ENV
+only=()
+if [ -n "${SIEM_ONLY_SECRETS:-}" ]; then
+    only=(--only-secrets "$SIEM_ONLY_SECRETS" --no-exit-on-missing-only-secrets)
+fi
+exec doppler run --config-dir "$CFG" --no-check-version --fallback-readonly ${only[@]+"${only[@]}"} -- "$@"

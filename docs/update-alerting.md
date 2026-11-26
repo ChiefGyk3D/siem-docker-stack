@@ -235,8 +235,17 @@ retry, counts only in its output). The InfluxDB account is `twingate_wo` with
 secret manager config `prd_network` as `TWINGATE_INFLUX_USER` and
 `TWINGATE_INFLUX_PASSWORD`. The owner steps (account, install, dry run, first run,
 landing check, `twingate-collect.timer`) and the Rollback are in
-`docs/live-deploy-runbook.md`, section 9. For a host without Telegraf this replaces
+`docs/live-deploy-runbook.md`, section 10. For a host without Telegraf this replaces
 the exec input above; use one or the other, not both.
+
+The collector requires `TWINGATE_EXPECTED_CONNECTORS`, a JSON array of the Connector
+names (supplied by the owner in the secret manager config, never kept in the repo).
+Unset, empty, `[]` or malformed fails the check closed. An expected Connector that the
+API does not return is written as `twingate_connector_up` value 0 (so the "not ALIVE"
+rule fires) and the check fails; a returned Connector that is not on the list is counted
+in `twingate_unexpected_connector` without failing the check. Duplicate names or ids and
+a repeated page cursor also fail the check. The unit and the wrapper start from an empty
+environment, and each stage receives only its own secrets (runbook section 10).
 
 A cleanly stopped Connector is still listed by the Admin API, so
 `twingate_connector_up` becomes 0 (it does not go missing). A dead collector does not

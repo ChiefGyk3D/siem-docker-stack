@@ -556,7 +556,7 @@ separate step after the landing check below passes.
 
 | File | Role |
 |------|------|
-| `scripts/live-deploy/twingate-collect` | Runs `twingate-update-metric.py` and pipes its line protocol to the writer, both under `siem-run`; exits non-zero if either stage fails (pipefail) or nothing is written |
+| `scripts/live-deploy/twingate-collect` | Re-executes itself under `env -i`, then runs `twingate-update-metric.py` and pipes its line protocol to the writer, each under `siem-run` with only its own secrets; exits non-zero if either stage fails (pipefail) or nothing is written |
 | `scripts/live-deploy/twingate-influx-write.py` | Stdlib writer: one POST to `/write?db=telegraf&precision=s`, Basic auth, 5 s timeout, no redirects, no retry; prints only counts and the HTTP status |
 | `docs/systemd/twingate-collect.service`, `.timer`, `twingate-collect-failure.service` | Hourly oneshot with sandboxing, and a journal notice when a run fails |
 
@@ -573,6 +573,14 @@ read inside the container from its own environment, so they are never typed):
 openssl rand -base64 36 | tr -d '\n=+/' | doppler secrets set TWINGATE_INFLUX_PASSWORD --project homelab --config prd_network > /dev/null
 printf '%s' 'twingate_wo' | doppler secrets set TWINGATE_INFLUX_USER --project homelab --config prd_network > /dev/null
 ```
+
+   The collector also REQUIRES the expected Connector inventory. The owner
+   supplies the real names; they are not kept in this repository. Put the JSON
+   array in the same secret manager config as `TWINGATE_EXPECTED_CONNECTORS`
+   (for example `["connector-a","connector-b"]` with your own names), or keep a
+   root-owned file and read it into the secret. Names use letters, digits, `.`,
+   `_` and `-` only (1 to 64 characters), with no duplicates (case does not
+   count). Without a valid list the check fails closed.
 
 2. Create the write-only InfluxDB account, `twingate_wo`, with write on the
    `telegraf` database only (the same pattern as `unpoller_wo`). The SQL is read
@@ -594,7 +602,9 @@ docker exec influxdb sh -c 'INFLUX_USERNAME="$INFLUXDB_ADMIN_USER" INFLUX_PASSWO
    Check: the last command lists `telegraf WRITE` and no other database.
 
 3. Install the units (replace `<user>` and the checkout path in
-   `twingate-collect.service` first). The timer is installed but not enabled yet:
+   `twingate-collect.service` first; its `ExecStart` starts the wrapper through
+   `/usr/bin/env -i` with a fixed `PATH`, `LC_ALL`, `HOME` and `SIEM_CONFIG_DIR`,
+   so even the first bash starts clean). The timer is installed but not enabled yet:
 
 ```
 sudo install -m 644 docs/systemd/twingate-collect.service docs/systemd/twingate-collect-failure.service docs/systemd/twingate-collect.timer /etc/systemd/system/
@@ -602,14 +612,16 @@ sudo systemctl daemon-reload
 ```
 
 4. Dry run: the collector alone, nothing is written. It prints one line per metric
-   (Connector names appear, no secret):
+   (Connector names appear, no secret). It runs the same way the wrapper starts it:
+   an empty environment, only the collector's secret names, absolute paths:
 
 ```
-siem-run python3 -I scripts/twingate-update-metric.py
+env -i PATH=/usr/local/bin:/usr/bin:/bin LC_ALL=C HOME="$HOME" SIEM_ONLY_SECRETS=TWINGATE_API_KEY,TWINGATE_NETWORK_URL,TWINGATE_CONNECTOR_MANAGED_BY_FILE,TWINGATE_CONNECTOR_MANAGED_BY,TWINGATE_EXPECTED_CONNECTORS scripts/live-deploy/siem-run /usr/bin/env -u DOPPLER_TOKEN -u DOPPLER_CONFIG -u DOPPLER_ENVIRONMENT -u DOPPLER_PROJECT -u HOME -u SIEM_ONLY_SECRETS PATH=/usr/bin:/bin /usr/bin/python3 -I scripts/twingate-update-metric.py
 ```
 
    Expected: `twingate_connector_behind` and `twingate_connector_up` lines for each
-   Connector, `twingate_update_check_success value=1i`, exit code 0.
+   Connector, `twingate_unexpected_connector value=0i` (the count of Connectors the API
+   returned that are not on your list), `twingate_update_check_success value=1i`, exit code 0.
 
 5. First run, then the landing check:
 
@@ -652,20 +664,31 @@ stay.
 How a cleanly stopped Connector appears: the Twingate Admin API still lists it with
 a state other than `ALIVE`, so the collector writes `twingate_connector_up` value 0
 (the series does not go missing) while `twingate_update_check_success` stays 1. The
-rule "Twingate Connector not ALIVE" fires after 15 minutes once it is unpaused. A
-Connector that is deleted in Twingate disappears from the data instead. To catch that, set
-`TWINGATE_EXPECTED_CONNECTORS` in the secret manager config to a JSON array of the
-Connector names (for example `["connector-a","connector-b"]`): when any listed
-name is missing from the API answer, the check fails closed and writes
-`twingate_update_check_success value=0i`. Update the list when you retire a
-Connector on purpose. An API answer without a valid `pageInfo`, or a Docker Hub
-release list that is still paging after the page cap, also fails the check.
+rule "Twingate Connector not ALIVE" fires after 15 minutes once it is unpaused. A Connector that is deleted in Twingate disappears from the data instead, which is
+why the expected inventory (`TWINGATE_EXPECTED_CONNECTORS`) is required, not optional.
+The collector fails closed, writing only `twingate_update_check_success value=0i`,
+when the setting is unset, empty, `[]`, not a JSON array of valid strings, or has
+duplicates, and when any listed name is missing from the API answer. In that last
+case it also writes `twingate_connector_up value=0i` for each missing name (with its
+`managed_by` tag), so the existing rule "Twingate Connector not ALIVE" fires for it.
+A Connector that the API returns but you did not list is not an error: it is counted in
+`twingate_unexpected_connector` and still gets its normal metrics, so a new Connector
+is noticed. Update the list when you add or retire a Connector on purpose. The check
+also fails on a duplicate Connector name or id, a repeated page cursor, a page that
+adds nothing while more pages are promised, an API answer without a valid `pageInfo`,
+or a Docker Hub release list that is still paging after the page cap.
 
-Secrets per stage: `twingate-collect` runs the collector with only the Twingate API
-key and network URL (plus the management and expected-Connector settings), and the
-writer with only the InfluxDB login; every other inherited variable is dropped
-before each program starts, and core dumps are off (`ulimit -c 0` and
-`LimitCORE=0`). The failure notice runs as a transient unprivileged user.
+Secrets per stage: the unit starts `twingate-collect` through `/usr/bin/env -i`, and
+the wrapper's first action is another `env -i` re-execution with a short allowlist, so
+`BASH_ENV`, `ENV`, exported shell functions, `PATH`, `LD_*` and `PYTHON*` from a caller
+never go further. Each stage is then started as `env -i ... siem-run /usr/bin/env -u
+DOPPLER_... python3 -I`: `siem-run` asks the secret manager for only that stage's
+names (`SIEM_ONLY_SECRETS`, passed to `doppler run --only-secrets`), the secret-manager
+service token reaches only `siem-run` and the CLI it runs, and no shell holds the
+secrets. The collector gets the Twingate API key, network URL and its optional
+settings; the writer gets only the InfluxDB login. Commands use absolute paths, and core
+dumps are off (`ulimit -c 0` and `LimitCORE=0`). The failure notice runs as a transient
+unprivileged user.
 
 A dead collector does not look green: the check rule "Twingate update check failing
 or stale" has `noDataState: Alerting`, reads a 6 hour window and fires on a 0 or on

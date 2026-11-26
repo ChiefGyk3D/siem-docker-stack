@@ -12,9 +12,13 @@ OnFailure=twingate-collect-failure.service
 [Service]
 Type=oneshot
 User=<user>
-ExecStart=/opt/siem/scripts/live-deploy/twingate-collect
+# The first bash starts with an empty environment (env -i) and only what is listed here:
+# a fixed PATH, LC_ALL, HOME and SIEM_CONFIG_DIR. Add INFLUX_URL=... or TWINGATE_INFLUX_DB=...
+# to this line if the defaults (http://127.0.0.1:8086, telegraf) do not fit. The service
+# token is read by siem-run from the token file and reaches nothing else; no secret value
+# and no secret name belongs on this line.
+ExecStart=/usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C HOME=/home/<user> SIEM_CONFIG_DIR=/home/<user>/.config/doppler-siem /opt/siem/scripts/live-deploy/twingate-collect
 TimeoutStartSec=120
-# Environment=INFLUX_URL=http://127.0.0.1:8086
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only

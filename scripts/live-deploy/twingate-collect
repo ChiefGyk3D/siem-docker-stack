@@ -6,35 +6,69 @@
 # secret manager). Both run under siem-run, so no value is on a command line or printed.
 #
 # Fail closed: pipefail makes the whole run exit non-zero if either stage fails. When the
-# check itself fails the collector prints only "twingate_update_check_success value=0i";
-# the writer still stores that line (so the health rule goes red quickly) and the run still
+# check itself fails the collector prints only "twingate_update_check_success value=0i"
+# (plus a "connector up value=0i" line for each expected Connector that was missing); the
+# writer still stores those lines (so the health rule goes red quickly) and the run still
 # exits non-zero. Zero lines, a 401 or any non-2xx write also exit non-zero.
 #
-# Each stage gets only its own secrets: stage_run drops every inherited variable that is not on
-# that stage's list before the program starts (no value is ever put on a command line). The
-# collector sees the Twingate API key and network URL; the writer sees the InfluxDB login.
-# Core dumps are disabled (ulimit -c 0) because both stages hold credentials.
+# Clean environment, in three layers (issue #222, review rounds 2 and 3):
+#  1. The first action re-executes this script under `env -i` with an explicit allowlist
+#     (fixed absolute PATH, LC_ALL=C and a few non-secret settings). The unit also starts it
+#     through `/usr/bin/env -i`, so even the first bash starts clean. Startup controls
+#     (BASH_ENV, ENV, exported functions, PATH, LD_*, PYTHON*) from the caller go no further.
+#  2. Each stage is started as `env -i <allowlist> siem-run /usr/bin/env -u DOPPLER_... python3`.
+#     The secret-manager service token therefore reaches ONLY siem-run (and the doppler CLI it
+#     runs); the program is started by /usr/bin/env, never by a shell that holds secrets.
+#  3. siem-run asks the secret manager for only the named secrets (SIEM_ONLY_SECRETS), so a
+#     stray name in the secret config (a variable called PATH, say) cannot steer anything.
+# The collector gets the Twingate API key, network URL and its optional settings; the writer
+# gets the InfluxDB login. No value is ever put on a command line. Core dumps are disabled
+# (ulimit -c 0) because both stages hold credentials.
 #
-# Environment (all optional): SIEM_CONFIG_DIR (see siem-run), INFLUX_URL, TWINGATE_INFLUX_DB.
+# Environment (all optional, passed through when set): SIEM_CONFIG_DIR (see siem-run),
+# INFLUX_URL, TWINGATE_INFLUX_DB, SSL_CERT_FILE, SSL_CERT_DIR, HOME.
 set -euo pipefail
 ulimit -c 0
 
+SAFE_PATH=/usr/bin:/bin
+ENV_BIN=/usr/bin/env
+
+# Layer 1: re-exec under an empty environment plus the allowlist.
+if [ "${TWINGATE_COLLECT_CLEAN:-}" != "1" ]; then
+    allow=()
+    for v in HOME SIEM_CONFIG_DIR INFLUX_URL TWINGATE_INFLUX_DB SSL_CERT_FILE SSL_CERT_DIR; do
+        if [ -n "${!v+x}" ]; then
+            allow+=("$v=${!v}")
+        fi
+    done
+    exec "$ENV_BIN" -i PATH="$SAFE_PATH" LC_ALL=C TWINGATE_COLLECT_CLEAN=1 ${allow[@]+"${allow[@]}"} \
+        /usr/bin/bash --noprofile --norc "${BASH_SOURCE[0]}" "$@"
+fi
+unset BASH_ENV ENV
+set +o allexport
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO="$(cd "$HERE/../.." && pwd -P)"
+PYTHON=/usr/bin/python3
 
-COLLECTOR_VARS="PATH LANG LC_ALL SSL_CERT_FILE SSL_CERT_DIR TWINGATE_API_KEY TWINGATE_NETWORK_URL TWINGATE_CONNECTOR_MANAGED_BY_FILE TWINGATE_CONNECTOR_MANAGED_BY TWINGATE_EXPECTED_CONNECTORS"
-WRITER_VARS="PATH LANG LC_ALL SSL_CERT_FILE SSL_CERT_DIR INFLUX_URL TWINGATE_INFLUX_DB TWINGATE_INFLUX_USER TWINGATE_INFLUX_PASSWORD"
-
-# stage_run "<allowed names>" COMMAND...: siem-run, then unset everything not allowed, then exec.
-stage_run() {
-    local allow="$1"
-    shift
-    "$HERE/siem-run" bash -c 'allow=" $1 "; shift
-for v in $(compgen -e); do
-    case "$allow" in *" $v "*) ;; *) unset "$v" 2>/dev/null || true ;; esac
-done
-exec "$@"' stage "$allow" "$@"
+# stage "<secret names>" "<non-secret names to pass on>" COMMAND...
+stage() {
+    local secrets="$1" plain="$2" v
+    shift 2
+    local keep=()
+    for v in HOME SIEM_CONFIG_DIR $plain; do
+        if [ -n "${!v+x}" ]; then
+            keep+=("$v=${!v}")
+        fi
+    done
+    "$ENV_BIN" -i PATH="/usr/local/bin:$SAFE_PATH" LC_ALL=C ${keep[@]+"${keep[@]}"} SIEM_ONLY_SECRETS="$secrets" \
+        "$HERE/siem-run" "$ENV_BIN" -u DOPPLER_TOKEN -u DOPPLER_CONFIG -u DOPPLER_ENVIRONMENT \
+        -u DOPPLER_PROJECT -u SIEM_ONLY_SECRETS -u HOME -u SIEM_CONFIG_DIR \
+        PATH="$SAFE_PATH" LC_ALL=C "$@"
 }
 
-stage_run "$COLLECTOR_VARS" python3 -I "$REPO/scripts/twingate-update-metric.py" |
-    stage_run "$WRITER_VARS" python3 -I "$HERE/twingate-influx-write.py"
+COLLECTOR_SECRETS="TWINGATE_API_KEY,TWINGATE_NETWORK_URL,TWINGATE_CONNECTOR_MANAGED_BY_FILE,TWINGATE_CONNECTOR_MANAGED_BY,TWINGATE_EXPECTED_CONNECTORS"
+WRITER_SECRETS="TWINGATE_INFLUX_USER,TWINGATE_INFLUX_PASSWORD"
+
+stage "$COLLECTOR_SECRETS" "SSL_CERT_FILE SSL_CERT_DIR" "$PYTHON" -I "$REPO/scripts/twingate-update-metric.py" |
+    stage "$WRITER_SECRETS" "SSL_CERT_FILE SSL_CERT_DIR INFLUX_URL TWINGATE_INFLUX_DB" "$PYTHON" -I "$HERE/twingate-influx-write.py"
