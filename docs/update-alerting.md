@@ -124,7 +124,7 @@ ready. The script runs only those two read-only commands.
 |-------|------------------|
 | `update_alert` | `true` marks an update-alerting rule: it matches the notification policy route with the 84h and 1h repeats, and its title belongs in `ALLOWED_ALERTNAMES` |
 | `severity` | `warning` or `critical`: the repeat interval, and the Pushover priority (1, or 2 for an allowlisted name with an urgent label) |
-| `phone` | `true` is the only way an alert reaches Pushover; any other value or no label keeps it off the phone (Discord is unaffected). Every update-pending rule for critical infrastructure (UniFi, pfSense; Twingate later) sets `phone=true`; only the poller-stale watchdog is `phone=false` |
+| `phone` | `true` is the only way an alert reaches Pushover; any other value or no label keeps it off the phone (Discord is unaffected). Every update-pending rule for critical infrastructure (UniFi, pfSense; Twingate later) sets `phone=true`, except the UniFi 24h warning, which is `phone=false` (Discord and Matrix only) so a UniFi update pages the phone only after 7 days pending; the poller-stale watchdog is also `phone=false` |
 | `alert_group` | Grouping and display (`updates` for these rules); no routing effect |
 | `update_security` | `true` marks a security release: emergency priority for allowlisted names |
 
@@ -142,7 +142,7 @@ policies), or copy it to `update-notification-policy.yml` if you have no
 tree yet. Repeat intervals: 84h for warning, 1h for critical. Owner decision (issue
 #199): update alerts for critical infrastructure reach the phone and repeat at
 least twice a week until the update is applied, so no repeat interval may be
-longer than 84h. This supersedes the earlier P2 and `phone=false` ruling (#152).
+longer than 84h. This supersedes the earlier P2 and `phone=false` ruling (#152). Refinement (owner, 2026-11-26, "wait 7 days first"): a UniFi pending update does not page the phone until it has been pending 7 days, so auto-patching devices usually finish first. The UniFi 24h warning is `phone=false`; the 7-day critical rule and the pfSense rules stay `phone=true`.
 
 ## Webhook authentication
 

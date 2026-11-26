@@ -500,12 +500,18 @@ def test_notification_policy_repeats():
 
 
 def test_pending_update_rules_all_push_to_the_phone():
-    # #199 supersedes the #152 P2/phone=false ruling: every pending rule pages
+    # #199: every pending rule pages, except the UniFi 24h warning. Owner decision
+    # 2026-11-26 ("wait 7 days first"): a UniFi update pending under 7 days does not
+    # page, so auto-patching devices usually finish first; the 7d critical pages.
     pending = [r for _, _, r in _rules() if r["labels"]["alert_group"] == "updates"
                and "poller" not in r["uid"]]
     assert len(pending) >= 6
     for r in pending:
-        assert r["labels"]["phone"] == "true", r["uid"]
+        want = "false" if r["uid"] == "update-unifi-pending-24h" else "true"
+        assert r["labels"]["phone"] == want, r["uid"]
+    uids = {r["uid"] for r in pending}
+    assert {"update-unifi-pending-24h", "update-unifi-pending-7d"} <= uids
+    assert any(u.startswith("update-pfsense") for u in uids)
 
 
 def test_contact_point_is_webhook_to_router():
@@ -1291,7 +1297,9 @@ def test_graph_malformed_notice_pushes_when_enabled():
 def test_every_update_rule_sets_the_phone_label_explicitly():
     seen = 0
     for _, _, rule in _rules():
-        want = "false" if rule["uid"] == "update-unifi-poller-stale" else "true"
+        # owner 2026-11-26: UniFi 24h warning stays off the phone (7-day wait)
+        quiet = {"update-unifi-poller-stale", "update-unifi-pending-24h"}
+        want = "false" if rule["uid"] in quiet else "true"
         assert rule["labels"].get("phone") == want, rule["uid"]
         seen += 1
     assert seen >= 7
