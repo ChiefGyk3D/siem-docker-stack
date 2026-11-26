@@ -9,6 +9,10 @@
 #
 # Jobs: twingate-ztna and unifi-controller are the critical infrastructure and
 # page the phone (phone "true", tier P1) for host down and disk almost full.
+# The SIEM host (job node, optional node_exporter) is in the critical DISK rule only,
+# because it hosts the alert engine. It is NOT in the host-down rules: a Grafana rule
+# cannot report its own host down while Grafana is dead; the external heartbeat
+# observer (docs/heartbeat.md) covers that case.
 # Security, AI, Cryptocurrency, grafana and prometheus are warnings with no
 # phone. The Computers job (laptops) has NO rule on purpose: a laptop that sleeps
 # or leaves the network is normal and must never page.
@@ -112,7 +116,7 @@ groups:
             model:
               refId: A
               datasource: {type: prometheus, uid: prometheus}
-              expr: '100 * (1 - node_filesystem_avail_bytes{job=~"twingate-ztna|unifi-controller",fstype!~"tmpfs|overlay|squashfs"} / node_filesystem_size_bytes{job=~"twingate-ztna|unifi-controller",fstype!~"tmpfs|overlay|squashfs"})'
+              expr: '100 * (1 - node_filesystem_avail_bytes{job=~"twingate-ztna|unifi-controller|node",fstype!~"tmpfs|overlay|squashfs"} / node_filesystem_size_bytes{job=~"twingate-ztna|unifi-controller|node",fstype!~"tmpfs|overlay|squashfs"})'
               instant: true
               range: false
           - refId: B
