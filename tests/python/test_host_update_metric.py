@@ -87,9 +87,9 @@ class Env:
         self.set_mtime(self.stamp, 3600)
         self.lists = tmp_path / "lists"
         self.lists.mkdir()
-        self.packages = self.lists / "deb.example_dists_stable_main_binary-arm64_Packages"
+        self.packages = self.lists / "deb.example_dists_stable-security_InRelease"
         self.packages.write_text("Package: foo\n")
-        self.set_mtime(self.packages, 7200)
+        self.set_mtime(self.packages, 3600)
         self.state_dir = tmp_path / "state"
         self.state_dir.mkdir(mode=0o700)
         self.state_dir.chmod(0o700)
@@ -324,7 +324,7 @@ def test_real_apt_autoremove_hint_is_accepted(env):
     assert parse(r.stdout)[("host_update_pending", "package", "true")] == 1
 
 
-def test_held_back_updates_are_reported_and_not_pending(env):
+def test_held_back_updates_are_reported_and_pending_non_security(env):
     env.set_apt(apt_out([inst("foo", "1", "2", DEB_SEC)],
                         summary="1 upgraded, 0 newly installed, 0 to remove and 3 not upgraded."))
     r = env.run()
@@ -332,7 +332,46 @@ def test_held_back_updates_are_reported_and_not_pending(env):
     m = parse(r.stdout)
     assert m[("host_update_held_back", None, None)] == 3
     assert m[("host_update_pending", "package", "true")] == 1
-    assert m[("host_update_pending", "package", "false")] == 0
+    assert m[("host_update_pending", "package", "false")] == 3
+
+
+def kept_back(names, n):
+    return (PREAMBLE + "The following packages have been kept back:\n  " + " ".join(names) + "\n"
+            + f"0 upgraded, 0 newly installed, 0 to remove and {n} not upgraded.\n")
+
+
+def test_held_back_names_get_their_own_aging_clock(env):
+    now = int(time.time())
+    f = env.state_dir / "first-seen"
+    f.write_text(f"host-update-state v1\nheld-back:foo 0 {now - 9 * DAY}\n")
+    f.chmod(0o600)
+    env.set_apt(kept_back(["foo", "bar"], 2))
+    r = env.run()
+    assert r.returncode == 0, r.stderr
+    m = parse(r.stdout)
+    assert m[("host_update_pending", "package", "false")] == 2
+    assert m[("host_update_held_back", None, None)] == 2
+    assert m[("host_update_state_ok", None, None)] == 1
+    assert 9 * DAY - 100 <= m[("host_update_oldest_pending_age_seconds", None, None)] <= 9 * DAY + 100
+    text = f.read_text()
+    assert f"\nheld-back:foo 0 {now - 9 * DAY}\n" in text and "\nheld-back:bar 0 " in text
+
+
+def test_held_back_unlisted_share_one_clock_key(env):
+    env.set_apt(apt_out([], summary="0 upgraded, 0 newly installed, 0 to remove and 2 not upgraded."))
+    assert env.run().returncode == 0
+    assert "\nheld-back:unlisted 0 " in (env.state_dir / "first-seen").read_text()
+
+
+def test_held_back_hostile_or_inconsistent_names_fail(env):
+    env.set_apt(kept_back(["Foo;rm"], 1))
+    assert_failed(env.run())
+    env.set_apt(kept_back(["foo", "bar"], 1))
+    assert_failed(env.run())
+    env.set_apt(kept_back(["foo", "foo"], 2))
+    assert_failed(env.run())
+    env.set_apt(apt_out([], summary="0 upgraded, 0 newly installed, 0 to remove and 1001 not upgraded."))
+    assert_failed(env.run())
 
 
 def test_reboot_required(env):
@@ -399,21 +438,76 @@ def test_exit_trap_prints_failure_on_internal_error(env):
 
 # ---------------------------------------------------------------- apt list freshness
 
-def test_lists_age_is_newest_of_stamp_and_lists(env):
+def write_list(env, name, seconds_ago, text="x\n"):
+    p = env.lists / name
+    p.write_text(text)
+    env.set_mtime(p, seconds_ago)
+    return p
+
+
+def test_lists_age_is_older_of_stamp_and_security_list(env):
     env.set_mtime(env.stamp, 2 * DAY)
     env.set_mtime(env.packages, 600)
-    assert 500 <= val(env.run(), "host_update_lists_age_seconds") <= 800
+    assert 2 * DAY - 200 <= val(env.run(), "host_update_lists_age_seconds") <= 2 * DAY + 200
     env.set_mtime(env.stamp, 300)
     env.set_mtime(env.packages, 2 * DAY)
-    assert 200 <= val(env.run(), "host_update_lists_age_seconds") <= 500
+    assert 2 * DAY - 200 <= val(env.run(), "host_update_lists_age_seconds") <= 2 * DAY + 200
 
 
-def test_lists_only_stamp_or_only_lists_is_enough(env):
+def test_lists_stamp_alone_is_not_enough(env):
+    # finding 1: a fresh stamp with wiped lists must not report healthy
     env.packages.unlink()
-    assert val(env.run(), "host_update_check_success") == 1
+    r = env.run()
+    assert_failed(r)
+    assert "no usable" in r.stderr
+
+
+def test_lists_without_stamp_fails(env):
     env.stamp.unlink()
-    (env.lists / "x_dists_stable_Release").write_text("Origin: x\n")
-    assert val(env.run(), "host_update_check_success") == 1
+    r = env.run()
+    assert_failed(r)
+    assert "stamp" in r.stderr
+
+
+def test_lists_one_fresh_third_party_list_does_not_hide_stale_security(env):
+    # finding 2, the reviewer's fixture
+    env.set_mtime(env.stamp, 200 * DAY)
+    env.set_mtime(env.packages, 200 * DAY)
+    write_list(env, "ppa.example_dists_noble_InRelease", 60)
+    assert_failed(env.run())
+
+
+def test_lists_stale_security_with_fresh_stamp_fails(env):
+    env.set_mtime(env.packages, 10 * DAY)
+    write_list(env, "ppa.example_dists_noble_InRelease", 60)
+    r = env.run()
+    assert_failed(r)
+    assert "older than 3 days" in r.stderr
+
+
+def test_lists_oldest_security_list_governs(env):
+    write_list(env, "esm.example_dists_noble-infra-security_InRelease", 5 * DAY)
+    assert_failed(env.run())
+
+
+def test_lists_stale_non_security_list_ignored_when_security_is_fresh(env):
+    write_list(env, "ppa.example_dists_noble_InRelease", 30 * DAY)
+    assert env.run().returncode == 0
+
+
+def test_lists_without_security_list_uses_oldest_of_all(env):
+    env.packages.unlink()
+    write_list(env, "a.example_dists_stable_InRelease", 5 * DAY)
+    write_list(env, "b.example_dists_stable_Release", 60)
+    assert_failed(env.run())
+
+
+def test_lists_junk_files_do_not_count(env):
+    env.packages.unlink()
+    write_list(env, "deb.example_dists_stable_main_binary-arm64_Packages", 60)
+    write_list(env, "deb.example_dists_stable_main_binary-arm64_Packages.FAILED", 60)
+    write_list(env, "a_Packages.FAILED", 60)
+    assert_failed(env.run())
 
 
 def test_lists_both_missing_fails(env):
@@ -425,17 +519,24 @@ def test_lists_both_missing_fails(env):
 
 
 def test_lists_empty_files_do_not_count(env):
-    env.stamp.unlink()
     env.packages.write_text("")
     assert_failed(env.run())
 
 
 def test_lists_symlink_does_not_count(env):
-    env.stamp.unlink()
     env.packages.unlink()
     target = env.tmp / "elsewhere-list"
-    target.write_text("Package: x\n")
-    (env.lists / "x_Packages").symlink_to(target)
+    target.write_text("Release: x\n")
+    (env.lists / "x_dists_stable-security_InRelease").symlink_to(target)
+    assert_failed(env.run())
+
+
+def test_stamp_symlink_does_not_count(env):
+    target = env.tmp / "elsewhere-stamp"
+    target.write_text("")
+    env.set_mtime(target, 60)
+    env.stamp.unlink()
+    env.stamp.symlink_to(target)
     assert_failed(env.run())
 
 
@@ -446,6 +547,7 @@ def test_lists_stale_fails_with_default_three_days(env):
     assert_failed(r)
     assert "older than 3 days" in r.stderr
     env.set_mtime(env.stamp, 3 * DAY - 600)
+    env.set_mtime(env.packages, 3 * DAY - 600)
     assert env.run().returncode == 0
 
 
@@ -465,10 +567,19 @@ def test_lists_max_age_argument_is_validated(env, value):
     assert env.calls() == []
 
 
-def test_lists_future_mtime_is_clamped_to_zero(env):
+def test_lists_small_future_mtime_is_clamped_to_zero(env):
     env.set_mtime(env.stamp, -3600)
-    env.set_mtime(env.packages, 2 * DAY)
+    env.set_mtime(env.packages, -3600)
     assert val(env.run(), "host_update_lists_age_seconds") == 0
+
+
+def test_lists_far_future_mtime_fails(env):
+    # finding 4: stamp or any list file more than 1 day ahead
+    env.set_mtime(env.stamp, -2 * DAY)
+    assert_failed(env.run())
+    env.set_mtime(env.stamp, 3600)
+    write_list(env, "ppa.example_dists_noble_InRelease", -2 * DAY)
+    assert_failed(env.run())
 
 
 def test_stale_lists_never_give_healthy_zero_pending(env):
@@ -1195,13 +1306,11 @@ def sc_uu_anchor(env):
 
 
 def sc_lists_missing(env):
-    env.stamp.unlink()
     env.packages.unlink()
     return {}
 
 
 def sc_lists_empty(env):
-    env.stamp.unlink()
     env.packages.write_text("")
     return {}
 
@@ -1212,25 +1321,91 @@ def sc_lists_stale(env):
     return {}
 
 
-def sc_lists_newest(env):
-    env.set_mtime(env.stamp, 600)
-    env.set_mtime(env.packages, 2 * DAY)
-    (env.lists / "x_dists_stable_InRelease").write_text("x\n")
-    env.set_mtime(env.lists / "x_dists_stable_InRelease", 1 * DAY)
+def sc_lists_oldest(env):
+    env.packages.unlink()
+    write_list(env, "a.example_dists_stable_InRelease", 5 * DAY)
+    write_list(env, "b.example_dists_stable_InRelease", 60)
     return {}
 
 
-def guard_lists_newest(r, env):
-    return r.returncode == 0 and 500 <= val(r, "host_update_lists_age_seconds") <= 800
+def sc_lists_oldest_sec(env):
+    env.set_mtime(env.packages, 5 * DAY)
+    write_list(env, "other.example_dists_noble-security_InRelease", 60)
+    write_list(env, "ppa.example_dists_noble_InRelease", 60)
+    return {}
+
+
+def sc_lists_security(env):
+    write_list(env, "ppa.example_dists_noble_InRelease", 30 * DAY)
+    return {}
+
+
+def sc_held_cap(env):
+    env.set_apt(apt_out(pkg_lines(500), summary="500 upgraded, 0 newly installed, 0 to remove and 600 not upgraded."))
+    return {}
+
+
+def sc_stamp_required(env):
+    env.stamp.unlink()
+    return {}
+
+
+def sc_stamp_symlink(env):
+    target = env.tmp / "elsewhere-stamp"
+    target.write_text("")
+    env.stamp.unlink()
+    env.stamp.symlink_to(target)
+    return {}
+
+
+def sc_stamp_future(env):
+    env.set_mtime(env.stamp, -2 * DAY)
+    return {}
+
+
+def sc_lists_future(env):
+    write_list(env, "ppa.example_dists_noble_InRelease", -2 * DAY)
+    return {}
+
+
+def sc_lists_symlink(env):
+    target = env.tmp / "elsewhere-list"
+    target.write_text("Release: x\n")
+    env.packages.unlink()
+    (env.lists / "x_dists_stable-security_InRelease").symlink_to(target)
+    return {}
 
 
 def sc_lists_clamp(env):
     env.set_mtime(env.stamp, -3600)
+    env.set_mtime(env.packages, -3600)
     return {}
 
 
 def guard_lists_zero(r, env):
     return r.returncode == 0 and val(r, "host_update_lists_age_seconds") == 0
+
+
+def sc_held_names(env):
+    now = int(time.time())
+    f = env.state_dir / "first-seen"
+    f.write_text(f"host-update-state v1\nheld-back:foo 0 {now - 9 * DAY}\n")
+    f.chmod(0o600)
+    env.set_apt(kept_back(["foo"], 1))
+    return {}
+
+
+def guard_held_pending(r, env):
+    return r.returncode == 0 and parse(r.stdout)[("host_update_pending", "package", "false")] == 1
+
+
+def guard_held_aged(r, env):
+    return r.returncode == 0 and val(r, "host_update_oldest_pending_age_seconds") >= 9 * DAY - 100
+
+
+def sc_held_charset(env):
+    env.set_apt(kept_back(["Foo;rm"], 1))
+    return {}
 
 
 def sc_lists_arg(env):
@@ -1268,12 +1443,24 @@ MUTANTS = {
     "oldest-clamp": (':', sc_oldest_clamp, guard_oldest_zero),
     "uu-fallback": ('for f in "$uu_log"; do', sc_uu_fallback, guard_ok),
     "uu-anchor": ("uu_re='All upgrades installed'", sc_uu_anchor, guard_failed),
-    "lists-missing": ('[ -n "$newest" ] || newest=$now', sc_lists_missing, guard_failed),
+    "lists-missing": ('[ -n "$oldest_all" ] || oldest_all=$now', sc_lists_missing, guard_failed),
     "lists-nonempty": (':', sc_lists_empty, guard_failed),
     "lists-stale": (':', sc_lists_stale, guard_failed),
-    "lists-newest": ('if [ -z "$newest" ] || [ "$m" -lt "$newest" ]; then newest=$m; fi', sc_lists_newest,
-                     guard_lists_newest),
+    "lists-oldest": ('if [ -z "$oldest_all" ] || [ "$m" -gt "$oldest_all" ]; then oldest_all=$m; fi',
+                     sc_lists_oldest, guard_failed),
+    "lists-oldest-sec": ('if [ -z "$oldest_sec" ] || [ "$m" -gt "$oldest_sec" ]; then oldest_sec=$m; fi',
+                         sc_lists_oldest_sec, guard_failed),
+    "lists-security": (':', sc_lists_security, guard_ok),
+    "stamp-required": ('[ -n "$stamp_m" ] || stamp_m=$now', sc_stamp_required, guard_failed),
+    "stamp-symlink": ('if [ -f "$stamp_file" ]; then', sc_stamp_symlink, guard_failed),
+    "stamp-future": (':', sc_stamp_future, guard_failed),
+    "lists-future": (':', sc_lists_future, guard_failed),
+    "lists-symlink": ('[ -f "$f" ] || continue', sc_lists_symlink, guard_failed),
     "lists-clamp": (':', sc_lists_clamp, guard_lists_zero),
+    "held-pending": (':', sc_held_names, guard_held_pending),
+    "held-key": (':', sc_held_names, guard_held_aged),
+    "held-cap": (':', sc_held_cap, guard_failed),
+    "held-charset": ('[!a-z0-9]* | *[!a-z0-9+.:-]*) : ;;', sc_held_charset, guard_failed),
     "lists-arg": (':', sc_lists_arg, guard_failed),
 }
 

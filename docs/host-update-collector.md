@@ -19,8 +19,8 @@ Only these, with `PATH=/usr/bin:/bin` and `LC_ALL=C`:
 - a test for `/var/run/reboot-required`
 - a bounded read (last 1 MiB) of `/var/log/unattended-upgrades/unattended-upgrades.log`, and the
   `.1` file when the current log has no success line yet
-- `stat` of `/var/lib/apt/periodic/update-success-stamp` and of the non-empty `*_Packages*`,
-  `*_Release` and `*_InRelease` files in `/var/lib/apt/lists`
+- `stat` of `/var/lib/apt/periodic/update-success-stamp` and of the non-empty `*_Release` and
+  `*_InRelease` files in `/var/lib/apt/lists`
 - `date`, `stat`, `id`, `head`, `tail`, `grep`, `timeout`, `env`, `mkdir`, `chmod`, `mv` on its own
   state directory
 
@@ -67,10 +67,14 @@ host_update_check_success,host=web-1,tier=critical value=1i
   A repository can label itself `security` (a third-party archive named like a security archive
   under one of the known labels would be counted); this is accepted, the label is not authenticated.
 - `host_update_held_back` is the `N not upgraded` count of the apt summary: updates apt holds back
-  (kept-back packages, phased updates, pins). **Held-back updates are not counted as pending**; the
-  metric makes them visible so they can be alerted on separately.
-- `host_update_lists_age_seconds` is the age of the newest of the apt update stamp and the list
-  files, see below.
+  (kept-back packages, phased updates, pins). **Held-back updates are also counted in
+  `host_update_pending` as non-security (`security=false`)**, so they cannot hide. Each package named
+  in apt's "kept back" list gets its own first-seen clock (state entries named `held-back:<package>`,
+  a separate kind from candidate versions, so they age and feed `oldest_pending_age`); held packages
+  apt does not name share one `held-back:unlisted` clock. More names than the summary count, a bad
+  name, or more than 1000 pending plus held packages is a failure.
+- `host_update_lists_age_seconds` is the age that governs the freshness check: the older of the apt
+  update stamp and the oldest security list, see below.
 - `host_unattended_last_run_age_seconds` is the age of the newest log line `All upgrades installed`
   or `No packages found that can be upgraded unattended ...`. If no such line exists, the age is
   unknown, and unknown is a **failure**, never `0`.
@@ -81,19 +85,36 @@ host_update_check_success,host=web-1,tier=critical value=1i
 ### Apt list freshness
 
 The script never refreshes the lists, so stale, emptied or wiped lists would report nothing pending.
-`host_update_lists_age_seconds` is the age of the newest of
-`/var/lib/apt/periodic/update-success-stamp` and the newest non-empty, non-symlink list file
-(`*_Packages*`, `*_Release`, `*_InRelease`) in `/var/lib/apt/lists`. If neither exists, or the age is
-over the maximum (default 3 days, `--max-lists-age-days`, 1 to 30), the whole check **fails**
-(`host_update_check_success value=0i` only), so stale lists never give `check_success=1` with zero
-pending. A clock set into the future gives age `0`. Keep the host's `apt-daily` refresh enabled.
+Both of these are required, and the check **fails** (`host_update_check_success value=0i` only) when
+either is missing or too old:
+
+1. `/var/lib/apt/periodic/update-success-stamp` (regular file, not a symlink);
+2. at least one non-empty, non-symlink `*_InRelease` or `*_Release` file in `/var/lib/apt/lists`.
+   Package files (`*_Packages*`, including `*_Packages.FAILED` junk) never count.
+
+The list age is the **oldest** of the security-archive list files (a suite ending in `-security`,
+read from the file name, for example `..._noble-security_InRelease`); when there is none, the oldest
+of all `InRelease`/`Release` files. One fresh third-party list therefore cannot hide a stale
+security list. `host_update_lists_age_seconds` is the older of that and the stamp age; over the
+maximum (default 3 days, `--max-lists-age-days`, 1 to 30) the check fails. A stamp or list mtime
+more than 1 day in the future fails the check; up to 1 day ahead gives age `0`. The security files
+are chosen by file name because apt's configured sources cannot be read without parsing apt
+configuration; a list left behind by a removed security source keeps failing until `apt-get update`
+(or `apt-get clean` of the lists) removes it. Keep the host's `apt-daily` refresh enabled.
 This covers issue #233.
+
+**Hosts without the stamp.** The age check needs the stamp, so a healthy host that has periodic
+updates disabled (`APT::Periodic::Update-Package-Lists "0"`) and never wrote the stamp **fails
+closed**. Enable the stamp with a file such as `/etc/apt/apt.conf.d/20auto-upgrades` containing
+`APT::Periodic::Update-Package-Lists "1";` (the `apt-daily.timer` then refreshes the lists and writes
+the stamp after each successful `apt-get update`); a manual `apt-get update` also writes it.
+Otherwise run this collector only on hosts that keep the stamp.
 
 ### Failure
 
 If apt output is not understood, a package name or origin has unexpected characters, the apt summary
 line is missing or disagrees with the `Inst` lines, apt exits non-zero or times out or prints more than
-4 MiB, the apt lists are missing or too old, the unattended-upgrades age is unknown, a number in the
+4 MiB, the apt stamp or lists are missing, too old or dated in the future, the unattended-upgrades age is unknown, a number in the
 state or the apt summary is not canonical (`0` or `[1-9][0-9]*`), the script runs as uid 0, the label
 or tier is invalid, or any required command is missing, the script prints only
 
@@ -132,7 +153,11 @@ It must be an absolute path. Rules:
 
 Alert rule suggestions: page on `host_update_check_success == 0` or missing data; on
 `host_update_state_ok == 0`; on `host_update_oldest_pending_age_seconds > 604800` (7 days); on
-`host_unattended_last_run_age_seconds > 172800` for the unattended-upgrades hosts.
+`host_unattended_last_run_age_seconds > 172800` for the unattended-upgrades hosts;
+`host_update_held_back > 0` for longer than a day (held-back packages are also in `pending`, so
+`host_update_oldest_pending_age_seconds` covers their age); and `host_update_lists_age_seconds >
+172800`, to warn before the 3-day hard failure. These are rule shapes only; no rules are shipped
+with the collector.
 
 ## Running it unprivileged
 
