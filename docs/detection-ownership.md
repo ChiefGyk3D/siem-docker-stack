@@ -37,6 +37,21 @@
 - **Notification**: Discord (primary), n8n SOAR webhooks (for high-severity)
 - **Evaluation interval**: 5m (all rules)
 
+
+### Drift known 2026-11-26
+
+> **Do not trust the tables above as the deployed state.** This document and `scripts/deploy-grafana-alerts.py` disagree, and no rule was changed to hide it. The live Grafana export is the source of truth. Reconciling this document, the script and `docs/roadmap.md` against that export is tracked under issue #225.
+
+| Item | This document | Script or other file |
+|---|---|---|
+| Execution error state | line 36: `execErrState` is OK for all rules (and line 15 for CrowdSec) | `scripts/deploy-grafana-alerts.py` lines 115 and 189: `"execErrState": "Error"` for every rule it deploys |
+| Evaluation interval | line 38: 5m for all rules | `scripts/deploy-grafana-alerts.py` line 144: query `interval` is `"auto"`; the script sets no rule-group evaluation interval |
+| Rule names | lines 15-22 and 28-33: CrowdSec Alert Detected, Docker Security Event, JumpCloud Security Alert, Office 365 Security Alert, Suricata High-Severity Alert, Wazuh Critical Alert (Level 12+), Wazuh High Alert (Level 10-11), Host Down, High CPU Usage, High Memory Usage, Disk Usage Critical, Network Interface Errors, Systemd Service Failed | script lines 253-386: Wazuh Agent Disconnected, High-Severity Alert Burst, Authentication Failure Burst, Critical File Integrity Change, Suricata Critical Alert, pfSense Firewall Block Surge, CrowdSec Ban Decision Surge, Docker Container Restart Loop. Only Wazuh Agent Disconnected matches by name |
+| Suricata | line 19: `alert.severity<=2` count > 3 in 5m, for 5m | script lines 326-331: `alert.severity:1`, window 300s, threshold 0 |
+| Wazuh Agent Disconnected | line 20: count > 0 in 5m | script lines 257-268: window 600s, threshold 0, `for` 5m |
+| pfSense block surge | not listed | script line 351: threshold 1000; `docs/roadmap.md` line 22 lists the "Current" value as >500 and the "Suggested" as >1000 |
+| Folders | lines 11 and 26: "SIEM" and "SIEM Alerts" | script groups: "SIEM — Wazuh", "SIEM — IDS", "SIEM — Firewall", "SIEM — CrowdSec", "SIEM — Docker" (rule groups; the folder comes from `ALERT_FOLDER_UID`) |
+
 ---
 
 ## n8n SOAR Workflows
