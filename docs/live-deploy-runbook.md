@@ -254,7 +254,7 @@ line and the Grafana restart are manual steps (steps 4 and 5 below).
    `update-alert-rules-pfsense.yml`, `heartbeat-alert-rule.yml` and
    `notification-failure-alert-rule.yml`. Also copy `update-alert-rules-twingate.yml`
    when the Twingate rules exist in the repo: it is in the script's `OPTIONAL_FILES`
-   list, deployed when staged and skipped when absent (a new rule file the live box
+   list, deployed when staged and skipped when absent (`infra-alerts.yml`, issue #224, is in that list too; see `docs/infrastructure-alerts.md` before staging it) (a new rule file the live box
    needs is a one-line add to that list). For the P1 email channel also copy
    `email-contact-point.yml.example` and `email-notification-policy.yml.example`;
    they are only deployed when you name them (below).

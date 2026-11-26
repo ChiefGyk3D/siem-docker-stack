@@ -21,7 +21,7 @@ FILES = sorted(list(ALERTING.glob("*.yml")) + list(ALERTING.glob("*.yml.example"
 SEVERITIES = {"critical", "warning", "info"}
 TIERS = {"P1", "P2", "P3", "none"}
 BOOL = {"true", "false"}
-ALERT_GROUPS = {"updates", "heartbeat", "alert-path"}
+ALERT_GROUPS = {"updates", "heartbeat", "alert-path", "infrastructure"}
 SOURCES = {"unifi", "pfsense", "twingate"}
 # Every label a rule may carry. A label outside this set is a defect: nothing
 # reads it, so it is either a typo or an unrecorded routing key.
@@ -71,6 +71,10 @@ def check_labels(labels):
     for k in ("update_alert", "update_security", "heartbeat", "delivery_failure", "digest"):
         if k in labels and labels[k] != "true":
             problems.append(f"{k} must be \"true\" or absent")
+    if labels.get("alert_group") == "infrastructure" and ("update_alert" in labels or "update_security" in labels):
+        problems.append("infrastructure rule must not carry update labels")
+    if labels.get("alert_group") == "infrastructure" and phone == "true" and (tier, sev) != ("P1", "critical"):
+        problems.append("infrastructure may page only as P1 critical")
     if "update_security" in labels and labels.get("update_alert") != "true":
         problems.append("update_security needs update_alert=true")
     if labels.get("alert_group") == "updates" and labels.get("update_alert") != "true":
@@ -213,6 +217,10 @@ def test_checker_accepts_good(key):
     ("HB", {"tier": "P2"}),
     ("P1", {"alert_group": "updates"}),
     ("P1", {"update_security": "true"}),
+    ("P1", {"alert_group": "infrastructure", "update_alert": "true"}),
+    ("P2", {"alert_group": "infrastructure", "phone": "true"}),
+    ("P2", {"alert_group": "infrastructure", "phone": "true", "update_alert": "true", "source": "twingate"}),
+    ("P1", {"alert_group": "infra"}),
 ])
 def test_checker_rejects_bad(key, change):
     labels = dict(GOOD[key])
@@ -234,3 +242,8 @@ def test_checker_requires_label(missing):
     labels = dict(GOOD["P1"])
     del labels[missing]
     assert any("missing" in p for p in check_labels(labels))
+
+
+def test_checker_accepts_infrastructure_p1_and_p2():
+    assert check_labels(dict(GOOD["P1"], alert_group="infrastructure")) == []
+    assert check_labels(dict(GOOD["P2"], alert_group="infrastructure")) == []
