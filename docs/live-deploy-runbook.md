@@ -443,6 +443,26 @@ proper fix (unique service names or separate networks) is tracked in a netpulse
 issue and in siem-docker-stack#61. Symptom to look for: datasource test fails or
 returns another stack's measurements.
 
+### Folder and file modes the deploy script accepts (seen live)
+
+The deploy script refuses to run if any folder on the path to the stage,
+config, alerting or datasource folders is writable by group (a sticky folder
+such as `/tmp` is accepted only as a parent), and it refuses staged files that
+are not mode 644 (or that are writable by group or others). A typical cause is a
+umask of 002, which creates group-writable folders and files. Fix it on the host,
+using your own paths:
+
+```
+# every folder on the path, from the stage folder up to (not including) /
+chmod g-w <stage-folder> <config-folder> <alerting-folder> <datasource-folder>
+# check each parent too: namei -m <stage-folder> shows the mode of every component
+# every staged file
+chmod 644 <stage-folder>/*
+```
+
+Then re-run the dry run. Folders must also be owned by root or by the user running
+the script.
+
 ## 6. The manual Grafana notification policy route
 
 Grafana provisions the notification policy as one tree for the whole
@@ -481,3 +501,49 @@ automate it and the deploy never runs it. If the same two feeds break again,
 read the snippet and make the change in the firewall's own interface or run
 the snippet there deliberately; it writes nothing if the rows are not in the
 expected state.
+
+## 9. InfluxDB authentication: one write-only user per writer
+
+InfluxDB runs with authentication on (`INFLUXDB_HTTP_AUTH_ENABLED=true` in
+`docker/docker-compose.yml`). Every writer needs its own user that can only write
+to its own database: unifi-poller, Telegraf and each collector. Do not reuse the
+admin account in a writer. Grafana's datasources read; give them a separate
+read-only user.
+
+Create the unifi-poller user. The password is read without being shown, goes to
+the secret manager through stdin with the output discarded, and is never put on a
+command line (`printf` is a shell builtin, so the value never reaches a process
+argument list; the container's own admin login from its environment is used):
+
+```
+# 1. Read a new password without echo
+read -rs UP_PW
+# 2. Store it in the secret manager (value from stdin, output discarded)
+printf '%s' "$UP_PW" | doppler secrets set UNPOLLER_INFLUX_PASSWORD --project <project> --config <config> > /dev/null
+# 3. Create the user in InfluxDB (statement from stdin, output discarded)
+printf "CREATE USER unpoller_wo WITH PASSWORD '%s'\n" "$UP_PW" | docker exec -i influxdb influx > /dev/null
+unset UP_PW
+# 4. Grant write on the one database only (no password in this statement)
+docker exec influxdb influx -execute 'GRANT WRITE ON unpoller TO unpoller_wo'
+# 5. Check: the grant shows WRITE on unpoller and nothing else
+docker exec influxdb influx -execute 'SHOW GRANTS FOR unpoller_wo'
+```
+
+Then point unifi-poller at it with two lines in the `unifi-poller` service
+environment of `docker/docker-compose.yml` (the shipped compose file already
+carries them):
+
+```
+- UP_INFLUXDB_USER=${UNPOLLER_INFLUX_USER:-unpoller_wo}
+- UP_INFLUXDB_PASS=${UNPOLLER_INFLUX_PASSWORD:?set UNPOLLER_INFLUX_PASSWORD in .env}
+```
+
+The password reaches compose from the secret manager (or the private `.env`
+described in the README upgrade notes), never from a value typed into the compose
+file. Recreate the container with `docker compose up -d unifi-poller` and confirm
+new points arrive:
+`docker exec influxdb influx -execute 'SELECT count(*) FROM usw' -database unpoller`.
+If the writer logs show an authentication error (401), the user or password does
+not match. Rollback: `DROP USER unpoller_wo`.
+
+Repeat the same steps for each other writer, with its own user name and database.
