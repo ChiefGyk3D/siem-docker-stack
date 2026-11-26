@@ -1,0 +1,204 @@
+#!/bin/bash -p
+# Run a command with chosen dev_network values injected from the secret manager.
+#
+# The box reads the Doppler config dev_network (project homelab) through a
+# read-only service token kept in a mode 600 file inside a private config
+# folder. This wrapper checks that file, then hands the token to `doppler run`
+# through exec, so it is in the environment of that one process (and of a tiny
+# checker shell that drops it before anything else runs, see CHECK below). It is
+# never printed and never put on a command line, and the wrapped command does not
+# inherit it. A service token is already scoped to one project and config, so no
+# project or config flag is passed.
+#
+# Only the secrets NAMED on the command line are injected (--only-secrets), and
+# only names in the fixed table below are accepted at all. A config that holds a
+# secret called LD_PRELOAD, BASH_ENV, PATH or ZDOTDIR would otherwise undo the
+# sanitizing, because the secret manager adds its values to the child
+# environment after this script ran; a list of bad names is never complete, so
+# the table lists the good ones. A change to the table is a change to this file.
+#
+# --require names must exist and be non-empty in the config: the wrapper clears
+# every requested name from its own environment first (so a copy inherited from
+# the caller cannot stand in for a missing secret) and the command is started
+# only after a small checker has found each required name non-empty (exit 3
+# otherwise). --optional names are injected when the config has them and are
+# simply absent when it does not. The values are never read from the disk cache:
+# with no fallback file, an outage or a revoked token stops the command instead
+# of serving old values.
+#
+# Environment (optional):
+#   SIEM_NET_CONFIG_DIR   private config folder that holds the file "token"
+#                         (default: $HOME/.config/doppler-siem-net)
+#
+# Exit status: the command's own status; 2 when the token file, its folder or a
+# name is refused; 3 when a required secret is missing or empty; 64 when the
+# arguments are malformed.
+#
+# Usage: siem-net-run [--require NAME1,NAME2] [--optional NAME3,NAME4] -- COMMAND [ARGS...]
+set +x
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+unset BASH_ENV ENV CDPATH GLOBIGNORE PS4
+set -euo pipefail
+umask 077
+
+# Drop every secret-manager setting the caller exported (project, config, host,
+# token): the token comes from the file below and nothing else.
+while IFS= read -r VAR_NAME; do
+    case "$VAR_NAME" in
+        DOPPLER_*) unset "$VAR_NAME" ;;
+    esac
+done < <(compgen -e)
+
+# The exact names this wrapper will ever inject: the n8n recreate, the Grafana
+# restarts (the names the grafana service of docker/docker-compose.yml uses, plus
+# the manual lines of the owner runbook, steps 4b and 5b) and the router test.
+PERMITTED_NAMES=(
+    BIND_ADDR DISCORD_FAILURE_WEBHOOK_URL EXPIRY_WATCH_ROUTER_TOKEN
+    GF_SMTP_ENABLED GF_SMTP_FROM_ADDRESS GF_SMTP_HOST GF_SMTP_PASSWORD GF_SMTP_STARTTLS_POLICY GF_SMTP_USER
+    GRAFANA_ADMIN_PASS GRAFANA_ADMIN_USER GRAFANA_INFLUX_PASSWORD GRAFANA_INFLUX_USER GRAFANA_PORT
+    GRAFANA_VERSION GRAFANA_WEBHOOK_SECRET HEARTBEAT_KIND HEARTBEAT_PING_URL OPENSEARCH_READONLY_PASSWORD
+    P1_EMAIL_TO PROMETHEUS_GRAFANA_PASSWORD PROMETHEUS_OTLP_GRAFANA_PASSWORD SIEM_HOST
+    WAZUH_GRAFANA_RO_PASSWORD WAZUH_GRAFANA_RO_USER
+)
+
+usage() {
+    echo "siem-net-run: usage: siem-net-run [--require NAME1,NAME2] [--optional NAME3,NAME4] -- COMMAND [ARGS...]" >&2
+    exit 64
+}
+
+refuse() {
+    echo "siem-net-run: $1" >&2
+    exit 2
+}
+
+REQUIRE=""
+OPTIONAL=""
+SEEN_REQUIRE=0
+SEEN_OPTIONAL=0
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --require)
+            [ "$#" -ge 2 ] && [ "$SEEN_REQUIRE" -eq 0 ] || usage
+            REQUIRE="$2"
+            SEEN_REQUIRE=1
+            shift 2
+            ;;
+        --optional)
+            [ "$#" -ge 2 ] && [ "$SEEN_OPTIONAL" -eq 0 ] || usage
+            OPTIONAL="$2"
+            SEEN_OPTIONAL=1
+            shift 2
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            usage
+            ;;
+    esac
+done
+if [ "$#" -eq 0 ] || { [ "$SEEN_REQUIRE" -eq 0 ] && [ "$SEEN_OPTIONAL" -eq 0 ]; }; then
+    usage
+fi
+
+# Each list: comma separated, no empty item, plain upper case names (the second
+# check), and every name in the fixed table (the first).
+ALL_NAMES=()
+check_list() {
+    local list="$1" name permitted found
+    local -a items
+    case "$list" in
+        "" | ,* | *, | *,,*) usage ;;
+    esac
+    IFS=, read -r -a items <<< "$list"
+    for name in "${items[@]}"; do
+        if [[ ! "$name" =~ ^[A-Z][A-Z0-9_]*$ ]]; then
+            usage
+        fi
+        found=0
+        for permitted in "${PERMITTED_NAMES[@]}"; do
+            if [ "$name" = "$permitted" ]; then
+                found=1
+            fi
+        done
+        if [ "$found" -eq 0 ]; then
+            refuse "name $name is not permitted (it is not in the table of this wrapper)"
+        fi
+        for permitted in ${ALL_NAMES[@]+"${ALL_NAMES[@]}"}; do
+            if [ "$name" = "$permitted" ]; then
+                usage
+            fi
+        done
+        ALL_NAMES+=("$name")
+    done
+}
+if [ "$SEEN_REQUIRE" -eq 1 ]; then
+    check_list "$REQUIRE"
+fi
+if [ "$SEEN_OPTIONAL" -eq 1 ]; then
+    check_list "$OPTIONAL"
+fi
+ONLY="$(IFS=,; echo "${ALL_NAMES[*]}")"
+
+CFG="${SIEM_NET_CONFIG_DIR:-$HOME/.config/doppler-siem-net}"
+TOKEN_FILE="$CFG/token"
+
+if [ -L "$TOKEN_FILE" ]; then
+    refuse "token file is a symlink; refusing"
+fi
+if [ ! -e "$TOKEN_FILE" ]; then
+    refuse "token file missing"
+fi
+if [ ! -f "$TOKEN_FILE" ] || [ ! -r "$TOKEN_FILE" ]; then
+    refuse "token file is not a readable regular file"
+fi
+
+ME="$(id -u)"
+if [ "$(stat -c '%u' "$TOKEN_FILE")" != "$ME" ]; then
+    refuse "token file owner is not the user running this command"
+fi
+FILE_MODE="$(stat -c '%a' "$TOKEN_FILE")"
+if [ $((8#$FILE_MODE & 8#077)) -ne 0 ]; then
+    refuse "token file mode $FILE_MODE lets group or others in; it must be 600 or stricter"
+fi
+
+if [ -L "$CFG" ]; then
+    refuse "config folder is a symlink; refusing"
+fi
+if [ "$(stat -c '%u' "$CFG")" != "$ME" ]; then
+    refuse "config folder is not owned by the user running this command"
+fi
+DIR_MODE="$(stat -c '%a' "$CFG")"
+if [ $((8#$DIR_MODE & 8#022)) -ne 0 ]; then
+    refuse "config folder mode $DIR_MODE lets group or others write; it must be 700"
+fi
+
+# The token is read last, after every check, and only into a shell variable.
+TOK="$(< "$TOKEN_FILE")"
+if [ -z "$TOK" ]; then
+    refuse "token file is empty"
+fi
+
+# A caller's own copy of a requested name must never stand in for the config's.
+for NAME in "${ALL_NAMES[@]}"; do
+    unset "$NAME"
+done
+
+# Runs inside doppler, after the secrets are injected, before the command. The
+# first thing it does is drop the service token: `doppler run` copies its own
+# environment into the child, so without this the token would reach the command
+# (VERIFIED against the CLI source by the Daybreak review; `doppler configure
+# set token=...` is no way around it: it takes the token on the command line and
+# the installed CLI stores a keychain reference, not a file in the private
+# folder). `unset` is a shell builtin, so no other program starts first. What
+# this cannot do: the doppler process itself, the parent of the command, still
+# holds the token, and anything running as this same user can read the token
+# file anyway. The guarantee is that the wrapped command and its children do not
+# inherit the token and get only the named secrets; it is not a sandbox for
+# hostile code. Then every required name must be non-empty. (Doppler warns but does not fail for a name
+# the config lacks, because of --no-exit-on-missing-only-secrets.)
+CHECK='unset DOPPLER_TOKEN; req=$1; shift; IFS=,; for v in $req; do if [ -z "$(printenv "$v")" ]; then echo "siem-net-run: required secret $v is missing or empty in the config" >&2; exit 3; fi; done; unset IFS; exec "$@"'
+
+DOPPLER_TOKEN="$TOK" exec doppler run --config-dir "$CFG" --no-check-version --no-fallback --no-exit-on-missing-only-secrets --only-secrets="$ONLY" -- sh -c "$CHECK" siem-net-run "$REQUIRE" "$@"

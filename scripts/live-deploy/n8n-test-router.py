@@ -15,10 +15,11 @@ Usage:
   siem-run python3 -I n8n-test-router.py --phone | --phone-resolve   (real phone pushes, Pushover on)
 
 Environment (all optional):
-  N8N_BASE         base URL used for the checks (default: http://192.0.2.19, a
-                   documentation address: set it to the n8n container's address on
-                   the Docker bridge network, port 80; a macvlan container is not
-                   reachable from its own host)
+  N8N_BASE         base URL used for the checks. Default: looked up at run time
+                   from the n8n container's address on the siem Docker network
+                   (a macvlan address is not reachable from its own host). Set it
+                   to skip the lookup. Lookup variables: N8N_CONTAINER (n8n),
+                   SIEM_NETWORK (unset: the attached network named siem-net or *_siem-net), N8N_PORT (80). See scripts/n8n_address.py.
   SIEM_CONFIG_DIR  private config directory with the file "router-path"
                    (default: $HOME/.config/doppler-siem)
 """
@@ -28,7 +29,7 @@ import sys
 import urllib.error
 import urllib.request
 
-BASE = os.environ.get("N8N_BASE", "http://192.0.2.19")
+BASE = None  # resolved in main(), so importing this file never calls docker
 CONFIG_DIR = os.environ.get("SIEM_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".config", "doppler-siem")
 PATH_FILE = os.path.join(CONFIG_DIR, "router-path")
 
@@ -85,11 +86,19 @@ def phone(mode, path, good):
 
 
 def main():
+    global BASE
     secret = os.environ.get("GRAFANA_WEBHOOK_SECRET", "")
     if not secret:
         sys.exit("missing environment value: GRAFANA_WEBHOOK_SECRET")
     with open(PATH_FILE, encoding="utf-8") as handle:
         path = handle.read().strip()
+    # -I removes the script directory from sys.path, so add the parent scripts/ directory.
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    import n8n_address
+    try:
+        BASE = n8n_address.resolve_n8n_base()
+    except n8n_address.N8nAddressError as err:
+        sys.exit(f"ERROR: {err}")
     good = {"Authorization": "Bearer " + secret}
     if len(sys.argv) > 1 and sys.argv[1] in ("--phone", "--phone-resolve"):
         return phone(sys.argv[1], path, good)

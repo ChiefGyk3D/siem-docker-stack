@@ -157,7 +157,10 @@ All alerts flow through **N8N** for dedup, severity filtering, and enrichment be
 - Ubuntu 22.04+ (or any modern Linux with Docker support)
 - Two storage devices: one fast (NVMe/SSD for HOT), one large (SATA SSD/HDD for WARM)
 - At least 16 GB RAM (32+ GB recommended)
-- Docker CE 24+ with Compose V2
+- Docker CE 24+ with Compose V2. Docker is the default. The helper scripts can use Podman instead when
+  `CONTAINER_ENGINE=podman` is set (see [docs/container-engine.md](docs/container-engine.md));
+  the compose files and the bootstrap script are still Docker-first, and the Podman path is not
+  verified on a rehearsal host yet.
 
 ### Step-by-Step Installation
 
@@ -170,10 +173,10 @@ cd siem-docker-stack
 #    Change NVME_DEV and SATA_DEV to match your hardware.
 #    Run `lsblk` to identify your disks.
 sudo nano scripts/01-disk-setup.sh
-sudo bash scripts/01-disk-setup.sh
+sudo scripts/01-disk-setup.sh
 
 # 3. Install Docker, tune kernel, configure firewall
-sudo bash scripts/02-bootstrap.sh
+sudo scripts/02-bootstrap.sh
 
 # 4. Configure your environment
 cp .env.example .env
@@ -183,13 +186,13 @@ nano .env    # Set YOUR IPs, passwords, and heap sizes
 bash scripts/06-generate-wazuh-certs.sh
 
 # 6. Deploy the stack (local mode)
-bash scripts/03-deploy.sh local
+sudo scripts/03-deploy.sh local
 
 # 7. Wait ~2 minutes, then apply index templates and ISM policy
-bash scripts/04-apply-ism-policy.sh http://localhost:9200
+sudo scripts/04-apply-ism-policy.sh http://localhost:9200
 
 # 8. Verify everything is healthy
-bash scripts/05-verify.sh localhost
+sudo scripts/05-verify.sh localhost
 
 # 9. Import the Grafana dashboards (file-based provisioning is not wired up —
 #    dashboards are deployed via the Grafana API)
@@ -240,8 +243,8 @@ in `.env.example`, and a missing, empty or placeholder value stops the stack or
 script that needs it. Values are never printed in an error message; the
 message names the variable. Use strong, unique values and avoid `$`.
 
-Before `docker compose up`, run `bash scripts/check-env.sh .env`; `scripts/03-deploy.sh`
-runs it for you. It rejects an empty value or a placeholder (the old well-known
+Before `docker compose up`, run `bash scripts/check-env.sh .env`. The deploy script
+(`sudo scripts/03-deploy.sh`) runs it for you. It rejects an empty value or a placeholder (the old well-known
 defaults and obvious fill-ins such as `your_*`, `<...>`, `example*`,
 `placeholder*`, `xxx*`, `admin` and `password`), compared case-insensitively. The
 exact rule lives in `scripts/lib-secrets.sh`, and each `scripts/deploy-*.py`
@@ -455,13 +458,16 @@ python3 scripts/deploy-dashboards.py
 Or manually via the Grafana API:
 
 ```bash
-# Via Grafana API
-for f in dashboards/*.json; do
-    curl -X POST "http://admin:${GRAFANA_ADMIN_PASS}@localhost:3000/api/dashboards/db" \
-        -H 'Content-Type: application/json' \
-        -d "{\"dashboard\": $(cat "$f"), \"overwrite\": true}"
-done
+# Via Grafana API (asks for the Grafana admin password without echo; repeat for each file)
+f=dashboards/example.json
+scripts/secure-curl.sh admin -X POST "http://localhost:3000/api/dashboards/db" \
+    -H 'Content-Type: application/json' \
+    -d "{\"dashboard\": $(cat "$f"), \"overwrite\": true}"
 ```
+
+`scripts/secure-curl.sh` hands the password to curl on stdin, never in the URL
+or an argument, so it stays out of the process list, shell history and shell traces.
+It needs bash 4.2 or newer. Start it by its path, not through `bash`.
 
 Or import via the Grafana UI: **Dashboards → New → Import → Upload JSON file**.
 
@@ -550,7 +556,7 @@ OPENSEARCH_URL="http://localhost:9200" \
 GRAFANA_URL="http://localhost:3000" \
 GRAFANA_USER="admin" \
 GRAFANA_PASS="$GRAFANA_ADMIN_PASS" \
-bash scripts/08-crowdsec-smoketest.sh
+sudo scripts/08-crowdsec-smoketest.sh
 ```
 
 The smoke test verifies synthetic CrowdSec events can be indexed and that the CrowdSec Grafana alert rule/dashboard are present.
@@ -812,6 +818,12 @@ This project is licensed under the [GNU GPL v2](LICENSE).
 ## Support This Project
 
 If this project is useful to you, consider supporting continued development:
+
+<div align="center">
+
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/A0A4E59UP)
+
+</div>
 
 ### Recurring Support
 

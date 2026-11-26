@@ -1,0 +1,20 @@
+# /etc/systemd/system/siem-state-backup.service
+# Example unit; paths and the user are placeholders.
+# The user needs access to the container runtime. Membership of the docker
+# group is root-equivalent, so use a dedicated account (or rootless podman).
+[Unit]
+Description=Encrypted backup of n8n and Grafana state
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+User=siem-backup
+UMask=0077
+ExecStart=/usr/bin/python3 /opt/siem/scripts/backup-state.py --config /etc/siem-state-backup.toml
+# Light sandboxing; the script only writes to the destination and temp dirs.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/backups/siem-state
+ProtectHome=true

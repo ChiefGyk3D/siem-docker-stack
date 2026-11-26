@@ -102,15 +102,19 @@ query string on the configured URL are dropped before the suffix is added.
 
 Set it up:
 
-1. Create a check named "Alert path heartbeat" with a period of 5 minutes and a
-   grace time of 10 minutes. That tolerates two missed pings before an alert.
+1. Create a check named "Alert path heartbeat" with a simple schedule, a period
+   of 5 minutes and a grace time of at least 15 minutes. The real gap between
+   pings is 5 to 6 minutes. Healthchecks marks a check down after period plus
+   grace (inferred from its docs, not tested here), so this check goes down after
+   about 20 minutes of silence, which tolerates about three missed pings.
 2. Under Integrations, add the channels that must reach you when the check goes
    down (email, a chat service, a phone push). Choose channels that do not run
    through this stack.
 3. Copy the check's ping URL into `HEARTBEAT_PING_URL` on the n8n container and
    restart n8n.
 4. Enable the Grafana rule and the policy route (below). The check turns up after the
-   first heartbeat; stop n8n for 15 minutes to see it go down.
+   first heartbeat; stop n8n and wait at least 20 minutes (period plus grace,
+   with some margin) to see it go down.
 
 ### 2. Self-hosted Healthchecks or Uptime Kuma on another host
 
@@ -161,9 +165,28 @@ the private layer so they still reach you.
   errors, and the router answers 200 for the heartbeat as for any alert. The
   observer then reports missed pings (if it exists).
 - **A failed ping never fails the delivery of a real alert.** The HTTP Request
-  node continues on error, so a timeout (10 seconds) or an observer outage ends in
-  a normal 200 answer. Normal alerts do not use this branch at all. A failed
-  heartbeat ping is not retried: the next heartbeat is the retry.
+  node continues on error, so a timeout or an observer outage ends in a normal
+  200 answer. Normal alerts do not use this branch at all.
+- **A failed ping is retried up to 3 times, then dropped.** The node has Retry
+  On Fail on, 3 tries, 2 seconds between tries and a 5 second request timeout,
+  because one dropped ping (for example an intermittent certificate error on
+  n8n's outbound call) used to be lost silently. The worst case is
+  3 x 5 s + 2 x 2 s = 19 seconds before the node gives up and the branch answers
+  200. If all tries fail, the ping is dropped and the next heartbeat is the
+  retry. Certificate checking stays on: `allowUnauthorizedCerts` is not
+  acceptable, because the ping URL is a secret and must only go to the real
+  observer.
+- **Limitation: the retries are synchronous with Grafana's webhook response.**
+  The ping runs before the router answers 200, so a heartbeat whose observer
+  call fails takes up to 19 seconds to answer. Grafana's webhook deadline is
+  unverified (not checked; the repository runs `GRAFANA_VERSION:-latest`). If
+  Grafana's deadline is shorter, it records the heartbeat notification as failed
+  and may deliver it again. If heartbeat notifications show as failed or
+  duplicated in Grafana (Alerting, contact point status and the notification
+  log), check that deadline first, and the observer's response time. Real alerts
+  never reach this node, so they are not delayed or duplicated by it. Suggested
+  later change, not made here: answer Grafana first and ping the observer from a
+  separate workflow.
 - **Contract failure sends `/fail`.** A firing heartbeat whose `phone` label is
   not exactly `false` sends `/fail` (Healthchecks) or `status=down` (Uptime Kuma)
   immediately. Still no Discord or phone message is sent.
@@ -178,13 +201,38 @@ the private layer so they still reach you.
   rule broken, the contact point or its header credential wrong, n8n down or
   the workflow inactive, the route to the observer broken, or the setting unset.
 
+## If the observer shows down when the path is up
+
+Work through these in order. All of it is unverified against a live system.
+
+1. Read the check's settings: use a simple schedule with a period of 5 minutes
+   and a grace time of at least 15 minutes (down after about 20 minutes of
+   silence, period plus grace, inferred from the Healthchecks docs). A cron
+   schedule or a short grace turns a 6 minute gap into a false alarm.
+2. Read the check's ping log. Gaps with no entry mean pings never arrived (look
+   at n8n and the network); a `/fail` entry means the router saw a heartbeat
+   that broke its contract (the `phone` label), which is a different problem.
+3. Compare the gap times with the n8n container logs for TLS or connection
+   errors on the outbound call. Retries now cover a one-off drop; a gap longer
+   than the three tries points at something steadier.
+4. If the errors are certificate trust errors (something inspecting outbound
+   TLS), fix the trust, not the check: add the inspecting CA to the n8n
+   container with `NODE_EXTRA_CA_CERTS` (a path to a CA bundle file mounted into
+   the container), or exempt the observer host from inspection. Do not set
+   `allowUnauthorizedCerts`. Both options are unverified here; check n8n's and
+   your inspecting device's current docs.
+
 ## Enable it
 
-1. Copy `heartbeat-alert-rule.yml` into Grafana's provisioning alerting folder
-   (next to the other rule files; the live deploy script copies a fixed list, so
-   add it by hand or extend the list) and restart Grafana.
+1. Deploy `heartbeat-alert-rule.yml` into Grafana's provisioning alerting folder
+   (next to the other rule files). `scripts/live-deploy/grafana-deploy.py`
+   copies it with the other alerting files ([live-deploy-runbook.md](live-deploy-runbook.md),
+   step 5); stage it with the others. Grafana loads a new rule file only at
+   startup, so restart Grafana (the script's `--apply` recreates the container).
 2. Merge the `heartbeat` route from `heartbeat-notification-policy.yml.example`
-   into your notification policy tree (Alerting, Notification policies).
+   into your notification policy tree (Alerting, Notification policies). This
+   stays a manual or API merge, not part of the deploy: Grafana loads one
+   policy tree per organization, so a provisioned file would replace the tree.
 3. Import the updated `n8n/grafana-alert-router.json` and activate it.
 4. Set `HEARTBEAT_PING_URL` (and `HEARTBEAT_KIND`) on the n8n container and
    restart it. `.env.example` lists the names.
@@ -204,8 +252,20 @@ model of n8n):
 - normal alerts keep their routing, 502 handling and phone label gate;
 - no ping URL or key is stored in any file of the repository.
 
+Verified (n8n docs, https://docs.n8n.io/workflows/components/nodes/, read
+2026-11-20): Retry On Fail reruns a failed node until it succeeds, and the
+"Continue" error setting proceeds to the next node despite the error. The HTTP
+Request timeout is milliseconds to the initial response
+(https://docs.n8n.io/integrations/builtin/core-nodes/n8n-nodes-base.httprequest/,
+read 2026-11-20).
+
 Unverified (not checked against a live system or the vendors' current docs in
 this change):
+
+- n8n: that after all retries fail, Continue (regular output) goes on to Respond
+  OK and the answer stays 200 (the docs read did not state the order; the
+  repository model assumes it), the Max Tries and Wait Between Tries limits, and
+  that a timeout counts as a failed try;
 
 - n8n: `$env` access in Code nodes with `N8N_BLOCK_ENV_ACCESS_IN_NODE=false`,
   and the HTTP Request node's continue-on-error (`continueRegularOutput`) for a
@@ -224,3 +284,7 @@ python3 -m pytest tests/python/test_heartbeat.py -q
 ```
 
 Node is required, as for the other router tests.
+
+## Related
+
+A second P1 channel that does not depend on n8n: [channel-redundancy.md](channel-redundancy.md).

@@ -21,7 +21,8 @@ errorWorkflow setting (a placeholder id would be rejected by n8n).
 
 Environment (all optional, the current values are the defaults):
   SIEM_CONFIG_DIR         private config directory (default: $HOME/.config/doppler-siem);
-                          holds the file "router-path" with the private webhook path
+                          holds the file "router-path" with the private Grafana webhook path
+                          and the file "expiry-path" with the private expiry watch path
   N8N_CONTAINER           n8n container name (default: n8n)
   GRAFANA_CONTAINER       Grafana container name, read for the dashboard origin
                           (default: grafana)
@@ -37,14 +38,19 @@ import json
 import os
 import re
 import secrets
+import stat
 import subprocess
 import sys
 import uuid
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), ".."))
+import container_engine  # noqa: E402  (the shared CONTAINER_ENGINE setting and trusted-binary resolver)
 
 CONTAINER = os.environ.get("N8N_CONTAINER", "n8n")
 GRAFANA_CONTAINER = os.environ.get("GRAFANA_CONTAINER", "grafana")
 CONFIG_DIR = os.environ.get("SIEM_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".config", "doppler-siem")
 PATH_FILE = os.path.join(CONFIG_DIR, "router-path")
+EXPIRY_PATH_FILE = os.path.join(CONFIG_DIR, "expiry-path")
 CRED_HEADER_ID = os.environ.get("N8N_CRED_HEADER_ID", "gfwebhookauth01")
 CRED_PUSHOVER_ID = os.environ.get("N8N_CRED_PUSHOVER_ID", "pushoverapi0001")
 CRED_DISCORD_ID = os.environ.get("N8N_CRED_DISCORD_ID", "dscwhk1479574998")
@@ -54,6 +60,7 @@ NEEDED = ("GRAFANA_WEBHOOK_SECRET", "PUSHOVER_API_KEY", "PUSHOVER_USER_KEY")
 HANDLER_NAME = os.environ.get("N8N_HANDLER_NAME", "Alert Router Error Handler")
 ERROR_PLACEHOLDER = "ERROR_WORKFLOW_ID"
 PATH_PREFIX = "grafana-alerts-"
+EXPIRY_PATH_PREFIX = "expiry-watch-alerts-"
 STRIP_KEYS = ("activeVersionId", "shared", "versionMetadata", "versionCounter",
               "createdAt", "updatedAt", "triggerCount", "pinData", "isArchived")
 
@@ -65,14 +72,25 @@ def need(name):
     return value
 
 
+def engine():
+    """The container engine name (docker unless CONTAINER_ENGINE says podman); a bad value stops the run."""
+    try:
+        return container_engine.engine_name()
+    except container_engine.ContainerEngineError as err:
+        sys.exit(str(err))
+
+
+def engine_run(args, **kwargs):
+    """Run the selected engine as the trusted binary (never through PATH); no shell is involved."""
+    try:
+        return container_engine.engine_run([engine(), *args], capture_output=True, check=False, **kwargs)
+    except container_engine.ContainerEngineError as err:
+        sys.exit(str(err))
+
+
 def docker_in(script, payload):
     """Feed payload to a shell script inside the n8n container over stdin."""
-    proc = subprocess.run(
-        ["docker", "exec", "-i", CONTAINER, "sh", "-c", script],
-        input=payload.encode(),
-        capture_output=True,
-        check=False,
-    )
+    proc = engine_run(["exec", "-i", CONTAINER, "sh", "-c", script], input=payload.encode())
     out = (proc.stdout + proc.stderr).decode(errors="replace")
     # Never echo anything that could contain a value; keep only plain status lines.
     lines = [ln for ln in out.splitlines() if ln.strip() and "Error tracking" not in ln]
@@ -80,7 +98,7 @@ def docker_in(script, payload):
 
 
 def docker_out(*args):
-    proc = subprocess.run(["docker", *args], capture_output=True, check=False)
+    proc = engine_run(list(args))
     return proc.returncode, proc.stdout.decode(errors="replace").strip()
 
 
@@ -113,12 +131,100 @@ def credential_id_map():
     }
 
 
-def choose_webhook_path(existing, token_fn=None):
-    """Reuse the saved private path when it looks right, else make a new one."""
+def choose_webhook_path(existing, token_fn=None, prefix=PATH_PREFIX, token_len=None):
+    """Reuse the saved private path when it looks right, else make a new one.
+
+    With token_len the saved path must be the prefix plus exactly that many URL-safe characters (the
+    shape token_urlsafe(18) makes, 24), so a known or short suffix is never reused."""
     existing = (existing or "").strip()
-    if existing.startswith(PATH_PREFIX) and len(existing) >= 20:
+    if token_len is not None:
+        ok = re.fullmatch(re.escape(prefix) + "[A-Za-z0-9_-]{%d}" % token_len, existing) is not None
+    else:
+        ok = existing.startswith(prefix) and len(existing) >= 20
+    if ok:
         return existing
-    return PATH_PREFIX + (token_fn or (lambda: secrets.token_urlsafe(18)))()
+    return prefix + (token_fn or (lambda: secrets.token_urlsafe(18)))()
+
+
+EXPIRY_TOKEN_LEN = 24
+
+
+def valid_expiry_path(path):
+    return re.fullmatch(re.escape(EXPIRY_PATH_PREFIX) + "[A-Za-z0-9_-]{%d}" % EXPIRY_TOKEN_LEN, path or "") is not None
+
+
+def _open_private(path, flags):
+    """Open path without following a symlink; refuse anything but a regular file we own."""
+    try:
+        fd = os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    except OSError as err:
+        sys.exit("cannot open %s safely (%s): refusing" % (path, err.strerror))
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        os.close(fd)
+        sys.exit("%s is not a regular file: refusing" % path)
+    if st.st_uid != os.geteuid():
+        os.close(fd)
+        sys.exit("%s has the wrong owner: refusing" % path)
+    return fd, st
+
+
+def read_private_file(path):
+    """Contents of a private file, or "" when it does not exist. Refuses a symlink, a file that is not a
+    regular file owned by this user, and any group or other permission bit (the path inside may have been
+    read by others: rotate it by deleting the file)."""
+    if not os.path.lexists(path):
+        return ""
+    fd, st = _open_private(path, os.O_RDONLY)
+    try:
+        if st.st_mode & 0o077:
+            sys.exit("%s has mode %o, looser than 600: refusing to trust it; delete it to make a new path"
+                     % (path, st.st_mode & 0o777))
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            fd = -1
+            return handle.read()
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def write_private_file(path, value):
+    """Replace path atomically and durably with mode 600: write a temp file in the same folder (created
+    exclusively, no symlink followed, mode 600 requested at creation), write until every byte is out,
+    fsync it, rename it over the final name, fsync the folder. The temp file is removed on any failure and
+    the old file stays untouched. A symlink or non-regular final path is refused."""
+    if os.path.lexists(path):
+        os.close(_open_private(path, os.O_RDONLY)[0])  # refuses a symlink, non-regular file, foreign owner
+    folder = os.path.dirname(path) or "."
+    tmp = os.path.join(folder, ".%s.tmp-%d-%s" % (os.path.basename(path), os.getpid(), secrets.token_hex(6)))
+    data = value.encode("utf-8")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, stat.S_IRUSR | stat.S_IWUSR)
+    try:
+        try:
+            view = memoryview(data)
+            while view:
+                try:
+                    written = os.write(fd, view)
+                except InterruptedError:
+                    continue
+                if written <= 0:
+                    raise OSError("short write to %s made no progress" % tmp)
+                view = view[written:]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    dir_fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
 def valid_origin(text):
@@ -170,7 +276,7 @@ def parse_workflow_args(rest):
 
 
 def patch_workflow(wf, reuse_id="", pushover_on=False, origin="", webhook_path="",
-                   webhook_id=None, new_id=None, error_workflow_id=""):
+                   webhook_id=None, new_id=None, error_workflow_id="", expiry_path=None):
     """Return the workflow patched for import. Mutates and returns wf."""
     check_id(reuse_id)
     check_id(error_workflow_id, "error workflow id")
@@ -191,7 +297,17 @@ def patch_workflow(wf, reuse_id="", pushover_on=False, origin="", webhook_path="
         for cred in (node.get("credentials") or {}).values():
             if cred.get("name") in ids:
                 cred["id"] = ids[cred["name"]]
-        if node["type"].endswith(".webhook"):
+        if node["type"].endswith(".webhook") and node["name"] == "Expiry Watch Webhook":
+            # the expiry watch's entry gets its own private path (never the committed placeholder),
+            # so an anonymous caller cannot find it and start executions
+            path = expiry_path or choose_webhook_path("", prefix=EXPIRY_PATH_PREFIX, token_len=EXPIRY_TOKEN_LEN)
+            if not valid_expiry_path(path):
+                raise ValueError("the expiry webhook path must be %s plus %d URL-safe characters"
+                                 % (EXPIRY_PATH_PREFIX, EXPIRY_TOKEN_LEN))
+            node["parameters"]["path"] = path
+            node["webhookId"] = str(uuid.uuid4())
+            node.pop("disabled", None)  # the committed node ships disabled; only a private path enables it
+        elif node["type"].endswith(".webhook"):
             node["parameters"]["path"] = webhook_path
             # With a webhookId the production URL is /webhook/<path>; without one n8n
             # serves it under /webhook/<workflowId>/<node name>/<path>.
@@ -264,12 +380,16 @@ def workflow(path, reuse_id="", pushover_on=False, error_workflow_id=""):
         with open(PATH_FILE, encoding="utf-8") as handle:
             existing = handle.read()
     new_path = choose_webhook_path(existing)
+    expiry_existing = read_private_file(EXPIRY_PATH_FILE)
+    expiry_path = choose_webhook_path(expiry_existing, prefix=EXPIRY_PATH_PREFIX, token_len=EXPIRY_TOKEN_LEN)
     origin = grafana_origin()
-    wf = patch_workflow(wf, reuse_id, pushover_on, origin, new_path, error_workflow_id=error_workflow_id)
+    wf = patch_workflow(wf, reuse_id, pushover_on, origin, new_path, error_workflow_id=error_workflow_id,
+                        expiry_path=expiry_path)
     old = os.umask(0o077)
     try:
         with open(PATH_FILE, "w", encoding="utf-8") as handle:
             handle.write(new_path)
+        write_private_file(EXPIRY_PATH_FILE, expiry_path)
     finally:
         os.umask(old)
     script = "cat > /tmp/wf.json && n8n import:workflow --input=/tmp/wf.json; rc=$?; rm -f /tmp/wf.json; exit $rc"
@@ -278,6 +398,7 @@ def workflow(path, reuse_id="", pushover_on=False, error_workflow_id=""):
         print(ln[:160])
     print("workflow import exit code:", rc)
     print("new webhook path saved (mode 600):", PATH_FILE)
+    print("expiry watch webhook path saved (mode 600):", EXPIRY_PATH_FILE)
     print("dashboard origin constant set:", bool(origin))
     print("error workflow set:", bool(error_workflow_id))
     return rc

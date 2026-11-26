@@ -593,7 +593,7 @@ These need to go in `.env.example` as the phases roll out:
 
 ```bash
 # ── N8N Automation Engine ─────────────────────────────────────────────────────
-# N8N_BASE=http://172.20.0.16:80
+# N8N_BASE=http://192.0.2.10:80   # placeholder; optional, scripts look the address up at run time
 # N8N_API_KEY=your-n8n-api-key
 
 # ── Ollama / LLM Server ──────────────────────────────────────────────────────

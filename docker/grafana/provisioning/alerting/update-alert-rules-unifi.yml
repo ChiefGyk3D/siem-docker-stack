@@ -87,6 +87,7 @@ groups:
           description: "Apply the pending UniFi firmware update. This alert clears only when the device reports no pending update."
         labels:
           severity: "warning"
+          tier: "P2"
           source: "unifi"
           alert_group: "updates"
           update_alert: "true"
@@ -137,6 +138,7 @@ groups:
           description: "Escalated: the update has been pending for over 7 days. Apply it. This alert clears only when the device reports no pending update."
         labels:
           severity: "critical"
+          tier: "P1"
           source: "unifi"
           alert_group: "updates"
           update_alert: "true"
@@ -177,6 +179,7 @@ groups:
           description: "The UniFi update alerts cannot see pending updates until the poller writes again. Check the unifi-poller container and its login to the controller."
         labels:
           severity: "warning"
+          tier: "P2"
           source: "unifi"
           alert_group: "updates"
           update_alert: "true"

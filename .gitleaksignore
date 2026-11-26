@@ -19,5 +19,5 @@
 5da4169ce54551c4ce18296943e871f3135c2b2e:docs/troubleshooting.md:curl-auth-user:142
 # scripts/05-verify.sh
 4cf105aec0866f4d7f455103ad7114be25403a7b:scripts/05-verify.sh:curl-auth-user:197
-# scripts/10-snapshot-setup.sh
+# scripts/10-snapshot-setup.sh (the line no longer exists on master; the entry stays because gitleaks scans every commit)
 3f7edfd6b46027a1c42a0884be16b7d779abd8bb:scripts/10-snapshot-setup.sh:curl-auth-user:175

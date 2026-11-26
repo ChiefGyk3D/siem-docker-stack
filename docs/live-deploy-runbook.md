@@ -11,9 +11,10 @@ brackets. Documentation addresses (192.0.2.x) stand for real ones.
 | File | Role |
 |------|------|
 | `scripts/live-deploy/siem-run` | Runs a command with the alert values injected from the secret manager |
+| `scripts/siem-net-run` | The same idea for the Doppler config `dev_network` (project `homelab`): reads a read-only service token from `$SIEM_NET_CONFIG_DIR/token` (default `$HOME/.config/doppler-siem-net`), refuses a missing, symlinked, non-private or foreign-owned file, and runs a command with the token only in that process. It needs `--require NAMES` and/or `--optional NAMES` then `--` (only those secrets are injected, only names in its fixed table are accepted, and a required one that is missing stops the command) and reads no cached copy. It restarts Grafana and recreates n8n for the owner runbook (`docs/owner-runbook.md`, step 0b.5) |
 | `scripts/live-deploy/n8n-setup-alert-router.py` | Creates the two n8n credentials and imports the router workflow |
 | `scripts/live-deploy/n8n-test-router.py` | Pre-deploy checks against the router (401/403 cases, test alerts, phone test) |
-| `scripts/live-deploy/grafana-deploy.py` | Additive Grafana deploy: alert files, two datasources, one compose line |
+| `scripts/live-deploy/grafana-deploy.py` | Grafana file deploy (dry run by default): allowlisted alert files with backups, one datasource file; never starts docker |
 | `scripts/live-deploy/pfb-fix-feeds.php` | One-time firewall feed fix, kept as a change note (see the last section) |
 
 Every script documents its environment variables at the top. The defaults are
@@ -25,7 +26,7 @@ the values of the original deploy; override them for your host:
 | `SIEM_STAGE_DIR` | `$HOME/bin/alerting` | Staged copy of `docker/grafana/provisioning/alerting/` |
 | `SIEM_CONFIG_DIR` | `$HOME/.config/doppler-siem` | Private config directory: token file, router path file |
 | `N8N_CONTAINER`, `GRAFANA_CONTAINER` | `n8n`, `grafana` | Container names |
-| `N8N_BASE` | `http://192.0.2.19` (placeholder) | n8n address for the checks, on the Docker bridge |
+| `N8N_BASE` | looked up at run time | Full n8n URL for the checks. Unset: found from the container's address on the siem network (`scripts/n8n_address.py`; see `N8N_CONTAINER`, `SIEM_NETWORK`, `N8N_PORT`) |
 | `INFLUX_URL` | `http://influxdb:8086` | URL of the two added datasources |
 | `DOPPLER_PROJECT`, `DOPPLER_CONFIG` | unset | Only if your token is not already scoped; examples `homelab` and `prd_network` |
 
@@ -148,13 +149,17 @@ fresh import gets a new id.
 
 ## 4. Test through the Docker bridge address
 
-A macvlan container is not reachable from its own host. Find the n8n
-container's address on the bridge network (`docker inspect n8n`), and run the
-checks against that:
+A macvlan container is not reachable from its own host, so the checks go
+through the siem network. The test script finds the n8n container's address on
+that network at run time (the address changes after a recreate, so none is
+written down here):
 
 ```
-N8N_BASE=http://<n8n-bridge-address> siem-run python3 -I scripts/live-deploy/n8n-test-router.py
+siem-run python3 -I scripts/live-deploy/n8n-test-router.py
 ```
+
+It stops with a clear message if n8n is not on the siem network. To skip the
+lookup, set `N8N_BASE=http://<n8n-bridge-address>:80` for the one command.
 
 Expected: six lines ending `PASS`, then `failed cases: 0`. Cases 1 to 3 (no
 header, wrong value, wrong scheme) must be 401 or 403. Cases 4 to 6 must be
@@ -193,55 +198,193 @@ Prove the failure path on purpose, in a copy, never on the live router:
 Rollback: nothing changed on the live router; the checks only send test alerts
 and the copy is deleted.
 
+### Keep n8n on the siem network
+
+Warning: recreating the n8n container (`docker compose up -d` after an image or
+config change) from a compose file that does not list the siem network drops it
+off that network. Grafana then cannot resolve the name `n8n`, and alert delivery
+fails silently until it is reattached. The reference service definition
+(siem network as `external: true` plus the macvlan network) is in
+`docs/examples/n8n-compose.example.yml`; make your live compose file match it.
+
+For a container that was already recreated, reattach it. The real network name
+is usually the compose project name plus `_siem-net` (for example
+`siem_siem-net`); `docker network ls` shows it.
+
+```
+docker network connect <network-name> n8n
+```
+
+Verify Grafana reaches n8n by name. Expected: an HTTP status line (a 404 or 405
+from the webhook path is fine, it proves the name resolves and n8n answers);
+`Could not resolve host` means the container is still off the network:
+
+```
+docker exec grafana wget -S -q -O /dev/null --post-data '{}' http://n8n/webhook/probe 2>&1 | head -3
+```
+
+Then run the checks of this section; they fail with the same hint if the
+container is off the network.
+
 ## 5. Additive Grafana deploy
 
-1. Stage the files: copy `docker/grafana/provisioning/alerting/contact-points.yml`,
-   `update-alert-rules-unifi.yml` and `update-alert-rules-pfsense.yml` to
-   `SIEM_STAGE_DIR`.
-2. Plan (changes nothing):
+The script `scripts/live-deploy/grafana-deploy.py` copies the provisioning files
+only. It never starts docker and never reads the compose file. The one compose
+line and the Grafana restart are manual steps (steps 4 and 5 below).
+
+1. Stage the files: copy these files from `docker/grafana/provisioning/alerting/`
+   to `SIEM_STAGE_DIR`: `contact-points.yml`, `update-alert-rules-unifi.yml`,
+   `update-alert-rules-pfsense.yml`, `heartbeat-alert-rule.yml` and
+   `notification-failure-alert-rule.yml`. For the P1 email channel also copy
+   `email-contact-point.yml.example` and `email-notification-policy.yml.example`;
+   they are only deployed when you name them (below).
+2. Dry run. This is the default, so no flag is needed. It changes nothing:
 
 ```
-siem-run python3 -I scripts/live-deploy/grafana-deploy.py --stage
+siem-run python3 -I scripts/live-deploy/grafana-deploy.py
 ```
 
-Expected: `staged files ok; router path length <n>; compose: insert after line <k>`
-(or `compose: already present` on a re-run). It refuses with a plain message if
-the router path file looks wrong, a staged file is missing, the contact point
-URL is not found, or the `GF_SERVER_ROOT_URL` anchor line is missing or appears
-more than once.
+Expected: `staged files ok; router path length <n>`, then `dry run: nothing is
+changed` and one line per file: `create`, `unchanged` or `overwrite`. For every
+file that would be overwritten it prints only the number of lines added and
+removed, never file content and never a hash (live files can hold credentials,
+and a hash of a guessable file is a guessing aid); variable names are listed for
+example files. `--stage` is the shorter check and prints only the first line.
 
-3. Apply:
+It refuses, with a plain message and a nonzero exit code, if a staged file or the
+`router-path` file is owned by someone else or writable by group or others (use
+`chmod 644`), the stage, config, alerting or datasource folder is writable by group
+or others (a sticky folder such as `/tmp` is accepted only as a parent, never as
+those folders themselves), the router path
+file looks wrong (it must be `grafana-alerts-` plus 8 to 128 letters, digits, `_`
+or `-`), a staged file is missing, a file or directory is a symlink or not a
+regular file (every directory in the path is opened without following symlinks,
+and each must be owned by root or you and not writable by group or others; a
+sticky world-writable directory such as `/tmp` is accepted), a file is over 1
+MiB, the contact point URL is not found, or `N8N_WEBHOOK_BASE` or `INFLUX_URL` is
+not a plain `http(s)` URL (they are written into YAML as is).
+
+3. Apply, only when the dry run looks right:
 
 ```
 siem-run python3 -I scripts/live-deploy/grafana-deploy.py --apply
 ```
 
-What it does, and only this:
+To deploy an example file as well, name it exactly (repeat the option for both):
+
+```
+siem-run python3 -I scripts/live-deploy/grafana-deploy.py --apply --include-example email-contact-point.yml.example
+```
+
+Only `email-contact-point.yml.example` and `email-notification-policy.yml.example`
+can be named; any other name is refused. A deployed example loses the `.example`
+suffix in the alerting folder. Without the option the examples stay inactive.
+The email contact point needs `P1_EMAIL_TO` and the `GF_SMTP_*` variables in the
+Grafana container environment ([channel-redundancy.md](channel-redundancy.md));
+the plan lists the variable names it sees, never values. The policy example
+replaces the whole notification policy tree (Grafana loads one tree per
+organization), so deploy it only when that tree is meant to be exactly that
+file; otherwise merge the route by hand as in step 6.
+
+What the script does, and only this:
 
 - Writes the alerting folder `grafana/provisioning/alerting/` (the contact
-  point gets the private webhook path; the pfSense rules stay paused).
-- Writes one new datasource file with two extra InfluxDB datasources, ids
+  point gets the private webhook path; the pfSense rules stay paused; the
+  heartbeat and notification failure rule files are copied as is, mode 644, and
+  files in the folder that are not on the allowlist are left alone).
+- Writes one datasource file with two extra InfluxDB datasources, ids
   `influxdb-pfsense` and `influxdb-unifi` (names `InfluxDB-pfSense-alerts` and
   `InfluxDB-UniFi-alerts`). Existing datasources are not changed, because
   changing a datasource id breaks dashboards that reference it.
-- Adds one pass-through line (`- GRAFANA_WEBHOOK_SECRET`) after the
-  `GF_SERVER_ROOT_URL` line in the Grafana service of the live compose file,
-  after saving a backup `docker-compose.yml.bak-<date>`. A second run finds the
-  line and does not add it again.
-- Recreates only the Grafana container (`docker compose up -d grafana`).
+- Before it replaces anything, it re-reads every existing target and saves the
+  old content as `<name>.bak-<UTC timestamp>` (mode 600) in the same folder (a
+  file that changed since the dry run stops the run before any replacement). The
+  backup is written under a temp name and linked into place only after a full
+  fsync, so a backup that exists is complete. Grafana ignores the `.bak-` files.
+- Then it replaces the files one at a time (temp file, fsync, rename), comparing
+  each one with the planned content right before its rename, and prints one
+  `manifest:` line per file as it goes (`replaced <name> (backup <name>)` or
+  `created <name>`). At the end it lists the files replaced and points here.
+- It is not atomic across files and not crash safe. If it stops on an error, or
+  is killed, the set can be partial: some files new, some old. Nothing is rolled
+  back for you. On an error it prints which files it had already replaced and the
+  backup that restores each one.
+- Concurrent edits are not supported. A process of the same user, or root, can
+  still change a file in the window of a few microseconds between the final
+  comparison and the rename; that edit would be replaced and is not in the backup.
+- Output: file names, line counts, backup names, variable names and the router
+  path length. No file content, no hashes, no environment values, and error
+  messages do not echo the path components or arguments you supplied.
+
+4. Manual: add the pass-through line that gives the webhook secret to the Grafana
+   container, and only to the grafana service (only if the compose file does not
+   already list it). `GRAFANA_WEBHOOK_SECRET` is the variable name; its value stays
+   in the secret manager. The backup of the compose file is made with `umask 077`
+   so it is mode 600, and `--no-clobber` so an existing backup is never replaced.
+   The compose file only references variable names, so the backup holds no secret
+   values unless someone wrote literal values into the compose file; treat it as
+   sensitive anyway. On the SIEM host, in `SIEM_DIR` (default `/opt/siem`):
+
+```
+cd /opt/siem
+( umask 077 && cp --no-clobber docker-compose.yml "docker-compose.yml.bak-$(date -u +%Y%m%dT%H%M%SZ)" )
+ls -l docker-compose.yml.bak-*
+awk '/^  [A-Za-z0-9_.-]+:[[:space:]]*$/ {svc=$1} /GRAFANA_WEBHOOK_SECRET/ {print svc, NR}' docker-compose.yml
+```
+
+The `ls` line of the new backup must start with `-rw-------`. The `awk` line prints
+the service name and line number of every line that mentions the variable. Before
+the edit it must print nothing for the grafana service (if it prints
+`grafana:` the line is already there, skip the edit). It assumes the usual layout
+with service names indented by two spaces; check the result by eye if your file
+is laid out differently.
+
+Edit the file in an editor (no scripted edit is given, because a blind
+insert would also hit any other service that has the same neighbor line). In the
+`grafana:` service, inside its `environment:` list, add exactly this item at the
+same indentation as its neighbors, directly after the `GF_SERVER_ROOT_URL` line:
+
+```
+      - GRAFANA_WEBHOOK_SECRET
+```
+
+Then run the `awk` line again. It must print exactly one line, and the service name
+on it must be `grafana:`. If any other service name appears, remove the line from
+any other service and run it again until only `grafana:` is listed: the secret
+must not reach any other service. Do not run `docker compose config` to check the
+result: it prints resolved values, including secrets, to your terminal.
+
+5. Manual: recreate only Grafana. Grafana loads provisioning files only at
+   startup, so this restart is what makes it read the new files. The values the
+   compose file needs come from the one Doppler dev config (`DEV_CONFIG` is the
+   config name; see `docs/owner-runbook.md`, Q1):
+
+```
+cd /opt/siem && doppler run --project homelab --config DEV_CONFIG -- docker compose up -d grafana
+```
 
 Check:
 
-- Output ends with `compose up exit code: 0`.
+- The command exits 0. `docker compose ls` lists the project as running, and
+  `docker ps --filter name=grafana --format '{{.Names}} {{.Status}}'` shows
+  `Up` (and `healthy` when the service defines a healthcheck).
 - In Grafana, Alerting shows the rules in the folder `Update Alerts` and the
   contact point `n8n-grafana-router`; the datasources list shows the two new
   ones. The UniFi rule states are Normal, not Error.
 - Verify the data the UniFi rules read: `SHOW FIELD KEYS ON unpoller FROM usw`
   lists the boolean field `upgradeable`.
 
-Rollback: restore `docker-compose.yml.bak-<date>` over the compose file, delete
-`grafana/provisioning/alerting/` and the datasource file `alerting-influx.yml`,
-then `docker compose up -d grafana`.
+Rollback, by hand (there is no automatic rollback): take the `manifest:` lines of
+the run, or the list in its error message. For each `replaced` file, copy its
+backup over it in the same folder, for example
+`cp -p contact-points.yml.bak-<UTC timestamp> contact-points.yml`. Delete each
+file marked `created`, and delete the datasource file `alerting-influx.yml` if it
+is not wanted. If you edited the compose file, restore it with
+`cp -p docker-compose.yml.bak-<UTC timestamp> docker-compose.yml`. Then recreate
+Grafana with the command of step 5. After a kill with no report, look for
+`*.bak-*` backups and leftover `.*.new-*` temp files in the alerting folder and
+the datasources folder; the backups of the files that were replaced are the
+newest `.bak-` of each name.
 
 ### Datasource name collision (seen live)
 
@@ -282,7 +425,7 @@ Rollback: delete the route in the same screen.
 | The service token file in the private config directory | A credential; recreate it in step 2 |
 | The `router-path` file (private webhook path) | The path is an access control by design; the import makes a new one, and Grafana's contact point is rewritten from it. If you lose it, redo steps 3 and 5 |
 | n8n's data volume, with the encrypted credentials and workflow state | Instance state; recreated by step 3 |
-| The compose backups `docker-compose.yml.bak-<date>` | Host-local copies of the live file |
+| The compose backups `docker-compose.yml.bak-<UTC timestamp>` | Host-local copies of the live file |
 | The Discord webhook credential in n8n | Part of the original n8n setup, outside this tooling |
 
 ## 8. One-time firewall feed fix (change note)

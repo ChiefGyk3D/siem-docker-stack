@@ -126,18 +126,19 @@ def test_every_node_is_reachable_only_through_the_authenticated_webhook():
     wf = _workflow()
     names = {n["name"] for n in wf["nodes"]}
     hooks = [n["name"] for n in wf["nodes"] if n["type"] == "n8n-nodes-base.webhook"]
-    assert len(hooks) == 1
+    assert hooks == ["Grafana Webhook", "Expiry Watch Webhook"], "two entry points: Grafana's and the expiry watch's"
     edges = _edges(wf)
     has_incoming = {t for ts in edges.values() for t in ts}
-    assert names - has_incoming == {hooks[0]}, "a node other than the webhook is an entry point"
-    assert _reachable(hooks[0], edges) == names, "unreachable node in the graph"
-    # nothing at all is reachable if the webhook is cut
-    assert _reachable(hooks[0], edges, blocked={hooks[0]}) == set()
-    # the Pushover HTTP nodes need the enable gate and the payload builder
+    assert names - has_incoming == set(hooks), "a node other than the webhooks is an entry point"
+    assert set().union(*(_reachable(h, edges) for h in hooks)) == names, "unreachable node in the graph"
+    # nothing at all is reachable if the webhooks are cut
+    assert _reachable(hooks[0], edges, blocked=set(hooks)) == set()
+    # the Pushover HTTP nodes need the enable gate and the payload builder, from either entry
     http = {n["name"] for n in _http_nodes()}
     assert http
-    assert not (http & _reachable(hooks[0], edges, blocked={"Pushover Enabled?"}))
-    assert not (http & _reachable(hooks[0], edges, blocked={_build_node()["name"]}))
+    for hook in hooks:
+        assert not (http & _reachable(hook, edges, blocked={"Pushover Enabled?"}))
+        assert not (http & _reachable(hook, edges, blocked={_build_node()["name"]}))
 
 
 def test_webhook_requires_header_auth_with_credential_reference():
@@ -151,7 +152,7 @@ def test_webhook_requires_header_auth_with_credential_reference():
 def test_pushover_secrets_come_from_a_credential_not_env_or_node_output():
     text = ROUTER.read_text(encoding="utf-8")
     # the only env access is the heartbeat sink setting, read in its own Code node (test_heartbeat.py)
-    assert set(re.findall(r"\$env\.(\w+)", text)) <= {"HEARTBEAT_PING_URL", "HEARTBEAT_KIND"}
+    assert set(re.findall(r"\$env\.(\w+)", text)) <= {"HEARTBEAT_PING_URL", "HEARTBEAT_KIND", "EXPIRY_WATCH_ROUTER_SECRET"}
     assert "$env" not in _build_node()["parameters"]["jsCode"], "the Pushover builder reads no env"
     assert "PUSHOVER_APP_TOKEN" not in text and "PUSHOVER_USER_KEY" not in text
     code = _build_node()["parameters"]["jsCode"]
@@ -500,14 +501,15 @@ def test_notification_policy_repeats():
 
 
 def test_pending_update_rules_all_push_to_the_phone():
-    # #199: every pending rule pages, except the UniFi 24h warning. Owner decision
-    # 2026-11-26 ("wait 7 days first"): a UniFi update pending under 7 days does not
-    # page, so auto-patching devices usually finish first; the 7d critical pages.
+    # #199: every pending rule pages, except the two 24h warnings. UniFi: owner decision
+    # 2026-11-26 ("wait 7 days first"), auto-patching devices usually finish first.
+    # pfSense 24h: P2 by owner decision 2026-11-20 (#152, already on master). The 7d
+    # critical and the pfSense security rule page.
     pending = [r for _, _, r in _rules() if r["labels"]["alert_group"] == "updates"
                and "poller" not in r["uid"]]
     assert len(pending) >= 6
     for r in pending:
-        want = "false" if r["uid"] == "update-unifi-pending-24h" else "true"
+        want = "false" if r["uid"] in {"update-unifi-pending-24h", "update-pfsense-pending-24h"} else "true"
         assert r["labels"]["phone"] == want, r["uid"]
     uids = {r["uid"] for r in pending}
     assert {"update-unifi-pending-24h", "update-unifi-pending-7d"} <= uids
@@ -718,9 +720,10 @@ def _expr(value):
 
 
 def _run_code_node(node, item, ctx=None):
-    harness = (_ctx_js(ctx) + "const f=new Function('$input','$','$prevNode','$env',"
+    harness = (_ctx_js(ctx) + "const $getWorkflowStaticData=(t)=>({});"  # fresh, empty workflow static data per run
+               "const f=new Function('$input','$','$prevNode','$env','$getWorkflowStaticData',"
                + json.dumps(node["parameters"]["jsCode"]) + ");"
-               "const r=f({first:()=>({json:" + json.dumps(item) + "})},$,$prevNode,$env);"
+               "const r=f({first:()=>({json:" + json.dumps(item) + "})},$,$prevNode,$env,$getWorkflowStaticData);"
                "console.log(JSON.stringify(r.map(x=>x.json)));")
     r = subprocess.run([_node_bin(), "-"], input=harness, capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, "Code node threw: " + r.stderr[-300:]
@@ -771,7 +774,7 @@ def _eval_many(codes, item, ctx=None):
     return json.loads(r.stdout)
 
 
-def _run_graph(webhook_item, pushover_enabled=False, fail=(), wf=None, env=None):
+def _run_graph(webhook_item, pushover_enabled=False, fail=(), wf=None, env=None, start=None):
     """Walk the real graph from the webhook, the way n8n runs it (first match for a
     switch, continue-on-error outputs, a failed node without one stops the run).
 
@@ -780,6 +783,7 @@ def _run_graph(webhook_item, pushover_enabled=False, fail=(), wf=None, env=None)
     response (the HTTP status the webhook answered, as a string), body (what it sent),
     run ("success" or "error": how the run ended, which is what the error workflow
     sees) and error (the Stop and Error message, or the failing node's name).
+    start: the webhook node the call enters through (default: the first, the Grafana one).
     env: the environment variables the Code nodes see ($env), or "blocked".
     requests: one {node, url} per HTTP node that ran, with its URL expression evaluated.
 
@@ -788,7 +792,7 @@ def _run_graph(webhook_item, pushover_enabled=False, fail=(), wf=None, env=None)
     body, so Grafana would treat it as delivered."""
     wf = wf or _workflow()
     nodes = {n["name"]: n for n in wf["nodes"]}
-    hook = next(n["name"] for n in wf["nodes"] if n["type"] == "n8n-nodes-base.webhook")
+    hook = start or next(n["name"] for n in wf["nodes"] if n["type"] == "n8n-nodes-base.webhook")
     res = {"reached": [], "notified": set(), "failed": set(), "response": None, "body": None,
            "run": "success", "error": "", "requests": []}
 
@@ -1297,9 +1301,10 @@ def test_graph_malformed_notice_pushes_when_enabled():
 def test_every_update_rule_sets_the_phone_label_explicitly():
     seen = 0
     for _, _, rule in _rules():
-        # owner 2026-11-26: UniFi 24h warning stays off the phone (7-day wait)
-        quiet = {"update-unifi-poller-stale", "update-unifi-pending-24h"}
-        want = "false" if rule["uid"] in quiet else "true"
+        # the poller-stale rule and the two 24h rules (P2, owner decision 2026-11-20, issue #152) stay off the phone;
+        # the UniFi 24h rule is also quiet by owner decision 2026-11-26 (7-day wait, issue #199)
+        p2 = {"update-unifi-poller-stale", "update-unifi-pending-24h", "update-pfsense-pending-24h"}
+        want = "false" if rule["uid"] in p2 else "true"
         assert rule["labels"].get("phone") == want, rule["uid"]
         seen += 1
     assert seen >= 7
@@ -1327,3 +1332,35 @@ def test_docs_have_the_label_taxonomy_and_health_notes():
     assert "stay off the phone until they carry `phone=true`" in flat
     assert "84h" in flat and "twice a week" in flat
     assert "heartbeat" in flat.lower() and "not part of this change" in flat.lower()
+
+
+# --- issue #61: a failing query must alert, never read as OK ---
+
+def test_no_update_rule_treats_a_query_error_as_ok():
+    rules = _rules()
+    files = {fname for fname, _, _ in rules}
+    assert any("unifi" in f for f in files) and any("pfsense" in f for f in files)
+    assert len(rules) >= 7
+    for fname, _group, rule in rules:
+        # the key must be present: Grafana's default is Alerting, but the rule
+        # files state it so a later edit cannot lean on a default
+        assert "execErrState" in rule, rule["uid"]
+        assert rule["execErrState"] == "Alerting", (fname, rule["uid"], rule["execErrState"])
+        assert rule["execErrState"] not in {"OK", "Error"}, rule["uid"]
+
+
+@pytest.mark.parametrize("uid", sorted({r["uid"] for _, _, r in _rules()}))
+def test_each_update_rule_alerts_on_query_error(uid):
+    rule = {r["uid"]: r for _, _, r in _rules()}[uid]
+    assert rule["execErrState"] == "Alerting"
+    # NoData is a separate decision: only the two UniFi pending rules treat it as OK
+    expect = "OK" if uid in PENDING_UNIFI else "Alerting"
+    assert rule["noDataState"] == expect
+
+
+def test_docs_describe_the_query_error_failure_mode():
+    flat = " ".join((REPO_ROOT / "docs" / "update-alerting.md").read_text().split())
+    assert "### Query errors" in flat
+    assert "`execErrState: Alerting`" in flat
+    assert "DatasourceError" in flat
+    assert "instead of the default" in flat

@@ -22,6 +22,15 @@ CONTACT = REPO_ROOT / "docker" / "grafana" / "provisioning" / "alerting" / "cont
 FILES = sorted(p for p in LIVE.iterdir() if p.is_file())
 
 
+@pytest.fixture(autouse=True)
+def _umask_022():
+    """grafana-deploy.py refuses group-writable directories; keep temp dirs 755 whatever the user's umask."""
+    import os
+    old = os.umask(0o022)
+    yield
+    os.umask(old)
+
+
 @pytest.fixture(scope="module")
 def setup():
     return import_module_from_path("live_n8n_setup", LIVE / "n8n-setup-alert-router.py")
@@ -213,35 +222,14 @@ COMPOSE = (
 )
 
 
-def test_compose_edit_inserts_the_line_once_after_the_anchor(gdeploy):
-    new, note = gdeploy.compose_edit(COMPOSE)
-    assert "insert after line 5" in note
-    lines = new.splitlines()
-    assert lines[5] == "      - GRAFANA_WEBHOOK_SECRET" and lines[4].startswith("      - GF_SERVER_ROOT_URL=")
-    assert new.count("GRAFANA_WEBHOOK_SECRET") == 1
-    assert [ln for ln in lines if ln != "      - GRAFANA_WEBHOOK_SECRET"] == COMPOSE.splitlines()
 
 
-def test_compose_edit_is_idempotent(gdeploy):
-    new, _ = gdeploy.compose_edit(COMPOSE)
-    again, note = gdeploy.compose_edit(new)
-    assert again is None and note == "already present"
 
 
-def test_compose_edit_refuses_a_missing_anchor(gdeploy):
-    with pytest.raises(ValueError, match="found 0"):
-        gdeploy.compose_edit(COMPOSE.replace("GF_SERVER_ROOT_URL", "GF_OTHER"))
 
 
-def test_compose_edit_refuses_an_ambiguous_anchor(gdeploy):
-    with pytest.raises(ValueError, match="found 2"):
-        gdeploy.compose_edit(COMPOSE + "      - GF_SERVER_ROOT_URL=http://other\n")
 
 
-def test_compose_edit_ignores_a_similar_line_that_is_not_the_anchor(gdeploy):
-    text = COMPOSE.replace("      - GF_SERVER_ROOT_URL=", "      # - GF_SERVER_ROOT_URL=")
-    with pytest.raises(ValueError):
-        gdeploy.compose_edit(text)
 
 
 def test_datasources_yaml_content(gdeploy):
@@ -262,16 +250,16 @@ def test_datasources_yaml_url_override(gdeploy):
 
 def test_contact_point_url_substitution(gdeploy):
     text = CONTACT.read_text(encoding="utf-8")
-    out = gdeploy.contact_with_path(text, "grafana-alerts-abc123")
-    assert "http://n8n/webhook/grafana-alerts-abc123" in out
-    assert gdeploy.OLD_URL not in out.replace("grafana-alerts-abc123", "")
-    assert yaml.safe_load(out)["contactPoints"][0]["receivers"][0]["settings"]["url"].endswith("/grafana-alerts-abc123")
-    assert gdeploy.contact_with_path(text, "p", base="http://192.0.2.9/").count("http://192.0.2.9/webhook/p") == 1
+    out = gdeploy.contact_with_path(text, "grafana-alerts-abc12345")
+    assert "http://n8n/webhook/grafana-alerts-abc12345" in out
+    assert gdeploy.OLD_URL not in out.replace("grafana-alerts-abc12345", "")
+    assert yaml.safe_load(out)["contactPoints"][0]["receivers"][0]["settings"]["url"].endswith("/grafana-alerts-abc12345")
+    assert gdeploy.contact_with_path(text, "grafana-alerts-abc12345", base="http://192.0.2.9/").count("http://192.0.2.9/webhook/grafana-alerts-abc12345") == 1
 
 
 def test_contact_point_substitution_refuses_when_the_url_is_missing(gdeploy):
     with pytest.raises(ValueError, match="contact point URL"):
-        gdeploy.contact_with_path("url: http://elsewhere/hook\n", "grafana-alerts-abc123")
+        gdeploy.contact_with_path("url: http://elsewhere/hook\n", "grafana-alerts-abc12345")
 
 
 @pytest.mark.parametrize("path,ok", [("grafana-alerts-" + "a" * 10, True), ("grafana-alerts-shor", False),
@@ -281,6 +269,10 @@ def test_router_path_validation(gdeploy, path, ok):
 
 
 # --- command-line behavior ----------------------------------------------------------------
+
+STAGED = ("contact-points.yml", "update-alert-rules-unifi.yml", "update-alert-rules-pfsense.yml",
+          "heartbeat-alert-rule.yml", "notification-failure-alert-rule.yml")
+
 
 def _run(script, args, env):
     base = {"PATH": "/usr/bin:/bin"}
@@ -295,9 +287,10 @@ def _stage_dirs(tmp_path, compose_text=COMPOSE):
         d.mkdir()
     (siem / "docker-compose.yml").write_text(compose_text, encoding="utf-8")
     (cfg / "router-path").write_text("grafana-alerts-" + "z" * 20, encoding="utf-8")
-    for name in ("contact-points.yml", "update-alert-rules-unifi.yml", "update-alert-rules-pfsense.yml"):
+    for name in STAGED:
         src = REPO_ROOT / "docker" / "grafana" / "provisioning" / "alerting" / name
         shutil.copy(src, stage / name)
+        (stage / name).chmod(0o644)
     return {"SIEM_DIR": str(siem), "SIEM_STAGE_DIR": str(stage), "SIEM_CONFIG_DIR": str(cfg)}
 
 
@@ -305,19 +298,26 @@ def test_grafana_deploy_stage_prints_the_plan(tmp_path):
     env = _stage_dirs(tmp_path)
     r = _run("grafana-deploy.py", ["--stage"], env)
     assert r.returncode == 0, r.stderr
-    assert r.stdout.strip() == "staged files ok; router path length 35; compose: insert after line 5"
-    assert "GRAFANA_WEBHOOK_SECRET" not in (tmp_path / "siem" / "docker-compose.yml").read_text(encoding="utf-8"), \
-        "--stage must not change anything"
+    assert r.stdout.strip() == "staged files ok; router path length 35"
 
 
-def test_grafana_deploy_stage_refuses_bad_inputs(tmp_path):
-    env = _stage_dirs(tmp_path, COMPOSE.replace("GF_SERVER_ROOT_URL", "GF_OTHER"))
+def test_grafana_deploy_ships_the_heartbeat_rule_file(gdeploy):
+    assert "heartbeat-alert-rule.yml" in gdeploy.FILES
+    assert len(set(gdeploy.FILES)) == len(gdeploy.FILES)
+    # every file the deploy copies exists in the repository's alerting folder
+    for name in gdeploy.FILES:
+        assert (CONTACT.parent / name).is_file(), name
+
+
+def test_grafana_deploy_stage_requires_the_heartbeat_rule_file(tmp_path):
+    env = _stage_dirs(tmp_path)
+    (tmp_path / "stage" / "heartbeat-alert-rule.yml").unlink()
     r = _run("grafana-deploy.py", ["--stage"], env)
-    assert r.returncode != 0 and "expected exactly one GF_SERVER_ROOT_URL line, found 0" in r.stderr
-    env = _stage_dirs(tmp_path / "b" if (tmp_path / "b").mkdir() is None else tmp_path)
-    (tmp_path / "b" / "cfg" / "router-path").write_text("bad", encoding="utf-8")
-    r = _run("grafana-deploy.py", ["--stage"], env)
-    assert r.returncode != 0 and "router path file looks wrong" in r.stderr
+    assert r.returncode != 0 and "missing staged file: heartbeat-alert-rule.yml" in r.stderr
+
+
+
+
 
 
 def test_setup_check_reports_presence_without_values(tmp_path):

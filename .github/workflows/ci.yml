@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   ci:
-    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/bash-ci.yml@01f397834f7acc553593abefbba135b18f580730 # v1.34.0
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/bash-ci.yml@9e0d7b2e7e8530e2b1bb200ecb4fbf6de021881f # v1.38.0
     permissions:
       contents: read
     with:
@@ -32,8 +32,34 @@ jobs:
       # compose, promtool, amtool, logstash, Wazuh XML and rule ids, pytest.
       test-install-command: python3 -m pip install --user pytest requests pyyaml
       test-command: |
+        # The root-hardening tests run the firewall script as uid 0 inside `unshare -r`.
+        # Ubuntu 24.04 restricts unprivileged user namespaces with AppArmor, so lift that on
+        # this ephemeral runner (a local sysctl write, no network), then prove it worked so the
+        # tests can never skip silently (Ubuntu 24.04 release notes, read 2026-11-19).
+        sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        unshare -r true || { echo "::error title=userns::unshare -r still fails; the root-hardening tests cannot run"; exit 1; }
         # required secrets are ${VAR:?}; tests/compose.ci.env supplies throwaway values
         (cd docker && docker compose --env-file ../tests/compose.ci.env -f docker-compose.yml config --quiet)
+        # Registry pulls time out about once a day (error pulling image configuration: i/o timeout,
+        # issue 99). Pull every image first, each with a bounded retry: 3 attempts, 5 s then 15 s
+        # apart, and each attempt is cut off after 60 s so a dead connection fails fast (issue 99,
+        # 119). The images and tags are unchanged and nothing waits longer than three attempts.
+        pull_retry() {
+          local attempt delay
+          for attempt in 1 2 3; do
+            timeout 60 docker pull --quiet "$1" > /dev/null && return 0
+            [ "$attempt" -lt 3 ] || break
+            delay=$((attempt == 1 ? 5 : 15))
+            echo "::warning title=docker pull::$1 attempt $attempt failed, retrying in ${delay}s"
+            sleep "$delay"
+          done
+          echo "::error title=docker pull::$1 failed after 3 attempts"
+          return 1
+        }
+        for img in httpd:2.4 prom/prometheus:v3.10.0 prom/alertmanager:v0.27.0 \
+          opensearchproject/logstash-oss-with-opensearch-output-plugin:8.9.0; do
+          pull_retry "$img" || exit 1
+        done
         stage=$(mktemp -d)
         cp -r docker/prometheus/. "$stage/"
         for f in "$stage"/targets/*.example.json; do cp "$f" "${f%.example.json}.json"; done
@@ -98,6 +124,7 @@ jobs:
       # is not published for arm64). No distros: the checks are about this stack's configs, not an OS.
       runners: '["ubuntu-24.04"]'
       egress-policy: block
-      # Docker Hub for the test's images (the list python-ci.yml measured), and the
+      # Docker Hub for the test's images (the list python-ci.yml measured) plus the S3 host its
+      # layer blobs redirect to (docker-images-prod.s3.dualstack.us-east-1.amazonaws.com), and the
       # four hosts the workflow-lint job needs (actionlint matcher and npm, zizmor image)
-      extra-allowed-endpoints: auth.docker.io:443 ghcr.io:443 pkg-containers.githubusercontent.com:443 production.cloudfront.docker.com:443 raw.githubusercontent.com:443 registry-1.docker.io:443 registry.npmjs.org:443
+      extra-allowed-endpoints: auth.docker.io:443 docker-images-prod.s3.dualstack.us-east-1.amazonaws.com:443 ghcr.io:443 pkg-containers.githubusercontent.com:443 production.cloudfront.docker.com:443 raw.githubusercontent.com:443 registry-1.docker.io:443 registry.npmjs.org:443

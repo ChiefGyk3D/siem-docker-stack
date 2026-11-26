@@ -78,7 +78,7 @@ docker exec influxdb influx -execute "SHOW USERS"
 ### 2b. Deploy the new configs (does NOT restart into the secured world yet)
 
 ```bash
-bash scripts/03-deploy.sh <SIEM_IP> <user>     # or: bash scripts/03-deploy.sh local
+sudo scripts/03-deploy.sh <SIEM_IP> <user>     # or: sudo scripts/03-deploy.sh local
 ```
 
 `03-deploy.sh` runs `docker compose up -d`, which **recreates changed
@@ -88,7 +88,7 @@ expected; the next step initializes the users the clients need.
 ### 2c. Initialize OpenSearch security BEFORE clients can work again
 
 ```bash
-bash scripts/08b-init-opensearch-security.sh
+sudo scripts/08b-init-opensearch-security.sh
 ```
 
 - [ ] Script ends with `Authenticated admin request: HTTP 200` and
@@ -104,24 +104,26 @@ docker compose up -d logstash grafana opensearch-dashboards elasticsearch-export
 ## 3. Fresh-install bring-up order (skip if you did step 2)
 
 ```bash
-bash scripts/01-disk-setup.sh          # now also creates /data/hot/alertmanager, /data/warm/snapshots
-bash scripts/02-bootstrap.sh
+sudo scripts/01-disk-setup.sh          # now also creates /data/hot/alertmanager, /data/warm/snapshots
+sudo scripts/02-bootstrap.sh
 bash scripts/06-generate-wazuh-certs.sh
 bash scripts/07-generate-opensearch-certs.sh
-bash scripts/03-deploy.sh local
+sudo scripts/03-deploy.sh local
 # opensearch-hot stays "unhealthy" (HTTP 503) until the next line runs — expected:
-bash scripts/08b-init-opensearch-security.sh
+sudo scripts/08b-init-opensearch-security.sh
 docker compose up -d                   # in /opt/siem — starts remaining services
-bash scripts/04-apply-ism-policy.sh
+sudo scripts/04-apply-ism-policy.sh
 ```
 
 ## 4. Verification — F1 (auth everywhere)
 
 ```bash
-set -a; source /opt/siem/.env; set +a
+# Run from the repository root. scripts/secure-curl.sh USER curl-args... asks for the
+# password without echo and hands it to curl on stdin, never as an argument, so it
+# stays out of the process list, shell history and shell traces. It needs bash 4.2 or newer.
 
 # Authenticated curl works:
-curl -sk -u "admin:${OPENSEARCH_ADMIN_PASSWORD}" https://localhost:9200/_cluster/health | jq .status
+scripts/secure-curl.sh admin -sk https://localhost:9200/_cluster/health | jq .status
 # Unauthenticated curl MUST FAIL with 401:
 curl -sk -o /dev/null -w '%{http_code}\n' https://localhost:9200/          # expect 401
 # Plain http MUST FAIL (TLS now required):
@@ -130,9 +132,9 @@ curl -s -o /dev/null -w '%{http_code}\n' http://localhost:9200/ || echo "conn-fa
 curl -sk -o /dev/null -w '%{http_code}\n' https://localhost:9201/          # expect 401
 
 # Least privilege sanity: logstash user cannot read, readonly cannot write
-curl -sk -u "logstash:${OPENSEARCH_LOGSTASH_PASSWORD}" \
+scripts/secure-curl.sh logstash -sk \
   -o /dev/null -w '%{http_code}\n' "https://localhost:9200/syslog-*/_search"   # expect 403
-curl -sk -u "readonly:${OPENSEARCH_READONLY_PASSWORD}" -X POST \
+scripts/secure-curl.sh readonly -sk -X POST \
   -H 'Content-Type: application/json' -d '{}' \
   -o /dev/null -w '%{http_code}\n' "https://localhost:9200/syslog-test/_doc"   # expect 403
 ```
@@ -142,15 +144,15 @@ curl -sk -u "readonly:${OPENSEARCH_READONLY_PASSWORD}" -X POST \
 **Logstash still indexing** (doc count increases):
 
 ```bash
-C1=$(curl -sk -u "admin:${OPENSEARCH_ADMIN_PASSWORD}" "https://localhost:9200/syslog-*,pfsense-*,suricata-*/_count" | jq .count)
+C1=$(scripts/secure-curl.sh admin -sk "https://localhost:9200/syslog-*,pfsense-*,suricata-*/_count" | jq .count)
 sleep 60
-C2=$(curl -sk -u "admin:${OPENSEARCH_ADMIN_PASSWORD}" "https://localhost:9200/syslog-*,pfsense-*,suricata-*/_count" | jq .count)
+C2=$(scripts/secure-curl.sh admin -sk "https://localhost:9200/syslog-*,pfsense-*,suricata-*/_count" | jq .count)
 echo "$C1 -> $C2"      # C2 > C1 (assuming sources are sending)
 docker logs logstash --tail 20   # no auth/TLS errors
 ```
 
 - [ ] Doc count increased; no `401`/`SSL` errors in logstash logs.
-- [ ] Fixture replay passes: `bash scripts/09-test-crowdsec-pfsense-ingest.sh`
+- [ ] Fixture replay passes: `sudo scripts/09-test-crowdsec-pfsense-ingest.sh`
 
 **Grafana datasources healthy:**
 
@@ -166,7 +168,7 @@ docker logs logstash --tail 20   # no auth/TLS errors
       `curl -s 'http://localhost:8086/query?q=SHOW+DATABASES' | jq .` → auth error.
 - [ ] pfSense Telegraf + any remote writers updated with credentials and
       writing again (check `pfsense` DB measurements timestamp).
-- [ ] `bash scripts/05-verify.sh` — all green (includes the 401 check).
+- [ ] `sudo scripts/05-verify.sh` — all green (includes the 401 check).
 
 ## 5. Verification — F3 (independent alerting)
 
@@ -174,8 +176,8 @@ docker logs logstash --tail 20   # no auth/TLS errors
 # Exporter metrics visible:
 docker exec prometheus wget -qO- http://elasticsearch-exporter:9114/metrics | grep -m3 elasticsearch_cluster_health
 # Prometheus sees its targets and rules:
-curl -s -u "self:$PROMETHEUS_SELF_PASSWORD" localhost:9090/api/v1/targets | jq '.data.activeTargets[] | {job: .labels.job, health: .health}'
-curl -s -u "self:$PROMETHEUS_SELF_PASSWORD" localhost:9090/api/v1/rules | jq '.data.groups[].name'
+scripts/secure-curl.sh self -s localhost:9090/api/v1/targets | jq '.data.activeTargets[] | {job: .labels.job, health: .health}'
+scripts/secure-curl.sh self -s localhost:9090/api/v1/rules | jq '.data.groups[].name'
 # Alertmanager healthy (loopback only):
 curl -s http://127.0.0.1:9093/-/healthy
 ```
@@ -206,9 +208,9 @@ curl -s http://127.0.0.1:9093/api/v2/alerts | jq '.[].labels.alertname'
 ## 6. Verification — F4 (snapshots + restore drill)
 
 ```bash
-bash scripts/10-snapshot-setup.sh
+sudo scripts/10-snapshot-setup.sh
 # Take a manual snapshot right now instead of waiting for 03:00 UTC:
-curl -sk -u "admin:${OPENSEARCH_ADMIN_PASSWORD}" -X PUT \
+scripts/secure-curl.sh admin -sk -X PUT \
   "https://localhost:9200/_snapshot/siem-snapshots/manual-test?wait_for_completion=true" \
   -H 'Content-Type: application/json' \
   -d '{"indices":"syslog-*","include_global_state":false}' | jq '.snapshot.state'
@@ -219,13 +221,13 @@ curl -sk -u "admin:${OPENSEARCH_ADMIN_PASSWORD}" -X PUT \
 - [ ] **Restore drill** from [docs/backup-restore.md](backup-restore.md)
       (restore one index renamed → verify count → delete) passes.
 - [ ] Delete the test snapshot:
-      `curl -sk -u admin:... -X DELETE https://localhost:9200/_snapshot/siem-snapshots/manual-test`
+      `scripts/secure-curl.sh admin -sk -X DELETE https://localhost:9200/_snapshot/siem-snapshots/manual-test`
 
 ## 7. Housekeeping checks
 
 - [ ] `docker ps` — no crash-looping containers (watch `opensearch-dashboards`,
       `alertmanager`, `elasticsearch-exporter`, `influxdb`).
-- [ ] `bash scripts/08-crowdsec-smoketest.sh` passes.
+- [ ] `sudo scripts/08-crowdsec-smoketest.sh` passes.
 - [ ] Reboot test (optional but recommended): `docker compose restart` in
       /opt/siem — cluster comes back green without re-running 08b (security
       config persists in the `.opendistro_security` index).
@@ -242,7 +244,7 @@ If a cycle fails and you need the pre-security state back:
 ```bash
 cd ~/siem-docker-stack
 git checkout master                      # restores http configs, old compose
-bash scripts/03-deploy.sh <SIEM_IP> <user>   # redeploys master configs; compose up -d recreates
+sudo scripts/03-deploy.sh <SIEM_IP> <user>   # redeploys master configs; compose up -d recreates
 cd /opt/siem && docker compose up -d --remove-orphans   # drops alertmanager/exporter
 ```
 
