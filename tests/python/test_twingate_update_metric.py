@@ -109,7 +109,7 @@ def test_versions_compare_numerically_not_as_text():
     tags = tags_page("1.10.0", "1.9.0")
     rc, out, _, _ = run([conn_page([node("tg-a", "1.9.0")])], [tags])
     assert rc == 0
-    assert "connector=tg-a,managed_by=docker value=1i" in out
+    assert "twingate_connector_behind,connector=tg-a,managed_by=docker value=1i" in lines(out)
 
 
 def test_connector_ahead_of_latest_is_zero_behind():
@@ -142,7 +142,7 @@ def test_latest_version_is_collected_across_tag_pages_with_a_cap():
     t1 = tags_page("1.95.0", nxt="https://hub.docker.com/v2/next")
     t2 = tags_page("1.96.0", "1.94.0")
     rc, out, _, f = run([conn_page([node("a", "1.95.0")])], [t1, t2])
-    assert rc == 0 and "value=1i" in out
+    assert rc == 0 and "twingate_connector_behind,connector=a,managed_by=docker value=1i" in lines(out)
     assert len(f.get_calls) == 2 and all(u.startswith("https://hub.docker.com/v2/repositories/twingate/connector/tags") for u in f.get_calls)
     endless = [tags_page("1.95.0", nxt="x")] * 50
     rc, out, _, f = run([conn_page([node("a", "1.95.0")])], endless)
@@ -159,6 +159,10 @@ def test_api_error_fails_closed():
 def test_graphql_errors_array_fails_closed():
     bad = {"errors": [{"message": "denied"}], "data": None}
     rc, out, _, _ = run([bad], [LATEST])
+    assert_failed_closed(rc, out)
+    # even a well-formed page next to an errors array is not trusted
+    partial = dict(conn_page([node("a", "1.96.0")]), errors=[{"message": "partial"}])
+    rc, out, _, _ = run([partial], [LATEST])
     assert_failed_closed(rc, out)
 
 
