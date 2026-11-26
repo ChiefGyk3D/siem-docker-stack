@@ -473,6 +473,39 @@ services:
       - siem-net
 
 # =============================================================================
+# NODE EXPORTER — SIEM host metrics (Optional, profile "node-exporter")
+# =============================================================================
+# Gives Prometheus the job "node" for the host that runs this stack, so a full
+# disk or a dead host is visible. Opt-in: `docker compose --profile node-exporter
+# up -d node-exporter`. See docs/node-exporter.md (also for older compose files).
+# Safe by default: not published on any host port (Prometheus reaches it on
+# siem-net as node-exporter:9100), read-only root filesystem and host mount,
+# no capabilities, no privilege escalation.
+# Neither `pid: host` nor `network_mode: host` is used: host mode would put the
+# listener on the host network where Prometheus (bridge) cannot reach it on
+# loopback, and filesystem, CPU, memory and load metrics do not need it. Cost:
+# the network collectors (node_network_*) describe the container namespace, not
+# the host NICs. Source: node_exporter README, "Docker" (path.rootfs + the
+# read-only rslave root mount).
+
+  node-exporter:
+    image: quay.io/prometheus/node-exporter:${NODE_EXPORTER_VERSION:-v1.12.1}
+    container_name: node-exporter
+    restart: unless-stopped
+    profiles: ["node-exporter"]
+    command:
+      - '--path.rootfs=/host'
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - /:/host:ro,rslave
+    networks:
+      - siem-net
+
+# =============================================================================
 # WAZUH — EDR/SIEM
 # =============================================================================
 # Wazuh provides endpoint detection & response, file integrity monitoring,

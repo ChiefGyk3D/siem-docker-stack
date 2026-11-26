@@ -80,7 +80,8 @@ scrape_configs:
       - targets: ['grafana:3000']
 
   # node_exporter on the SIEM host itself (optional):
-  # copy targets/node.example.json → targets/node.json and adjust.
+  # Start the node-exporter service (profile node-exporter), then copy
+  # targets/node.example.json → targets/node.json (docs/node-exporter.md).
   - job_name: 'node'
     file_sd_configs:
       - files: ['/etc/prometheus/targets/node.json']

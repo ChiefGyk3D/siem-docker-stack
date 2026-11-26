@@ -17,13 +17,16 @@ DOC = REPO_ROOT / "docs" / "infrastructure-alerts.md"
 ROUTER = REPO_ROOT / "n8n" / "grafana-alert-router.json"
 
 CRITICAL_JOBS = {"twingate-ztna", "unifi-controller"}
+# The SIEM host (job "node") hosts the alert engine: disk rules only, never host-down
+# (a Grafana rule cannot report its own host down while Grafana is dead).
+DISK_CRITICAL_JOBS = CRITICAL_JOBS | {"node"}
 OTHER_UP_JOBS = {"Security", "AI", "Cryptocurrency", "grafana", "prometheus"}
 OTHER_DISK_JOBS = {"Security", "AI", "Cryptocurrency"}
 LIVE_TITLES = {"Host Down", "Disk Usage Critical"}
 EXPECTED = {
     "infra-host-down-critical": ("up", CRITICAL_JOBS, True),
     "infra-host-down-other": ("up", OTHER_UP_JOBS, False),
-    "infra-disk-critical": ("disk", CRITICAL_JOBS, True),
+    "infra-disk-critical": ("disk", DISK_CRITICAL_JOBS, True),
     "infra-disk-other": ("disk", OTHER_DISK_JOBS, False),
 }
 
@@ -117,6 +120,21 @@ def test_doc_lists_every_job_and_the_migration():
     assert "—" not in text
 
 
+def test_node_job_is_in_critical_disk_rule_only():
+    by = {r["uid"]: r for r in load_rules()}
+    assert "node" in next(iter(jobs_of(expr_of(by["infra-disk-critical"]))))
+    for uid in ("infra-host-down-critical", "infra-host-down-other", "infra-disk-other"):
+        assert "node" not in next(iter(jobs_of(expr_of(by[uid])))), uid
+    labels = by["infra-disk-critical"]["labels"]
+    assert (labels["phone"], labels["tier"], labels["severity"]) == ("true", "P1", "critical")
+
+
+def test_doc_explains_why_host_down_excludes_node():
+    text = " ".join(DOC.read_text(encoding="utf-8").split())
+    assert "`node`" in text and "docs/heartbeat.md" in text
+    assert "cannot report its own host down" in text
+
+
 # Negative cases: each mutant must be caught by the checker.
 def _mutate(fn):
     rules = copy.deepcopy(load_rules())
@@ -162,3 +180,9 @@ def test_checker_catches_filesystem_filter_and_threshold_loss():
 def test_checker_catches_title_reuse_and_update_label():
     assert _mutate(lambda b: b["infra-host-down-critical"].update(title="Host Down"))
     assert _mutate(lambda b: b["infra-host-down-critical"]["labels"].update(update_alert="true"))
+
+
+def test_checker_catches_node_dropped_or_added_to_host_down():
+    assert _mutate(lambda b: _set_expr(b["infra-disk-critical"], "unifi-controller|node", "unifi-controller"))
+    assert _mutate(lambda b: _set_expr(b["infra-host-down-critical"], "unifi-controller", "unifi-controller|node"))
+    assert _mutate(lambda b: _set_expr(b["infra-host-down-other"], "prometheus", "prometheus|node"))
