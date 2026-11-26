@@ -138,7 +138,8 @@ def test_writer_rejects_missing_credentials_and_bad_config(fake):
     assert run_writer(GOOD, env, drop=("TWINGATE_INFLUX_USER",)).returncode != 0
     assert run_writer(GOOD, {"INFLUX_URL": "ftp://127.0.0.1:1"}).returncode != 0
     assert run_writer(GOOD, {"INFLUX_URL": "http://user:pw@127.0.0.1:1"}).returncode != 0
-    assert run_writer(GOOD, {"INFLUX_URL": "http://192.0.2.5:8086"}).returncode != 0   # cleartext off-box
+    p = run_writer(GOOD, {"INFLUX_URL": "http://192.0.2.5:8086"})            # cleartext off-box
+    assert p.returncode != 0 and "cleartext" in p.stderr
     assert run_writer(GOOD, {"INFLUX_URL": f.url, "TWINGATE_INFLUX_DB": "a&b=c"}).returncode != 0
     assert f.requests == []
 
