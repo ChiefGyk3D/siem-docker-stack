@@ -35,7 +35,7 @@ you turn it on.
 | `docker/grafana/provisioning/alerting/update-notification-policy.yml.example` | Repeat intervals: 84h warning (twice a week), 24h critical |
 | `n8n/grafana-alert-router.json` | Router with header auth and the added Pushover nodes |
 | `docs/heartbeat.md` | The alert path heartbeat (dead-man's switch), its own rule, policy route and settings |
-| `scripts/pfsense-update-metric.sh` | Read-only metric source for the firewall (not deployed) |
+| `scripts/pfsense-update-metric.sh` | Read-only metric source for the firewall (deployed 2026-11-26) |
 | `docker/grafana/provisioning/alerting/update-alert-rules-twingate.yml` | Twingate Connector rules and a collector health rule, shipped paused |
 | `scripts/twingate-update-metric.py` | Read-only metric source for Twingate Connectors (not deployed) |
 | `tests/python/test_update_alerting.py` | Tests for all of the above (Node is required) |
@@ -125,10 +125,13 @@ docker exec influxdb influx -execute 'SHOW FIELD KEYS ON unpoller FROM usw'
 The UniFi Network application itself is not reported by the poller, so a
 pending Network application update does not raise an alert.
 
-### pfSense data (not deployed)
+### pfSense data
 
-The pfSense rules ship paused. Enable them (set `isPaused: false`) once the
-Telegraf input below is deployed and the metrics are arriving.
+The pfSense rules ship active (`isPaused: false`). The Telegraf exec input
+below was added on the firewall on 2026-11-26 and the script was verified on
+the live firewall in the healthy case. The pending-update parser fix is PR
+#217 (not yet merged when this was written). Pause a rule (`isPaused: true`)
+if the metrics stop arriving.
 
 Metric `pfsense_update_pending`: gauge, `value` 0 or 1, tags `kind`
 (`core`, `kernel`, `package`) and `security` (`true`, `false`). Metric
