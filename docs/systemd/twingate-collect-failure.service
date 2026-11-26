@@ -1,0 +1,14 @@
+# Runs when twingate-collect.service fails (OnFailure=). It writes one fixed line to the
+# journal at priority err; it carries no value and does not alert on its own. The alerting
+# path is Grafana: the rule "Twingate update check failing or stale" fires when no success
+# point arrives for 6 hours or the last one is 0.
+[Unit]
+Description=Notice: the Twingate collector run failed
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/logger -p user.err -t twingate-collect "collector run failed; see journalctl -u twingate-collect.service"
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes

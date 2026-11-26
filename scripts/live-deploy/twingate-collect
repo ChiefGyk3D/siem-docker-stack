@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Collect the Twingate Connector update metrics and write them to InfluxDB. Issue #222.
+#
+# Runs twingate-update-metric.py (Twingate API key from the secret manager) and pipes its
+# line protocol to twingate-influx-write.py (write-only InfluxDB account, also from the
+# secret manager). Both run under siem-run, so no value is on a command line or printed.
+#
+# Fail closed: pipefail makes the whole run exit non-zero if either stage fails. When the
+# check itself fails the collector prints only "twingate_update_check_success value=0i";
+# the writer still stores that line (so the health rule goes red quickly) and the run still
+# exits non-zero. Zero lines, a 401 or any non-2xx write also exit non-zero.
+#
+# Environment (all optional): SIEM_CONFIG_DIR (see siem-run), INFLUX_URL, TWINGATE_INFLUX_DB.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO="$(cd "$HERE/../.." && pwd -P)"
+
+"$HERE/siem-run" python3 -I "$REPO/scripts/twingate-update-metric.py" |
+    "$HERE/siem-run" python3 -I "$HERE/twingate-influx-write.py"

@@ -481,3 +481,112 @@ automate it and the deploy never runs it. If the same two feeds break again,
 read the snippet and make the change in the firewall's own interface or run
 the snippet there deliberately; it writes nothing if the rows are not in the
 expected state.
+
+## 9. Twingate collector (hourly metrics into InfluxDB)
+
+Issue #222. This feeds the paused Twingate rules
+(`update-alert-rules-twingate.yml`). It does not unpause them: that is a later,
+separate step after the landing check below passes.
+
+| File | Role |
+|------|------|
+| `scripts/live-deploy/twingate-collect` | Runs `twingate-update-metric.py` and pipes its line protocol to the writer, both under `siem-run`; exits non-zero if either stage fails (pipefail) or nothing is written |
+| `scripts/live-deploy/twingate-influx-write.py` | Stdlib writer: one POST to `/write?db=telegraf&precision=s`, Basic auth, 5 s timeout, no redirects, no retry; prints only counts and the HTTP status |
+| `docs/systemd/twingate-collect.service`, `.timer`, `twingate-collect-failure.service` | Hourly oneshot with sandboxing, and a journal notice when a run fails |
+
+Owner steps (placeholders in angle brackets; the InfluxDB admin credentials are
+read inside the container from its own environment, so they are never typed):
+
+1. Create the secrets. The password is generated, piped straight into the
+   secret manager and never shown. The secret manager config `prd_network` is the
+   one `siem-run` reads; its service token must be able to read the two names
+   (that the CLI takes the value from stdin is not verified here: if it asks for
+   a prompt, type nothing into the terminal history and paste the value instead):
+
+```
+openssl rand -base64 36 | tr -d '\n=+/' | doppler secrets set TWINGATE_INFLUX_PASSWORD --project homelab --config prd_network > /dev/null
+printf '%s' 'twingate_wo' | doppler secrets set TWINGATE_INFLUX_USER --project homelab --config prd_network > /dev/null
+```
+
+2. Create the write-only InfluxDB account, `twingate_wo`, with write on the
+   `telegraf` database only (the same pattern as `unpoller_wo`). The SQL is read
+   from stdin and its output is discarded, so the password is never in an
+   argument or on the screen:
+
+```
+siem-run bash -c 'docker exec -i influxdb sh -c '\''influx -username "$INFLUXDB_ADMIN_USER" -password "$INFLUXDB_ADMIN_PASSWORD"'\'' > /dev/null <<EOSQL
+CREATE USER "$TWINGATE_INFLUX_USER" WITH PASSWORD '\''$TWINGATE_INFLUX_PASSWORD'\''
+GRANT WRITE ON "telegraf" TO "$TWINGATE_INFLUX_USER"
+EOSQL'
+docker exec influxdb sh -c 'influx -username "$INFLUXDB_ADMIN_USER" -password "$INFLUXDB_ADMIN_PASSWORD" -execute "SHOW GRANTS FOR twingate_wo"'
+```
+
+   Check: the last command lists `telegraf WRITE` and no other database.
+
+3. Install the units (replace `<user>` and the checkout path in
+   `twingate-collect.service` first). The timer is installed but not enabled yet:
+
+```
+sudo install -m 644 docs/systemd/twingate-collect.service docs/systemd/twingate-collect-failure.service docs/systemd/twingate-collect.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+```
+
+4. Dry run: the collector alone, nothing is written. It prints one line per metric
+   (Connector names appear, no secret):
+
+```
+siem-run python3 -I scripts/twingate-update-metric.py
+```
+
+   Expected: `twingate_connector_behind` and `twingate_connector_up` lines for each
+   Connector, `twingate_update_check_success value=1i`, exit code 0.
+
+5. First run, then the landing check:
+
+```
+scripts/live-deploy/twingate-collect; echo "exit=$?"
+```
+
+   Expected: `twingate-influx-write: lines=<n> status=204` and `exit=0`. A 401 means
+   the account or password is wrong; the run exits non-zero. Read the point back
+   through the Grafana read account (never the write account):
+
+```
+docker exec influxdb sh -c 'influx -username "$GRAFANA_INFLUX_USER" -password "$GRAFANA_INFLUX_PASSWORD" -database telegraf -execute "SELECT last(value) FROM twingate_update_check_success"'
+```
+
+   Expected: one row with value 1 and a recent time. Then, in Grafana, open the
+   datasource `influxdb-twingate` and press Save and test. The repo's
+   `datasources.yml` gives it the read account `grafana_ro`, but `grafana-deploy.py`
+   keeps the live block as it is and writes no credentials into the pfSense or UniFi
+   datasources, so confirm on the live box that the test passes (InfluxDB has auth
+   on) before anyone unpauses the rules.
+
+6. Enable the timer:
+
+```
+sudo systemctl enable --now twingate-collect.timer
+systemctl list-timers twingate-collect.timer
+```
+
+   Check after the next hour: `systemctl status twingate-collect.service` shows
+   `status=0/SUCCESS` and `journalctl -u twingate-collect.service` shows only the
+   counts line.
+
+Rollback: `sudo systemctl disable --now twingate-collect.timer`, delete the three
+unit files from `/etc/systemd/system/` and run `sudo systemctl daemon-reload`. To
+remove the account, run `DROP USER "twingate_wo"` as the InfluxDB admin and delete
+the two names from the secret manager. Points already written are harmless and can
+stay.
+
+How a cleanly stopped Connector appears: the Twingate Admin API still lists it with
+a state other than `ALIVE`, so the collector writes `twingate_connector_up` value 0
+(the series does not go missing) while `twingate_update_check_success` stays 1. The
+rule "Twingate Connector not ALIVE" fires after 15 minutes once it is unpaused. A
+Connector that is deleted in Twingate disappears from the data instead.
+
+A dead collector does not look green: the check rule "Twingate update check failing
+or stale" has `noDataState: Alerting`, reads a 6 hour window and fires on a 0 or on
+no point at all. When the Twingate or Docker Hub call fails, the collector writes
+`twingate_update_check_success value=0i` (the run still exits non-zero), and the
+unit's `OnFailure` leaves a journal notice.

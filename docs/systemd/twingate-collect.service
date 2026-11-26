@@ -1,0 +1,29 @@
+# Twingate Connector update collector (issue #222). Install by hand; see
+# docs/live-deploy-runbook.md, section "Twingate collector". Replace /opt/siem with the
+# checkout of this repository and <user> with the account that owns the secret-manager
+# token file. No secret value belongs in this file: siem-run reads the token from
+# <home>/.config/doppler-siem/token.
+[Unit]
+Description=Collect Twingate Connector update metrics into InfluxDB
+Wants=network-online.target
+After=network-online.target
+OnFailure=twingate-collect-failure.service
+
+[Service]
+Type=oneshot
+User=<user>
+ExecStart=/opt/siem/scripts/live-deploy/twingate-collect
+TimeoutStartSec=120
+# Environment=INFLUX_URL=http://127.0.0.1:8086
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+# The doppler CLI keeps a small cache; give it a private writable place inside the sandbox.
+# (--fallback-readonly in siem-run uses the token directory under the read-only home.)

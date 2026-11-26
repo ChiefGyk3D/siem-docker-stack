@@ -224,6 +224,26 @@ ready. The rules assume one run per hour.
 To act on a "behind" alert, follow
 [twingate-connector-update.md](twingate-connector-update.md).
 
+#### Collector deployment (issue #222)
+
+The collector that feeds these metrics is `scripts/live-deploy/twingate-collect`,
+run hourly by `docs/systemd/twingate-collect.timer`. It pipes
+`twingate-update-metric.py` into `scripts/live-deploy/twingate-influx-write.py`
+(one write to the database `telegraf`, Basic auth, 5 s timeout, no redirects, no
+retry, counts only in its output). The InfluxDB account is `twingate_wo` with
+`GRANT WRITE ON "telegraf"` only; its user name and password are stored in the
+secret manager config `prd_network` as `TWINGATE_INFLUX_USER` and
+`TWINGATE_INFLUX_PASSWORD`. The owner steps (account, install, dry run, first run,
+landing check, `twingate-collect.timer`) and the Rollback are in
+`docs/live-deploy-runbook.md`, section 9. For a host without Telegraf this replaces
+the exec input above; use one or the other, not both.
+
+A cleanly stopped Connector is still listed by the Admin API, so
+`twingate_connector_up` becomes 0 (it does not go missing). A dead collector does not
+look green: all five rules use `noDataState: Alerting`, and "Twingate update check
+failing or stale" reads a 6 hour window, so no point for 6 hours (or a 0) alerts once
+the rules are unpaused. The rules stay paused until the landing check passes.
+
 #### How each Connector is managed (`managed_by`)
 
 Connectors are not all updated the same way, and the mix will change. The
