@@ -102,7 +102,7 @@ class Env:
         t = time.time() - seconds_ago
         os.utime(path, (t, t))
 
-    def build(self, name, marks=None, rewrites=None):
+    def build(self, name, marks=None, rewrites=None, edit=None):
         """A scratch copy of the shipped script. The fixed default path lines are rewritten to this
         Env's fixtures (the shipped script has no test hooks). marks: marker -> replacement line for
         a guard that is neutralized for a revert proof. The shipped file is never edited."""
@@ -126,8 +126,14 @@ class Env:
             assert len(hits) == 1, f"marker {marker} found {len(hits)} times"
             indent = re.match(r"\s*", lines[hits[0]]).group(0)
             lines[hits[0]] = indent + replacement + "\n"
+        text = "".join(lines)
+        if edit is not None:
+            # a scratch-only text edit (a fault injected into the copy); it must change the text
+            edited = edit(text)
+            assert edited != text, "edit did not apply"
+            text = edited
         p = self.tmp / name
-        p.write_text("".join(lines), encoding="utf-8")
+        p.write_text(text, encoding="utf-8")
         return p
 
     def run(self, args=("standard",), label="host-a", extra=None, apt_rc=0, script=None, stdout_to=None):
@@ -961,6 +967,12 @@ def test_output_write_failure_is_not_success(env):
     assert p.returncode != 0
 
 
+def test_emit_failure_after_a_prefix_exits_nonzero_without_the_prefix(env):
+    r = env.run(script=env.build("emitfail.sh", edit=inject_emit_failure))
+    assert guard_failed(r, env), (r.returncode, r.stdout)
+    assert "host_update_pending" not in r.stdout
+
+
 def test_state_file_lost_emits_no_age_and_state_ok_zero(env):
     (env.state_dir / "first-seen").unlink()
     env.set_apt(apt_out([inst("foo", "1", "2", DEB_UPD)]))
@@ -1343,6 +1355,15 @@ def sc_future_state(env):
     return {}
 
 
+def inject_emit_failure(text):
+    # emit_all prints its whole payload, then fails: a prefix followed by a failing status
+    return text.replace('\n}\n# a failed capture', '\n    return 1\n}\n# a failed capture', 1)
+
+
+def sc_emit_fails(env):
+    return {"edit": inject_emit_failure}
+
+
 def sc_output_full(env):
     return {"stdout_to": "/dev/full"}
 
@@ -1504,6 +1525,7 @@ MUTANTS = {
     "state-uint": (':', sc_leading_zero_state, guard_state_untrusted),
     "state-future": (':', sc_future_state, guard_state_untrusted),
     "output-check": ('printf \'%s\\n\' "$payload"', sc_output_full, guard_nonzero_exit),
+    "capture-check": ('payload=$(emit_all)', sc_emit_fails, guard_failed),
     "state-lost": (':', sc_state_lost, guard_state_untrusted),
     "state-dir-mode": (':', sc_dir_mode, guard_state_untrusted),
     "state-parse": (':', sc_corrupt, guard_state_untrusted),
@@ -1549,14 +1571,16 @@ def test_revert_proof_mutant_goes_red(env, name):
     repl, scenario, guard = MUTANTS[name]
     kw = scenario(env)
     rewrites = kw.pop("rewrites", None)
-    real = env.build("real-copy.sh", rewrites=rewrites)
+    edit = kw.pop("edit", None)
+    real = env.build("real-copy.sh", rewrites=rewrites, edit=edit)
     assert guard(env.run(script=real, **kw), env), f"guard {name} does not hold on the unmutated copy"
     # replay the same scenario in a fresh Env on the mutant
     (env.tmp / "replay").mkdir()
     env2 = Env(env.tmp / "replay")
     kw = scenario(env2)
     rewrites = kw.pop("rewrites", None)
-    mpath = env2.build(f"mutant-{name}.sh", marks={name: repl}, rewrites=rewrites)
+    edit = kw.pop("edit", None)
+    mpath = env2.build(f"mutant-{name}.sh", marks={name: repl}, rewrites=rewrites, edit=edit)
     assert mpath.read_text() != real.read_text()
     assert subprocess.run(["sh", "-n", str(mpath)], timeout=30).returncode == 0, "mutant is not valid shell"
     res = env2.run(script=mpath, **kw)

@@ -528,7 +528,8 @@ emit_all() {
     printf 'host_update_state_ok%s value=%di\n' "$tags" "$state_ok"
     printf 'host_update_check_success%s value=1i' "$tags"
 }
-payload=$(emit_all)
+# a failed capture exits non-zero before anything is printed, so a partial payload never reaches stdout
+if ! payload=$(emit_all); then exit 1; fi # MUTATE:capture-check
 if ! printf '%s\n' "$payload"; then exit 1; fi # MUTATE:output-check
 finished=1
 exit 0

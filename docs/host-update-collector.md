@@ -156,7 +156,7 @@ It must be an absolute path. Rules:
   it and delete the file to re-seed
 - a state problem never turns the check itself into a failure
 
-The metrics are written in one step and only after every value is known. If that write fails (a
+The metrics are built in full and written in one step, only after every value is known; if building them fails, nothing is printed and the script exits non-zero. If that write fails (a
 full disk, a closed pipe), the script exits non-zero and does not exit 0 with a partial set; gate
 every health conclusion on a fresh `host_update_check_success == 1`, because a killed process or a
 closed output can still leave no data at all.
