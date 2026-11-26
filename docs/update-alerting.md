@@ -221,6 +221,9 @@ the secret manager; nothing is written into the file):
 Copy `scripts/twingate-update-metric.py` to that path by hand when you are
 ready. The rules assume one run per hour.
 
+To act on a "behind" alert, follow
+[twingate-connector-update.md](twingate-connector-update.md).
+
 #### How each Connector is managed (`managed_by`)
 
 Connectors are not all updated the same way, and the mix will change. The
