@@ -7,8 +7,8 @@
 # or copy this file to update-notification-policy.yml if the tree is empty.
 #
 # Repeat intervals (owner decision, issue #199): a pending update re-alerts every
-# 84h (warning, so at least twice a week) and every 1h (critical) for as long as
-# the alert keeps firing. No update route may repeat less often than 84h.
+# 84h (warning, so at least twice a week) and every 24h (critical, owner decision
+# issue #53) for as long as the alert keeps firing. No update route may repeat less often than 84h.
 apiVersion: 1
 
 policies:
@@ -30,4 +30,4 @@ policies:
           - receiver: n8n-grafana-router
             object_matchers:
               - ["severity", "=", "critical"]
-            repeat_interval: 1h
+            repeat_interval: 24h

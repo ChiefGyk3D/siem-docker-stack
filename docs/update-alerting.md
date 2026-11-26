@@ -32,7 +32,7 @@ you turn it on.
 | `docker/grafana/provisioning/alerting/update-alert-rules-unifi.yml` | UniFi rules: warning from 24h to 7 days pending, critical after 7 days |
 | `docker/grafana/provisioning/alerting/update-alert-rules-pfsense.yml` | pfSense rules and a collector health rule, shipped paused |
 | `docker/grafana/provisioning/alerting/contact-points.yml` | Webhook contact point pointing at the n8n router |
-| `docker/grafana/provisioning/alerting/update-notification-policy.yml.example` | Repeat intervals: 84h warning (twice a week), 1h critical |
+| `docker/grafana/provisioning/alerting/update-notification-policy.yml.example` | Repeat intervals: 84h warning (twice a week), 24h critical |
 | `n8n/grafana-alert-router.json` | Router with header auth and the added Pushover nodes |
 | `docs/heartbeat.md` | The alert path heartbeat (dead-man's switch), its own rule, policy route and settings |
 | `scripts/pfsense-update-metric.sh` | Read-only metric source for the firewall (not deployed) |
@@ -251,7 +251,7 @@ check failing or stale" apply to every mode.
 
 | Label | What it controls |
 |-------|------------------|
-| `update_alert` | `true` marks an update-alerting rule: it matches the notification policy route with the 84h and 1h repeats, and its title belongs in `ALLOWED_ALERTNAMES` |
+| `update_alert` | `true` marks an update-alerting rule: it matches the notification policy route with the 84h and 24h repeats, and its title belongs in `ALLOWED_ALERTNAMES` |
 | `severity` | `warning` or `critical`: the repeat interval, and the Pushover priority (1, or 2 for an allowlisted name with an urgent label) |
 | `phone` | `true` is the only way an alert reaches Pushover; any other value or no label keeps it off the phone (Discord is unaffected). Every update-pending rule for critical infrastructure (UniFi, pfSense, Twingate) sets `phone=true`, except the UniFi 24h warning, which is `phone=false` (Discord and Matrix only) so a UniFi update pages the phone only after 7 days pending; the poller-stale watchdog is also `phone=false` |
 | `alert_group` | Grouping and display (`updates` for these rules); no routing effect |
@@ -268,10 +268,10 @@ Grafana provisions the notification policy as one tree for the whole
 organization, so the file ships as `.example` and Grafana ignores it. Merge its
 `update_alert` route into your existing tree (Alerting, Notification
 policies), or copy it to `update-notification-policy.yml` if you have no
-tree yet. Repeat intervals: 84h for warning, 1h for critical. Owner decision (issue
+tree yet. Repeat intervals: 84h for warning, 24h for critical (owner decision, issue #53: a fresh critical page daily, not hourly). Owner decision (issue
 #199): update alerts for critical infrastructure reach the phone and repeat at
 least twice a week until the update is applied, so no repeat interval may be
-longer than 84h. This supersedes the earlier P2 and `phone=false` ruling (#152). Refinement (owner, 2026-11-26, "wait 7 days first"): a UniFi pending update does not page the phone until it has been pending 7 days, so auto-patching devices usually finish first. The UniFi 24h warning is `phone=false`; the 7-day critical rule and the pfSense rules stay `phone=true`. Twingate (owner, 2026-11-26): critical infrastructure pages at least twice a week until updated, so the 7-day warning is `phone=true` (84h repeats), the 14-day critical pages hourly, and only the operator-managed rule is `phone=false`.
+longer than 84h. This supersedes the earlier P2 and `phone=false` ruling (#152). Refinement (owner, 2026-11-26, "wait 7 days first"): a UniFi pending update does not page the phone until it has been pending 7 days, so auto-patching devices usually finish first. The UniFi 24h warning is `phone=false`; the 7-day critical rule and the pfSense rules stay `phone=true`. Twingate (owner, 2026-11-26): critical infrastructure pages at least twice a week until updated, so the 7-day warning is `phone=true` (84h repeats), the 14-day critical pages daily, and only the operator-managed rule is `phone=false`.
 
 ## Webhook authentication
 
@@ -492,8 +492,14 @@ prefix and only for names in `ALLOWED_ALERTNAMES`.
 
 Acknowledging in the Pushover app stops that one message only. While the
 update is still pending, Grafana re-alerts at the policy repeat interval (84h
-warning, 1h critical) and a new emergency message starts. The alert itself
+warning, 24h critical) and a new emergency message starts. The alert itself
 ends only when the update is applied.
+
+A critical update pages at emergency priority (Pushover priority 2), which
+itself repeats about every 5 minutes (`PUSHOVER_RETRY`, 300 seconds) for up to
+3 hours (`PUSHOVER_EXPIRE`, 10800 seconds) until you acknowledge it. Priority 1
+and 2 both bypass Pushover quiet hours. So the 24h policy repeat starts a fresh
+page each day, and each page keeps ringing until acknowledged or the 3 hours end.
 
 ### Residual risk (accepted)
 
