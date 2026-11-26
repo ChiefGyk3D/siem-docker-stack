@@ -5,6 +5,7 @@ a check function; the real workflow must pass it and a mutated copy of the workf
 (revert-proof mutants), so a guard that cannot bite is caught here.
 """
 import copy
+import datetime as _dt
 import json
 import re
 import shutil
@@ -99,7 +100,8 @@ def check_no_phone_path(wf):
     assert len(triggers) == 1 and triggers[0]["type"] == "n8n-nodes-base.scheduleTrigger"
     for n in wf["nodes"]:
         if n["type"] == "n8n-nodes-base.httpRequest":
-            assert "/_matrix/client/" in n["parameters"]["url"]
+            url = n["parameters"]["url"]
+            assert "/_matrix/client/" in url or "/api/ds/query" in url, "only Matrix and Grafana queries"
 
 
 def test_digest_has_no_phone_path_and_schedule_trigger_only():
@@ -259,13 +261,15 @@ def test_mutant_discord_failure_stops_run_is_caught():
 
 # --- collectors ----------------------------------------------------------------------------------
 
-def test_collectors_are_stubs_returning_not_deployed():
+def test_os_collector_is_a_stub_pointing_at_219_and_others_are_real():
     wf = _wf()
-    for c in COLLECTORS:
-        item = _ok_run(_js(wf, c), {})["items"]
-        assert len(item) == 1
-        j = item[0]["json"]
-        assert j["status"] == "not-deployed" and j["applied"] == [] and j["pending"] == []
+    j = _ok_run(_js(wf, "OS Packages Collector"), {})["items"][0]["json"]
+    assert j["status"] == "not-deployed" and "#219" in j["reason"] and j["applied"] == [] and j["pending"] == []
+    for c in ("UniFi Collector", "Twingate Collector", "pfSense Collector"):
+        assert "STUB" not in _js(wf, c), c
+        # no query result at all: failed, never ok and never a silent not-deployed
+        j = _ok_run(_js(wf, c), {})["items"][0]["json"]
+        assert j["status"] == "failed", c
 
 
 # --- window --------------------------------------------------------------------------------------
@@ -557,3 +561,399 @@ def test_doc_names_env_and_credentials_with_placeholders_only():
     assert "\u2014" not in text, "no em dashes"
     assert not re.search(r"![A-Za-z0-9]{10,}:[A-Za-z0-9.-]+", text), "no real room id"
     assert not re.search(r"syt_[A-Za-z0-9]+", text), "no token"
+
+
+# --- real collectors (Grafana data source query API) -------------------------------------------------
+
+NOW_MS = int(_dt.datetime(2026, 11, 30, 12, 0, tzinfo=_dt.timezone.utc).timestamp() * 1000)
+H = 3600 * 1000
+REAL = {  # collector -> (query node, source key)
+    "UniFi Collector": ("UniFi Query", "unifi"),
+    "Twingate Collector": ("Twingate Query", "twingate"),
+    "pfSense Collector": ("pfSense Query", "pfsense"),
+}
+QUERY_UIDS = {"UniFi Query": "influxdb-unifi", "Twingate Query": "influxdb-twingate", "pfSense Query": "influxdb-pfsense"}
+
+
+def _frame(labels, points):
+    return {"schema": {"fields": [{"name": "Time", "type": "time"},
+                                  {"name": "v", "type": "number", "labels": labels}]},
+            "data": {"values": [[t for t, _ in points], [v for _, v in points]]}}
+
+
+def _res(*frames, **extra):
+    d = {"status": 200, "frames": list(frames)}
+    d.update(extra)
+    return d
+
+
+def _answer(**refs):
+    return {"statusCode": 200, "body": {"results": refs}}
+
+
+def _collect(wf, name, answer):
+    qn = REAL[name][0]
+    return _ok_run(_js(wf, name), {qn: answer})["items"][0]["json"]
+
+
+def _unifi(wf, cur, ever=()):
+    """cur: [(name, age_ms, upgradeable)], ever: [(name, count)]"""
+    a = _res(*[_frame({"name": n}, [(NOW_MS - age, up)]) for n, age, up in cur])
+    b = _res(*[_frame({"name": n}, [(NOW_MS - H, c)]) for n, c in ever])
+    return _collect(wf, "UniFi Collector", _answer(A=a, B=b))
+
+
+def _pfsense(wf, cur, ever=(), check=((0, 1),)):
+    a = _res(*[_frame({"kind": k, "security": sec}, [(NOW_MS - age, v)]) for k, sec, age, v in cur])
+    b = _res(*[_frame({"kind": k, "security": sec}, [(NOW_MS - H, v)]) for k, sec, v in ever])
+    c = _res(*[_frame({}, [(NOW_MS - age, v)]) for age, v in check])
+    return _collect(wf, "pfSense Collector", _answer(A=a, B=b, C=c))
+
+
+def _twingate(wf, cur, ever=(), check=((0, 1),)):
+    a = _res(*[_frame({"connector": n}, [(NOW_MS - age, v)]) for n, age, v in cur])
+    b = _res(*[_frame({"connector": n}, [(NOW_MS - H, v)]) for n, v in ever])
+    c = _res(*[_frame({}, [(NOW_MS - age, v)]) for age, v in check])
+    return _collect(wf, "Twingate Collector", _answer(A=a, B=b, C=c))
+
+
+def _good_answer(name):
+    """A healthy, fresh answer (one pending item) for the named collector."""
+    if name == "UniFi Collector":
+        return _answer(A=_res(_frame({"name": "ap1"}, [(NOW_MS - 60000, True)])), B=_res())
+    if name == "pfSense Collector":
+        return _answer(A=_res(_frame({"kind": "core", "security": "false"}, [(NOW_MS - H, 1)])), B=_res(),
+                       C=_res(_frame({}, [(NOW_MS - H, 1)])))
+    return _answer(A=_res(_frame({"connector": "c1"}, [(NOW_MS - H, 2)])), B=_res(),
+                   C=_res(_frame({}, [(NOW_MS - H, 1)])))
+
+
+def check_collector_config(wf):
+    for name, (qn, key) in REAL.items():
+        n = _node(wf, qn)
+        p = n["parameters"]
+        assert n["type"] == "n8n-nodes-base.httpRequest" and p["method"] == "POST"
+        assert "$env.GRAFANA_BASE_URL" in p["url"] and p["url"].endswith("'/api/ds/query' }}")
+        assert not re.search(r"https?://", p["url"]), "base URL only from the environment"
+        assert p["authentication"] == "genericCredentialType" and p["genericAuthType"] == "httpCustomAuth"
+        assert n["credentials"] == {"httpCustomAuth": {"id": "YOUR_CREDENTIAL_ID", "name": "grafana-viewer-auth"}}
+        o = p["options"]
+        assert 0 < o["timeout"] <= 30000, "bounded timeout"
+        assert o["redirect"]["redirect"]["followRedirects"] is False, "no redirects (the bearer token must not follow one)"
+        assert o["response"]["response"] == {"fullResponse": True, "neverError": True}
+        assert n.get("onError") == "continueRegularOutput"
+        body = json.loads(p["jsonBody"])
+        assert body["from"] == "now-7d" and body["to"] == "now"
+        assert body["queries"] and all(q["datasource"]["uid"] == QUERY_UIDS[qn] for q in body["queries"])
+        assert all(q["rawQuery"] is True and "now() - 7d" in q["query"] for q in body["queries"])
+        assert all("SLIMIT" in q["query"] or "check_success" in q["query"] for q in body["queries"])
+        assert _js(wf, name).count("MAX_BYTES") >= 2, "response size cap present"
+    blob = json.dumps(wf)
+    assert not re.search(r"(?i)bearer\s+[A-Za-z0-9_-]{8,}|glsa_", blob), "no token in JSON"
+
+
+def test_collector_query_nodes_are_authenticated_bounded_and_do_not_redirect():
+    check_collector_config(_wf())
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda o: o["redirect"]["redirect"].update(followRedirects=True),
+    lambda o: o.pop("timeout"),
+    lambda o: o["response"]["response"].update(neverError=False),
+])
+def test_mutant_query_option_is_caught(mutate):
+    wf = _wf()
+    mutate(_node(wf, "pfSense Query")["parameters"]["options"])
+    with pytest.raises((AssertionError, KeyError)):
+        check_collector_config(wf)
+
+
+def test_mutant_query_hardcoded_url_or_credential_is_caught():
+    wf = _wf()
+    _node(wf, "UniFi Query")["parameters"]["url"] = "https://grafana.example.org/api/ds/query"
+    with pytest.raises(AssertionError):
+        check_collector_config(wf)
+    wf = _wf()
+    _node(wf, "Twingate Query")["credentials"]["httpCustomAuth"]["name"] = "other"
+    with pytest.raises(AssertionError):
+        check_collector_config(wf)
+
+
+def check_graph_order(wf):
+    edges = {s: c["main"][0][0]["node"] for s, c in wf["connections"].items()}
+    for qn, col in (("UniFi Query", "UniFi Collector"), ("Twingate Query", "Twingate Collector"),
+                    ("pfSense Query", "pfSense Collector")):
+        assert edges[qn] == col, "each query feeds its collector"
+    assert edges["pfSense Collector"] == "Build Digest"
+
+
+def test_query_nodes_feed_their_collectors():
+    check_graph_order(_wf())
+
+
+# -- failure is never "0 updates" --
+
+BAD_ANSWERS = {
+    "request error item": {"error": {"message": "ECONNREFUSED"}},
+    "no item": None,
+    "HTTP 401": {"statusCode": 401, "body": {"message": "Unauthorized"}},
+    "HTTP 302 redirect": {"statusCode": 302, "body": ""},
+    "HTTP 500": {"statusCode": 500, "body": {"results": {}}},
+    "body not json": {"statusCode": 200, "body": "<html>login</html>"},
+    "no results": {"statusCode": 200, "body": {}},
+    "per-query error": _answer(A={"status": 400, "error": "bad query", "frames": []}, B=_res(), C=_res()),
+    "missing ref": _answer(A=_res()),
+    "frames not a list": _answer(A={"status": 200, "frames": "x"}, B=_res(), C=_res()),
+    "malformed frame": _answer(A=_res({"schema": {}, "data": {}}), B=_res(), C=_res()),
+    "bad timestamp": _answer(A=_res(_frame({"name": "a"}, [("x", True)])), B=_res(), C=_res()),
+}
+
+
+def check_failures_are_failed(wf):
+    for name in REAL:
+        for label, ans in BAD_ANSWERS.items():
+            qn = REAL[name][0]
+            ctx = {} if ans is None else {qn: ans}
+            j = _ok_run(_js(wf, name), ctx)["items"][0]["json"]
+            assert j["status"] == "failed", (name, label, j["status"])
+            assert j["applied"] == [] and j["pending"] == [] and j["reason"], (name, label)
+
+
+def test_query_failures_are_failed_never_ok_with_empty_lists():
+    check_failures_are_failed(_wf())
+
+
+def test_query_failure_never_renders_as_zero_updates_in_the_digest():
+    wf = _wf()
+    j = _collect(wf, "UniFi Collector", BAD_ANSWERS["HTTP 401"])
+    out = _build(wf, {"UniFi Collector": j})
+    assert out["counts"] == {"applied": 0, "pending": 0, "notChecked": 1}
+    assert "UniFi: check failed - " in out["description"] and out["sources"]["unifi"] == "failed"
+
+
+def test_grafana_error_text_is_not_copied_into_the_reason():
+    j = _collect(_wf(), "UniFi Collector", {"statusCode": 500, "body": {"message": "SECRET-DETAIL"}})
+    assert "SECRET-DETAIL" not in json.dumps(j)
+
+
+def test_mutant_error_treated_as_ok_is_caught():
+    wf = _wf()
+    n = _node(wf, "UniFi Collector")
+    anchor = "if (r.statusCode !== 200) return failed("
+    assert anchor in n["parameters"]["jsCode"]
+    n["parameters"]["jsCode"] = n["parameters"]["jsCode"].replace(anchor, "if (r.statusCode !== 200) return done('ok', '', [], []) || failed(")
+    with pytest.raises(AssertionError):
+        check_failures_are_failed(wf)
+
+
+def test_mutant_request_error_treated_as_empty_is_caught():
+    wf = _wf()
+    n = _node(wf, "pfSense Collector")
+    anchor = "if (r.error) return failed("
+    assert anchor in n["parameters"]["jsCode"]
+    n["parameters"]["jsCode"] = n["parameters"]["jsCode"].replace(anchor, "if (r.error) return done('ok') || failed(")
+    with pytest.raises(AssertionError):
+        check_failures_are_failed(wf)
+
+
+# -- response size cap --
+
+def check_size_caps(wf):
+    for name in REAL:
+        big = _good_answer(name)
+        big["body"]["results"]["X"] = {"pad": "x" * 300000}
+        j = _collect(wf, name, big)
+        assert j["status"] == "failed" and "too large" in j["reason"], name
+        many = _good_answer(name)
+        many["body"]["results"]["A"]["frames"] = many["body"]["results"]["A"]["frames"] * 250
+        j = _collect(wf, name, many)
+        assert j["status"] == "failed" and j["pending"] == [], name
+        pts = _good_answer(name)
+        fr = pts["body"]["results"]["A"]["frames"][0]
+        fr["data"]["values"] = [list(range(2500)), [True] * 2500]
+        assert _collect(wf, name, pts)["status"] == "failed", name
+        assert _collect(wf, name, _good_answer(name))["status"] == "ok", name
+
+
+def test_oversized_answers_too_many_series_and_too_many_points_are_failed():
+    check_size_caps(_wf())
+
+
+@pytest.mark.parametrize("old,new", [
+    ("const MAX_BYTES = 262144;", "const MAX_BYTES = 1e12;"),
+    ("const MAX_SERIES = 200;", "const MAX_SERIES = 1e9;"),
+    ("const MAX_POINTS = 2000;", "const MAX_POINTS = 1e9;"),
+])
+def test_mutant_size_cap_removed_is_caught(old, new):
+    wf = _wf()
+    n = _node(wf, "Twingate Collector")
+    assert old in n["parameters"]["jsCode"]
+    n["parameters"]["jsCode"] = n["parameters"]["jsCode"].replace(old, new)
+    with pytest.raises(AssertionError):
+        check_size_caps(wf)
+
+
+# -- ok / not-deployed / stale --
+
+def check_unifi(wf):
+    j = _unifi(wf, [("ap1", 60000, True), ("sw1", 60000, False), ("sw2", 60000, False)], ever=[("sw2", 12)])
+    assert j["status"] == "ok"
+    assert j["pending"] == [{"name": "ap1", "version": "upgrade available"}]
+    assert j["applied"] == [{"name": "sw2", "from": "upgrade pending", "to": "up to date"}]
+    j = _unifi(wf, [("sw1", 60000, False)])
+    assert j["status"] == "ok" and j["pending"] == [] and j["applied"] == []          # fresh and nothing pending
+    # a device whose last point is old is not current: ignored while another device is fresh
+    j = _unifi(wf, [("ap1", 60000, False), ("gone", 5 * H, True)])
+    assert j["status"] == "ok" and j["pending"] == []
+    # stale: newest point older than 2 hours is failed, never ok with an empty list
+    j = _unifi(wf, [("ap1", 3 * H, True), ("sw1", 4 * H, False)])
+    assert j["status"] == "failed" and "stale" in j["reason"] and j["pending"] == []
+    j = _unifi(wf, [("ap1", 2 * H + 1, False)])
+    assert j["status"] == "failed"
+    # empty series: the source does not exist
+    j = _unifi(wf, [])
+    assert j["status"] == "not-deployed" and j["pending"] == []
+    j = _collect(wf, "UniFi Collector", _answer(A={"status": 200}, B={"status": 200}))
+    assert j["status"] == "not-deployed"
+
+
+def test_unifi_collector_ok_stale_and_empty():
+    check_unifi(_wf())
+
+
+def _mutate(name, old, new):
+    wf = _wf()
+    n = _node(wf, name)
+    assert old in n["parameters"]["jsCode"], old
+    n["parameters"]["jsCode"] = n["parameters"]["jsCode"].replace(old, new)
+    return wf
+
+
+@pytest.mark.parametrize("old,new", [
+    ("if (state.size === 0) return failed(", "if (false) return failed("),
+    ("const FRESH_MS = 7200000;", "const FRESH_MS = 1e12;"),
+    ("if (cur.length === 0) return done('not-deployed',", "if (cur.length === 0) return done('ok',"),
+])
+def test_mutant_unifi_proof_removed_is_caught(old, new):
+    with pytest.raises(AssertionError):
+        check_unifi(_mutate("UniFi Collector", old, new))
+
+
+def check_pfsense(wf):
+    j = _pfsense(wf, [("core", "false", H, 1), ("kernel", "true", H, 1), ("package", "false", H, 0),
+                      ("package", "true", H, 0)], ever=[("package", "false", 1)])
+    assert j["status"] == "ok"
+    assert j["pending"] == [{"name": "core", "version": "update available"},
+                            {"name": "kernel (security)", "version": "security update available"}]
+    assert j["applied"] == [{"name": "package", "from": "update pending", "to": "up to date"}]
+    j = _pfsense(wf, [("core", "false", H, 0)])
+    assert j["status"] == "ok" and j["pending"] == [] and j["applied"] == []
+    assert _pfsense(wf, [("core", "false", H, 1)], check=((14 * H, 1),))["status"] == "failed"   # stale check
+    j = _pfsense(wf, [("core", "false", H, 0)], check=((H, 0),))                                 # check reported failure
+    assert j["status"] == "failed" and j["pending"] == []
+    j = _pfsense(wf, [("core", "false", H, 0)], check=())                                        # no proof of currency
+    assert j["status"] == "failed" and "missing" in j["reason"]
+    j = _pfsense(wf, [], check=())
+    assert j["status"] == "not-deployed" and "#70" in j["reason"]
+
+
+def test_pfsense_collector_ok_stale_failed_check_and_empty():
+    check_pfsense(_wf())
+
+
+@pytest.mark.parametrize("old,new", [
+    ("if (!truthy(cp.v)) return failed(", "if (false) return failed("),
+    ("if (chk.length === 0) return failed(", "if (false) return failed("),
+    ("const FRESH_MS = 46800000;", "const FRESH_MS = 1e12;"),
+    ("if (cur.length === 0 && chk.length === 0) return done('not-deployed',",
+     "if (cur.length === 0 && chk.length === 0) return done('ok',"),
+])
+def test_mutant_pfsense_proof_removed_is_caught(old, new):
+    with pytest.raises(AssertionError):
+        check_pfsense(_mutate("pfSense Collector", old, new))
+
+
+def check_twingate(wf):
+    j = _twingate(wf, [("c1", H, 2), ("c2", H, 1), ("c3", H, 0), ("c4", H, 0)], ever=[("c3", 3)])
+    assert j["status"] == "ok"
+    assert j["pending"] == [{"name": "c1", "version": "2 releases behind"}, {"name": "c2", "version": "1 release behind"}]
+    assert j["applied"] == [{"name": "c3", "from": "3 behind", "to": "current"}]
+    assert _twingate(wf, [("c1", H, 0)])["pending"] == []
+    assert _twingate(wf, [("c1", H, 2)], check=((4 * H, 1),))["status"] == "failed"
+    assert _twingate(wf, [("c1", H, 0)], check=((H, 0),))["status"] == "failed"
+    j = _twingate(wf, [("c1", H, 0)], check=())
+    assert j["status"] == "failed" and "missing" in j["reason"]
+    # not deployed yet: no series at all is not-deployed (not ok, not failed)
+    j = _twingate(wf, [], check=())
+    assert j["status"] == "not-deployed" and j["applied"] == [] and j["pending"] == []
+
+
+def test_twingate_collector_ok_stale_failed_check_and_not_deployed():
+    check_twingate(_wf())
+
+
+@pytest.mark.parametrize("old,new", [
+    ("const FRESH_MS = 10800000;", "const FRESH_MS = 1e12;"),
+    ("if (!truthy(cp.v)) return failed(", "if (false) return failed("),
+    ("if (cur.length === 0 && chk.length === 0) return done('not-deployed',",
+     "if (cur.length === 0 && chk.length === 0) return done('ok',"),
+])
+def test_mutant_twingate_proof_removed_is_caught(old, new):
+    with pytest.raises(AssertionError):
+        check_twingate(_mutate("Twingate Collector", old, new))
+
+
+# -- injection through device and connector names, end to end through Build Digest --
+
+EVIL = ["@everyone <@123456789012345678> [x](https://evil.test) **b** `c`", "a\nb\u202ec\x00", "z" * 5000]
+
+
+def check_injection(wf):
+    ans_u = _answer(A=_res(*[_frame({"name": n}, [(NOW_MS - 60000, True)]) for n in EVIL],
+                           _frame({"name": {"x": 1}}, [(NOW_MS - 60000, True)])), B=_res())
+    ans_t = _answer(A=_res(*[_frame({"connector": n}, [(NOW_MS - H, 1)]) for n in EVIL]), B=_res(),
+                    C=_res(_frame({}, [(NOW_MS - H, 1)])))
+    ans_p = _answer(A=_res(_frame({"kind": EVIL[0], "security": "true"}, [(NOW_MS - H, 1)])), B=_res(),
+                    C=_res(_frame({}, [(NOW_MS - H, 1)])))
+    srcs = {"UniFi Collector": _collect(wf, "UniFi Collector", ans_u),
+            "Twingate Collector": _collect(wf, "Twingate Collector", ans_t),
+            "pfSense Collector": _collect(wf, "pfSense Collector", ans_p)}
+    for j in srcs.values():
+        assert j["status"] == "ok" and j["pending"], j
+    out = _build(wf, srcs)
+    d = out["description"]
+    assert out["counts"]["pending"] == 8
+    assert "@everyone" not in d and not re.search("@(?!" + ZWSP + ")", d) and "@" + ZWSP in d
+    assert "[x](" not in d and "\\[x\\]\\(" in d and "**b**" not in d
+    assert "\x00" not in d and "\u202e" not in d and "\\(invalid\\)" in d
+    assert "z" * 100 not in d and len(d) <= 4096
+    assert out["allowed_mentions"] == {"parse": []}
+    assert "@everyone" not in out["matrixBody"] and "\x00" not in out["matrixBody"]
+    for j in srcs.values():
+        assert all(len(p["name"]) <= 120 for p in j["pending"]), "collector caps name length"
+
+
+def test_hostile_device_connector_and_kind_names_are_neutralized_end_to_end():
+    check_injection(_wf())
+
+
+def test_mutant_collector_name_not_capped_or_coerced_is_caught():
+    old = "function str(v) { return (typeof v === 'string' || typeof v === 'number') ? String(v).slice(0, NAME_MAX) : '(invalid)'; }"
+    with pytest.raises((AssertionError, RuntimeError)):
+        check_injection(_mutate("UniFi Collector", old, "function str(v) { return v; }"))
+
+
+def test_mutant_digest_mention_break_removed_is_caught_with_collector_data():
+    with pytest.raises(AssertionError):
+        check_injection(_mutate("Build Digest", "s = s.replace(/@/g, '@\\u200b');", ""))
+
+
+# -- docs --
+
+def test_doc_covers_grafana_collectors():
+    text = DOC.read_text(encoding="utf-8")
+    for needle in ("GRAFANA_BASE_URL", "grafana-viewer-auth", "Viewer", "/api/ds/query", "#219",
+                   "redirect", "response size", "stale", "applied"):
+        assert needle in text, needle
+    assert "\u2014" not in text
+    assert not re.search(r"glsa_[A-Za-z0-9_]+", text), "no token"

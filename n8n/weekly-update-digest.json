@@ -36,12 +36,52 @@
     },
     {
       "parameters": {
-        "jsCode": "// STUB collector (#202 shell). Returns not-deployed until the real source lands (#200, #70).\n// Contract: status is one of ok | failed | not-deployed; applied = [{name, from, to}];\n// pending = [{name, version}]. A failed source must return status failed, never empty lists.\nreturn [{ json: { source: 'unifi', status: 'not-deployed', reason: 'collector not implemented yet (#200)', applied: [], pending: [] } }];\n"
+        "method": "POST",
+        "url": "={{ String($env.GRAFANA_BASE_URL || '').replace(/\\/+$/, '') + '/api/ds/query' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"from\":\"now-7d\",\"to\":\"now\",\"queries\":[{\"refId\":\"A\",\"datasource\":{\"type\":\"influxdb\",\"uid\":\"influxdb-unifi\"},\"rawQuery\":true,\"resultFormat\":\"time_series\",\"query\":\"SELECT last(\\\"upgradeable\\\") FROM /^(uap|usw|ugw|udm|uxg)$/ WHERE time > now() - 7d GROUP BY \\\"name\\\" SLIMIT 200\"},{\"refId\":\"B\",\"datasource\":{\"type\":\"influxdb\",\"uid\":\"influxdb-unifi\"},\"rawQuery\":true,\"resultFormat\":\"time_series\",\"query\":\"SELECT count(\\\"upgradeable\\\") FROM /^(uap|usw|ugw|udm|uxg)$/ WHERE \\\"upgradeable\\\" = true AND time > now() - 7d GROUP BY \\\"name\\\" SLIMIT 200\"}]}",
+        "options": {
+          "timeout": 15000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        300
+      ],
+      "id": "unifi-query",
+      "name": "UniFi Query",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "grafana-viewer-auth"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const SOURCE = 'unifi';\nconst QUERY_NODE = 'UniFi Query';\nconst FRESH_MS = 7200000;\n// Real collector (#202). Reads the HTTP node's answer from Grafana's /api/ds/query. Contract:\n// status ok | failed | not-deployed; applied = [{name, from, to}]; pending = [{name, version}].\n// NEVER ok with empty lists on an error, a bad status, a malformed or oversized answer or stale data.\nconst MAX_BYTES = 262144;   // answer size cap (the query also limits series; see docs/update-digest.md)\nconst MAX_SERIES = 200;\nconst MAX_POINTS = 2000;\nconst NAME_MAX = 120;\nconst done = (status, reason, applied, pending) => [{ json: { source: SOURCE, status, reason, applied: applied || [], pending: pending || [] } }];\nconst failed = (reason) => done('failed', reason);\nfunction str(v) { return (typeof v === 'string' || typeof v === 'number') ? String(v).slice(0, NAME_MAX) : '(invalid)'; }\nlet r = null;\ntry { r = $(QUERY_NODE).first().json; } catch (e) { r = null; }\nif (!r || typeof r !== 'object') return failed('query node produced no result');\nif (r.error) return failed('query request failed (no answer from Grafana)');\nif (r.statusCode !== 200) return failed('Grafana answered HTTP ' + str(r.statusCode));\nconst body = r.body;\nif (!body || typeof body !== 'object' || Array.isArray(body)) return failed('Grafana answer is not JSON');\nlet size = 0;\ntry { size = JSON.stringify(body).length; } catch (e) { return failed('Grafana answer cannot be read'); }\nif (size > MAX_BYTES) return failed('Grafana answer too large (' + size + ' bytes)');\nconst results = body.results;\nif (!results || typeof results !== 'object') return failed('Grafana answer has no results');\n// -> array of {labels, points:[{t, v}]}, or a string error\nfunction readRef(ref) {\n  const res = results[ref];\n  if (!res || typeof res !== 'object') return 'query ' + ref + ' missing from the answer';\n  if (res.error || (res.status !== undefined && res.status !== 200)) return 'query ' + ref + ' reported an error';\n  if (res.frames === undefined || res.frames === null) return [];\n  if (!Array.isArray(res.frames)) return 'query ' + ref + ' answer malformed';\n  if (res.frames.length > MAX_SERIES) return 'query ' + ref + ' returned too many series';\n  const out = [];\n  for (const fr of res.frames) {\n    const fields = fr && fr.schema && fr.schema.fields;\n    const vals = fr && fr.data && fr.data.values;\n    if (!Array.isArray(fields) || !Array.isArray(vals) || vals.length !== fields.length) return 'query ' + ref + ' answer malformed';\n    const ti = fields.findIndex((f) => f && f.type === 'time');\n    const vi = fields.findIndex((f) => f && f.type !== 'time');\n    if (ti < 0 || vi < 0 || !Array.isArray(vals[ti]) || !Array.isArray(vals[vi])) return 'query ' + ref + ' answer malformed';\n    if (vals[ti].length !== vals[vi].length || vals[ti].length > MAX_POINTS) return 'query ' + ref + ' answer malformed or too large';\n    const lb = fields[vi].labels;\n    const labels = (lb && typeof lb === 'object' && !Array.isArray(lb)) ? lb : {};\n    const points = [];\n    for (let i = 0; i < vals[ti].length; i++) {\n      const t = vals[ti][i];\n      if (typeof t !== 'number' || !isFinite(t)) return 'query ' + ref + ' answer malformed';\n      points.push({ t, v: vals[vi][i] });\n    }\n    out.push({ labels, points });\n  }\n  return out;\n}\nconst lastPoint = (s) => s.points.length ? s.points.reduce((a, b) => (b.t >= a.t ? b : a)) : null;\nconst truthy = (v) => v === true || v === 1 || v === '1' || v === 'true';\nconst positive = (v) => typeof v === 'number' && v > 0;\n\nconst cur = readRef('A');\nif (typeof cur === 'string') return failed(cur);\nconst ever = readRef('B');\nif (typeof ever === 'string') return failed(ever);\nif (cur.length === 0) return done('not-deployed', 'no UniFi upgradeable series in the last 7 days (unpoller not writing or not deployed)');\nconst now = Date.now();\nconst state = new Map();\nfor (const s of cur) {\n  const lp = lastPoint(s);\n  if (!lp || now - lp.t > FRESH_MS || lp.t > now + 300000) continue;  // stale or future point: device not current\n  const name = str(s.labels.name);\n  state.set(name, (state.get(name) || false) || truthy(lp.v));\n}\nif (state.size === 0) return failed('newest UniFi point is older than 2 hours: data is stale');\nconst everTrue = new Set();\nfor (const s of ever) { const lp = lastPoint(s); if (lp && positive(lp.v)) everTrue.add(str(s.labels.name)); }\nconst pending = [];\nconst applied = [];\nfor (const [name, up] of state) {\n  if (up) pending.push({ name, version: 'upgrade available' });\n  else if (everTrue.has(name)) applied.push({ name, from: 'upgrade pending', to: 'up to date' });\n}\nreturn done('ok', '', applied, pending);\n"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        480,
+        720,
         300
       ],
       "id": "unifi-collector",
@@ -50,12 +90,12 @@
     },
     {
       "parameters": {
-        "jsCode": "// STUB collector (#202 shell). Returns not-deployed until the real source lands (#200, #70).\n// Contract: status is one of ok | failed | not-deployed; applied = [{name, from, to}];\n// pending = [{name, version}]. A failed source must return status failed, never empty lists.\nreturn [{ json: { source: 'os', status: 'not-deployed', reason: 'collector not implemented yet', applied: [], pending: [] } }];\n"
+        "jsCode": "// Host package collector is not built yet: tracked in issue #219 (host collectors).\n// Contract: status is one of ok | failed | not-deployed; applied = [{name, from, to}];\n// pending = [{name, version}]. A failed source must return status failed, never empty lists.\nreturn [{ json: { source: 'os', status: 'not-deployed', reason: 'host package collector not built yet (#219)', applied: [], pending: [] } }];\n"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        720,
+        960,
         300
       ],
       "id": "os-collector",
@@ -64,12 +104,52 @@
     },
     {
       "parameters": {
-        "jsCode": "// STUB collector (#202 shell). Returns not-deployed until the real source lands (#200, #70).\n// Contract: status is one of ok | failed | not-deployed; applied = [{name, from, to}];\n// pending = [{name, version}]. A failed source must return status failed, never empty lists.\nreturn [{ json: { source: 'twingate', status: 'not-deployed', reason: 'collector not implemented yet', applied: [], pending: [] } }];\n"
+        "method": "POST",
+        "url": "={{ String($env.GRAFANA_BASE_URL || '').replace(/\\/+$/, '') + '/api/ds/query' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"from\":\"now-7d\",\"to\":\"now\",\"queries\":[{\"refId\":\"A\",\"datasource\":{\"type\":\"influxdb\",\"uid\":\"influxdb-twingate\"},\"rawQuery\":true,\"resultFormat\":\"time_series\",\"query\":\"SELECT last(\\\"value\\\") FROM \\\"twingate_connector_behind\\\" WHERE time > now() - 7d GROUP BY \\\"connector\\\" SLIMIT 200\"},{\"refId\":\"B\",\"datasource\":{\"type\":\"influxdb\",\"uid\":\"influxdb-twingate\"},\"rawQuery\":true,\"resultFormat\":\"time_series\",\"query\":\"SELECT max(\\\"value\\\") FROM \\\"twingate_connector_behind\\\" WHERE time > now() - 7d GROUP BY \\\"connector\\\" SLIMIT 200\"},{\"refId\":\"C\",\"datasource\":{\"type\":\"influxdb\",\"uid\":\"influxdb-twingate\"},\"rawQuery\":true,\"resultFormat\":\"time_series\",\"query\":\"SELECT last(\\\"value\\\") FROM \\\"twingate_update_check_success\\\" WHERE time > now() - 7d\"}]}",
+        "options": {
+          "timeout": 15000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1200,
+        300
+      ],
+      "id": "twingate-query",
+      "name": "Twingate Query",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "grafana-viewer-auth"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const SOURCE = 'twingate';\nconst QUERY_NODE = 'Twingate Query';\nconst FRESH_MS = 10800000;\n// Real collector (#202). Reads the HTTP node's answer from Grafana's /api/ds/query. Contract:\n// status ok | failed | not-deployed; applied = [{name, from, to}]; pending = [{name, version}].\n// NEVER ok with empty lists on an error, a bad status, a malformed or oversized answer or stale data.\nconst MAX_BYTES = 262144;   // answer size cap (the query also limits series; see docs/update-digest.md)\nconst MAX_SERIES = 200;\nconst MAX_POINTS = 2000;\nconst NAME_MAX = 120;\nconst done = (status, reason, applied, pending) => [{ json: { source: SOURCE, status, reason, applied: applied || [], pending: pending || [] } }];\nconst failed = (reason) => done('failed', reason);\nfunction str(v) { return (typeof v === 'string' || typeof v === 'number') ? String(v).slice(0, NAME_MAX) : '(invalid)'; }\nlet r = null;\ntry { r = $(QUERY_NODE).first().json; } catch (e) { r = null; }\nif (!r || typeof r !== 'object') return failed('query node produced no result');\nif (r.error) return failed('query request failed (no answer from Grafana)');\nif (r.statusCode !== 200) return failed('Grafana answered HTTP ' + str(r.statusCode));\nconst body = r.body;\nif (!body || typeof body !== 'object' || Array.isArray(body)) return failed('Grafana answer is not JSON');\nlet size = 0;\ntry { size = JSON.stringify(body).length; } catch (e) { return failed('Grafana answer cannot be read'); }\nif (size > MAX_BYTES) return failed('Grafana answer too large (' + size + ' bytes)');\nconst results = body.results;\nif (!results || typeof results !== 'object') return failed('Grafana answer has no results');\n// -> array of {labels, points:[{t, v}]}, or a string error\nfunction readRef(ref) {\n  const res = results[ref];\n  if (!res || typeof res !== 'object') return 'query ' + ref + ' missing from the answer';\n  if (res.error || (res.status !== undefined && res.status !== 200)) return 'query ' + ref + ' reported an error';\n  if (res.frames === undefined || res.frames === null) return [];\n  if (!Array.isArray(res.frames)) return 'query ' + ref + ' answer malformed';\n  if (res.frames.length > MAX_SERIES) return 'query ' + ref + ' returned too many series';\n  const out = [];\n  for (const fr of res.frames) {\n    const fields = fr && fr.schema && fr.schema.fields;\n    const vals = fr && fr.data && fr.data.values;\n    if (!Array.isArray(fields) || !Array.isArray(vals) || vals.length !== fields.length) return 'query ' + ref + ' answer malformed';\n    const ti = fields.findIndex((f) => f && f.type === 'time');\n    const vi = fields.findIndex((f) => f && f.type !== 'time');\n    if (ti < 0 || vi < 0 || !Array.isArray(vals[ti]) || !Array.isArray(vals[vi])) return 'query ' + ref + ' answer malformed';\n    if (vals[ti].length !== vals[vi].length || vals[ti].length > MAX_POINTS) return 'query ' + ref + ' answer malformed or too large';\n    const lb = fields[vi].labels;\n    const labels = (lb && typeof lb === 'object' && !Array.isArray(lb)) ? lb : {};\n    const points = [];\n    for (let i = 0; i < vals[ti].length; i++) {\n      const t = vals[ti][i];\n      if (typeof t !== 'number' || !isFinite(t)) return 'query ' + ref + ' answer malformed';\n      points.push({ t, v: vals[vi][i] });\n    }\n    out.push({ labels, points });\n  }\n  return out;\n}\nconst lastPoint = (s) => s.points.length ? s.points.reduce((a, b) => (b.t >= a.t ? b : a)) : null;\nconst truthy = (v) => v === true || v === 1 || v === '1' || v === 'true';\nconst positive = (v) => typeof v === 'number' && v > 0;\n\nconst cur = readRef('A');\nif (typeof cur === 'string') return failed(cur);\nconst mx = readRef('B');\nif (typeof mx === 'string') return failed(mx);\nconst chk = readRef('C');\nif (typeof chk === 'string') return failed(chk);\nif (cur.length === 0 && chk.length === 0) return done('not-deployed', 'no Twingate update metrics in the last 7 days (the collector is not deployed yet)');\nif (chk.length === 0) return failed('Twingate update_check_success series is missing: cannot prove the data is current');\nconst now = Date.now();\nlet cp = null;\nfor (const s of chk) { const lp = lastPoint(s); if (lp && (!cp || lp.t > cp.t)) cp = lp; }\nif (!cp || now - cp.t > FRESH_MS || cp.t > now + 300000) return failed('Twingate check is older than 3 hours: data is stale');\nif (!truthy(cp.v)) return failed('the Twingate update check itself reported failure');\nconst peak = new Map();\nfor (const s of mx) { const lp = lastPoint(s); if (lp && positive(lp.v)) peak.set(str(s.labels.connector), lp.v); }\nconst pending = [];\nconst applied = [];\nfor (const s of cur) {\n  const lp = lastPoint(s);\n  if (!lp || now - lp.t > FRESH_MS || lp.t > now + 300000 || typeof lp.v !== 'number') continue;\n  const name = str(s.labels.connector);\n  if (lp.v > 0) pending.push({ name, version: lp.v + (lp.v === 1 ? ' release behind' : ' releases behind') });\n  else if (peak.has(name)) applied.push({ name, from: peak.get(name) + ' behind', to: 'current' });\n}\nreturn done('ok', '', applied, pending);\n"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        960,
+        1440,
         300
       ],
       "id": "twingate-collector",
@@ -78,12 +158,52 @@
     },
     {
       "parameters": {
-        "jsCode": "// STUB collector (#202 shell). Returns not-deployed until the real source lands (#200, #70).\n// Contract: status is one of ok | failed | not-deployed; applied = [{name, from, to}];\n// pending = [{name, version}]. A failed source must return status failed, never empty lists.\nreturn [{ json: { source: 'pfsense', status: 'not-deployed', reason: 'collector not implemented yet (#70)', applied: [], pending: [] } }];\n"
+        "method": "POST",
+        "url": "={{ String($env.GRAFANA_BASE_URL || '').replace(/\\/+$/, '') + '/api/ds/query' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpCustomAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"from\":\"now-7d\",\"to\":\"now\",\"queries\":[{\"refId\":\"A\",\"datasource\":{\"type\":\"influxdb\",\"uid\":\"influxdb-pfsense\"},\"rawQuery\":true,\"resultFormat\":\"time_series\",\"query\":\"SELECT last(\\\"value\\\") FROM \\\"pfsense_update_pending\\\" WHERE time > now() - 7d GROUP BY \\\"kind\\\", \\\"security\\\" SLIMIT 50\"},{\"refId\":\"B\",\"datasource\":{\"type\":\"influxdb\",\"uid\":\"influxdb-pfsense\"},\"rawQuery\":true,\"resultFormat\":\"time_series\",\"query\":\"SELECT max(\\\"value\\\") FROM \\\"pfsense_update_pending\\\" WHERE time > now() - 7d GROUP BY \\\"kind\\\", \\\"security\\\" SLIMIT 50\"},{\"refId\":\"C\",\"datasource\":{\"type\":\"influxdb\",\"uid\":\"influxdb-pfsense\"},\"rawQuery\":true,\"resultFormat\":\"time_series\",\"query\":\"SELECT last(\\\"value\\\") FROM \\\"pfsense_update_check_success\\\" WHERE time > now() - 7d\"}]}",
+        "options": {
+          "timeout": 15000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1680,
+        300
+      ],
+      "id": "pfsense-query",
+      "name": "pfSense Query",
+      "credentials": {
+        "httpCustomAuth": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "grafana-viewer-auth"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const SOURCE = 'pfsense';\nconst QUERY_NODE = 'pfSense Query';\nconst FRESH_MS = 46800000;\n// Real collector (#202). Reads the HTTP node's answer from Grafana's /api/ds/query. Contract:\n// status ok | failed | not-deployed; applied = [{name, from, to}]; pending = [{name, version}].\n// NEVER ok with empty lists on an error, a bad status, a malformed or oversized answer or stale data.\nconst MAX_BYTES = 262144;   // answer size cap (the query also limits series; see docs/update-digest.md)\nconst MAX_SERIES = 200;\nconst MAX_POINTS = 2000;\nconst NAME_MAX = 120;\nconst done = (status, reason, applied, pending) => [{ json: { source: SOURCE, status, reason, applied: applied || [], pending: pending || [] } }];\nconst failed = (reason) => done('failed', reason);\nfunction str(v) { return (typeof v === 'string' || typeof v === 'number') ? String(v).slice(0, NAME_MAX) : '(invalid)'; }\nlet r = null;\ntry { r = $(QUERY_NODE).first().json; } catch (e) { r = null; }\nif (!r || typeof r !== 'object') return failed('query node produced no result');\nif (r.error) return failed('query request failed (no answer from Grafana)');\nif (r.statusCode !== 200) return failed('Grafana answered HTTP ' + str(r.statusCode));\nconst body = r.body;\nif (!body || typeof body !== 'object' || Array.isArray(body)) return failed('Grafana answer is not JSON');\nlet size = 0;\ntry { size = JSON.stringify(body).length; } catch (e) { return failed('Grafana answer cannot be read'); }\nif (size > MAX_BYTES) return failed('Grafana answer too large (' + size + ' bytes)');\nconst results = body.results;\nif (!results || typeof results !== 'object') return failed('Grafana answer has no results');\n// -> array of {labels, points:[{t, v}]}, or a string error\nfunction readRef(ref) {\n  const res = results[ref];\n  if (!res || typeof res !== 'object') return 'query ' + ref + ' missing from the answer';\n  if (res.error || (res.status !== undefined && res.status !== 200)) return 'query ' + ref + ' reported an error';\n  if (res.frames === undefined || res.frames === null) return [];\n  if (!Array.isArray(res.frames)) return 'query ' + ref + ' answer malformed';\n  if (res.frames.length > MAX_SERIES) return 'query ' + ref + ' returned too many series';\n  const out = [];\n  for (const fr of res.frames) {\n    const fields = fr && fr.schema && fr.schema.fields;\n    const vals = fr && fr.data && fr.data.values;\n    if (!Array.isArray(fields) || !Array.isArray(vals) || vals.length !== fields.length) return 'query ' + ref + ' answer malformed';\n    const ti = fields.findIndex((f) => f && f.type === 'time');\n    const vi = fields.findIndex((f) => f && f.type !== 'time');\n    if (ti < 0 || vi < 0 || !Array.isArray(vals[ti]) || !Array.isArray(vals[vi])) return 'query ' + ref + ' answer malformed';\n    if (vals[ti].length !== vals[vi].length || vals[ti].length > MAX_POINTS) return 'query ' + ref + ' answer malformed or too large';\n    const lb = fields[vi].labels;\n    const labels = (lb && typeof lb === 'object' && !Array.isArray(lb)) ? lb : {};\n    const points = [];\n    for (let i = 0; i < vals[ti].length; i++) {\n      const t = vals[ti][i];\n      if (typeof t !== 'number' || !isFinite(t)) return 'query ' + ref + ' answer malformed';\n      points.push({ t, v: vals[vi][i] });\n    }\n    out.push({ labels, points });\n  }\n  return out;\n}\nconst lastPoint = (s) => s.points.length ? s.points.reduce((a, b) => (b.t >= a.t ? b : a)) : null;\nconst truthy = (v) => v === true || v === 1 || v === '1' || v === 'true';\nconst positive = (v) => typeof v === 'number' && v > 0;\n\nconst cur = readRef('A');\nif (typeof cur === 'string') return failed(cur);\nconst mx = readRef('B');\nif (typeof mx === 'string') return failed(mx);\nconst chk = readRef('C');\nif (typeof chk === 'string') return failed(chk);\nif (cur.length === 0 && chk.length === 0) return done('not-deployed', 'no pfSense update metrics in the last 7 days (Telegraf exec input not deployed, see #70)');\nif (chk.length === 0) return failed('pfSense update_check_success series is missing: cannot prove the data is current');\nconst now = Date.now();\nlet cp = null;\nfor (const s of chk) { const lp = lastPoint(s); if (lp && (!cp || lp.t > cp.t)) cp = lp; }\nif (!cp || now - cp.t > FRESH_MS || cp.t > now + 300000) return failed('pfSense check is older than 13 hours: data is stale');\nif (!truthy(cp.v)) return failed('the pfSense update check itself reported failure');\nconst label = (s) => str(s.labels.kind) + (String(s.labels.security) === 'true' ? ' (security)' : '');\nconst everTrue = new Set();\nfor (const s of mx) { const lp = lastPoint(s); if (lp && positive(lp.v)) everTrue.add(label(s)); }\nconst pending = [];\nconst applied = [];\nfor (const s of cur) {\n  const lp = lastPoint(s);\n  if (!lp || now - lp.t > FRESH_MS || lp.t > now + 300000) continue;\n  const name = label(s);\n  if (truthy(lp.v)) pending.push({ name, version: String(s.labels.security) === 'true' ? 'security update available' : 'update available' });\n  else if (everTrue.has(name)) applied.push({ name, from: 'update pending', to: 'up to date' });\n}\nreturn done('ok', '', applied, pending);\n"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1200,
+        1920,
         300
       ],
       "id": "pfsense-collector",
@@ -97,7 +217,7 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1440,
+        2160,
         300
       ],
       "id": "digest-build",
@@ -121,7 +241,7 @@
       "type": "n8n-nodes-base.discord",
       "typeVersion": 2,
       "position": [
-        1680,
+        2400,
         300
       ],
       "id": "digest-discord",
@@ -150,7 +270,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        1920,
+        2640,
         300
       ],
       "id": "digest-matrix",
@@ -170,7 +290,7 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2160,
+        2880,
         300
       ],
       "id": "digest-record",
@@ -190,6 +310,17 @@
       ]
     },
     "Window": {
+      "main": [
+        [
+          {
+            "node": "UniFi Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "UniFi Query": {
       "main": [
         [
           {
@@ -215,6 +346,17 @@
       "main": [
         [
           {
+            "node": "Twingate Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Twingate Query": {
+      "main": [
+        [
+          {
             "node": "Twingate Collector",
             "type": "main",
             "index": 0
@@ -223,6 +365,17 @@
       ]
     },
     "Twingate Collector": {
+      "main": [
+        [
+          {
+            "node": "pfSense Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "pfSense Query": {
       "main": [
         [
           {

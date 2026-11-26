@@ -90,6 +90,7 @@ the n8n container without that volume loses all of them:
 | The imported error handler workflow | Workflow (Error Trigger) | `n8n-setup-alert-router.py --error-workflow` |
 | The private webhook path | Value in the workflow and in the Grafana contact point | A new one is generated on first import and saved to `router-path` in the config directory |
 | Credential `matrix-bot-auth` (optional, for the weekly digest) | Custom Auth with an `Authorization: Bearer <token>` header | `MATRIX_BOT_TOKEN=... n8n-setup-alert-router.py --credentials --with-matrix` |
+| Credential `grafana-viewer-auth` (optional, for the digest collectors) | Custom Auth with an `Authorization: Bearer <Grafana Viewer service account token>` header | `GRAFANA_VIEWER_TOKEN=... n8n-setup-alert-router.py --credentials --with-grafana-viewer` |
 | The imported weekly update digest workflow (optional) | Workflow, imported inactive | `n8n-setup-alert-router.py --digest-workflow n8n/weekly-update-digest.json` |
 | The Discord webhook credential | Existing credential, used by the router's Discord nodes | Not recreated here: it is part of the original n8n setup |
 
@@ -113,6 +114,12 @@ Details that were learned live:
   token comes from the secret manager through `siem-run` as the environment value
   `MATRIX_BOT_TOKEN`, goes to n8n over stdin like the other secrets, and is never
   on argv and never printed. Add `MATRIX_BOT_TOKEN` to the names `siem-run` injects.
+- The Grafana Viewer credential is created only with `--with-grafana-viewer` (together with
+  `--credentials`, combinable with `--with-matrix`; `--check --with-grafana-viewer` reports
+  `GRAFANA_VIEWER_TOKEN`). The token is a Grafana service account token with the Viewer role, comes
+  through `siem-run` as `GRAFANA_VIEWER_TOKEN`, goes to n8n over stdin and is never on argv or
+  printed. `GRAFANA_BASE_URL` is not a secret: a pass-through line (name only) in the n8n container
+  environment, like `MATRIX_HOMESERVER`.
 - `--digest-workflow n8n/weekly-update-digest.json [ID] [--error-workflow-id HANDLER_ID]`
   imports the weekly digest inactive and maps its Discord and `matrix-bot-auth`
   credential ids. Import the error handler first and pass its id, as for the

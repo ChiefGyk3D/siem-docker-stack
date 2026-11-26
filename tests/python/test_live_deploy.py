@@ -121,7 +121,9 @@ def test_build_credentials_shapes(setup):
 
 def test_credential_id_map_covers_the_known_names(setup):
     ids = setup.credential_id_map()
-    assert set(ids) == {"grafana-webhook-auth", "pushover-api", setup.DISCORD_NAME, "matrix-bot-auth"}
+    assert set(ids) == {"grafana-webhook-auth", "pushover-api", setup.DISCORD_NAME, "matrix-bot-auth",
+                        "grafana-viewer-auth"}
+    assert ids["grafana-viewer-auth"] == setup.CRED_GRAFANA_VIEWER_ID
     assert ids["matrix-bot-auth"] == setup.CRED_MATRIX_ID
     assert ids["grafana-webhook-auth"] == setup.CRED_HEADER_ID and ids["pushover-api"] == setup.CRED_PUSHOVER_ID
 
@@ -533,5 +535,65 @@ def test_runbook_documents_issue_53_n8n_changes():
     text = " ".join((REPO_ROOT / "docs" / "live-deploy-runbook.md").read_text(encoding="utf-8").split())
     for needle in ("matrix-bot-auth", "--with-matrix", "MATRIX_BOT_TOKEN", "--digest-workflow",
                    "weekly-update-digest.json", "MATRIX_HOMESERVER", "MATRIX_ROOM_ID", "not secrets"):
+        assert needle in text, needle
+    assert "—" not in text
+
+
+# --- issue #202: grafana-viewer-auth credential for the digest collectors ----------------
+
+def test_build_grafana_viewer_credential_shape(setup):
+    cred = setup.build_grafana_viewer_credential("tok" + "7" * 10)
+    assert cred["name"] == "grafana-viewer-auth" and cred["type"] == "httpCustomAuth"
+    assert cred["id"] == setup.CRED_GRAFANA_VIEWER_ID
+    assert json.loads(cred["data"]["json"]) == {"headers": {"Authorization": "Bearer tok" + "7" * 10}}
+
+
+def test_grafana_viewer_token_never_reaches_argv_or_output(setup, monkeypatch, capsys):  # GUARD
+    seen = {}
+
+    def fake(script, payload):
+        seen["script"], seen["payload"] = script, payload
+        return 0, ["Successfully imported 1 credential."]
+
+    monkeypatch.setattr(setup, "docker_in", fake)
+    monkeypatch.setenv("GRAFANA_VIEWER_TOKEN", "VIEWERSECRET-0123456789")
+    assert setup.grafana_viewer_credentials() == 0
+    assert "VIEWERSECRET" not in seen["script"] and "VIEWERSECRET" in seen["payload"]
+    assert "VIEWERSECRET" not in capsys.readouterr().out
+    assert [c["name"] for c in json.loads(seen["payload"])] == ["grafana-viewer-auth"]
+
+
+def test_grafana_viewer_credentials_need_the_token(setup, monkeypatch):
+    monkeypatch.delenv("GRAFANA_VIEWER_TOKEN", raising=False)
+    with pytest.raises(SystemExit):
+        setup.grafana_viewer_credentials()
+
+
+def test_check_with_grafana_viewer_reports_presence_only():
+    base = {"GRAFANA_WEBHOOK_SECRET": "x" * 12, "PUSHOVER_API_KEY": "y" * 12, "PUSHOVER_USER_KEY": "z" * 12}
+    r = _run("n8n-setup-alert-router.py", ["--check", "--with-grafana-viewer"],
+             dict(base, GRAFANA_VIEWER_TOKEN="g" * 12))
+    assert r.returncode == 0 and "GRAFANA_VIEWER_TOKEN: present" in r.stdout
+    assert "g" * 12 not in r.stdout + r.stderr
+    r = _run("n8n-setup-alert-router.py", ["--check", "--with-grafana-viewer"], base)
+    assert r.returncode == 1 and "GRAFANA_VIEWER_TOKEN: MISSING" in r.stdout
+
+
+def test_check_with_both_flags_needs_both_tokens():
+    base = {"GRAFANA_WEBHOOK_SECRET": "x" * 12, "PUSHOVER_API_KEY": "y" * 12, "PUSHOVER_USER_KEY": "z" * 12,
+            "MATRIX_BOT_TOKEN": "m" * 12}
+    r = _run("n8n-setup-alert-router.py", ["--check", "--with-matrix", "--with-grafana-viewer"], base)
+    assert r.returncode == 1 and "MATRIX_BOT_TOKEN: present" in r.stdout and "GRAFANA_VIEWER_TOKEN: MISSING" in r.stdout
+
+
+def test_patch_digest_workflow_maps_the_viewer_credential_on_every_query_node(setup):
+    out = setup.patch_digest_workflow(digest())
+    viewer = [c for n in out["nodes"] for c in (n.get("credentials") or {}).values() if c["name"] == "grafana-viewer-auth"]
+    assert len(viewer) == 3 and all(c["id"] == setup.CRED_GRAFANA_VIEWER_ID for c in viewer)
+
+
+def test_runbook_documents_grafana_viewer_credential():
+    text = " ".join((REPO_ROOT / "docs" / "live-deploy-runbook.md").read_text(encoding="utf-8").split())
+    for needle in ("grafana-viewer-auth", "--with-grafana-viewer", "GRAFANA_VIEWER_TOKEN", "GRAFANA_BASE_URL"):
         assert needle in text, needle
     assert "—" not in text

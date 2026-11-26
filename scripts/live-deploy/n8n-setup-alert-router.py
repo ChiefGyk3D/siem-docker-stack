@@ -13,6 +13,7 @@ Usage:
   siem-run python3 -I n8n-setup-alert-router.py --error-workflow handler.json [HANDLER_ID]
   siem-run python3 -I n8n-setup-alert-router.py --check --with-matrix
   siem-run python3 -I n8n-setup-alert-router.py --credentials --with-matrix
+  siem-run python3 -I n8n-setup-alert-router.py --credentials --with-grafana-viewer
   siem-run python3 -I n8n-setup-alert-router.py --digest-workflow weekly-update-digest.json [WORKFLOW_ID] [--error-workflow-id HANDLER_ID]
   siem-run python3 -I n8n-setup-alert-router.py --workflow router.json [WORKFLOW_ID] [--pushover-on] [--error-workflow-id HANDLER_ID]
 
@@ -21,6 +22,11 @@ Custom Auth credential matrix-bot-auth: the bearer token comes from the environm
 MATRIX_BOT_TOKEN and goes to n8n over stdin like the other secrets (never argv, never
 printed). --digest-workflow imports n8n/weekly-update-digest.json inactive with its
 credential ids mapped; import the error handler first and pass its id, as for the router.
+--with-grafana-viewer works the same way for the Custom Auth credential grafana-viewer-auth
+(the weekly digest collectors read Grafana with it): the token of a Grafana Viewer service
+account comes from the environment value GRAFANA_VIEWER_TOKEN, over stdin, never argv, never
+printed. The flags can be combined. GRAFANA_BASE_URL is not a secret: a pass-through line
+(name only) in the n8n container environment.
 MATRIX_HOMESERVER and MATRIX_ROOM_ID are not secrets and not handled here: they are
 pass-through lines (names only) in the n8n container environment of the compose file.
 
@@ -41,6 +47,8 @@ Environment (all optional, the current values are the defaults):
   N8N_CRED_PUSHOVER_ID    id for the pushover-api credential (default: pushoverapi0001)
   N8N_CRED_MATRIX_ID      id for the matrix-bot-auth credential (default: matrixbotauth01)
   MATRIX_BOT_TOKEN        only with --with-matrix: the Matrix bot's access token (secret)
+  N8N_CRED_GRAFANA_VIEWER_ID  id for the grafana-viewer-auth credential (default: grafanaviewer01)
+  GRAFANA_VIEWER_TOKEN    only with --with-grafana-viewer: a Grafana Viewer service account token (secret)
   N8N_CRED_DISCORD_ID     id of the existing Discord webhook credential in n8n
                           (default: dscwhk1479574998; an n8n internal id, not a secret)
   N8N_DISCORD_CRED_NAME   name of that credential (default: Discord Webhook Alerts)
@@ -67,6 +75,7 @@ EXPIRY_PATH_FILE = os.path.join(CONFIG_DIR, "expiry-path")
 CRED_HEADER_ID = os.environ.get("N8N_CRED_HEADER_ID", "gfwebhookauth01")
 CRED_PUSHOVER_ID = os.environ.get("N8N_CRED_PUSHOVER_ID", "pushoverapi0001")
 CRED_MATRIX_ID = os.environ.get("N8N_CRED_MATRIX_ID", "matrixbotauth01")
+CRED_GRAFANA_VIEWER_ID = os.environ.get("N8N_CRED_GRAFANA_VIEWER_ID", "grafanaviewer01")
 CRED_DISCORD_ID = os.environ.get("N8N_CRED_DISCORD_ID", "dscwhk1479574998")
 DISCORD_NAME = os.environ.get("N8N_DISCORD_CRED_NAME", "Discord Webhook Alerts")
 NEW_NAME = os.environ.get("N8N_ROUTER_NAME", "Grafana SOAR — Alert Router (authenticated)")
@@ -146,6 +155,16 @@ def build_matrix_credential(token):
     }
 
 
+def build_grafana_viewer_credential(token):
+    """The Custom Auth credential the weekly digest's Grafana query nodes use: one Authorization header."""
+    return {
+        "id": CRED_GRAFANA_VIEWER_ID,
+        "name": "grafana-viewer-auth",
+        "type": "httpCustomAuth",
+        "data": {"json": json.dumps({"headers": {"Authorization": "Bearer " + token}})},
+    }
+
+
 def credential_id_map():
     """Credential name -> the n8n credential id this tooling creates or expects."""
     return {
@@ -153,6 +172,7 @@ def credential_id_map():
         "pushover-api": CRED_PUSHOVER_ID,
         DISCORD_NAME: CRED_DISCORD_ID,
         "matrix-bot-auth": CRED_MATRIX_ID,
+        "grafana-viewer-auth": CRED_GRAFANA_VIEWER_ID,
     }
 
 
@@ -373,8 +393,8 @@ def patch_workflow(wf, reuse_id="", pushover_on=False, origin="", webhook_path="
 
 # ---- command line ----------------------------------------------------------------
 
-def check(with_matrix=False):
-    names = NEEDED + (("MATRIX_BOT_TOKEN",) if with_matrix else ())
+def check(with_matrix=False, with_viewer=False):
+    names = NEEDED + (("MATRIX_BOT_TOKEN",) if with_matrix else ()) + (("GRAFANA_VIEWER_TOKEN",) if with_viewer else ())
     for name in names:
         print("%s: %s" % (name, "present" if os.environ.get(name) else "MISSING"))
     return 0 if all(os.environ.get(n) for n in names) else 1
@@ -399,6 +419,17 @@ def matrix_credentials():
     for ln in lines[:6]:
         print(ln[:160])
     print("matrix credential import exit code:", rc)
+    return rc
+
+
+def grafana_viewer_credentials():
+    """Create only grafana-viewer-auth. The token is read from the environment and sent over stdin."""
+    cred = build_grafana_viewer_credential(need("GRAFANA_VIEWER_TOKEN"))
+    script = "cat > /tmp/cred.json && n8n import:credentials --input=/tmp/cred.json; rc=$?; rm -f /tmp/cred.json; exit $rc"
+    rc, lines = docker_in(script, json.dumps([cred]))
+    for ln in lines[:6]:
+        print(ln[:160])
+    print("grafana viewer credential import exit code:", rc)
     return rc
 
 
@@ -483,11 +514,19 @@ def workflow(path, reuse_id="", pushover_on=False, error_workflow_id=""):
 
 
 def main(argv):
-    if argv[:1] == ["--check"] and argv[1:] in ([], ["--with-matrix"]):
-        return check(bool(argv[1:]))
-    if argv[:1] == ["--credentials"] and argv[1:] in ([], ["--with-matrix"]):
+    flags = argv[1:]
+    known = {"--with-matrix", "--with-grafana-viewer"}
+    if argv[:1] in (["--check"], ["--credentials"]) and len(set(flags)) == len(flags) and set(flags) <= known:
+        if argv[0] == "--check":
+            return check("--with-matrix" in flags, "--with-grafana-viewer" in flags)
         rc = credentials()
-        return rc if rc or not argv[1:] else matrix_credentials()
+        if rc:
+            return rc
+        if "--with-matrix" in flags:
+            rc = matrix_credentials()
+        if not rc and "--with-grafana-viewer" in flags:
+            rc = grafana_viewer_credentials()
+        return rc
     if argv[:1] == ["--digest-workflow"] and len(argv) >= 2:
         try:
             reuse_id, _unused, error_id = parse_workflow_args(argv[2:])

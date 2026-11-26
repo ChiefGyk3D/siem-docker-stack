@@ -3,14 +3,16 @@
 An n8n workflow (`n8n/weekly-update-digest.json`) that posts one message every Monday at 07:00
 America/New_York saying what was updated in the last week and what is still pending. Issue #202.
 
-This is the workflow shell. The four source collectors are stubs that report `not-deployed` until
-the real collectors land (UniFi #200, pfSense #70, OS packages and Twingate later). Until then the
-digest says so in its "Not checked" section instead of pretending nothing happened.
+The UniFi, pfSense and Twingate collectors are real: they read InfluxDB through Grafana's data
+source query API (see "Collectors"). The OS packages collector is still a stub that reports
+`not-deployed` until the host collectors exist (issue #219). A source that is not deployed or cannot
+be read is listed in the "Not checked" section instead of being shown as "0 updates".
 
 ## What it does
 
 ```
-Weekly Schedule -> Window -> UniFi / OS Packages / Twingate / pfSense Collector
+Weekly Schedule -> Window -> UniFi Query -> UniFi Collector -> OS Packages Collector
+  -> Twingate Query -> Twingate Collector -> pfSense Query -> pfSense Collector
   -> Build Digest -> Discord Digest -> Matrix Digest -> Record Window
 ```
 
@@ -52,22 +54,61 @@ executions.
    `Matrix Digest`. Its JSON sets the header `Authorization` to `Bearer <bot access token>`. The
    token lives only in the n8n credential store (fed from the secret manager); it is never in the
    workflow JSON or this repo.
-4. Environment: set these on the n8n container, values from your own deployment (never committed):
+4. Grafana Viewer credential (UniFi, pfSense and Twingate collectors). In Grafana create a service
+   account with the `Viewer` role (Administration, Users and access, Service accounts) and a token
+   for it. Create an n8n Custom Auth credential named `grafana-viewer-auth` and attach it to the
+   three `... Query` nodes. Its JSON sets the header `Authorization` to `Bearer <viewer token>`.
+   With the live-deploy tooling the token comes from the secret manager through `siem-run` as
+   `GRAFANA_VIEWER_TOKEN` and the credential is created with
+   `n8n-setup-alert-router.py --credentials --with-grafana-viewer` (token over stdin, never on argv,
+   never printed). The token lives only in the n8n credential store and is never in the workflow
+   JSON or this repo. The Viewer role reads data sources and dashboards and cannot write. InfluxDB
+   has no read-only user for n8n, so n8n never holds InfluxDB credentials: Grafana does the read.
+5. Environment: set these on the n8n container, values from your own deployment (never committed):
 
    | Name | Meaning | Placeholder |
    | --- | --- | --- |
+   | `GRAFANA_BASE_URL` | Grafana base URL, no trailing slash | `https://grafana.example.org` |
    | `MATRIX_HOMESERVER` | homeserver base URL, no trailing slash | `https://matrix.example.org` |
    | `MATRIX_ROOM_ID` | target room id | `!roomid:example.org` |
 
    n8n must allow `$env` in nodes (`N8N_BLOCK_ENV_ACCESS_IN_NODE` not set to `true`).
-5. Set the error workflow in the workflow settings (the JSON carries the placeholder
+6. Set the error workflow in the workflow settings (the JSON carries the placeholder
    `ERROR_WORKFLOW_ID`), then activate the workflow. It is imported inactive.
 
 The Matrix send is `PUT {homeserver}/_matrix/client/v3/rooms/{room}/send/m.room.message/{txnId}`
 with `msgtype` `m.notice`. The transaction id is derived from the window end, so a retry of the
 same run does not post twice.
 
-## Writing a real collector
+## Collectors
+
+Each real collector is an HTTP Request node (`POST {GRAFANA_BASE_URL}/api/ds/query`, 7 days back,
+InfluxQL, Custom Auth credential `grafana-viewer-auth`) followed by a Code node that maps the answer
+to the contract. The request has a 15 second timeout, follows no redirects (so the bearer token can
+never be sent to another host) and returns the status code instead of throwing. The mapping refuses
+anything unexpected: a response size cap (256 KB of JSON), at most 200 series and 2000 points per
+series, queries that use `SLIMIT`, and a status of `failed` for a request error, any HTTP status
+other than 200 (including a redirect), a non-JSON body, a per-query error, a missing query or a
+malformed frame. The reason names only the HTTP status, never text copied from Grafana. The n8n
+HTTP node downloads the whole answer before the size check, so the real bound on download size is
+the `SLIMIT` in each query.
+
+| Source | Data source | Pending (current state) | Applied (state change in the window) | `ok` only when | `not-deployed` when |
+| --- | --- | --- | --- | --- | --- |
+| UniFi | `influxdb-unifi`, measurements `uap`, `usw`, `ugw`, `udm`, `uxg` | devices whose newest `upgradeable` is true | device now false and true at some point in 7 days | a point newer than 2 hours exists (devices with an older newest point are ignored) | no series at all |
+| pfSense | `influxdb-pfsense`, `pfsense_update_pending` | kinds (core, kernel, package; security marked) whose newest value is 1 | newest 0 and 1 at some point in 7 days | `pfsense_update_check_success` newest point is 1 and under 13 hours old | no pending and no check series |
+| Twingate | `influxdb-twingate`, `twingate_connector_behind` | connectors whose newest behind count is above 0 | newest 0 and above 0 at some point in 7 days | `twingate_update_check_success` newest point is 1 and under 3 hours old | no behind and no check series |
+| OS packages | none yet | none | none | never: stub | always (issue #219, host collectors) |
+
+Applied items are state changes the data proves (an upgrade or update stopped being pending), not
+version numbers: none of these sources stores a version history yet, so `from` and `to` read
+"update pending" and "up to date" (Twingate: "N behind" and "current"). Nothing is invented: where
+no such change is in the data, applied stays empty. A stale source is `failed`, a missing check
+series next to existing data is `failed` (currency cannot be proven), and `ok` is never returned
+with empty lists because of an error or an empty answer. Twingate is not deployed yet, so it
+reports `not-deployed` until its metrics arrive.
+
+## Writing a collector
 
 Replace the stub `Code` node body. Return one item:
 `{ status, reason, applied: [{name, from, to}], pending: [{name, version}] }` with `status` one of
@@ -79,8 +120,9 @@ is also treated as `failed`.
 
 | Situation | Result |
 | --- | --- |
-| Source stub or not installed | listed under Not checked as "not deployed yet" |
-| Source errors or returns junk | listed under Not checked as "check failed", counted in K |
+| Source stub, empty series or not installed | listed under Not checked as "not deployed yet" |
+| Source errors, stale data, redirect, oversized or junk answer | listed under Not checked as "check failed", counted in K |
+| Grafana down or token revoked | UniFi, pfSense and Twingate all listed as "check failed" |
 | Quiet week | digest still sent, "0 applied" |
 | Discord down | Matrix still sent, window advances |
 | Matrix down | Discord still sent, window advances |
