@@ -458,11 +458,11 @@ def test_unifi_warning_is_bounded_by_the_critical_rule_with_no_overlap_or_gap():
         assert rule["noDataState"] == "OK" and rule["execErrState"] == "Alerting"
 
 
-def test_pfsense_rules_ship_paused_and_use_metric():
+def test_pfsense_rules_ship_active_and_use_metric():
     pf = [r for _, _, r in _rules() if r["uid"].startswith("update-pfsense")]
     assert len(pf) >= 4
     for r in pf:
-        assert r["isPaused"] is True, r["uid"]
+        assert r["isPaused"] is False, r["uid"]
         assert "pfsense_update" in json.dumps(r["data"])
     assert any(r["labels"].get("update_security") == "true"
                and r["labels"]["severity"] == "critical" for r in pf)
@@ -477,7 +477,7 @@ def test_pfsense_collector_health_rule():
     assert "pfsense_update_check_success" in json.dumps(r["data"])
     assert "36h" in json.dumps(r["data"]) or 129600 in [d["relativeTimeRange"]["from"] for d in r["data"]
                                                          if "relativeTimeRange" in d]
-    assert r["isPaused"] is True and r["noDataState"] == "Alerting"
+    assert r["isPaused"] is False and r["noDataState"] == "Alerting"
     cond = json.dumps([d["model"] for d in r["data"] if d["refId"] == "C"])
     assert '"lt"' in cond
 
