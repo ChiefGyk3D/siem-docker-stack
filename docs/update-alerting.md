@@ -32,7 +32,7 @@ you turn it on.
 | `docker/grafana/provisioning/alerting/update-alert-rules-unifi.yml` | UniFi rules: warning from 24h to 7 days pending, critical after 7 days |
 | `docker/grafana/provisioning/alerting/update-alert-rules-pfsense.yml` | pfSense rules and a collector health rule, shipped paused |
 | `docker/grafana/provisioning/alerting/contact-points.yml` | Webhook contact point pointing at the n8n router |
-| `docker/grafana/provisioning/alerting/update-notification-policy.yml.example` | Repeat intervals: 4h warning, 1h critical |
+| `docker/grafana/provisioning/alerting/update-notification-policy.yml.example` | Repeat intervals: 84h warning (twice a week), 1h critical |
 | `n8n/grafana-alert-router.json` | Router with header auth and the added Pushover nodes |
 | `docs/heartbeat.md` | The alert path heartbeat (dead-man's switch), its own rule, policy route and settings |
 | `scripts/pfsense-update-metric.sh` | Read-only metric source for the firewall (not deployed) |
@@ -122,9 +122,9 @@ ready. The script runs only those two read-only commands.
 
 | Label | What it controls |
 |-------|------------------|
-| `update_alert` | `true` marks an update-alerting rule: it matches the notification policy route with the 4h and 1h repeats, and its title belongs in `ALLOWED_ALERTNAMES` |
+| `update_alert` | `true` marks an update-alerting rule: it matches the notification policy route with the 84h and 1h repeats, and its title belongs in `ALLOWED_ALERTNAMES` |
 | `severity` | `warning` or `critical`: the repeat interval, and the Pushover priority (1, or 2 for an allowlisted name with an urgent label) |
-| `phone` | `true` is the only way an alert reaches Pushover; any other value or no label keeps it off the phone (Discord is unaffected) |
+| `phone` | `true` is the only way an alert reaches Pushover; any other value or no label keeps it off the phone (Discord is unaffected). Every update-pending rule for critical infrastructure (UniFi, pfSense; Twingate later) sets `phone=true`; only the poller-stale watchdog is `phone=false` |
 | `alert_group` | Grouping and display (`updates` for these rules); no routing effect |
 | `update_security` | `true` marks a security release: emergency priority for allowlisted names |
 
@@ -139,7 +139,10 @@ Grafana provisions the notification policy as one tree for the whole
 organization, so the file ships as `.example` and Grafana ignores it. Merge its
 `update_alert` route into your existing tree (Alerting, Notification
 policies), or copy it to `update-notification-policy.yml` if you have no
-tree yet. Repeat intervals: 4h for warning, 1h for critical.
+tree yet. Repeat intervals: 84h for warning, 1h for critical. Owner decision (issue
+#199): update alerts for critical infrastructure reach the phone and repeat at
+least twice a week until the update is applied, so no repeat interval may be
+longer than 84h. This supersedes the earlier P2 and `phone=false` ruling (#152).
 
 ## Webhook authentication
 
@@ -339,7 +342,7 @@ repeats for that tag. The cancel call runs only for tags with the `upd-`
 prefix and only for names in `ALLOWED_ALERTNAMES`.
 
 Acknowledging in the Pushover app stops that one message only. While the
-update is still pending, Grafana re-alerts at the policy repeat interval (4h
+update is still pending, Grafana re-alerts at the policy repeat interval (84h
 warning, 1h critical) and a new emergency message starts. The alert itself
 ends only when the update is applied.
 

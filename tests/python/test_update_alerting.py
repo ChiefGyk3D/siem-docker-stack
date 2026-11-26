@@ -493,7 +493,19 @@ def test_notification_policy_repeats():
     routes = root["routes"][0]["routes"]
     rep = {next(m for m in r["object_matchers"] if m[0] == "severity")[2]: r["repeat_interval"]
            for r in routes}
-    assert rep == {"warning": "4h", "critical": "1h"}
+    assert rep == {"warning": "84h", "critical": "1h"}
+    # owner decision (#199): never less often than twice a week (84h)
+    for sev, val in rep.items():
+        assert val.endswith("h") and int(val[:-1]) <= 84, sev
+
+
+def test_pending_update_rules_all_push_to_the_phone():
+    # #199 supersedes the #152 P2/phone=false ruling: every pending rule pages
+    pending = [r for _, _, r in _rules() if r["labels"]["alert_group"] == "updates"
+               and "poller" not in r["uid"]]
+    assert len(pending) >= 6
+    for r in pending:
+        assert r["labels"]["phone"] == "true", r["uid"]
 
 
 def test_contact_point_is_webhook_to_router():
@@ -1305,4 +1317,5 @@ def test_docs_have_the_label_taxonomy_and_health_notes():
         assert label in text, label
     flat = " ".join(text.split())
     assert "stay off the phone until they carry `phone=true`" in flat
+    assert "84h" in flat and "twice a week" in flat
     assert "heartbeat" in flat.lower() and "not part of this change" in flat.lower()
