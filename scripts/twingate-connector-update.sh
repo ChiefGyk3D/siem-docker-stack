@@ -66,7 +66,8 @@ NL='
 # that gives another user write access. Two detections, no extra package needed
 # for the first: (1) the long listing of the mode ends in a plus sign when an
 # extended ACL exists (GNU ls); (2) where getfacl is installed, anything beyond
-# the three base entries (named users or groups, mask, default entries) counts.
+# the three base entries (named users or groups, mask, default entries, or
+# empty, malformed or duplicate output) counts.
 # Other extended attributes (security.*, user.*) do not change who may write a
 # file, so they are not checked; the ACL attributes are the ones that do.
 acl_present() {
@@ -78,8 +79,22 @@ acl_present() {
     esac
     if command -v getfacl >/dev/null 2>&1; then
         _x=$(getfacl -p -c -- "$1" 2>/dev/null) || return 0
-        _x=$(printf '%s\n' "$_x" | sed -n '/^user::/d;/^group::/d;/^other::/d;/^$/d;p')
-        if [ -n "$_x" ]; then return 0; fi
+        # Fail closed: exactly one user::, one group:: and one other:: base entry
+        # and nothing else. Empty, malformed, duplicate or incomplete output
+        # (and any named, mask or default entry) counts as "cannot be trusted".
+        _nu=0; _ng=0; _no=0
+        while IFS= read -r _ln; do
+            case "$_ln" in
+                "") ;;
+                user::[r-][w-][x-]) _nu=$((_nu + 1)) ;;
+                group::[r-][w-][x-]) _ng=$((_ng + 1)) ;;
+                other::[r-][w-][x-]) _no=$((_no + 1)) ;;
+                *) return 0 ;;
+            esac
+        done <<EOF_ACL
+$_x
+EOF_ACL
+        if [ "$_nu" != 1 ] || [ "$_ng" != 1 ] || [ "$_no" != 1 ]; then return 0; fi
     fi
     return 1
 }
@@ -96,8 +111,8 @@ if [ "${TWINGATE_UPDATE_CLEAN_ENV:-}" != "1" ]; then
     # Hardening: the script must live in a root-owned location. Make the path
     # absolute and physical (the directory through `pwd -P`; the file itself must
     # not be a link), then require the file and EVERY directory up to / to be
-    # owned by root and not group- or world-writable. A real run refuses
-    # otherwise, and so does a --dry-run as root; only a non-root --dry-run warns.
+    # owned by root and not group- or world-writable. Every invocation refuses
+    # otherwise (any user, dry run included).
     PATH_OK=1
     PATH_WHY=""
     SELF_DIR=$(cd "$(dirname -- "$SELF")" 2>/dev/null && pwd -P) || SELF_DIR=""
@@ -124,15 +139,12 @@ if [ "${TWINGATE_UPDATE_CLEAN_ENV:-}" != "1" ]; then
         done
     fi
     if [ "$PATH_OK" != 1 ]; then
-        # As root (the trusted user) EVERY invocation, a dry run included, is
-        # refused: this shell is already reading the file, so a dry run as root
-        # from an untrusted path would execute it as root. Only an unprivileged
-        # dry run (which runs nothing as root) may continue, with a warning.
-        if [ "$(id -u)" = "$TRUSTED_UID" ]; then early_die "$PATH_WHY"; fi
-        case " $* " in
-            *" --dry-run "*) printf 'WARNING: %s (a real run would refuse)\n' "$PATH_WHY" >&2 ;;
-            *) early_die "$PATH_WHY" ;;
-        esac
+        # EVERY invocation from a path that fails validation is refused, whatever
+        # the user and whether or not it is a dry run. This shell is already
+        # reading the file, and a user with access to the Docker socket is
+        # root-equivalent, so even an unprivileged run of an untrusted copy is
+        # inside the threat model. Use the installed, trusted copy to preview.
+        early_die "$PATH_WHY"
     fi
     # Read the script text ONCE and run the clean second stage from that text,
     # so the path is never opened a second time.
@@ -230,8 +242,14 @@ step() { if [ "$DRY" = 1 ]; then printf 'DRY-RUN would: %s\n' "$*"; else printf 
 # filesystem (find -xdev). The removal itself also stays on one filesystem and
 # never follows links.
 secure_rmdir() {
-    _all=$(find "$1" -mindepth 1 2>/dev/null)
-    _one=$(find "$1" -mindepth 1 -xdev 2>/dev/null)
+    if ! _all=$(find "$1" -mindepth 1 2>/dev/null); then
+        printf 'refused: cannot scan %s; not removing it\n' "$1" >&2
+        return 1
+    fi
+    if ! _one=$(find "$1" -mindepth 1 -xdev 2>/dev/null); then
+        printf 'refused: cannot scan %s; not removing it\n' "$1" >&2
+        return 1
+    fi
     if [ "$_all" != "$_one" ]; then
         printf 'refused: %s holds a mount point; not removing it\n' "$1" >&2
         return 1
@@ -240,9 +258,12 @@ secure_rmdir() {
         if ! { [ -f "$f" ] && [ ! -L "$f" ]; }; then continue; fi
         if command -v shred >/dev/null 2>&1; then shred -u "$f" >/dev/null 2>&1 || rm -f "$f"; else rm -f "$f"; fi
     done
-    # The check above found no mount point, so the plain form is a safe fallback
-    # where rm lacks --one-file-system.
-    rm -rf --one-file-system -- "$1" 2>/dev/null || rm -rf -- "$1"
+    # The one-file-system form is required: there is no unrestricted fallback.
+    # If it fails (including an rm without the option) nothing more is tried.
+    if ! rm -rf --one-file-system -- "$1" 2>/dev/null; then
+        printf 'refused: cannot remove %s on one file system (rm --one-file-system is required)\n' "$1" >&2
+        return 1
+    fi
 }
 
 cleanup() {

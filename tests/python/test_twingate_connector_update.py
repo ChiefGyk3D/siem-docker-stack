@@ -1849,15 +1849,40 @@ def test_untrusted_script_path_or_ancestor_is_refused(env, which, listfile, reas
     assert env.leftovers() == []
 
 
-def test_untrusted_script_path_only_warns_for_an_unprivileged_dry_run(env):
+def _as_non_root(env):
     # TRUSTED_UID=0 in this copy: the test user is not the trusted user (not root)
     t = env.script.read_text().replace(f"TRUSTED_UID={os.getuid()}", "TRUSTED_UID=0")
+    assert "TRUSTED_UID=0" in t
     env.script.write_text(t)
+
+
+@pytest.mark.parametrize("args", [("--dry-run",), ("--dry-run", "--yes"), ("--yes",), ()])
+def test_a_non_root_run_from_an_untrusted_path_is_refused_dry_run_or_not(env, args):
+    _as_non_root(env)
+    (env.d / "gw").write_text(os.path.dirname(os.path.realpath(env.script)) + "\n")
+    r = env.run(*args, NAME)
+    assert r.returncode == 2
+    assert "WARNING" not in r.stderr
+    assert "not owned by root or is group- or world-writable" in r.stderr
+    assert env.log() == []
+
+
+def test_a_non_root_dry_run_from_an_untrusted_copy_executes_none_of_its_code(env):
+    _as_non_root(env)
+    marker = env.root / "executed-marker-nonroot"
+    t = env.script.read_text()
+    anchor = "    SCRIPT_TEXT=$(cat -- \"$SELF\""
+    assert t.count(anchor) == 1
+    env.script.write_text(t.replace(anchor, f": >{shlex.quote(str(marker))}\n" + anchor, 1))
     (env.d / "gw").write_text(os.path.dirname(os.path.realpath(env.script)) + "\n")
     r = env.run("--dry-run", NAME)
-    assert r.returncode == 0, r.stderr
-    assert "WARNING" in r.stderr and "would refuse" in r.stderr
-    assert changed(env) == []
+    assert r.returncode == 2
+    assert not marker.exists()
+    assert env.log() == []
+    # control: with a trusted path the same marker line does run, so the probe is live
+    (env.d / "gw").write_text("")
+    r = env.run("--dry-run", NAME)
+    assert marker.exists(), r.stderr
 
 
 @pytest.mark.parametrize("listfile", ["gw", "foreign", "acl", "getfacl"])
@@ -1911,6 +1936,24 @@ def test_acl_check_fails_closed_when_getfacl_fails(env):
     assert env.log() == []
 
 
+@pytest.mark.parametrize("body", [
+    "",                                                  # empty success output
+    "garbage\n",                                         # malformed
+    "user::rwx\ngroup::r-x\n",                           # incomplete: no other::
+    "group::r-x\nother::r-x\n",                          # incomplete: no user::
+    "user::rwx\nuser::rwx\ngroup::r-x\nother::r-x\n",    # duplicate
+    "user::rwx\ngroup::r-x\nother::r-x\nother::r-x\n",   # duplicate
+    "user::rwx\ngroup::r-x\nother::r-x\nbogus\n",        # trailing junk
+    "user::rwx\ngroup::r-x\nother::zzz\n",              # malformed permissions
+])
+def test_acl_check_fails_closed_on_empty_or_malformed_getfacl_output(env, body):
+    (env.bin / "getfacl").write_text("#!/bin/sh\ncat <<'EOF_X'\n" + body + "EOF_X\nexit 0\n")
+    r = env.run("--yes", NAME)
+    assert r.returncode == 2
+    assert "access control list" in r.stderr
+    assert env.log() == []
+
+
 def test_acl_check_fails_closed_when_the_listing_cannot_be_read(env):
     (env.bin / "ls").write_text("#!/bin/sh\nexit 1\n")
     r = env.run("--yes", NAME)
@@ -1935,6 +1978,66 @@ def test_a_nested_mount_in_a_reset_directory_is_never_descended_into(env):
     assert r.returncode != 0
     assert (mnt / "precious").exists()
     assert "mount point" in r.stderr
+    assert changed(env) == []
+
+
+def _prepopulate_run_dir(env):
+    rd = env.run_dir / "twingate-connector-update"
+    (rd / "docker-config").mkdir(parents=True)
+    (rd / "home").mkdir()
+    rd.chmod(0o700)
+    (rd / "docker-config" / "keep").write_text("x")
+    return rd
+
+
+def _find_fails_on_scans(env, only_second):
+    # Fails every scan of the reset directories (the trust query is answered as usual).
+    cond = '*" -xdev "*' if only_second else '*" -mindepth "*'
+    f = env.bin / "find"
+    body = f.read_text().replace(
+        "# The test tree is not root-owned",
+        f'case " $* " in {cond}) exit 1 ;; esac\n# The test tree is not root-owned', 1)
+    assert body != f.read_text()
+    f.write_text(body)
+
+
+@pytest.mark.parametrize("only_second", [False, True])
+def test_a_failing_find_scan_refuses_and_removes_nothing(env, only_second):
+    rd = _prepopulate_run_dir(env)
+    _find_fails_on_scans(env, only_second)
+    r = env.run("--yes", NAME)
+    assert r.returncode != 0
+    assert (rd / "docker-config" / "keep").exists()
+    assert "cannot scan" in r.stderr
+    assert changed(env) == []
+
+
+def test_find_failing_with_equal_empty_output_does_not_pass_the_scan(env):
+    rd = _prepopulate_run_dir(env)
+    f = env.bin / "find"
+    f.write_text(f.read_text().replace(
+        "# The test tree is not root-owned",
+        'case " $* " in *" -mindepth "*) exit 1 ;; esac\n# The test tree is not root-owned', 1))
+    r = env.run("--yes", NAME)
+    assert r.returncode != 0
+    assert (rd / "docker-config" / "keep").exists()
+    assert changed(env) == []
+
+
+def test_a_failing_removal_is_refused_with_no_unrestricted_fallback(env):
+    rd = _prepopulate_run_dir(env)
+    log = env.root / "rm.log"
+    (env.bin / "rm").write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >>{shlex.quote(str(log))}\n"
+        'case " $* " in *" --one-file-system "*) exit 1 ;; esac\n'
+        'exec /bin/rm "$@"\n')
+    (env.bin / "rm").chmod(0o755)
+    r = env.run("--yes", NAME)
+    assert r.returncode != 0
+    assert "--one-file-system is required" in r.stderr
+    calls = [l for l in log.read_text().splitlines() if "-rf" in l]
+    assert calls and all("--one-file-system" in l for l in calls), calls
     assert changed(env) == []
 
 

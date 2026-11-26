@@ -67,7 +67,9 @@ def test_script_doc_never_shows_a_root_run_from_a_checkout():
     t = SCRIPT_DOC.read_text()
     assert "/usr/local/sbin/twingate-connector-update" in t  # collected something real
     assert not ROOT_FROM_CHECKOUT.search(t)
-    assert "EVERY invocation as root, a dry run included, is refused" in " ".join(t.split())
+    assert "EVERY invocation from a path that fails it is refused" in " ".join(t.split())
+    assert "only warns" not in t and "nothing runs as root" not in t
+    assert "root-equivalent" in t and "unsupported for the install location" in " ".join(t.split())
 
 
 @pytest.mark.parametrize("bad", ["sudo ./scripts/twingate-connector-update.sh --dry-run x",
