@@ -110,7 +110,7 @@ FILES = ("contact-points.yml", "update-alert-rules-unifi.yml", "update-alert-rul
          "heartbeat-alert-rule.yml", "notification-failure-alert-rule.yml")
 # Deployed only when staged (a missing one is skipped, not an error). Adding a rule
 # file the live box needs is a one-line add here.
-OPTIONAL_FILES = ("update-alert-rules-twingate.yml",)
+OPTIONAL_FILES = ("update-alert-rules-twingate.yml", "infra-alerts.yml")
 KEEP_DATASOURCE_UIDS = ("influxdb-twingate",)
 # Examples stay inactive unless named with --include-example. Maps the staged
 # example name to the name it gets in the alerting folder.

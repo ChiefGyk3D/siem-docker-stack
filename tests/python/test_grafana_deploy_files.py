@@ -825,6 +825,19 @@ def test_optional_rule_file_is_deployed_when_staged_and_skipped_when_absent(gd, 
     code, out, _ = run(gd, capsys, ["--apply"])
     assert code == 0 and (env.alert / TWINGATE).read_text(encoding="utf-8") == "apiVersion: 1\n"
 
+def test_infra_rule_file_is_optional_and_deployed_when_staged(gd, env, capsys, monkeypatch):  # issue #224
+    _influx(gd, monkeypatch)
+    infra = "infra-alerts.yml"
+    assert infra in gd.OPTIONAL_FILES and infra not in gd.FILES
+    code, out, _ = run(gd, capsys, ["--apply"])
+    assert code == 0 and not (env.alert / infra).exists()
+    src = (REPO_ROOT / "docker" / "grafana" / "provisioning" / "alerting" / infra).read_text(encoding="utf-8")
+    (env.stage / infra).write_text(src, encoding="utf-8")
+    (env.stage / infra).chmod(0o644)
+    code, out, _ = run(gd, capsys, ["--apply"])
+    assert code == 0 and (env.alert / infra).read_text(encoding="utf-8") == src
+
+
 def test_optional_rule_file_is_on_the_allowlist(gd, env):
     (env.stage / TWINGATE).write_text("apiVersion: 1\n", encoding="utf-8")
     (env.stage / TWINGATE).chmod(0o644)
