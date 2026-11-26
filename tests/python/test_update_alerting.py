@@ -494,8 +494,9 @@ def test_notification_policy_repeats():
     routes = root["routes"][0]["routes"]
     rep = {next(m for m in r["object_matchers"] if m[0] == "severity")[2]: r["repeat_interval"]
            for r in routes}
-    assert rep == {"warning": "84h", "critical": "1h"}
-    # owner decision (#199): never less often than twice a week (84h)
+    # owner decisions: warning twice a week (#199), critical a fresh page daily (#53)
+    assert rep == {"warning": "84h", "critical": "24h"}
+    # no update route may repeat less often than 84h
     for sev, val in rep.items():
         assert val.endswith("h") and int(val[:-1]) <= 84, sev
 
@@ -1376,6 +1377,7 @@ def test_docs_have_the_label_taxonomy_and_health_notes():
     flat = " ".join(text.split())
     assert "stay off the phone until they carry `phone=true`" in flat
     assert "84h" in flat and "twice a week" in flat
+    assert "24h critical" in flat and "1h critical" not in flat  # issue #53
     assert "heartbeat" in flat.lower() and "not part of this change" in flat.lower()
 
 
