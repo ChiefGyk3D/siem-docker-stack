@@ -1165,6 +1165,51 @@ def test_docs_exist_and_use_placeholders_only():
     assert not re.search(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", text.replace("127.0.0.1", ""))
 
 
+def _runtime_bound_problems(text):
+    """Return the missing pieces of the documented runtime bound (empty list = guidance present)."""
+    problems = []
+    unit = re.search(r"```ini\n(.*?)```", text, re.S)
+    unit_text = unit.group(1) if unit else ""
+    if not re.search(r"^TimeoutStartSec=\S+", unit_text, re.M) or "infinity" in unit_text:
+        problems.append("unit TimeoutStartSec")
+    if not re.search(r"^TimeoutStopSec=\S+", unit_text, re.M):
+        problems.append("unit TimeoutStopSec")
+    if not re.search(r"^KillMode=control-group$", unit_text, re.M):
+        problems.append("unit KillMode")
+    if not re.search(r"^SendSIGKILL=yes$", unit_text, re.M):
+        problems.append("unit SendSIGKILL")
+    if not re.search(r"RuntimeMaxSec=[^\n]*(no effect|does not|not apply)", text):
+        problems.append("RuntimeMaxSec oneshot warning")
+    if not re.search(r"^\d+ \* \* \* \* .*timeout --kill-after=\S+ \S+ ", text, re.M):
+        problems.append("cron timeout wrapper")
+    for needle in ("systemd.service(5)", "systemd.kill(5)", "blocked-write", "absence"):
+        if needle not in text:
+            problems.append(needle)
+    return problems
+
+
+def test_docs_bound_the_runtime_of_the_whole_pipeline():
+    text = DOC.read_text(encoding="utf-8")
+    assert _runtime_bound_problems(text) == []
+
+
+def test_docs_runtime_bound_guard_bites():
+    text = DOC.read_text(encoding="utf-8")
+    for old, new in (("TimeoutStartSec=", "XTimeoutStartSec="), ("TimeoutStopSec=", "XTimeoutStopSec="),
+                     ("KillMode=control-group", "KillMode=process"), ("SendSIGKILL=yes", "SendSIGKILL=no"),
+                     ("timeout --kill-after", "timeout --foreground")):
+        assert old in text, old
+        assert _runtime_bound_problems(text.replace(old, new)) != [], old
+
+
+def test_docs_terminal_line_claim_is_narrow():
+    text = " ".join(DOC.read_text(encoding="utf-8").split())
+    assert "exactly one terminal status line is printed" not in text
+    for needle in ("normal completion", "signal before the write", "failure of the write", "forced kill",
+                   "may leave no status line"):
+        assert needle in text, needle
+
+
 # ---------------------------------------------------------------- revert proofs (clean mutants)
 # Each mutant is a scratch copy of the script with ONE guard neutralized (the line carrying the
 # marker comment is replaced). The scenario must satisfy its guard on the unmutated copy and violate

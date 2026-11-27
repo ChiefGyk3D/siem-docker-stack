@@ -160,8 +160,23 @@ The metrics are built in full and written in one step, only after every value is
 full disk, a closed pipe), the script exits non-zero and does not exit 0 with a partial set; gate
 every health conclusion on a fresh `host_update_check_success == 1`, because a killed process or a
 closed output can still leave no data at all. Termination signals (HUP, INT, TERM) are ignored
-once the write begins, so a signal can never append a failure line after a complete payload; exactly one
-terminal status line is printed.
+once the write begins, so a signal can never append a failure line after a complete payload.
+
+What is guaranteed, and what is not. A single terminal status line is printed in these cases only:
+normal completion (the metrics, with `host_update_check_success value=1i`), a signal before the
+write (HUP, INT or TERM; the failure line), and a failure of the write itself when the output can still
+take the failure line. These cases may leave no status line at all: a forced kill (KILL cannot be
+trapped), a stopped process, a signal the script does not trap (PIPE, ALRM, USR1, QUIT), a closed
+output, and a sink that fails after accepting part of the payload. Alert on missing data.
+
+**Blocked-write interval.** If the reader of the output never drains it (a stuck writer or a full
+pipe), the write blocks, and because TERM is ignored there, a normal stop does not end the process.
+That interval is bounded only by the runtime limit you configure, so the Install section sets one:
+a systemd `TimeoutStartSec=` (with `TimeoutStopSec=` and the default `KillMode=control-group`, so
+the stuck process and the delivery command are really killed with KILL) and, for cron, `timeout
+--kill-after`. While a blocked run lasts no fresh metric is produced; the alert for that is the
+absence of a fresh `host_update_check_success` (see the alert rules below). Without a limit, a
+stuck systemd oneshot would block every later timer run and stuck cron runs would pile up.
 
 Alert rule suggestions: page on `host_update_check_success == 0` or missing data; on
 `host_update_state_ok == 0`; on `host_update_oldest_pending_age_seconds > 604800` (7 days); on
@@ -196,6 +211,10 @@ Environment=HOST_LABEL=web-1
 StateDirectory=host-update-metric
 StateDirectoryMode=0700
 ExecStart=/bin/sh -c '/opt/siem/scripts/host-update-metric.sh critical | /opt/siem/deliver-metrics'
+TimeoutStartSec=10min
+TimeoutStopSec=30s
+KillMode=control-group
+SendSIGKILL=yes
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
@@ -215,10 +234,24 @@ as is, so no extra variable is needed. (Put `[Timer]` and `[Install]` in the `.t
 failures: a shell pipeline hides the collector's exit code; deliver the failure line too, as the
 collector prints it, or use `set -o pipefail` in a bash wrapper.
 
-Cron alternative (one user crontab line, hourly):
+**Runtime limit (systemd).** `RuntimeMaxSec=` has no effect on `Type=oneshot` services (the man page says
+to use `TimeoutStartSec=` to limit them), so the unit above uses
+`TimeoutStartSec=`, which for a oneshot unit limits the whole run (its default there is no
+limit). At the limit systemd sends TERM (`TimeoutStartFailureMode=` defaults to `terminate`); the
+collector may ignore TERM in the blocked-write interval, so after `TimeoutStopSec=` systemd sends
+KILL to every process in the unit's control group (`KillMode=control-group`, `SendSIGKILL=yes`, both
+the defaults, written out so a drop-in cannot silently weaken them). The worst case is about
+`TimeoutStartSec` plus `TimeoutStopSec`; the unit then fails and the next timer run starts. Needs
+systemd 246 or newer for `TimeoutStartFailureMode=`; the settings written in the unit have existed
+since systemd 188. Read from `systemd.service(5)` and `systemd.kill(5)` (systemd 257 man pages,
+2026-11-26).
+
+Cron alternative (one user crontab line, hourly) with an equivalent bound: `timeout` sends TERM
+at 10 minutes, and `--kill-after` sends KILL 30 seconds later to the whole group, so a blocked
+write cannot pile up runs:
 
 ```
-7 * * * * HOST_LABEL=web-1 /opt/siem/scripts/host-update-metric.sh standard | /opt/siem/deliver-metrics
+7 * * * * HOST_LABEL=web-1 timeout --kill-after=30s 10m sh -c '/opt/siem/scripts/host-update-metric.sh standard | /opt/siem/deliver-metrics'
 ```
 
 ## Delivery is not decided
