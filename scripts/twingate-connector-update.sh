@@ -154,8 +154,22 @@ secure_rmdir() {
         printf 'refused: cannot check whether %s is a mount point; not removing it\n' "$1" >&2
         return 1
     fi
+    # Field 5 writes a space, tab, newline and backslash as \040 \011 \012 \134:
+    # decode those four before comparing with the real path.
+    _tab=$(printf '\t')
     while read -r _a _b _c _d _mp _rest; do
-        if [ "$_mp" = "$_real" ]; then
+        _dec=""
+        while [ -n "$_mp" ]; do
+            case "$_mp" in
+                '\040'*) _dec="$_dec "; _mp=${_mp#????} ;;
+                '\011'*) _dec="$_dec$_tab"; _mp=${_mp#????} ;;
+                '\012'*) _dec="$_dec
+"; _mp=${_mp#????} ;;
+                '\134'*) _dec="$_dec\\"; _mp=${_mp#????} ;;
+                *) _tail=${_mp#?}; _dec="$_dec${_mp%"$_tail"}"; _mp=$_tail ;;
+            esac
+        done
+        if [ "$_dec" = "$_real" ]; then
             printf 'refused: %s is a mount point; not removing it\n' "$1" >&2
             return 1
         fi

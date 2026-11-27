@@ -2184,14 +2184,21 @@ def test_a_failing_removal_is_refused_with_no_unrestricted_fallback(env):
 
 def test_real_find_refuses_an_updater_that_root_does_not_own_as_the_trusted_user(env):
     # no fake find: the launcher copy's PATH is reset to the system directories, so
-    # the real ownership and mode checks run. The trusted user in this copy is the
-    # test user, and the "updater" is a file owned by someone else (root).
+    # the real ownership and mode checks run. The shipped TRUSTED_UID=0 stays; `id`
+    # is a shim that says 0, so the launcher runs as "root", and the updater is a
+    # file owned by the test user, i.e. NOT by the trusted user.
     if os.getuid() == 0:
         pytest.skip("needs a non-root test user")
-    t = LAUNCHER.read_text().replace("TRUSTED_UID=0", f"TRUSTED_UID={os.getuid()}")
+    idshim = env.root / "id-says-root"
+    idshim.write_text("#!/bin/sh\necho 0\n")
+    idshim.chmod(0o755)
+    own = env.root / "owned-by-the-test-user.sh"
+    own.write_text("exit 0\n")
+    own.chmod(0o600)
+    t = LAUNCHER.read_text().replace("ID=/usr/bin/id\n", f"ID={idshim}\n")
     t = t.replace("UPDATER=\"/usr/local/libexec/twingate-connector-update/twingate-connector-update.sh\"",
-                  'UPDATER="/etc/hostname"')
-    assert "/etc/hostname" in t and f"TRUSTED_UID={os.getuid()}" in t
+                  f'UPDATER="{own}"')
+    assert f'UPDATER="{own}"' in t and f"ID={idshim}" in t and "TRUSTED_UID=0" in t
     copy = env.root / "launcher-real-find.sh"
     copy.write_text(t)
     r = subprocess.run(["sh", str(copy), "--yes", NAME], capture_output=True, text=True,
@@ -2355,7 +2362,7 @@ def test_an_unreadable_or_empty_mount_table_refuses_the_removal(env):
 
 # --- round 9 (Daybreak round 8): no command is found through PATH; bounded read -----
 CMD_CONSTANTS = {"ID": "id", "DIRNAME": "dirname", "FIND": "find", "LS": "ls", "GETFACL": "getfacl",
-                 "HEAD": "head", "WC": "wc", "OD": "od", "TR": "tr", "ENV": "env", "SH": "sh"}
+                 "HEAD": "head", "TEE": "tee", "WC": "wc", "OD": "od", "TR": "tr", "ENV": "env", "SH": "sh"}
 
 
 def test_the_shipped_launcher_names_every_command_by_a_fixed_absolute_path():
@@ -2517,3 +2524,259 @@ def test_a_file_that_ends_in_many_newlines_after_the_cap_is_still_refused(env):
     env.script.write_text("#!/bin/sh\nexit 0\n" + "\n" * 100010)
     r = _run_copy(env, env.launcher)
     assert r.returncode == 2 and "empty or too large" in r.stderr
+
+
+# --- round 10 (Daybreak round 9): bytes counted as read; open first, check the descriptor ---
+# The launcher copy still differs from the shipped file in exactly six lines (PATH,
+# TRUSTED_UID, UPDATER, FIND, LS, GETFACL): TEE is not rewritten, so the real tee runs.
+
+def _mutant(env, old, new, name="launcher-mutant.sh"):
+    t = env.launcher.read_text()
+    assert t.count(old) == 1, old
+    copy = env.root / name
+    copy.write_text(t.replace(old, new))
+    return copy
+
+
+def _run_launcher(env, copy, timeout=60):
+    return subprocess.run(["sh", str(copy), "--dry-run", NAME], capture_output=True, text=True,
+                          env=env.environ(), cwd=str(env.root), timeout=timeout)
+
+
+def _run_updater_bytes(env, data, copy=None, timeout=60):
+    env.script.write_bytes(data)
+    return _run_launcher(env, copy or env.launcher, timeout)
+
+
+# the shipped size test; the mutants below stand for the old behaviour
+CAP_TEST = '[ "$COUNT" -ge 100000 ] || [ "$TLEN" != "$COUNT" ]'
+
+
+@pytest.mark.parametrize("size", [100, 99999, 100000, 100001, 200000])
+def test_an_updater_with_nul_bytes_is_refused_at_every_size_around_the_cap(env, size):
+    # command substitution drops NUL bytes, so the text can be far shorter than what was read
+    r = _run_updater_bytes(env, b"exit 0\n" + b"\0" * (size - 7))
+    assert r.returncode == 2 and "empty or too large" in r.stderr, (size, r.stderr)
+    assert env.log() == []
+
+
+def test_without_the_nul_check_a_small_nul_updater_would_run(env):
+    # mutant: the text length is no longer compared with the bytes read
+    mutant = _mutant(env, CAP_TEST, '[ "$COUNT" -ge 100000 ]')
+    r = _run_updater_bytes(env, b"exit 0\n\0\0\0\0", copy=mutant)
+    assert r.returncode == 0  # the NULs were silently dropped and the text ran
+
+
+def test_counting_the_text_instead_of_the_bytes_read_lets_a_huge_nul_updater_pass_the_size_test(env):
+    # mutant: the old rule, the cap applies to the length of the transformed text
+    mutant = _mutant(env, CAP_TEST, '[ "$TLEN" -ge 100000 ]')
+    r = _run_updater_bytes(env, b"exit 0\n" + b"\0" * 100000, copy=mutant)
+    assert "empty or too large" not in r.stderr  # the cap no longer fires; the shipped file refuses it above
+
+
+@pytest.mark.parametrize("size,ok", [(99999, True), (100000, False), (100001, False), (150000, False)])
+def test_an_updater_ending_in_newlines_is_counted_in_bytes_at_the_cap(env, size, ok):
+    r = _run_updater_bytes(env, b"exit 0\n" + b"\n" * (size - 7))
+    if ok:
+        assert r.returncode == 0, r.stderr
+    else:
+        assert r.returncode == 2 and "empty or too large" in r.stderr, (size, r.stderr)
+
+
+def test_a_cap_one_byte_too_high_accepts_the_newline_updater_of_exactly_the_cap(env):
+    mutant = _mutant(env, '[ "$COUNT" -ge 100000 ]', '[ "$COUNT" -ge 100001 ]')
+    r = _run_updater_bytes(env, b"exit 0\n" + b"\n" * (100000 - 7), copy=mutant)
+    assert r.returncode == 0  # the shipped cap refuses exactly this file (test above)
+
+
+# --- the type of the updater is checked on the OPEN descriptor ----------------------------
+
+def _fifo_updater(env):
+    env.script.unlink()
+    os.mkfifo(env.script)
+
+
+def test_a_fifo_as_the_updater_is_refused_without_blocking(env):
+    _fifo_updater(env)
+    r = _run_launcher(env, env.launcher, timeout=20)
+    assert r.returncode == 2 and "not a regular file" in r.stderr, r.stderr
+    assert env.log() == []
+
+
+def test_a_read_only_open_would_block_on_a_fifo(env):
+    # mutant: the descriptor is opened read-only; the open waits for a writer forever
+    _fifo_updater(env)
+    mutant = _mutant(env, 'exec 4<>"$UPDATER"', 'exec 4<"$UPDATER"')
+    with pytest.raises(subprocess.TimeoutExpired):
+        _run_launcher(env, mutant, timeout=4)
+
+
+SWAP_TO_FIFO = '/usr/bin/rm -f "$UPDATER" && /usr/bin/mkfifo "$UPDATER"; exec 4<>"$UPDATER"'
+
+
+def test_a_regular_file_swapped_for_a_fifo_between_the_checks_and_the_open_is_refused(env):
+    # the writer of the directory replaces the file right before the open
+    swap = _mutant(env, 'exec 4<>"$UPDATER"', SWAP_TO_FIFO)
+    r = _run_launcher(env, swap, timeout=20)
+    assert r.returncode == 2 and "not a regular file" in r.stderr, r.stderr
+
+
+def test_the_same_swap_blocks_a_launcher_that_opens_read_only(env):
+    swap = _mutant(env, 'exec 4<>"$UPDATER"', SWAP_TO_FIFO.replace("4<>", "4<"))
+    with pytest.raises(subprocess.TimeoutExpired):
+        _run_launcher(env, swap, timeout=4)
+
+
+def _device_copy(env, text):
+    copy = env.root / "launcher-device.sh"
+    assert f'UPDATER="{env.script}"' in text
+    copy.write_text(text.replace(f'UPDATER="{env.script}"', 'UPDATER="/dev/null"'))
+    return copy
+
+
+def test_a_device_as_the_updater_is_refused_by_the_descriptor_check(env):
+    r = _run_launcher(env, _device_copy(env, env.launcher.read_text()), timeout=20)
+    assert r.returncode == 2 and "not a regular file" in r.stderr, r.stderr
+
+
+def test_without_the_descriptor_type_test_a_device_is_not_called_a_non_regular_file(env):
+    mutant = _mutant(env, '[ ! -f /dev/fd/4 ] || ', '')
+    r = _run_launcher(env, _device_copy(env, mutant.read_text()), timeout=20)
+    assert "not a regular file" not in r.stderr
+
+
+def test_a_directory_as_the_updater_is_refused_cleanly(env):
+    env.script.unlink()
+    env.script.mkdir()
+    r = _run_launcher(env, env.launcher, timeout=20)
+    assert r.returncode == 2 and "refused:" in r.stderr and "not a regular file" in r.stderr, r.stderr
+
+
+def test_a_missing_updater_is_not_created_by_the_open(env):
+    env.script.unlink()
+    r = env.run("--dry-run", NAME)
+    assert r.returncode == 2 and "missing" in r.stderr
+    assert not env.script.exists()
+
+
+@pytest.mark.parametrize("listfile,reason", [("foreign", "not owned by root"), ("gw", "writable"),
+                                             ("acl", "access control list"), ("getfacl", "access control list")])
+def test_the_opened_descriptor_itself_is_checked_for_owner_mode_and_acl(env, listfile, reason):
+    (env.d / listfile).write_text("/dev/fd/4\n")
+    r = env.run("--yes", NAME)
+    assert r.returncode == 2 and reason in r.stderr, r.stderr
+    assert env.log() == []
+    # mutant: only the path is inspected, as before
+    mutant = _mutant(env, "p=/dev/fd/4\n", 'p="$UPDATER"\n')
+    r = _run_launcher(env, mutant)
+    assert reason not in r.stderr
+
+
+def test_a_read_that_stopped_short_is_refused_by_the_size_comparison(env):
+    # the reader delivers 12 bytes of a longer file
+    short = env.root / "head-short"
+    short.write_text('#!/bin/sh\n/usr/bin/head -c 100001 | /usr/bin/head -c 12\n')
+    short.chmod(0o755)
+    env.script.write_text("echo hello-from-the-updater; exit 0\n# padding to be longer than twelve bytes\n")
+    mutant = _mutant(env, "HEAD=/usr/bin/head\n", f"HEAD={short}\n")
+    r = _run_launcher(env, mutant)
+    assert r.returncode == 2 and "not read completely" in r.stderr, r.stderr
+    # mutant: the size comparison is gone, the truncated text runs
+    t = mutant.read_text()
+    assert t.count('-size "${COUNT}c"') == 1
+    gone = env.root / "launcher-nosize.sh"
+    gone.write_text(t.replace('-size "${COUNT}c"', "-size +0c"))
+    r = _run_launcher(env, gone)
+    assert "not read completely" not in r.stderr
+
+
+# --- inherited descriptors ---------------------------------------------------------------
+
+def _fd_report_updater(env):
+    mark = env.root / "fds-seen"
+    env.script.write_text(f'/usr/bin/ls -1 /proc/self/fd >"{mark}"\nexit 0\n')
+    return mark
+
+
+def _run_with_fds(env, launcher, opens, shell="sh"):
+    redirs = " ".join(f"{n}</dev/null" for n in opens)
+    return subprocess.run([shell, "-c", f'exec {redirs}; exec sh "$0" --dry-run {NAME}', str(launcher)],
+                          capture_output=True, text=True, env=env.environ(), cwd=str(env.root), timeout=60)
+
+
+def test_inherited_descriptors_5_to_9_are_closed_before_the_updater_runs(env):
+    mark = _fd_report_updater(env)
+    r = _run_with_fds(env, env.launcher, [5, 7, 9])
+    assert r.returncode == 0, r.stderr
+    seen = set(mark.read_text().split())
+    assert seen and not seen & {"5", "6", "7", "8", "9"}, seen  # 3 and 4: heredoc and the ls own directory
+
+
+def test_without_the_close_an_inherited_descriptor_reaches_the_updater(env):
+    mark = _fd_report_updater(env)
+    mutant = _mutant(env, "exec 4<&- 5<&- 6<&- 7<&- 8<&- 9<&-", "exec 4<&-")
+    r = _run_with_fds(env, mutant, [5, 7])
+    assert r.returncode == 0, r.stderr
+    assert {"5", "7"} <= set(mark.read_text().split())
+
+
+def test_an_inherited_descriptor_above_nine_is_refused(env):
+    mark = _fd_report_updater(env)
+    r = _run_with_fds(env, env.launcher, [12], shell="bash")
+    assert r.returncode == 2 and "inherited file descriptor above 9" in r.stderr, r.stderr
+    assert not mark.exists()
+
+
+def test_without_the_listing_check_a_high_descriptor_reaches_the_updater(env):
+    mark = _fd_report_updater(env)
+    mutant = _mutant(env, "|*[0-9][0-9]*)", ")")
+    r = _run_with_fds(env, mutant, [12], shell="bash")
+    assert r.returncode == 0 and "12" in mark.read_text().split()
+
+
+def test_descriptors_that_cannot_be_listed_are_refused(env):
+    (env.bin / "ls").write_text('#!/bin/sh\nfor a in "$@"; do if [ "$a" = /proc/self/fd ]; then exit 1; fi; done\nexec /bin/ls "$@"\n')
+    r = env.run("--dry-run", NAME)
+    assert r.returncode == 2 and "descriptors cannot be listed" in r.stderr
+
+
+# --- R8-3: the mount table writes some characters as octal escapes --------------------------
+
+ESCAPED = [("040", "run dir"), ("011", "run\tdir"), ("134", "run\\dir"), ("012", "run\ndir")]
+
+
+def _mount_setup(env, arm, name, mutate_arm=False):
+    base = env.root / name
+    base.mkdir()
+    env.run_dir = base
+    t = env.script.read_text()
+    old = f'RUN_BASE="{env.root / "run"}"'
+    assert t.count(old) == 1
+    t = t.replace(old, f'RUN_BASE="{base}"')
+    if mutate_arm:  # mutant: this one escape is no longer decoded
+        needle = "'" + chr(92) + arm + "'*) _dec="
+        assert t.count(needle) == 1
+        t = t.replace(needle, needle + "Q")
+    env.script.write_text(t)
+    rd = _prepopulate_run_dir(env)
+    dc = os.path.realpath(rd / "docker-config")
+    assert name in dc
+    (env.d / "mountinfo").write_text(
+        f"20 1 0:5 / /proc rw - proc proc rw\n36 35 0:30 / {dc.replace(name, 'run' + chr(92) + arm + 'dir')} rw - tmpfs tmpfs rw\n")
+    return rd
+
+
+@pytest.mark.parametrize("arm,name", ESCAPED, ids=[a for a, _ in ESCAPED])
+def test_a_mount_point_whose_name_has_an_escaped_character_is_found(env, arm, name):
+    rd = _mount_setup(env, arm, name)
+    r = env.run("--yes", NAME)
+    assert r.returncode != 0
+    assert (rd / "docker-config" / "keep").exists()
+    assert "is a mount point" in r.stderr, r.stderr
+
+
+@pytest.mark.parametrize("arm,name", ESCAPED, ids=[a for a, _ in ESCAPED])
+def test_each_mountinfo_escape_arm_is_needed(env, arm, name):
+    _mount_setup(env, arm, name, mutate_arm=True)
+    r = env.run("--yes", NAME)
+    assert "is a mount point" not in r.stderr

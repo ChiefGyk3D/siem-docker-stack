@@ -103,3 +103,13 @@ def test_script_doc_documents_cleanup_failure_and_the_launcher_exit_codes():
                                  "sudo scripts/twingate-connector-update.sh --dry-run x"])
 def test_checkout_guard_bites(bad):
     assert ROOT_FROM_CHECKOUT.search(bad)
+
+
+def test_script_doc_describes_the_descriptor_checks_the_byte_count_and_inherited_descriptors():
+    t = " ".join(SCRIPT_DOC.read_text().split())
+    assert "opens the updater ONCE, FIRST, and then checks the open descriptor itself" in t
+    assert "a FIFO, device or directory is refused" in t and "does not block on a FIFO" in t
+    assert "COUNTED as they pass" in t and "drops NUL bytes and trailing newlines" in t
+    assert "closes descriptors 4 to 9" in t and "any descriptor above 9" in t
+    assert "a read-only mount is refused" in t
+    assert "octal escapes" in t

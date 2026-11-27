@@ -51,13 +51,31 @@ The launcher refuses (fixed message, exit code 2) unless ALL of these hold:
   checked.
 
 So EVERY invocation from a path that fails it is refused, before one byte of
-the updater has run. The launcher opens the updater ONCE and reads its text from that open file
-descriptor with a bounded read (`head -c 100001`: never more than 100001 bytes
-are read, and 100000 or more is refused), then runs that text with
+the updater has run. The launcher opens the updater ONCE, FIRST, and then checks
+the open descriptor itself: it must be a regular file (a FIFO, device or
+directory is refused, and the open does not block on a FIFO), and its owner,
+mode and ACL are checked on the descriptor before the same checks run on the
+path and every directory above it. The open uses read-write mode, because under
+Linux that is the only way POSIX `sh` can open without waiting on a FIFO; the
+file is never written. The consequences, all refusals: the updater must exist
+and be writable by root on a writable file system (a read-only mount is
+refused); the check relies on `/dev/fd` and `/proc` (Linux).
+
+The text is read from that open file descriptor with a bounded read (`head -c
+100001`: never more than 100001 bytes are read). The bytes are COUNTED as they
+pass (one copy goes through `tee` to `wc -c`), not measured after command
+substitution, which drops NUL bytes and trailing newlines. The updater is
+refused when 100000 bytes or more were read, when the text held is not exactly
+as long as the count (a NUL byte), or when the count is not the file's size (a
+short read). The launcher then closes descriptors 4 to 9 and refuses to run if
+any descriptor above 9 was inherited (POSIX `sh` cannot name those to close
+them, and `/proc/self/fd` must be listable). It runs the text with
 `env -i` and `sh -c`; the path is never opened again (not for the restart, not
 for `--help`), so a file swapped after the check is never executed. The
 updater and its directories can only be changed by root, so the remaining
-window (between opening the file and checking its path) needs root as well.
+window (the directory walk by path, after the descriptor was checked) needs
+root as well. `/usr/bin` and the commands in it are part of the operating
+system trust boundary; the launcher does not validate them again.
 
 What this does not do: the updater cannot refuse a direct run by root in a way
 an attacker could not imitate. It stops an accidental direct run (it needs the
@@ -110,7 +128,7 @@ The whole environment is cleared. The launcher starts the updater under
 `env -i` with a fixed `PATH`, `LANG=C`, `DOCKER_HOST=unix:///var/run/docker.sock`,
 a `DOCKER_CONFIG` of its own (a root-only directory, emptied by the script each run,
 `/run/twingate-connector-update/docker-config`) and a `HOME` of its own (an empty
-root-only directory, `/run/twingate-connector-update/home`). The two directories are removed with a routine that stays on one filesystem and never follows links; if the directory itself is a mount point (checked against the kernel mount table, `/proc/self/mountinfo`; an unreadable table also refuses), if it holds a mount point, or if either scan or the one-file-system removal fails, the run refuses and removes nothing more (there is no unrestricted fallback, so an `rm` without `--one-file-system` is refused). `DOCKER_CONTEXT`,
+root-only directory, `/run/twingate-connector-update/home`). The two directories are removed with a routine that stays on one filesystem and never follows links; if the directory itself is a mount point (checked against the kernel mount table, `/proc/self/mountinfo`; an unreadable table also refuses; the table's octal escapes for a space, tab, newline and backslash are decoded before the comparison), if it holds a mount point, or if either scan or the one-file-system removal fails, the run refuses and removes nothing more (there is no unrestricted fallback, so an `rm` without `--one-file-system` is refused). `DOCKER_CONTEXT`,
 `DOCKER_TLS_VERIFY`, `DOCKER_CERT_PATH`, `SSL_CERT_FILE`, `SSL_CERT_DIR`,
 `CURL_CA_BUNDLE`, the proxy variables, `XDG_*` and everything else the caller had
 set never reach `docker`, `curl` or `jq`, so an environment-preserving `sudo`
