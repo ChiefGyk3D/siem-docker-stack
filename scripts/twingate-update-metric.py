@@ -12,6 +12,17 @@ Environment (never argv, never printed, never logged):
   TWINGATE_CONNECTOR_MANAGED_BY_FILE   optional path to a JSON object
   TWINGATE_CONNECTOR_MANAGED_BY        optional inline JSON object (used only
                                        when no file is set)
+  TWINGATE_EXPECTED_CONNECTORS         REQUIRED JSON array of the Connector names
+                                       that must all be present (strict charset,
+                                       no duplicates, case-insensitive compare).
+                                       Unset, empty, [] or malformed fails the
+                                       check. A listed name missing from the API
+                                       answer fails the check and is written as
+                                       twingate_connector_up value=0i for that
+                                       name, so the "not ALIVE" rule fires. A
+                                       Connector the API returns that is not
+                                       listed is counted in
+                                       twingate_unexpected_connector.
 The JSON object maps a Connector name to how it is updated: "docker",
 "systemd" (both manual, so they page) or "operator" (the Kubernetes Operator
 updates it, so it never pages). A name that is not listed is "docker".
@@ -19,13 +30,16 @@ updates it, so it never pages). A name that is not listed is "docker".
 Success (exit 0), per Connector, then the health metric:
   twingate_connector_behind,connector=<n>,managed_by=<m> value=<releases behind>i
   twingate_connector_up,connector=<n>,managed_by=<m> value=1i|0i
+  twingate_unexpected_connector value=<count of Connectors not on the expected list>i
   twingate_update_check_success value=1i
 "Releases behind" is the number of released versions newer than the Connector.
 
-Failure (any API error, empty answer, unparsable version, bad configuration or
-unreachable latest-version source): prints only
-`twingate_update_check_success value=0i` and exits 1. It never prints
-per-Connector metrics after a failure, so a broken check cannot look healthy.
+Failure (any API error, empty answer, unparsable version, bad configuration,
+duplicate Connector name or id, repeated cursor or unreachable latest-version
+source): prints only `twingate_update_check_success value=0i` and exits 1. It
+never prints per-Connector metrics after a failure, so a broken check cannot
+look healthy. The one exception: when expected Connectors are missing from the
+answer it also prints `twingate_connector_up ... value=0i` for each missing name.
 
 Latest-version source: the Docker Hub tags API for twingate/connector (JSON,
 one version per tag). Every remote value is untrusted: strict version regex,
@@ -50,16 +64,25 @@ TIMEOUT_SECONDS = 20
 MODES = ("docker", "systemd", "operator")
 DEFAULT_MODE = "docker"
 TAGS_URL = "https://hub.docker.com/v2/repositories/twingate/connector/tags"
+NAME_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
 HOST_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,62}\.twingate\.com")
 VERSION_RE = re.compile(r"[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}")
 QUERY = ("query Connectors($first: Int!, $after: String) { "
          "connectors(first: $first, after: $after) { "
          "pageInfo { hasNextPage endCursor } "
-         "edges { node { name version state } } } }")
+         "edges { node { id name version state } } } }")
 
 
 class CheckError(Exception):
     """A check failure. The text is fixed and never carries remote data or a secret."""
+
+
+class MissingExpected(CheckError):
+    """Expected Connectors absent from the answer; carries one "down" line per missing name."""
+
+    def __init__(self, names):
+        super().__init__("expected connector missing")
+        self.names = names
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -144,6 +167,25 @@ def load_management(env):
     return cfg
 
 
+def load_expected(env):
+    """The required inventory: a non-empty list of unique, strictly named Connectors.
+
+    Returns a list in the order given. Unset, empty, [] and anything malformed fail closed:
+    an optional list would let a partial answer look healthy."""
+    raw = env.get("TWINGATE_EXPECTED_CONNECTORS")
+    if not isinstance(raw, str) or not raw.strip():
+        raise CheckError("expected connectors not configured")
+    if len(raw.encode("utf-8")) > MAX_CONFIG_BYTES:
+        raise CheckError("bad expected connectors")
+    val = json.loads(raw)
+    if (not isinstance(val, list) or not 0 < len(val) <= MAX_CONFIG_ENTRIES
+            or not all(isinstance(x, str) and NAME_RE.fullmatch(x) for x in val)):
+        raise CheckError("bad expected connectors")
+    if len({x.casefold() for x in val}) != len(val):
+        raise CheckError("duplicate expected connector")
+    return val
+
+
 def latest_releases(get):
     """Every released x.y.z version Docker Hub lists (floating tags are ignored)."""
     versions = set()
@@ -157,6 +199,8 @@ def latest_releases(get):
                 versions.add(parse_version(name))
         if not data.get("next"):
             break
+    else:
+        raise CheckError("release list truncated")
     if not versions:
         raise CheckError("no release versions found")
     return versions
@@ -164,7 +208,9 @@ def latest_releases(get):
 
 def fetch_connectors(post, url, api_key):
     nodes, after = [], None
+    names, ids, cursors = set(), set(), set()
     for _ in range(MAX_CONNECTOR_PAGES):
+        added = 0
         data = post(url, api_key, QUERY, {"first": 100, "after": after})
         if not isinstance(data, dict) or data.get("errors"):
             raise CheckError("api error")
@@ -175,17 +221,33 @@ def fetch_connectors(post, url, api_key):
             n = edge.get("node") if isinstance(edge, dict) else None
             if not isinstance(n, dict):
                 raise CheckError("bad connector")
+            name = n.get("name")
+            if isinstance(name, str):
+                if name.casefold() in names:
+                    raise CheckError("duplicate connector")
+                names.add(name.casefold())
+            ident = n.get("id")
+            if ident is not None:
+                if not isinstance(ident, str) or ident in ids:
+                    raise CheckError("duplicate connector")
+                ids.add(ident)
             nodes.append(n)
+            added += 1
         if len(nodes) > MAX_CONNECTORS:
             raise CheckError("too many connectors")
         info = conns.get("pageInfo")
-        if not isinstance(info, dict) or not info.get("hasNextPage"):
+        if not isinstance(info, dict) or not isinstance(info.get("hasNextPage"), bool):
+            raise CheckError("bad page info")
+        if not info["hasNextPage"]:
             if not nodes:
                 raise CheckError("no connectors returned")
             return nodes
         after = info.get("endCursor")
         if not isinstance(after, str) or not 0 < len(after) <= 512:
             raise CheckError("bad cursor")
+        if after in cursors or added == 0:
+            raise CheckError("pagination did not advance")
+        cursors.add(after)
     raise CheckError("too many pages")
 
 
@@ -201,11 +263,18 @@ def safe_tag(name, seen):
 
 def collect(env, post, get):
     management = load_management(env)
+    expected = load_expected(env)
     api_key = env.get("TWINGATE_API_KEY")
     if not api_key or not isinstance(api_key, str):
         raise CheckError("missing key")
     url = api_url(env.get("TWINGATE_NETWORK_URL"))
     nodes = fetch_connectors(post, url, api_key)
+    present = {n.get("name").casefold() for n in nodes if isinstance(n.get("name"), str)}
+    missing = [x for x in expected if x.casefold() not in present]
+    if missing:
+        raise MissingExpected(missing)
+    wanted = {x.casefold() for x in expected}
+    unexpected = sum(1 for n in nodes if not isinstance(n.get("name"), str) or n["name"].casefold() not in wanted)
     releases = latest_releases(get)
     out, seen = [], set()
     for n in nodes:
@@ -219,6 +288,7 @@ def collect(env, post, get):
         tags = f"connector={safe_tag(name, seen)},managed_by={management.get(name, DEFAULT_MODE)}"
         out.append(f"twingate_connector_behind,{tags} value={behind}i")
         out.append(f"twingate_connector_up,{tags} value={up}i")
+    out.append(f"twingate_unexpected_connector value={unexpected}i")
     out.append("twingate_update_check_success value=1i")
     return out
 
@@ -227,8 +297,19 @@ def main(env=None, post=post_graphql, get=get_json, stdout=None, stderr=None):
     env = os.environ if env is None else env
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
+    extra = []
     try:
         lines = collect(env, post, get)
+    except MissingExpected as e:
+        reason = str(e)
+        try:
+            management = load_management(env)
+        except Exception:
+            management = {}
+        seen = set()
+        for name in e.names:
+            extra.append(f"twingate_connector_up,connector={safe_tag(name, seen)},"
+                         f"managed_by={management.get(name, DEFAULT_MODE)} value=0i")
     except CheckError as e:
         reason = str(e)
     except Exception:  # any other failure: fixed text only, never the exception (it may echo a secret)
@@ -237,7 +318,7 @@ def main(env=None, post=post_graphql, get=get_json, stdout=None, stderr=None):
         stdout.write("\n".join(lines) + "\n")
         return 0
     stderr.write(f"twingate-update-metric: {reason}\n")
-    stdout.write("twingate_update_check_success value=0i\n")
+    stdout.write("".join(x + "\n" for x in extra) + "twingate_update_check_success value=0i\n")
     return 1
 
 
