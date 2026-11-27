@@ -141,6 +141,19 @@ shown as `(invalid)`), and so does a second frame with the same identity in one 
 frames, or two kinds that print the same name), so a series can never be both applied and pending.
 Each source's check query returns exactly one series.
 
+Identities are normalized before anything else: Unicode NFC, then a conservative allowlist (letters,
+digits, combining marks, space and `. _ : / ( ) # + -`; no leading or trailing space), and one script
+family per name (Latin, Cyrillic or Greek, never mixed). A name that fails any of this fails the
+source. Because the normalized form is used for the length check, the duplicate check and the join of
+current and history data, two spellings of the same name collide (a failed source) and a decomposed
+name still joins history written precomposed. Look-alikes from different scripts that are each a
+single-script name (an all-Cyrillic name that reads like a Latin one) are not detected.
+
+Frame-level errors fail the source. A frame whose schema meta carries a notice with any severity other
+than `info` or `warning` (an `error` notice is how Grafana marks a partial result), a notice without a
+severity, malformed notices or an error field on the frame make the source `failed`; the reason never
+copies the notice text.
+
 **Download size: a limit that is only partly closed.** The n8n HTTP Request node downloads and
 parses the whole answer before the Code node can look at it, and the node has no option to cap the
 response size (checked on the n8n HTTP Request node docs page, its Options list, read 2026-11-26:
@@ -154,7 +167,40 @@ fails, and the 15 second timeout limits duration, not size. The real mitigations
 workflow: reach Grafana only over a trusted network path, restrict the credential to the Grafana
 host (above, so the token never goes elsewhere), and give the n8n container a memory limit so an
 oversized answer restarts n8n instead of the host. A byte limit at a reverse proxy in front of
-Grafana would close it, and is not part of this change.
+Grafana would close it, and is not part of this change. See Accepted residuals below.
+
+## Accepted residuals
+
+Two weaknesses cannot be closed inside the workflow. The owner must accept both before the workflow
+is activated. Nothing here is a fix; each item states what stays open.
+
+1. **No response size limit before n8n reads the answer** (availability). The HTTP Request node has no
+   response size limit, so a compromised or fake Grafana can send a very large answer and exhaust the
+   n8n container's memory before the size check in the Code node runs. Consequence: n8n stops or
+   restarts, and the digest (and any other workflow in that n8n) is unavailable until it is back; the
+   data is not corrupted. Mitigations: reach Grafana only over a trusted network path; set a memory
+   limit on the n8n container so the failure stays inside it; put a reverse proxy in front of Grafana
+   that limits the response size. None is enforced by this change.
+2. **The credential's host lock is not enforced or verifiable by the import** (confidentiality). The
+   Allowed HTTP Request Domains setting of `grafana-viewer-auth` cannot be set from an import file and
+   cannot be read back by the setup script. Consequence: until the lock is set by hand, the Grafana
+   Viewer token is sent to whatever `https` host `GRAFANA_BASE_URL` names, so a later change of that
+   value would send the token to the new host. The token is read-only (Viewer role). Mitigations: the
+   editor step and the post-import check in docs/live-deploy-runbook.md; keep `GRAFANA_BASE_URL`
+   under change control. The setup script cannot prove the lock, so after a successful viewer import
+   it exits with code 3 ("imported, domain lock not verified"), never 0.
+
+Also open: the credential file used during import is in memory (`/dev/shm`) when the container has a
+memory-backed mount there, otherwise in `/tmp` (the script prints a warning). A SIGKILL or crash
+while the import runs skips the cleanup trap: on `/dev/shm` the file is gone with the container's
+next stop, on `/tmp` it stays in the container's writable layer until the container is recreated.
+The directory is mode 700 and the file mode 600 either way.
+
+Not found: a supported way to verify or enforce either item. The n8n docs pages for credentials, the
+environment variables and the public API could not be read in this environment (2026-11-26), so
+whether a setting or variable restricts the HTTP node's target hosts, or whether the public API
+exposes the allowed-domains field of a credential, is unverified. If either exists, it would replace
+the manual step and should be adopted.
 
 The value of each series must be a boolean or a finite number: a null,
 NaN, string or object in the newest point fails the source (a series that is already stale is only

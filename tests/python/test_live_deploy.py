@@ -557,7 +557,7 @@ def test_grafana_viewer_token_never_reaches_argv_or_output(setup, monkeypatch, c
 
     monkeypatch.setattr(setup, "docker_in", fake)
     monkeypatch.setenv("GRAFANA_VIEWER_TOKEN", "VIEWERSECRET-0123456789")
-    assert setup.grafana_viewer_credentials() == 0
+    assert setup.grafana_viewer_credentials() == setup.EXIT_DOMAIN_LOCK_UNVERIFIED
     assert "VIEWERSECRET" not in seen["script"] and "VIEWERSECRET" in seen["payload"]
     assert "VIEWERSECRET" not in capsys.readouterr().out
     assert [c["name"] for c in json.loads(seen["payload"])] == ["grafana-viewer-auth"]
@@ -635,7 +635,7 @@ def test_credentials_run_changes_nothing_when_a_later_value_is_missing(setup, mo
             setup.main(FLAGS)
         assert calls == [], missing + ": nothing may be imported before every value is checked"
     _env(monkeypatch)
-    assert setup.main(FLAGS) == 0
+    assert setup.main(FLAGS) == setup.EXIT_DOMAIN_LOCK_UNVERIFIED
     assert len(calls) == 3, "the base credentials, then matrix, then the viewer"
 
 
@@ -654,7 +654,7 @@ def test_credentials_run_changes_nothing_when_a_token_is_bad(setup, monkeypatch)
 def test_viewer_and_matrix_tokens_lose_surrounding_whitespace_only(setup, monkeypatch):
     calls = _record_docker(setup, monkeypatch)
     _env(monkeypatch, GRAFANA_VIEWER_TOKEN="  tok-VIEW-1234 \n", MATRIX_BOT_TOKEN="\tsyt_matrix_1234  ")
-    assert setup.main(FLAGS) == 0
+    assert setup.main(FLAGS) == setup.EXIT_DOMAIN_LOCK_UNVERIFIED
     sent = {json.loads(p)[0]["name"]: json.loads(json.loads(p)[0]["data"]["json"]) for _s, p in calls[1:]}
     assert sent["grafana-viewer-auth"] == {"headers": {"Authorization": "Bearer tok-VIEW-1234"}}
     assert sent["matrix-bot-auth"] == {"headers": {"Authorization": "Bearer syt_matrix_1234"}}
@@ -733,7 +733,8 @@ def test_credential_import_never_prints_child_output(setup, monkeypatch, capsys,
         return _Proc(rc, kwargs["input"], kwargs["input"] + b"\nError: " + kwargs["input"])
 
     monkeypatch.setattr(setup, "engine_run", fake_engine_run)
-    assert getattr(setup, fn)() == rc
+    expected = setup.EXIT_DOMAIN_LOCK_UNVERIFIED if (fn == "grafana_viewer_credentials" and rc == 0) else rc
+    assert getattr(setup, fn)() == expected
     seen = capsys.readouterr()
     assert echoed and CANARY.encode() in echoed[0], "the fake really did see the token"
     assert CANARY not in seen.out and CANARY not in seen.err
@@ -766,7 +767,7 @@ def test_credential_import_engine_errors_carry_no_secret(setup, monkeypatch, cap
 def test_every_credential_import_uses_the_private_script(setup, monkeypatch):
     calls = _record_docker(setup, monkeypatch)
     _canary_env(monkeypatch)
-    assert setup.main(FLAGS) == 0
+    assert setup.main(FLAGS) == setup.EXIT_DOMAIN_LOCK_UNVERIFIED
     assert len(calls) == 3 and all(script == setup.CRED_IMPORT_SCRIPT for script, _p in calls)
     assert "/tmp/cred.json" not in setup.CRED_IMPORT_SCRIPT
 
@@ -780,37 +781,45 @@ exit 3
 """
 
 
-def _run_cred_script(script, tmp_path, payload, umask=0o000):
+def _run_cred_script(script, tmp_path, payload, umask=0o000, use_shm=False, fs="ext4"):
     """Run the credential script under sh with a stub n8n; returns (result, record lines, listing of the temp base)."""
     import os
     stub = tmp_path / "bin"
     stub.mkdir(exist_ok=True)
     (stub / "n8n").write_text(_STUB, encoding="utf-8")
     (stub / "n8n").chmod(0o755)
+    (stub / "stat").write_text('#!/bin/sh\ncase "$1" in -f) echo "$FSTYPE";; *) exec /usr/bin/stat "$@";; esac\n', encoding="utf-8")
+    (stub / "stat").chmod(0o755)
     base = tmp_path / "base"
     base.mkdir(exist_ok=True)
-    assert "/tmp/n8n-cred." in script
-    local = script.replace("/tmp/n8n-cred.", str(base) + "/n8n-cred.")
+    assert 'base=/tmp;' in script and 'shm=/dev/shm;' in script
+    shm = tmp_path / "shm"
+    shm.mkdir(exist_ok=True)
+    local = script.replace('base=/tmp;', 'base=' + str(base) + ';').replace('shm=/dev/shm;', 'shm=' + str(shm if use_shm else tmp_path / "no-shm") + ';')
     rec = tmp_path / "rec.txt"
-    env = {"PATH": str(stub) + ":" + os.environ["PATH"], "REC": str(rec)}
+    env = {"PATH": str(stub) + ":" + os.environ["PATH"], "REC": str(rec), "FSTYPE": fs}
     r = subprocess.run(["sh", "-c", local], input=payload.encode(), capture_output=True, env=env, timeout=30,
                        preexec_fn=lambda: os.umask(umask))
     lines = rec.read_text(encoding="utf-8").splitlines() if rec.exists() else []
     if rec.exists():
         rec.unlink()
-    return r, lines, sorted(p.name for p in base.iterdir())
+    return r, lines, sorted(p.name for d in (base, shm) for p in d.iterdir())
 
 
-def check_cred_script(script, tmp_path):
+def check_cred_script(script, tmp_path, use_shm=True, fs="tmpfs"):
     names = set()
+    memory = use_shm and fs == "tmpfs"
     for i in range(3):
-        r, lines, left = _run_cred_script(script, tmp_path, "PAYLOAD-" + str(i) + "-" + CANARY)
+        r, lines, left = _run_cred_script(script, tmp_path, "PAYLOAD-" + str(i) + "-" + CANARY, use_shm=use_shm, fs=fs)
         assert r.returncode == 3, "the n8n exit code must come back"
-        assert r.stdout == b"" and r.stderr == b"", "n8n output is discarded inside the container"
+        assert r.stderr == b"", "n8n output is discarded inside the container"
+        assert (r.stdout == b"") if memory else (r.stdout.decode().strip().startswith("warning: /dev/shm is not a memory-backed mount")), r.stdout
+        assert b"CANARY-OUT" not in r.stdout and b"CANARY-ERR" not in r.stdout
         path, fmode, dmode, content = lines[0], lines[1], lines[2], "\n".join(lines[3:])
         assert fmode == "600" and dmode == "700", (fmode, dmode)
         assert content == "PAYLOAD-" + str(i) + "-" + CANARY
         assert re.search(r"/n8n-cred\.[A-Za-z0-9]{10}/c\.json$", path), path
+        assert ("/shm/" in path) if memory else ("/base/" in path), "directory choice: " + path
         assert left == [], "the file and its directory are removed afterwards: " + str(left)
         names.add(path)
     assert len(names) == 3, "the file name is unpredictable: a fresh random directory every run"
@@ -818,6 +827,26 @@ def check_cred_script(script, tmp_path):
 
 def test_credential_script_creates_a_private_unpredictable_file_and_removes_it(setup, tmp_path):  # GUARD
     check_cred_script(setup.CRED_IMPORT_SCRIPT, tmp_path)
+
+
+@pytest.mark.parametrize("use_shm,fs", [(True, "ext4"), (True, "overlay"), (True, ""), (False, "tmpfs")])
+def test_credential_dir_falls_back_to_tmp_with_a_warning_unless_shm_is_memory_backed(setup, tmp_path, use_shm, fs):  # GUARD
+    check_cred_script(setup.CRED_IMPORT_SCRIPT, tmp_path, use_shm=use_shm, fs=fs)
+
+
+def test_credential_dir_choice_is_memory_backed_only_for_tmpfs(setup, tmp_path):
+    """Negative case for the guard: a script that always picks the shm directory is caught on a non-tmpfs mount."""
+    always = setup.CRED_IMPORT_SCRIPT.replace('= tmpfs ]', '= tmpfs ] || true')
+    assert always != setup.CRED_IMPORT_SCRIPT
+    with pytest.raises(AssertionError):
+        check_cred_script(always, tmp_path, use_shm=True, fs="ext4")
+
+
+def test_import_prints_only_the_fixed_fallback_warning(setup, monkeypatch, capsys):
+    monkeypatch.setattr(setup, "docker_in", lambda script, payload: (0, [setup.WARN_NOT_TMPFS, "CANARYLEAK"]))
+    assert setup.import_credential_records([{"a": 1}]) == 0
+    out = capsys.readouterr().out
+    assert setup.WARN_NOT_TMPFS in out and "CANARYLEAK" not in out
 
 
 @pytest.mark.parametrize("old,new", [
@@ -834,7 +863,7 @@ def test_mutant_credential_script_weakened_is_caught(setup, tmp_path, old, new):
 
 def test_mutant_credential_script_with_a_fixed_name_is_caught(setup, tmp_path):
     script = setup.CRED_IMPORT_SCRIPT
-    fixed = re.sub(r"d=\$\(mktemp -d [^)]*\) \|\| exit 70", "d=/tmp/n8n-cred.FIXED00000; mkdir -m 700 \"$d\" 2>/dev/null || true", script)
+    fixed = re.sub(r"d=\$\(mktemp -d [^)]*\) \|\| exit 70", "d=$base/n8n-cred.FIXED00000; mkdir -m 700 \"$d\" 2>/dev/null || true", script)
     assert fixed != script
     with pytest.raises(AssertionError):
         check_cred_script(fixed, tmp_path)
@@ -843,7 +872,7 @@ def test_mutant_credential_script_with_a_fixed_name_is_caught(setup, tmp_path):
 def test_viewer_import_prints_the_host_restriction_reminder_without_the_token(setup, monkeypatch, capsys):
     _canary_env(monkeypatch)
     _record_docker(setup, monkeypatch)
-    assert setup.grafana_viewer_credentials() == 0
+    assert setup.grafana_viewer_credentials() == setup.EXIT_DOMAIN_LOCK_UNVERIFIED
     out = capsys.readouterr().out
     assert "REQUIRED NEXT STEP" in out and "Allowed HTTP Request Domains" in out and "grafana-viewer-auth" in out
     assert "post-import check" in out and CANARY not in out
@@ -859,5 +888,45 @@ def test_viewer_import_failure_does_not_claim_a_next_step(setup, monkeypatch, ca
 def test_full_credentials_run_ends_with_the_reminder(setup, monkeypatch, capsys):
     _canary_env(monkeypatch)
     _record_docker(setup, monkeypatch)
-    assert setup.main(FLAGS) == 0
-    assert capsys.readouterr().out.rstrip().endswith("sent to any https host that GRAFANA_BASE_URL names.")
+    assert setup.main(FLAGS) == setup.EXIT_DOMAIN_LOCK_UNVERIFIED
+    assert "sent to any https host that GRAFANA_BASE_URL names." in capsys.readouterr().out
+
+
+# --- issue #202 fix round 3: distinct exit code for "imported, domain lock not verified" ------------------
+
+def check_viewer_exit_code(setup, monkeypatch, capsys):
+    assert setup.EXIT_DOMAIN_LOCK_UNVERIFIED == 3
+    _canary_env(monkeypatch)
+    _record_docker(setup, monkeypatch)
+    for argv in (["--credentials", "--with-grafana-viewer"], FLAGS):
+        assert setup.main(argv) == 3
+    out = capsys.readouterr().out
+    assert "REQUIRED NEXT STEP" in out and "exit code 3: imported, domain lock not verified" in out and CANARY not in out
+    assert setup.main(["--credentials"]) == 0, "without the viewer the run is fully done"
+
+
+def test_viewer_success_never_exits_zero_and_uses_the_documented_code(setup, monkeypatch, capsys):  # GUARD
+    check_viewer_exit_code(setup, monkeypatch, capsys)
+
+
+@pytest.mark.parametrize("rc", [1, 2, 127])
+def test_viewer_import_failure_keeps_its_own_nonzero_code(setup, monkeypatch, capsys, rc):
+    _canary_env(monkeypatch)
+    monkeypatch.setattr(setup, "docker_in", lambda script, payload: (rc, []))
+    assert setup.grafana_viewer_credentials() == rc
+    assert "domain lock not verified" not in capsys.readouterr().out
+
+
+def test_mutant_viewer_success_returning_zero_is_caught(setup, monkeypatch, capsys):
+    monkeypatch.setattr(setup, "EXIT_DOMAIN_LOCK_UNVERIFIED", 0)
+    with pytest.raises(AssertionError):
+        check_viewer_exit_code(setup, monkeypatch, capsys)
+
+
+def test_runbook_explains_exit_code_3_and_the_accepted_residuals():
+    run = " ".join((REPO_ROOT / "docs" / "live-deploy-runbook.md").read_text(encoding="utf-8").split())
+    for needle in ("exit code 3", "imported, domain lock not verified", "/dev/shm"):
+        assert needle in run, needle
+    doc = " ".join((REPO_ROOT / "docs" / "update-digest.md").read_text(encoding="utf-8").split())
+    for needle in ("Accepted residuals", "owner must accept", "before the workflow is activated", "no response size limit"):
+        assert needle in doc, needle

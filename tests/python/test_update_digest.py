@@ -932,8 +932,12 @@ def check_injection(wf):
     srcs = {"UniFi Collector": _collect(wf, "UniFi Collector", ans_u),
             "Twingate Collector": _collect(wf, "Twingate Collector", ans_t),
             "pfSense Collector": _collect(wf, "pfSense Collector", ans_p)}
+    # round 3: the collectors now refuse hostile identities outright (a failed source, never data) ...
     for j in srcs.values():
-        assert j["status"] == "ok" and j["pending"], j
+        assert j["status"] == "failed" and j["pending"] == [], j
+    # ... and the digest still neutralizes the same text if it ever arrives (defense in depth)
+    srcs = {c: _src(pending=[{"name": n[:120], "version": "x"} for n in EVIL]) for c in ("UniFi Collector", "Twingate Collector")}
+    srcs["pfSense Collector"] = _src(pending=[{"name": EVIL[0][:120] + " (security)", "version": "x"}])
     out = _build(wf, srcs)
     d = out["description"]
     assert out["counts"]["pending"] == 7
@@ -943,8 +947,6 @@ def check_injection(wf):
     assert "z" * 100 not in d and len(d) <= 4096
     assert out["allowed_mentions"] == {"parse": []}
     assert "@everyone" not in out["matrixBody"] and "\x00" not in out["matrixBody"]
-    for j in srcs.values():
-        assert all(len(p["name"]) <= 120 for p in j["pending"]), "collector caps name length"
 
 
 def test_hostile_device_connector_and_kind_names_are_neutralized_end_to_end():
@@ -1969,3 +1971,94 @@ def test_doc_round_2_is_honest_about_what_code_cannot_close():
     for needle in ("post-import check", "Allowed HTTP Request Domains", "mktemp -d", "umask 077", "trap",
                    "no stdin form is documented", "dummy token"):
         assert needle in run, needle
+
+
+# -- fix round 3: frame-level errors and identity normalization --
+
+def _with_notice(name, **notice):
+    a = _good_answer(name)
+    a["body"]["results"]["A"]["frames"][0]["schema"]["meta"] = {"notices": [notice]}
+    return a
+
+
+def check_frame_errors(wf):
+    for name in REAL:
+        assert _collect(wf, name, _good_answer(name))["status"] == "ok", name
+        info = _with_notice(name, severity="info", text="ok")
+        assert _collect(wf, name, info)["status"] == "ok", name
+        for notice in ({"severity": "error", "text": "partial result"}, {"severity": "ERROR", "text": "x"},
+                       {"text": "no severity"}, {"severity": "fatal", "text": "x"}):
+            j = _collect(wf, name, _with_notice(name, **notice))
+            assert j["status"] == "failed" and j["pending"] == [] and "partial result" not in json.dumps(j), (name, notice)
+        bad = _good_answer(name)
+        bad["body"]["results"]["A"]["frames"][0]["schema"]["meta"] = {"notices": "x"}
+        assert _collect(wf, name, bad)["status"] == "failed", name
+        bad = _good_answer(name)
+        bad["body"]["results"]["A"]["frames"][0]["error"] = "boom"
+        assert _collect(wf, name, bad)["status"] == "failed", name
+
+
+def test_frame_level_error_notices_make_the_source_failed():
+    check_frame_errors(_wf())
+
+
+@pytest.mark.parametrize("name", list(REAL))
+def test_mutant_frame_error_check_removed_is_caught(name):
+    wf = _wf()
+    n = _node(wf, name)
+    old = "!['info', 'warning'].includes(String(ntc.severity).toLowerCase())"
+    assert old in n["parameters"]["jsCode"]
+    n["parameters"]["jsCode"] = n["parameters"]["jsCode"].replace(old, "false")
+    with pytest.raises(AssertionError):
+        check_frame_errors(wf)
+
+
+def _named(wf, name, label, label2=None):
+    frames = [_frame(_ident(name, label), [(NOW_MS - 60000, 1)])]
+    if label2 is not None:
+        frames.append(_frame(_ident(name, label2), [(NOW_MS - 60000, 1)]))
+    a = _good_answer(name)
+    a["body"]["results"]["A"]["frames"] = frames
+    return _collect(wf, name, a)
+
+
+E_ACUTE = chr(0xE9)
+E_COMBINING = "e" + chr(0x301)
+CYR_A = chr(0x430)
+GREEK_ALPHA = chr(0x3B1)
+
+
+def check_identities(wf):
+    for name in REAL:
+        assert _named(wf, name, "caf" + E_ACUTE)["status"] == "ok", name
+        # canonically equivalent spellings are one identity: two frames collide and fail
+        j = _named(wf, name, "caf" + E_ACUTE, "caf" + E_COMBINING)
+        assert j["status"] == "failed" and "duplicate" in j["reason"], name
+        j = _named(wf, name, "caf" + E_COMBINING)
+        assert j["status"] == "ok" and j["pending"][0]["name"].startswith("caf" + E_ACUTE), name
+        for bad in ("a" + CYR_A, CYR_A + "b", "x" + GREEK_ALPHA, "bad@name", "bad" + chr(0x202E) + "name",
+                    "bad" + chr(0), " pad", "pad ", "a*b", "a" + chr(10) + "b", "a" + chr(0x200B) + "b"):
+            j = _named(wf, name, bad)
+            assert j["status"] == "failed" and j["pending"] == [], (name, bad)
+        assert _named(wf, name, CYR_A * 3 + "-1")["status"] == "ok", name   # one script is fine
+
+
+def test_identities_are_nfc_allowlisted_and_not_mixed_script():
+    check_identities(_wf())
+
+
+def test_decomposed_name_joins_history_written_precomposed():
+    j = _unifi(_wf(), [("caf" + E_COMBINING, 60000, False)], ever=[("caf" + E_ACUTE, 3)])
+    assert j["status"] == "ok" and j["applied"] == [{"name": "caf" + E_ACUTE, "from": "upgrade pending", "to": "up to date"}]
+
+
+@pytest.mark.parametrize("name", list(REAL))
+@pytest.mark.parametrize("old,new", [
+    ("v.normalize('NFC')", "v"),
+    ("scripts > 1 ? null : n", "n"),
+    ("if (!/^[\\p{L}\\p{N}\\p{M} ._:\\/()#+-]+$/u.test(n)) return null;", ""),
+])
+def test_mutant_identity_check_removed_is_caught(name, old, new):
+    wf = _mutate(name, old, new)
+    with pytest.raises(AssertionError):
+        check_identities(wf)

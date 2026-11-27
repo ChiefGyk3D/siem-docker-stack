@@ -134,6 +134,18 @@ Details that were learned live:
   token goes to whatever `https` host `GRAFANA_BASE_URL` names. The script prints a reminder after a
   successful import and cannot check the setting itself.
 
+  **Exit codes of the viewer flow.** After a successful import the command exits with **exit code 3**
+  (imported, domain lock not verified), never 0, so automation cannot treat the step as fully done.
+  Handle it as "done except for the manual lock": do the post-import check below, then record the
+  owner's acceptance of the residuals in docs/update-digest.md (Accepted residuals) before activating
+  the workflow. A failed import keeps the importer's own nonzero code (1 and above, never 3). A run
+  without `--with-grafana-viewer` still exits 0 on success.
+
+  The credential file for each import is created under `/dev/shm` when it is a memory-backed mount
+  (checked with `stat -f -c %T`, must print `tmpfs`), so a SIGKILL during the import leaves nothing in
+  the container's writable layer. Otherwise it uses `/tmp` and the script prints a warning; in that
+  case a SIGKILL leaves the file (mode 600 in a mode 700 directory) until the container is recreated.
+
   **Grafana Viewer credential: post-import check.** Do this before activating the digest workflow:
   1. In the n8n editor open `grafana-viewer-auth` and confirm **Allowed HTTP Request Domains** is
      set to Specific Domains with only the Grafana host (no wildcard, no other host).

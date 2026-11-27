@@ -25,7 +25,9 @@ credential ids mapped; import the error handler first and pass its id, as for th
 --with-grafana-viewer works the same way for the Custom Auth credential grafana-viewer-auth
 (the weekly digest collectors read Grafana with it): the token of a Grafana Viewer service
 account comes from the environment value GRAFANA_VIEWER_TOKEN, over stdin, never argv, never
-printed. The flags can be combined; every needed value and id is checked BEFORE n8n is changed,
+printed. After a successful viewer import the command exits 3 (imported, Allowed HTTP Request
+Domains lock not verified; 0 is never returned for it, 1 and above otherwise mean the import failed).
+The flags can be combined; every needed value and id is checked BEFORE n8n is changed,
 so a bad value leaves nothing half done. Tokens lose surrounding whitespace; an empty or
 multi-line token stops the run. GRAFANA_BASE_URL is not a secret: a pass-through line
 (name only) in the n8n container environment.
@@ -173,11 +175,25 @@ def docker_in(script, payload):
 # with --input=<file> only (no stdin form), so a file is used. The n8n output is thrown away inside the
 # container and never printed here: it is not needed to judge success (the exit code is), and a CLI
 # error could echo its input.
+# The directory is under /dev/shm when that is a memory-backed mount (the filesystem type is read with
+# stat and must be tmpfs), so a SIGKILL or crash, which skips the trap, leaves the plaintext in RAM only
+# and not in the container's writable layer. Otherwise /tmp is used and WARN_NOT_TMPFS is printed by the
+# caller (it is a fixed line; no other child output is ever shown).
+SHM_DIR = "/dev/shm"
+FALLBACK_DIR = "/tmp"
+WARN_NOT_TMPFS = "warning: /dev/shm is not a memory-backed mount; the credential file uses /tmp (it survives a SIGKILL)"
 CRED_IMPORT_SCRIPT = (
-    "umask 077; d=$(mktemp -d /tmp/n8n-cred.XXXXXXXXXX) || exit 70; "
+    "umask 077; shm=" + SHM_DIR + "; base=" + FALLBACK_DIR + "; "
+    "if [ -d \"$shm\" ] && [ -w \"$shm\" ] && [ \"$(stat -f -c %T \"$shm\" 2>/dev/null)\" = tmpfs ]; then base=$shm; "
+    "else echo '" + WARN_NOT_TMPFS + "'; fi; "
+    "d=$(mktemp -d \"$base/n8n-cred.XXXXXXXXXX\") || exit 70; "
     "trap 'rm -f \"$d/c.json\"; rmdir \"$d\"' EXIT HUP INT TERM; "
     "cat > \"$d/c.json\" && n8n import:credentials --input=\"$d/c.json\" >/dev/null 2>&1"
 )
+
+# Exit code of the viewer flow when the import itself worked: the credential exists but nothing proves
+# its Allowed HTTP Request Domains lock, so automation must not treat the run as fully done.
+EXIT_DOMAIN_LOCK_UNVERIFIED = 3
 
 VIEWER_REMINDER = (
     "REQUIRED NEXT STEP: an import file cannot lock a credential to a host. In the n8n editor open\n"
@@ -190,7 +206,9 @@ VIEWER_REMINDER = (
 def import_credential_records(records):
     """Import credential records through the private-file script. Returns only the exit code: child
     output is never shown, so no error path can print the token or the credential JSON."""
-    rc, _hidden = docker_in(CRED_IMPORT_SCRIPT, json.dumps(records))
+    rc, lines = docker_in(CRED_IMPORT_SCRIPT, json.dumps(records))
+    if WARN_NOT_TMPFS in lines:
+        print(WARN_NOT_TMPFS)   # the one fixed line the script itself prints; nothing else from the child
     return rc
 
 
@@ -492,6 +510,8 @@ def grafana_viewer_credentials():
     print("grafana viewer credential import exit code:", rc)
     if rc == 0:
         print(VIEWER_REMINDER)
+        print("exit code %d: imported, domain lock not verified (see docs/live-deploy-runbook.md)" % EXIT_DOMAIN_LOCK_UNVERIFIED)
+        return EXIT_DOMAIN_LOCK_UNVERIFIED
     return rc
 
 
