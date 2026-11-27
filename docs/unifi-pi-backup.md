@@ -4,8 +4,8 @@ Copies the UniFi OS auto-backups of the Pi to a NAS share, keeps a real 90 day h
 and reports how fresh the backups are so Grafana can alert. Tracked in issue #228 (epic #62).
 
 Nothing here is deployed by this repo, and **nothing in this change was verified on a real Pi, a
-real NAS or real systemd**. The tests run the script against fake `mount`, `umount`, `mountpoint`,
-`cp` and `id` binaries. See "Not verified" at the end.
+real NAS or real systemd**. The tests run the script against fake `mount`, `umount`, `mountpoint`, `stat`, `df`,
+`id`, `date` and `sha256sum` binaries, a wrapper around `perl`, and a fake mountinfo file. See "Not verified" at the end.
 
 ## What it does
 
@@ -45,48 +45,78 @@ the script runs as root, so it does not trust paths between a check and a use.
 - A source folder that is a symlink, and a source file that is a symlink, has more than one hard
   link, or is not a plain file, is refused (result code 2). A swapped file is refused (code 5).
 - Each source file is bound to ONE open file. A small `perl` helper (perl-base is Essential on
-  Debian, so `/usr/bin/perl` is there; the script uses that fixed path) opens it once with
-  `O_NOFOLLOW` and `O_NONBLOCK`: a symlink cannot be followed and a FIFO swapped in after the check
-  cannot block the root service. The open file itself (fstat, not the path) must be a plain file with
-  the device, inode, size and time the path showed before, and a link count of 1. It reads only from
-  that descriptor, at most size+1 bytes (an endless or growing file cannot fill the disk), into a
-  new root-only staging file (`O_EXCL`) in the state directory (`/var/lib/unifi-backup-sync/stage`,
-  removed after every file and on every exit), then checks the descriptor again. The script checks
-  the path metadata again after the read (code 5 on any difference, including a helper exit that
-  says the opened file was not the checked one). The staged copy must have exactly the size the
-  lstat reported; only the staged copy is hashed and uploaded, and the upload is verified again
-  against the staged hash.
+  Debian, so `/usr/bin/perl` is there; the script uses that fixed path and starts it with
+  `env -i`, a fixed `PATH` and `LC_ALL=C`, so `PERL5OPT`, `PERL5LIB` and the like from the caller
+  never reach it) opens the source once with `O_NOFOLLOW` and `O_NONBLOCK`: a symlink cannot be
+  followed and a FIFO swapped in after the check cannot block the root service. The open file itself
+  (fstat, not the path) must be a plain file with the device, inode, size and time the path showed
+  before, and a link count of 1. It reads only from that descriptor, at most size+1 bytes (an
+  endless or growing file cannot fill the disk), into a new root-only staging file (`O_EXCL`) in the
+  state directory (`/var/lib/unifi-backup-sync/stage`, removed after every file and on every
+  exit), then checks the descriptor again. The script checks the path metadata again after the read
+  (code 5 on any difference).
 - Layering (shown by the revert proofs): removing only the helper's identity check, or only the
-  path re-check, still stops a hard-link swap; both are needed to lose it. Not verified on a real Pi:
-  a swap in and out of another plain file between the helper's open and its final check is stopped
-  by the second descriptor check, not by anything stronger.
+  path re-check, still stops a hard-link swap; both are needed to lose it.
+- The same helper does every NAS-side operation, against a folder handle opened once with
+  `O_DIRECTORY|O_NOFOLLOW` that must be the folder the script checked (device and inode): hashing an
+  existing copy, the upload, the rename and the prune. perl-base has no `openat`, `renameat`,
+  `unlinkat` or `fstatat`; what it has is `sysopen` (open(2) with those flags), `stat`/`lstat`,
+  `rename`, `unlink`, `utime` on a handle (futimens), `fsync` (via IO::Handle), `fork`, `pipe` and
+  `exec`. The `*at` behavior is approximated by naming files as `/proc/self/fd/<folder handle>/<name>`,
+  which resolves through the opened folder, so a swapped path component above the backup folder
+  cannot redirect an operation. The raw `syscall()` builtin could reach the `*at` calls, but its
+  numbers differ per CPU architecture (a Pi is usually arm64) and could not be tested here, so it is
+  not used.
+- Hashing: `sha256sum` is fed from one open file by the helper, which checks the tool's exit status
+  and the number of bytes read; a failing hash tool or a short read is a failure (never a hash that
+  is compared). An existing NAS copy is accepted only if its hash equals the staged source hash and
+  the name still shows the file that was hashed afterwards (inode, device, size, time unchanged).
+- Upload: a leftover or planted `.partial-<name>` (a symlink included) is removed as a name, never
+  followed; the new partial file is created with `O_EXCL|O_NOFOLLOW`; its content is verified by
+  reading it back through the same open handle (after an `fsync`), its time is set on that handle,
+  and after the `rename` the final name must show that same file (device and inode). If it does not,
+  the run fails with code 5 and the substituted file is left where it is (never deleted); every later
+  run refuses it too, because its hash differs from the source.
+- Prune: a candidate is chosen by one `lstat` (plain file, one link, same device, exact name, old
+  enough, not the newest) and the helper removes it only if the file it opens is that inode with
+  that time, and the name still shows it just before the `unlink`.
+- **Residual windows that this design cannot close** (Linux has no rename or unlink by inode, and
+  perl-base has no `renameat2`): (1) between the helper's last check and the `rename`, a writer on
+  the NAS backup folder can swap the partial file; the swapped file then gets published under a
+  backup name for as long as it takes the next run to notice (code 5 and an alert; nothing is
+  deleted). (2) between the last check and the `unlink` of a prune candidate, the same writer can put
+  a newer file under that name and have it deleted; the Pi keeps weeks of backups, so the next run
+  copies it again. (3) A writer who creates the final name between the absence check and the
+  `rename` is overwritten by the verified copy (no harm). Who can exploit: only someone who can write
+  into the share folder (the NAS account, an admin of the NAS, anything that mounts the same share
+  read-write). What they gain: they can make one backup file hold bytes of their choosing, or cost
+  one retention-sized deletion, in a window of microseconds, and the sync reports the first as a
+  failure. The strongest mitigations here: the share and folder should be writable only by the
+  sync account on the NAS (the script cannot see the NAS's permissions: on CIFS the mode shown is
+  the one this mount sets), and the destination folder is refused unless it is owned by root and not
+  writable by group or others as the kernel reports it. Whether this is accepted is the owner's
+  decision.
 - Size bounds (the state filesystem is shared with the Pi): a file larger than `MAX_BACKUP_BYTES`
   (default 1 GiB) is refused (code 2) before anything is read; free space on the state filesystem
   must be at least the file size plus `MIN_FREE_BYTES` (default 256 MiB), else it is refused (code
   4); a folder with more than 1000 backup files is refused (code 2). At most one file is staged at a
   time, so the peak is one file. Put `/var/lib/unifi-backup-sync` on a filesystem with a quota if
   you want a hard cap: systemd's `StateDirectory=` sets none by itself.
-- The temporary upload file is never trusted: a leftover or planted `.partial-<name>` (a symlink
-  included) is removed as a name (never followed), `dd` creates the new one with `conv=excl` and
-  `oflag=nofollow`, the result is checked by lstat (plain file, one link, same size and hash) and
-  again just before the final `mv -T`, and the time is set with `touch -h`. The checks and the
-  rename are separate steps on a share that someone else may write: a writer who swaps the partial
-  file between the last check and the rename can still replace what gets published (it is then an
-  attacker-chosen plain file in the backup folder, never a write outside it). That is why the share
-  should only be writable by the sync account.
 - On the NAS the destination folder must not be a symlink, must resolve (physical path) to
   `<mount point>/<NAS_DEST_SUBDIR>`, and must be on the same device as the mount point. A prune
   candidate must be a plain file (a symlink is never followed or removed) on that same device and
-  match the exact backup name; otherwise it is left alone and the run fails with code 6.
+  match the exact backup name; otherwise it is left alone and the run fails with code 6. The
+  destination must also be owned by root and not writable by group or others (code 3).
 - The share is mounted with `nosymfollow`. Source: `mount(8)`, util-linux 2.41.5, read 2026-11-27
   on the build machine: "nosymfollow: Do not follow symlinks when resolving paths", a VFS flag
   applied to the mount point. That the CIFS client of your Pi kernel honors it (and which kernel
   version added it) is **inferred**, not read from a vendor page, and not tested on a real mount.
   `mount.cifs(8)` documents `mfsymlinks` (off unless set); it is not set.
-- With `NAS_USE_EXISTING_MOUNT=1` the script does not know your mount options. It cannot check
-  `nosymfollow` there; the destination, device and partial-file rules above still apply, but the
-  mount safety is yours: mount it without symlink following (and with the sync account only) if you
-  use that mode. Not checked by the script.
+- With `NAS_USE_EXISTING_MOUNT=1` the script reads the mount options of `NAS_MOUNT_POINT` from
+  `/proc/self/mountinfo` (the entry whose mount point equals the physical path) and refuses with
+  code 3 unless `nosymfollow` is among them, or when the mount is not listed. `nosuid`, `nodev` and
+  `noexec` are recommended, not required: a missing one is logged as a warning. The folder
+  permission rule above applies to every mode.
 
 ## Settings
 
@@ -98,7 +128,7 @@ holds no secret).
 | `UNIFI_BACKUP_SRC` | `/home/uosserver/.local/share/containers/storage/volumes/uosserver_var_lib_unifi/_data/backup/autobackup` | Source folder (UniFi OS rootless container volume) |
 | `NAS_SHARE` | none | `//host/share`, for example `//nas.example.internal/unifi-backups`; needed unless the mount is existing |
 | `NAS_MOUNT_POINT` | `/mnt/unifi-backup-nas` | Existing empty directory to mount on |
-| `NAS_USE_EXISTING_MOUNT` | `0` | `1` = use an already mounted `NAS_MOUNT_POINT`, never mount or unmount it |
+| `NAS_USE_EXISTING_MOUNT` | `0` | `1` = use an already mounted `NAS_MOUNT_POINT`, never mount or unmount it; its options must include `nosymfollow` |
 | `NAS_DEST_SUBDIR` | `unifi-autobackup` | One folder name on the share that receives the copies |
 | `SMB_CREDENTIALS_FILE` | `/etc/unifi-backup-sync/smb-credentials` | Root-owned, mode 600, in `mount.cifs` format |
 | `SMB_VERS` | `3.0` | SMB protocol version |
@@ -217,7 +247,7 @@ NAS_SHARE=//nas.example.internal/unifi-backups
    going on:
 
 ```
-for c in id date stat dd df perl mv rm touch mkdir sha256sum mount umount mountpoint; do ls -l "/usr/bin/$c"; done
+for c in id date stat env df perl mv rm mkdir sha256sum mount umount mountpoint; do ls -l "/usr/bin/$c"; done
 ls -l /sbin/mount.cifs
 ```
 
@@ -288,7 +318,9 @@ restore needs a compatible controller version. Test a restore once before you ne
 
 ## Not verified
 
-- The perl copy helper, `dd conv=excl`, `touch -h`, `mv -T` and `df -Pk` were run only against the
+- The helper and the mountinfo check need `/proc/self/fd` and `/proc/self/mountinfo` inside the
+  unit; the unit sets no `ProtectProc=` or `ProcSubset=`, so the defaults apply (unverified).
+- The perl helper (including `sysopen` with `O_DIRECTORY`, the `/proc/self/fd/<n>/<name>` paths, `utime` on a handle and `IO::Handle::sync`) and `df -Pk` were run only against the
   fake-binary tests on the build machine (GNU coreutils, perl 5.40), not on the Pi.
 - Nothing ran on a real Pi, a real NAS or real systemd. The mount options, the capability set of
   the unit, `ProtectSystem=strict` together with a CIFS mount inside the unit's namespace and
