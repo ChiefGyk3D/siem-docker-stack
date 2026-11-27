@@ -49,3 +49,6 @@ portainer_data/
 *.backup
 __pycache__/
 *.pyc
+
+# test scratch (unifi-os-version-metric tests)
+.test-scratch/
