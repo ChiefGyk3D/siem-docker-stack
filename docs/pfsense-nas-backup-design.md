@@ -1,6 +1,10 @@
 # pfSense configuration backup: NAS first, S3 second (design note)
 
 Status: design for review, nothing deployed. Issue #236, epic #62.
+Owner decisions of 2026-11-27 are recorded below and marked **DECIDED**; what
+is still undecided is marked **OPEN**. Open items: the Doppler config for the
+backup secrets (section 7.4), F4 Public Key Only and the optional Auto Config
+Backup copy (section 7.1).
 All hostnames and addresses are placeholders: `fw.example.internal` is the
 firewall, `nas.example.internal` is the NAS, `mon.example.internal` is the
 host that runs monitoring.
@@ -140,16 +144,16 @@ How the restricted pull works (design):
   regardless of your rules, so the `from=` option is what pins the source
   address; add an explicit firewall rule allowing only the NAS address if
   the NAS is on another interface.
-- Optional hardening: "SSHd Key Only" set to "Public Key Only" (P-ADMIN
-  VERIFIED options exist). It also removes password login for the admin
+- Optional hardening (**OPEN**, owner decision pending): "SSHd Key Only" set
+  to "Public Key Only" (P-ADMIN VERIFIED options exist). It also removes password login for the admin
   account, so the owner must confirm his own key works first.
 
 Pull schedule: once a day at a fixed time, plus on demand. Reason: the
 firewall config changes rarely, a one-day RPO is acceptable for a homelab,
 and an unchanged hash writes nothing. P-BACKUP (VERIFIED) advises a backup
 after each change and before and after major changes, so the owner triggers
-the pull by hand around planned work (one command on the NAS). This
-cadence is a proposal for the owner.
+the pull by hand around planned work (one command on the NAS). The daily
+pull from the firewall by the NAS is **DECIDED** (owner, 2026-11-27).
 
 ## 3. What the backup does not cover
 
@@ -182,7 +186,9 @@ healthy system. Measure these instead, from outside the puller:
 | `pfsense_backup_s3_behind_count` | NAS ciphertext files not present in S3. |
 | `pfsense_backup_check_success` | The check itself ran (1) or failed (0). |
 
-Proposed thresholds (flagged: a proposal for the owner to approve or change):
+Thresholds for the pull, the S3 copy and the silent monitor are **DECIDED**
+(owner, 2026-11-27). Only the restore drill age thresholds in section 6 stay a
+proposal.
 
 | Alert | Condition | Severity | Why |
 |---|---|---|---|
@@ -194,9 +200,10 @@ Proposed thresholds (flagged: a proposal for the owner to approve or change):
 
 A per-run rule also alerts on any non-zero pull exit (bad XML, ssh failure,
 hash mismatch), because a "fresh" status on a corrupt file is worse than a
-stale one. If the owner prefers to copy the weekly shape instead (8 and 15
-days), the cost is a week of unprotected config changes before the first
-alert; I do not recommend it.
+stale one.
+
+Delivery is **DECIDED** (owner, 2026-11-27): critical alerts page the phone;
+warnings go to chat only (Discord and Matrix), with no phone for warnings.
 
 Where it runs (same path as `docs/update-alerting.md`): a Telegraf exec input
 on the monitoring host mounts the backup share read-only (a separate NAS
@@ -208,8 +215,16 @@ credential, matching the pull principle. Grafana rules go in the existing
 `influxdb-pfsense` alerting datasource, labels `severity`,
 `alert_group=backup`, shipped paused until data arrives, delivered through
 the existing `n8n-grafana-router` contact point. Phone push (`phone=true`)
-for critical only is a decision for the owner. A later PR adds the script, the
+is set for critical only, per the decision above. A later PR adds the script, the
 rules file and tests (not part of this note).
+
+### Where the tools live (DECIDED, owner, 2026-11-27)
+
+The backup tools and scripts will live in the public repo
+`homelab-backup-tools`, with placeholders only in the repo and real values in a
+private config or the secret manager. The pull script, the NAS-side script and
+the metric script go there. Their alert rules stay in this repo
+(`siem-docker-stack`). Tracked in issue #241.
 
 ## 5. Retention
 
@@ -272,10 +287,10 @@ paid; Auto Config Backup is free (P-ACB VERIFIED).
 | F1 | Local user `backup-ro` | A dedicated identity for the pull; audit trail | Privilege "User - System: Shell account access" only, no root, no admin group; long random password that is never used; key login only | OWNER (GUI) |
 | F2 | Authorized key line on `backup-ro` | Lets the NAS, and only the NAS, read the config | `from=` NAS address, `command="cat /cf/conf/config.xml"`, `no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding`; ed25519; public half only travels | OWNER (paste), LEAD drafts the exact line |
 | F3 | SSH enabled, port known | The pull needs it | Already on (the owner has read the box over SSH); no change unless F4 | OWNER |
-| F4 | "SSHd Key Only" to Public Key Only | Removes password SSH for all accounts | Optional hardening; owner confirms his own key first | OWNER (decision) |
+| F4 | "SSHd Key Only" to Public Key Only (**OPEN**) | Removes password SSH for all accounts | Optional hardening; owner confirms his own key first | OWNER (decision pending) |
 | F5 | Firewall rule NAS address to SSH port | Only needed if the NAS is not on the LAN interface | Source one NAS address, destination the firewall address, one port | OWNER |
 | F6 | sudo package with one rule | Only if the config file is not readable by `backup-ro` | `cat /cf/conf/config.xml` only | OWNER, only if needed |
-| F7 | (Optional) Enable Auto Config Backup | Independent third copy | Frequency "On Every Configuration Change" (P-ACB VERIFIED option); a long encryption password; device key saved. Both are secrets: they go into Doppler, never into a file or chat | OWNER |
+| F7 | (Optional, **OPEN**) Enable Auto Config Backup | Independent third copy | Frequency "On Every Configuration Change" (P-ACB VERIFIED option); a long encryption password; device key saved. Both are secrets: they go into Doppler, never into a file or chat | OWNER |
 
 ### 7.2 NAS (nas.example.internal)
 
@@ -298,6 +313,9 @@ paid; Auto Config Backup is free (P-ACB VERIFIED).
 | S4 | Lifecycle rule | Expire non-current versions after 365 days | Bucket setting, no credential | OWNER |
 
 ### 7.4 Doppler (project `homelab`, config `prd_network`, as named by the owner)
+
+**OPEN** (owner decision pending): whether the backup secrets go in config
+`prd_network` or a dev config first.
 
 Note: the dev-before-prd rule applies to new projects; this is an existing
 live project and config the owner named, so no dev config is proposed. Reject
