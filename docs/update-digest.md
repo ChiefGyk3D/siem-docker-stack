@@ -141,18 +141,18 @@ shown as `(invalid)`), and so does a second frame with the same identity in one 
 frames, or two kinds that print the same name), so a series can never be both applied and pending.
 Each source's check query returns exactly one series.
 
-Identities are ASCII only. Each name is first normalized with Unicode NFKC (so full-width forms fold to
-plain ASCII and join the plain spelling), then it must match a strict allowlist: ASCII letters `a-z` and
-`A-Z`, ASCII digits, space and `. _ ( ) -`; it must start with a letter or digit, have no leading or
-trailing space and be at most 120 characters. Every other character fails the source with a fixed
-error message that never echoes the name: every non-ASCII letter (accented Latin, Cyrillic, Greek, Han
-and so on), every combining or enclosing mark, every invisible character and every symbol. There is no
-slash, colon, hash, plus or at sign, so a name cannot read as a URL scheme, a Matrix room alias or a
-mention. A bare host name such as `ap-1.example.com` is still accepted and a chat client may turn it
-into a plain link; it can carry no scheme or path. To fix a rejected name, rename the device (or
-connector) to ASCII; the digest does not transliterate. The normalized form is used for the length
-check, the duplicate check and the join of current and history data, so a full-width spelling collides
-with the plain one (a failed source) and joins history written plain.
+Identities are ASCII only and nothing is normalized. The raw name must match a strict allowlist: ASCII
+letters `a-z` and `A-Z`, ASCII digits, space and `. _ ( ) -`; it must start with a letter or digit, have
+no leading or trailing space and be at most 120 characters. Every other character fails the source with
+a fixed error message that never echoes the name: every non-ASCII letter (accented Latin, Cyrillic,
+Greek, Han and so on), every compatibility character (full-width or circled letters, ligatures,
+superscript digits), every combining or enclosing mark, every invisible character and every symbol.
+There is no slash, colon, hash, plus or at sign, so a name cannot read as a URL scheme, a Matrix room
+alias or a mention. A bare host name such as `ap-1.example.com` is still accepted and a chat client may
+turn it into a plain link; it can carry no scheme or path. To fix a rejected name, rename the device (or
+connector) to ASCII; the digest does not transliterate or fold anything. The duplicate check and the
+join of current and history data use the exact raw name and are case sensitive, so a compatibility
+spelling can never join a different plain name.
 
 Accepted residual: ASCII has same-script look-alikes, for example a lowercase `l` and a capital `I`, or
 `0` and `O`, which can be hard to tell apart in some fonts. Two such names are two distinct

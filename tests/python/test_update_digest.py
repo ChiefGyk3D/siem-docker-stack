@@ -2090,13 +2090,25 @@ def check_ascii_identities(wf):
             # a rejected spelling next to its plain twin never yields two pending identities
             j = _named(wf, name, "ap", bad)
             assert j["status"] == "failed" and j["pending"] == [], (name, bad)
-        # full-width forms fold to ASCII (NFKC), so they join the plain spelling and collide with it
-        j = _named(wf, name, _u(0xFF21) + "p", "Ap")
-        assert j["status"] == "failed" and "duplicate" in j["reason"], name
-        assert _named(wf, name, _u(0xFF21) + "p")["pending"][0]["name"] == "Ap", name
+        # nothing is normalized: compatibility characters are rejected, never folded to a plain name
+        for compat in COMPAT_IDENTITIES:
+            j = _named(wf, name, compat)
+            assert j["status"] == "failed" and j["pending"] == [], (name, compat)
+            assert "identity" in j["reason"], (name, compat)
+        # case is kept: two names that differ only in case are two identities
+        j = _named(wf, name, "Ap", "ap")
+        assert j["status"] == "ok" and len(j["pending"]) == 2, name
 
 
-def test_identities_are_nfkc_then_ascii_only():
+# characters that NFKC would fold to plain ASCII: fullwidth, circled, ligature, superscript, and a 120-unit
+# name whose last character is a superscript two
+COMPAT_IDENTITIES = [
+    _u(0xFF21) + "p", _u(0xFF41, 0xFF50), _u(0x24D0) + "p", _u(0xFB03), "x" + _u(0xB2), "a" * 119 + _u(0xB2),
+    _u(0x2460), "ap" + _u(0x2024) + "x",
+]
+
+
+def test_identities_are_raw_ascii_only_nothing_normalized():
     check_ascii_identities(_wf())
 
 
@@ -2105,19 +2117,27 @@ def test_non_ascii_identity_is_rejected_per_collector(name):
     for bad in ("caf" + _u(0xE9), "a" + _u(0x20DD), "a" + _u(0x305) * 118, "a" + _u(0x10780), _u(0x430) + "p"):
         j = _named(_wf(), name, bad)
         assert j["status"] == "failed" and j["pending"] == [], (name, bad)
+    for bad in COMPAT_IDENTITIES:
+        j = _named(_wf(), name, bad)
+        assert j["status"] == "failed" and j["pending"] == [], (name, bad)
 
 
-def test_fullwidth_name_joins_history_written_plain():
-    j = _unifi(_wf(), [(_u(0xFF41) + "p", 60000, False)], ever=[("ap", 3)])
+def test_history_join_never_matches_across_a_compatibility_pair():
+    wf = _wf()
+    for cur, ever in ((_u(0xFF41, 0xFF50), "ap"), ("ap", _u(0xFF41, 0xFF50)), (_u(0x24D0) + "p", "ap")):
+        j = _unifi(wf, [(cur, 60000, False)], ever=[(ever, 3)])
+        assert j["status"] == "failed" and j["applied"] == [] and j["pending"] == [], (cur, ever)
+    # the exact same raw name still joins
+    j = _unifi(wf, [("ap", 60000, False)], ever=[("ap", 3)])
     assert j["status"] == "ok" and j["applied"] == [{"name": "ap", "from": "upgrade pending", "to": "up to date"}]
 
 
 @pytest.mark.parametrize("name", list(REAL))
 @pytest.mark.parametrize("old,new", [
-    ("v.normalize('NFKC')", "v"),
-    ("if (!/^[A-Za-z0-9][A-Za-z0-9 ._()-]*$/.test(n)) return null;", ""),
-    ("n.length > NAME_MAX", "false"),
-    ("n !== n.trim()", "false"),
+    ("if (v === '' ||", "v = v.normalize('NFKC'); if (v === '' ||"),
+    ("if (!/^[A-Za-z0-9][A-Za-z0-9 ._()-]*$/.test(v)) return null;", ""),
+    ("v.length > NAME_MAX", "false"),
+    ("v !== v.trim()", "false"),
 ])
 def test_mutant_identity_check_removed_is_caught(name, old, new):
     wf = _mutate(name, old, new)
