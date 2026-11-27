@@ -82,7 +82,10 @@ class Env:
         self.src.write_text("0\n")
         self.uos = self.bin / "uosserver"
         self.write_fake()
+        # generous command limit: a loaded CI worker must not time the fake out. Only the tests that
+        # prove the time bound use env.fast (1 second).
         self.script = self.build("script.sh")
+        self.fast = self.build("fast.sh", rewrites={"cmd_timeout": "1"})
 
     def write_fake(self, status_cmd=None):
         status_cmd = status_cmd or f"cat {shlex.quote(str(self.sfix))}"
@@ -94,7 +97,7 @@ class Env:
 
     def build(self, name, marks=None, rewrites=None):
         """Scratch copy of the shipped script: constants rewritten, optional one-line mutations."""
-        rw = {"uos_bin": str(self.uos), "cmd_timeout": "1"}
+        rw = {"uos_bin": str(self.uos), "cmd_timeout": "30"}
         rw.update(rewrites or {})
         lines = SCRIPT.read_text(encoding="utf-8").splitlines(keepends=True)
         for var, value in rw.items():
@@ -244,7 +247,7 @@ def test_missing_uosserver_fails(env):
 def test_hanging_version_is_bounded(env):
     env.uos.write_text("#!/bin/sh\nsleep 300\n", encoding="utf-8")
     start = time.time()
-    r = env.run()
+    r = env.run(script=env.fast)
     assert time.time() - start < 20
     assert_failed_clean(r)
 
@@ -252,7 +255,7 @@ def test_hanging_version_is_bounded(env):
 def test_hanging_version_with_pipe_holding_child_is_bounded(env):
     env.uos.write_text("#!/bin/sh\nsleep 300 &\nsleep 300\n", encoding="utf-8")
     start = time.time()
-    r = env.run()
+    r = env.run(script=env.fast)
     assert time.time() - start < 20
     assert_failed_clean(r)
 
@@ -340,7 +343,7 @@ def test_status_with_too_many_lines_is_unknown(env):
 def test_hanging_status_is_bounded_and_network_unknown(env):
     env.write_fake(status_cmd="sleep 300")
     start = time.time()
-    r = env.run()
+    r = env.run(script=env.fast)
     assert time.time() - start < 20
     net_unknown(r)
 
@@ -376,8 +379,8 @@ def test_docs_wording_and_scope():
 
 
 # ------------------------------------------------------------------ clean-mutant revert proofs
-def mutant(env, marker, replacement, name="mut.sh"):
-    return env.build(name, marks={marker: replacement})
+def mutant(env, marker, replacement, name="mut.sh", rewrites=None):
+    return env.build(name, marks={marker: replacement}, rewrites=rewrites)
 
 
 def test_mutant_os_charset_guard_bites(env):
@@ -427,8 +430,9 @@ def test_mutant_net_charset_guard_bites(env):
 
 def test_mutant_timeout_guard_bites(env):
     env.uos.write_text("#!/bin/sh\nsleep 6\n", encoding="utf-8")
-    assert env.run().returncode != 0
-    m = mutant(env, "run-cmd", '"$env_bin" -i PATH=/usr/bin:/bin LC_ALL=C "$uos_bin" "$1" </dev/null 2>/dev/null')
+    assert env.run(script=env.fast).returncode != 0
+    m = mutant(env, "run-cmd", '"$env_bin" -i PATH=/usr/bin:/bin LC_ALL=C "$uos_bin" "$1" </dev/null 2>/dev/null',
+               rewrites={"cmd_timeout": "1"})
     start = time.time()
     env.run(script=m)
     assert time.time() - start >= 5
