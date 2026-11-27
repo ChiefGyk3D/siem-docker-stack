@@ -2132,6 +2132,50 @@ def test_history_join_never_matches_across_a_compatibility_pair():
     assert j["status"] == "ok" and j["applied"] == [{"name": "ap", "from": "upgrade pending", "to": "up to date"}]
 
 
+# R7-1: pfSense compared a display string (kind plus a security suffix), so two different raw identities collided
+def test_pfsense_display_collision_never_joins_current_and_history():
+    wf = _wf()
+    # the R7-1 repro: current (core, true) vs history ("core (security)", false) print the same name
+    j = _pfsense(wf, [("core", "true", H, 0)], ever=[("core (security)", "false", 1)])
+    assert j["applied"] == [], j
+    assert j["status"] == "failed" or j["pending"] == [], j
+    # and the reverse direction
+    j = _pfsense(wf, [("core (security)", "false", H, 0)], ever=[("core", "true", 1)])
+    assert j["applied"] == [], j
+    # two different raw identities that print the same name are refused, in one query or across queries
+    j = _pfsense(wf, [("core", "true", H, 1), ("core (security)", "false", H, 1)])
+    assert j["status"] == "failed" and "duplicate" in j["reason"], j
+    j = _pfsense(wf, [("core", "true", H, 1)], ever=[("core (security)", "false", 1)])
+    assert j["status"] == "failed" and "duplicate" in j["reason"], j
+    # the same raw identity still joins and the display string is only used for output
+    j = _pfsense(wf, [("core", "true", H, 0)], ever=[("core", "true", 1)])
+    assert j["status"] == "ok" and j["applied"] == [{"name": "core (security)", "from": "update pending", "to": "up to date"}]
+    j = _pfsense(wf, [("core", "true", H, 1), ("core", "false", H, 1)])
+    assert j["status"] == "ok" and [p["name"] for p in j["pending"]] == ["core (security)", "core"]
+
+
+def test_unifi_and_twingate_keys_are_the_cleaned_raw_name_not_a_display_string():
+    # audit: both join on the raw label itself, so two different raw names never meet
+    wf = _wf()
+    j = _unifi(wf, [("ap (security)", 60000, False)], ever=[("ap", 3)])
+    assert j["status"] == "ok" and j["applied"] == [], j
+    j = _twingate(wf, [("c1 (security)", H, 0)], ever=[("c1", 2)])
+    assert j["status"] == "ok" and j["applied"] == [], j
+
+
+def test_mutant_pfsense_display_key_is_caught():
+    old = "const idOf = (l) => { const k = cleanName(l.kind); return (k !== null && (l.security === 'true' || l.security === 'false')) ? JSON.stringify([k, l.security]) : null; };"
+    new = "const idOf = (l) => { const k = cleanName(l.kind); return (k !== null && (l.security === 'true' || l.security === 'false')) ? k + (l.security === 'true' ? ' (security)' : '') : null; };"
+    wf = _mutate("pfSense Collector", old, new)
+    with pytest.raises(AssertionError):
+        _pf_collision_check(wf)
+
+
+def _pf_collision_check(wf):
+    j = _pfsense(wf, [("core", "true", H, 0)], ever=[("core (security)", "false", 1)])
+    assert j["applied"] == [], j
+
+
 @pytest.mark.parametrize("name", list(REAL))
 @pytest.mark.parametrize("old,new", [
     ("if (v === '' ||", "v = v.normalize('NFKC'); if (v === '' ||"),

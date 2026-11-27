@@ -151,8 +151,12 @@ There is no slash, colon, hash, plus or at sign, so a name cannot read as a URL 
 alias or a mention. A bare host name such as `ap-1.example.com` is still accepted and a chat client may
 turn it into a plain link; it can carry no scheme or path. To fix a rejected name, rename the device (or
 connector) to ASCII; the digest does not transliterate or fold anything. The duplicate check and the
-join of current and history data use the exact raw name and are case sensitive, so a compatibility
-spelling can never join a different plain name.
+join of current and history data use the exact raw labels and are case sensitive, so a compatibility
+spelling can never join a different plain name. For pfSense the key is the exact raw pair of `kind`
+and `security`, never the printed name (a kind plus a ` (security)` suffix is output only), so
+`core` with security `true` and a kind literally named `core (security)` with security `false` are
+different identities; because they would print the same, a source that contains both, in either query
+or across the current and history queries, fails instead of joining them.
 
 Accepted residual: ASCII has same-script look-alikes, for example a lowercase `l` and a capital `I`, or
 `0` and `O`, which can be hard to tell apart in some fonts. Two such names are two distinct
