@@ -116,7 +116,7 @@ def test_rules_are_the_four_expected_and_all_paused():
 def test_severity_tier_and_phone_labels_follow_the_existing_update_pattern():
     _, rules = _rules()
     lab = {u: (r["labels"]["severity"], r["labels"]["tier"], r["labels"]["phone"]) for u, r in rules.items()}
-    assert lab["update-synology-pending-24h"] == ("warning", "P2", "true")
+    assert lab["update-synology-pending-24h"] == ("warning", "P2", "false")
     assert lab["update-synology-pending-7d"] == ("critical", "P1", "true")
     assert lab["update-synology-data-stale"] == ("warning", "P2", "false")
     assert lab["update-synology-check-failing"] == ("warning", "P2", "false")

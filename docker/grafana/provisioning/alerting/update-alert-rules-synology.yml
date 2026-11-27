@@ -27,8 +27,9 @@
 # Missing data or a failing query (noDataState and execErrState Alerting) raises
 # an alert: a broken check must not look healthy. Repeat intervals come from the
 # notification policy (update-notification-policy.yml.example, update_alert route:
-# 84h warning, 24h critical). Labels follow the Twingate update rules: the warning
-# pages the phone (owner pattern: twice a week), the two health rules do not.
+# 84h warning, 24h critical). Labels follow the UniFi and pfSense 24h update rules
+# (owner decisions #152 and 2026-11-26): the 24h warning is chat only (phone false),
+# the 7-day critical pages the phone, and the two health rules do not.
 apiVersion: 1
 
 groups:
@@ -86,7 +87,7 @@ groups:
           source: "synology"
           alert_group: "updates"
           update_alert: "true"
-          phone: "true"
+          phone: "false"
 
       - uid: update-synology-pending-7d
         title: "Synology DSM update pending over 7 days"

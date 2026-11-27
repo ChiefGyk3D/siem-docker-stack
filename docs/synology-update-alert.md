@@ -26,17 +26,17 @@ NAS (SNMPv3 read-only user) <-- Telegraf snmp input, hourly
 
 | Rule | Fires when | Labels | Repeat |
 |------|------------|--------|--------|
-| Synology DSM update pending over 24h | value 1 for 24 to 159 hourly buckets in 7 days | warning, P2, phone true | 84h |
+| Synology DSM update pending over 24h | value 1 for 24 to 159 hourly buckets in 7 days | warning, P2, phone false | 84h |
 | Synology DSM update pending over 7 days | value 1 for 160 or more hourly buckets | critical, P1, phone true | 24h |
 | Synology update data stale | no point in `synology_dsm` for 3 hours (the poller stopped); no data also alerts | warning, P2, phone false | 84h |
 | Synology DSM update check failing | value 3 or 4 for 6 hours (the NAS cannot check) | warning, P2, phone false | 84h |
 
   The warning and critical bands share the number 160, the same exclusive-range
   pattern as the UniFi rules, so they never both fire. Repeats come from the
-  `update_alert` route of `update-notification-policy.yml.example`. The warning
-  pages twice a week (the Twingate update-rule pattern). The UniFi and pfSense
-  24h warnings do not page (owner decision 2026-11-20, issue #152); if you want that for the NAS,
-  set `phone: "false"` on `update-synology-pending-24h`.
+  `update_alert` route of `update-notification-policy.yml.example`. The 24h warning
+  goes to chat only, like the UniFi and pfSense 24h warnings (owner decisions #152 and
+  2026-11-26); only the 7-day critical pages the phone. To page on the warning
+  as well, set `phone: "true"` on `update-synology-pending-24h` (the taxonomy allows it for an update rule).
 - The four titles are on the router allow-list (`ALLOWED_ALERTNAMES`), so a
   critical pages at emergency priority once Pushover is enabled.
 
