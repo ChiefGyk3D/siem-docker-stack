@@ -1,0 +1,214 @@
+# Synology DSM pending-update alerts (issue #257). Provisioned PAUSED.
+#
+# These rules ship paused (isPaused: true). They stay paused until the owner has
+# created the read-only SNMPv3 user on the NAS and confirmed one live snmpget
+# (docs/synology-update-alert.md), and the Telegraf poller
+# (docs/examples/synology-snmp-telegraf.conf.example) writes to InfluxDB. To
+# enable: set isPaused to false and restart Grafana, or unpause in the UI (a UI
+# change is overwritten by the file on the next provisioning run).
+#
+# Data: measurement `synology_dsm` in InfluxDB database `telegraf` (datasource
+# `influxdb-twingate`, the repo's existing Telegraf database), polled hourly by
+# Telegraf over SNMPv3. Field `upgrade_available` is the integer
+# SYNOLOGY-SYSTEM-MIB upgradeAvailable: 1 available, 2 unavailable,
+# 3 connecting, 4 disconnected, 5 others. Tag `nas` is a short label. This
+# covers DSM only, NOT packages.
+#
+# Escalation is exclusive and has no `for` clock (same pattern as the UniFi
+# rules): query P counts the hourly buckets in the last 7 days that held a
+# pending point (value 1). Warning: 24 to 159 buckets. Critical: 160 or more.
+# The 160 is the same number in both rules, so they cannot overlap or leave a
+# gap, and it leaves about 8 hours of tolerance per week for missed polls. Both
+# also need pending now (B == 1, the last value in 3 hours, which is three polls).
+# Limit: the 7-day bucket count does not reset when a value of 2 appears, so a
+# new update that follows an applied one within 7 days can reach the critical
+# band early; the rules clear as soon as the value is no longer 1.
+#
+# Missing data or a failing query (noDataState and execErrState Alerting) raises
+# an alert: a broken check must not look healthy. Repeat intervals come from the
+# notification policy (update-notification-policy.yml.example, update_alert route:
+# 84h warning, 24h critical). Labels follow the Twingate update rules: the warning
+# pages the phone (owner pattern: twice a week), the two health rules do not.
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: Update pending - Synology
+    folder: Update Alerts
+    interval: 15m
+    rules:
+      - uid: update-synology-pending-24h
+        title: "Synology DSM update pending over 24h"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 10800, to: 0}
+            datasourceUid: influxdb-twingate
+            model:
+              refId: A
+              datasource: {type: influxdb, uid: influxdb-twingate}
+              rawQuery: true
+              resultFormat: time_series
+              query: >-
+                SELECT last("upgrade_available") FROM "synology_dsm" WHERE time > now() - 3h GROUP BY "nas"
+          - refId: P
+            relativeTimeRange: {from: 604800, to: 0}
+            datasourceUid: influxdb-twingate
+            model:
+              refId: P
+              datasource: {type: influxdb, uid: influxdb-twingate}
+              rawQuery: true
+              resultFormat: time_series
+              query: >-
+                SELECT count("upgrade_available") FROM "synology_dsm" WHERE "upgrade_available" = 1 AND time > now() - 7d GROUP BY time(1h), "nas"
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: B, type: reduce, expression: A, reducer: last, settings: {mode: dropNN}}
+          - refId: Pc
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: Pc, type: reduce, expression: P, reducer: count, settings: {mode: dropNN}}
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: C, type: math, expression: "$B == 1 && $Pc >= 24 && $Pc < 160"}
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 0s
+        isPaused: true
+        annotations:
+          summary: "Synology NAS {{ $labels.nas }} has had a DSM update pending for over 24 hours"
+          description: "Apply the pending DSM update by hand. This alert covers DSM only, not packages. It clears only when the NAS reports no pending update."
+        labels:
+          severity: "warning"
+          tier: "P2"
+          source: "synology"
+          alert_group: "updates"
+          update_alert: "true"
+          phone: "true"
+
+      - uid: update-synology-pending-7d
+        title: "Synology DSM update pending over 7 days"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 10800, to: 0}
+            datasourceUid: influxdb-twingate
+            model:
+              refId: A
+              datasource: {type: influxdb, uid: influxdb-twingate}
+              rawQuery: true
+              resultFormat: time_series
+              query: >-
+                SELECT last("upgrade_available") FROM "synology_dsm" WHERE time > now() - 3h GROUP BY "nas"
+          - refId: P
+            relativeTimeRange: {from: 604800, to: 0}
+            datasourceUid: influxdb-twingate
+            model:
+              refId: P
+              datasource: {type: influxdb, uid: influxdb-twingate}
+              rawQuery: true
+              resultFormat: time_series
+              query: >-
+                SELECT count("upgrade_available") FROM "synology_dsm" WHERE "upgrade_available" = 1 AND time > now() - 7d GROUP BY time(1h), "nas"
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: B, type: reduce, expression: A, reducer: last, settings: {mode: dropNN}}
+          - refId: Pc
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: Pc, type: reduce, expression: P, reducer: count, settings: {mode: dropNN}}
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: C, type: math, expression: "$B == 1 && $Pc >= 160"}
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 0s
+        isPaused: true
+        annotations:
+          summary: "Synology NAS {{ $labels.nas }} has had a DSM update pending for over 7 days"
+          description: "Escalated: the DSM update has been pending for over 7 days. Apply it. This alert clears only when the NAS reports no pending update."
+        labels:
+          severity: "critical"
+          tier: "P1"
+          source: "synology"
+          alert_group: "updates"
+          update_alert: "true"
+          phone: "true"
+
+      - uid: update-synology-data-stale
+        title: "Synology update data stale"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 10800, to: 0}
+            datasourceUid: influxdb-twingate
+            model:
+              refId: A
+              datasource: {type: influxdb, uid: influxdb-twingate}
+              rawQuery: true
+              resultFormat: time_series
+              query: >-
+                SELECT count("upgrade_available") FROM "synology_dsm" WHERE time > now() - 3h
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: B, type: reduce, expression: A, reducer: last, settings: {mode: dropNN}}
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: C, type: threshold, expression: B, conditions: [{evaluator: {type: lt, params: [1]}}]}
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 10m
+        isPaused: true
+        annotations:
+          summary: "No Synology update data has arrived for 3 hours"
+          description: "The Telegraf SNMP poller wrote nothing to synology_dsm for 3 hours (it polls hourly). The Synology update alerts cannot see a pending update until it writes again. Check the poller, the SNMPv3 user and the InfluxDB write account."
+        labels:
+          severity: "warning"
+          tier: "P2"
+          source: "synology"
+          alert_group: "updates"
+          update_alert: "true"
+          phone: "false"
+
+      - uid: update-synology-check-failing
+        title: "Synology DSM update check failing"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 10800, to: 0}
+            datasourceUid: influxdb-twingate
+            model:
+              refId: A
+              datasource: {type: influxdb, uid: influxdb-twingate}
+              rawQuery: true
+              resultFormat: time_series
+              query: >-
+                SELECT last("upgrade_available") FROM "synology_dsm" WHERE time > now() - 3h GROUP BY "nas"
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: B, type: reduce, expression: A, reducer: last, settings: {mode: dropNN}}
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: C, type: math, expression: "$B == 3 || $B == 4"}
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 6h
+        isPaused: true
+        annotations:
+          summary: "Synology NAS {{ $labels.nas }} reports its update check as connecting or disconnected for 6 hours"
+          description: "upgradeAvailable has been 3 (connecting) or 4 (disconnected) for 6 hours, so the NAS cannot check for updates. A pending update would not show. Check the NAS update settings and its internet access."
+        labels:
+          severity: "warning"
+          tier: "P2"
+          source: "synology"
+          alert_group: "updates"
+          update_alert: "true"
+          phone: "false"

@@ -16,6 +16,7 @@ DOCS = [
     "docs/alert-taxonomy.md",
     "docs/detection-ownership.md",
     "docs/live-deploy-runbook.md",
+    "docs/synology-update-alert.md",
 ]
 
 # RFC 5737 documentation ranges are placeholders by definition and are allowed

@@ -513,7 +513,9 @@ def test_pending_update_rules_all_push_to_the_phone():
         # the operator-managed Twingate rule auto-updates and never pages (#200)
         want = "false" if r["uid"] in {"update-unifi-pending-24h", "update-pfsense-pending-24h",
                                        "update-twingate-operator-behind",
-                                       "update-twingate-unexpected-connector"} else "true"
+                                       "update-twingate-unexpected-connector",
+                                       # #257: the two Synology health rules are quiet (Discord and Matrix only)
+                                       "update-synology-data-stale", "update-synology-check-failing"} else "true"
         assert r["labels"]["phone"] == want, r["uid"]
     uids = {r["uid"] for r in pending}
     assert {"update-unifi-pending-24h", "update-unifi-pending-7d"} <= uids
@@ -1435,7 +1437,8 @@ def test_every_update_rule_sets_the_phone_label_explicitly():
         # the poller-stale rule and the two 24h rules (P2, owner decision 2026-11-20, issue #152) stay off the phone;
         # the UniFi 24h rule is also quiet by owner decision 2026-11-26 (7-day wait, issue #199)
         p2 = {"update-unifi-poller-stale", "update-unifi-pending-24h", "update-pfsense-pending-24h",
-              "update-twingate-operator-behind", "update-twingate-unexpected-connector"}  # operator: digest only (#200); unexpected: warning, no phone (#222)
+              "update-twingate-operator-behind", "update-twingate-unexpected-connector",
+              "update-synology-data-stale", "update-synology-check-failing"}  # synology health: quiet (#257); operator: digest only (#200); unexpected: warning, no phone (#222)
         want = "false" if rule["uid"] in p2 else "true"
         assert rule["labels"].get("phone") == want, rule["uid"]
         seen += 1
