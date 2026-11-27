@@ -597,3 +597,107 @@ def test_runbook_documents_grafana_viewer_credential():
     for needle in ("grafana-viewer-auth", "--with-grafana-viewer", "GRAFANA_VIEWER_TOKEN", "GRAFANA_BASE_URL"):
         assert needle in text, needle
     assert "—" not in text
+
+
+# --- issue #202 fix round 1: preflight before any change, id and token validation --------------
+
+ENV_ALL = {"GRAFANA_WEBHOOK_SECRET": "s" * 12, "PUSHOVER_API_KEY": "k" * 12, "PUSHOVER_USER_KEY": "u" * 12,
+           "MATRIX_BOT_TOKEN": "m" * 12, "GRAFANA_VIEWER_TOKEN": "g" * 12}
+FLAGS = ["--credentials", "--with-matrix", "--with-grafana-viewer"]
+
+
+def _env(monkeypatch, **over):
+    for k in ENV_ALL:
+        monkeypatch.delenv(k, raising=False)
+    for k, v in {**ENV_ALL, **over}.items():
+        if v is None:
+            monkeypatch.delenv(k, raising=False)
+        else:
+            monkeypatch.setenv(k, v)
+
+
+def _record_docker(setup, monkeypatch):
+    calls = []
+
+    def fake(script, payload):
+        calls.append((script, payload))
+        return 0, ["Successfully imported 1 credential."]
+
+    monkeypatch.setattr(setup, "docker_in", fake)
+    return calls
+
+
+def test_credentials_run_changes_nothing_when_a_later_value_is_missing(setup, monkeypatch):  # GUARD
+    calls = _record_docker(setup, monkeypatch)
+    for missing in ("GRAFANA_VIEWER_TOKEN", "MATRIX_BOT_TOKEN", "PUSHOVER_USER_KEY"):
+        _env(monkeypatch, **{missing: None})
+        with pytest.raises(SystemExit):
+            setup.main(FLAGS)
+        assert calls == [], missing + ": nothing may be imported before every value is checked"
+    _env(monkeypatch)
+    assert setup.main(FLAGS) == 0
+    assert len(calls) == 3, "the base credentials, then matrix, then the viewer"
+
+
+def test_credentials_run_changes_nothing_when_a_token_is_bad(setup, monkeypatch):  # GUARD
+    calls = _record_docker(setup, monkeypatch)
+    for bad in ("", "   ", "\n", "abc\ndef", "abc\r\ndef", "abc\tdef", "abc" + chr(27) + "def"):
+        _env(monkeypatch, GRAFANA_VIEWER_TOKEN=bad)
+        with pytest.raises(SystemExit):
+            setup.main(FLAGS)
+        _env(monkeypatch, MATRIX_BOT_TOKEN=bad)
+        with pytest.raises(SystemExit):
+            setup.main(FLAGS)
+    assert calls == []
+
+
+def test_viewer_and_matrix_tokens_lose_surrounding_whitespace_only(setup, monkeypatch):
+    calls = _record_docker(setup, monkeypatch)
+    _env(monkeypatch, GRAFANA_VIEWER_TOKEN="  tok-VIEW-1234 \n", MATRIX_BOT_TOKEN="\tsyt_matrix_1234  ")
+    assert setup.main(FLAGS) == 0
+    sent = {json.loads(p)[0]["name"]: json.loads(json.loads(p)[0]["data"]["json"]) for _s, p in calls[1:]}
+    assert sent["grafana-viewer-auth"] == {"headers": {"Authorization": "Bearer tok-VIEW-1234"}}
+    assert sent["matrix-bot-auth"] == {"headers": {"Authorization": "Bearer syt_matrix_1234"}}
+
+
+def test_viewer_credential_alone_rejects_empty_and_multiline_tokens(setup, monkeypatch):
+    calls = _record_docker(setup, monkeypatch)
+    for bad in ("", " \n ", "a\nb"):
+        monkeypatch.setenv("GRAFANA_VIEWER_TOKEN", bad)
+        with pytest.raises(SystemExit):
+            setup.grafana_viewer_credentials()
+    assert calls == []
+
+
+@pytest.mark.parametrize("bad", ["", "short", "has space 12345", "semi;colon1234", "x" * 33, "../../etc/pass", "id\nid123456"])
+def test_viewer_credential_id_must_pass_the_same_id_check(setup, monkeypatch, bad):  # GUARD
+    calls = _record_docker(setup, monkeypatch)
+    _env(monkeypatch)
+    monkeypatch.setattr(setup, "CRED_GRAFANA_VIEWER_ID", bad)
+    with pytest.raises(SystemExit):
+        setup.main(["--credentials", "--with-grafana-viewer"])
+    with pytest.raises(SystemExit):
+        setup.grafana_viewer_credentials()
+    assert calls == []
+
+
+def test_every_credential_id_is_checked_and_defaults_pass(setup, monkeypatch):
+    setup.check_credential_ids()
+    for attr in ("CRED_HEADER_ID", "CRED_PUSHOVER_ID", "CRED_MATRIX_ID", "CRED_DISCORD_ID"):
+        with monkeypatch.context() as m:
+            m.setattr(setup, attr, "bad id!")
+            with pytest.raises(SystemExit):
+                setup.check_credential_ids()
+
+
+@pytest.mark.parametrize("other", ["CRED_HEADER_ID", "CRED_PUSHOVER_ID", "CRED_MATRIX_ID", "CRED_DISCORD_ID"])
+def test_viewer_credential_id_equal_to_another_credential_is_refused(setup, monkeypatch, other):  # GUARD
+    calls = _record_docker(setup, monkeypatch)
+    _env(monkeypatch)
+    monkeypatch.setattr(setup, "CRED_GRAFANA_VIEWER_ID", getattr(setup, other))
+    with pytest.raises(SystemExit) as err:
+        setup.main(["--credentials", "--with-grafana-viewer"])
+    assert "own id" in str(err.value)
+    with pytest.raises(SystemExit):
+        setup.grafana_viewer_credentials()
+    assert calls == []

@@ -25,7 +25,9 @@ credential ids mapped; import the error handler first and pass its id, as for th
 --with-grafana-viewer works the same way for the Custom Auth credential grafana-viewer-auth
 (the weekly digest collectors read Grafana with it): the token of a Grafana Viewer service
 account comes from the environment value GRAFANA_VIEWER_TOKEN, over stdin, never argv, never
-printed. The flags can be combined. GRAFANA_BASE_URL is not a secret: a pass-through line
+printed. The flags can be combined; every needed value and id is checked BEFORE n8n is changed,
+so a bad value leaves nothing half done. Tokens lose surrounding whitespace; an empty or
+multi-line token stops the run. GRAFANA_BASE_URL is not a secret: a pass-through line
 (name only) in the n8n container environment.
 MATRIX_HOMESERVER and MATRIX_ROOM_ID are not secrets and not handled here: they are
 pass-through lines (names only) in the n8n container environment of the compose file.
@@ -48,6 +50,7 @@ Environment (all optional, the current values are the defaults):
   N8N_CRED_MATRIX_ID      id for the matrix-bot-auth credential (default: matrixbotauth01)
   MATRIX_BOT_TOKEN        only with --with-matrix: the Matrix bot's access token (secret)
   N8N_CRED_GRAFANA_VIEWER_ID  id for the grafana-viewer-auth credential (default: grafanaviewer01)
+                          (every credential id is 8 to 32 letters or digits, and no two are equal)
   GRAFANA_VIEWER_TOKEN    only with --with-grafana-viewer: a Grafana Viewer service account token (secret)
   N8N_CRED_DISCORD_ID     id of the existing Discord webhook credential in n8n
                           (default: dscwhk1479574998; an n8n internal id, not a secret)
@@ -93,6 +96,50 @@ def need(name):
     if not value:
         sys.exit("missing environment value: " + name)
     return value
+
+
+def bearer_token(name):
+    """A secret from the environment for a Bearer header: surrounding whitespace is stripped; empty, or
+    anything with a line break or other control character inside, stops the run (it would corrupt the header)."""
+    value = os.environ.get(name, "").strip()
+    if not value:
+        sys.exit("missing environment value: " + name)
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        sys.exit(name + " must be one line without control characters")
+    return value
+
+
+def credential_ids():
+    """Every credential id this tooling creates or expects, by credential name."""
+    return {
+        "grafana-webhook-auth": CRED_HEADER_ID,
+        "pushover-api": CRED_PUSHOVER_ID,
+        DISCORD_NAME: CRED_DISCORD_ID,
+        "matrix-bot-auth": CRED_MATRIX_ID,
+        "grafana-viewer-auth": CRED_GRAFANA_VIEWER_ID,
+    }
+
+
+def check_credential_ids():
+    """Each credential id is 8 to 32 letters or digits and no two credentials share one."""
+    seen = {}
+    for name, value in credential_ids().items():
+        if not re.match(r"^[A-Za-z0-9]{8,32}$", value or ""):
+            sys.exit("credential id for %s must be 8 to 32 letters or digits" % name)
+        if value in seen:
+            sys.exit("credential id for %s equals the id for %s: every credential needs its own id" % (name, seen[value]))
+        seen[value] = name
+
+
+def preflight(with_matrix=False, with_viewer=False):
+    """Check everything a credential run needs BEFORE n8n is changed, so a bad value never leaves a partial result."""
+    check_credential_ids()
+    for name in NEEDED:
+        need(name)
+    if with_matrix:
+        bearer_token("MATRIX_BOT_TOKEN")
+    if with_viewer:
+        bearer_token("GRAFANA_VIEWER_TOKEN")
 
 
 def engine():
@@ -167,13 +214,7 @@ def build_grafana_viewer_credential(token):
 
 def credential_id_map():
     """Credential name -> the n8n credential id this tooling creates or expects."""
-    return {
-        "grafana-webhook-auth": CRED_HEADER_ID,
-        "pushover-api": CRED_PUSHOVER_ID,
-        DISCORD_NAME: CRED_DISCORD_ID,
-        "matrix-bot-auth": CRED_MATRIX_ID,
-        "grafana-viewer-auth": CRED_GRAFANA_VIEWER_ID,
-    }
+    return credential_ids()
 
 
 def choose_webhook_path(existing, token_fn=None, prefix=PATH_PREFIX, token_len=None):
@@ -413,7 +454,7 @@ def credentials():
 
 def matrix_credentials():
     """Create only matrix-bot-auth. The token is read from the environment and sent over stdin."""
-    cred = build_matrix_credential(need("MATRIX_BOT_TOKEN"))
+    cred = build_matrix_credential(bearer_token("MATRIX_BOT_TOKEN"))
     script = "cat > /tmp/cred.json && n8n import:credentials --input=/tmp/cred.json; rc=$?; rm -f /tmp/cred.json; exit $rc"
     rc, lines = docker_in(script, json.dumps([cred]))
     for ln in lines[:6]:
@@ -424,7 +465,8 @@ def matrix_credentials():
 
 def grafana_viewer_credentials():
     """Create only grafana-viewer-auth. The token is read from the environment and sent over stdin."""
-    cred = build_grafana_viewer_credential(need("GRAFANA_VIEWER_TOKEN"))
+    check_credential_ids()
+    cred = build_grafana_viewer_credential(bearer_token("GRAFANA_VIEWER_TOKEN"))
     script = "cat > /tmp/cred.json && n8n import:credentials --input=/tmp/cred.json; rc=$?; rm -f /tmp/cred.json; exit $rc"
     rc, lines = docker_in(script, json.dumps([cred]))
     for ln in lines[:6]:
@@ -519,6 +561,7 @@ def main(argv):
     if argv[:1] in (["--check"], ["--credentials"]) and len(set(flags)) == len(flags) and set(flags) <= known:
         if argv[0] == "--check":
             return check("--with-matrix" in flags, "--with-grafana-viewer" in flags)
+        preflight("--with-matrix" in flags, "--with-grafana-viewer" in flags)
         rc = credentials()
         if rc:
             return rc

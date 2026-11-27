@@ -119,7 +119,11 @@ Details that were learned live:
   `GRAFANA_VIEWER_TOKEN`). The token is a Grafana service account token with the Viewer role, comes
   through `siem-run` as `GRAFANA_VIEWER_TOKEN`, goes to n8n over stdin and is never on argv or
   printed. `GRAFANA_BASE_URL` is not a secret: a pass-through line (name only) in the n8n container
-  environment, like `MATRIX_HOMESERVER`.
+  environment, like `MATRIX_HOMESERVER`; it must be `https` (plain `http` only for loopback).
+  Every needed value and every credential id (8 to 32 letters or digits, all different) is checked
+  before n8n is changed, so a bad value leaves nothing half done. The token loses surrounding
+  whitespace; an empty or multi-line token stops the run. After the import, set the credential's
+  **Allowed HTTP Request Domains** to the Grafana host only (see docs/update-digest.md).
 - `--digest-workflow n8n/weekly-update-digest.json [ID] [--error-workflow-id HANDLER_ID]`
   imports the weekly digest inactive and maps its Discord and `matrix-bot-auth`
   credential ids. Import the error handler first and pass its id, as for the

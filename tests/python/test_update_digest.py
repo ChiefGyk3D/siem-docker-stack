@@ -284,21 +284,22 @@ def check_window(wf):
     assert _window(wf)["windowStart"] == "2026-11-23T12:00:00.000Z"                       # fallback 7 days
     assert _window(wf, "2026-11-23T12:00:00.000Z")["windowStart"] == "2026-11-23T12:00:00.000Z"
     assert _window(wf, "2026-11-27T00:00:00.000Z")["windowStart"] == "2026-11-27T00:00:00.000Z"
-    assert _window(wf, "2026-09-01T00:00:00.000Z")["windowStart"] == "2026-11-16T12:00:00.000Z"  # cap 14 days
+    assert _window(wf, "2026-11-20T00:00:00.000Z")["windowStart"] == "2026-11-23T12:00:00.000Z"  # cap 7 days (the query lookback)
+    assert _window(wf, "2026-09-01T00:00:00.000Z")["windowStart"] == "2026-11-23T12:00:00.000Z"
     assert _window(wf, "garbage")["windowStart"] == "2026-11-23T12:00:00.000Z"
     assert _window(wf, "2027-01-01T00:00:00.000Z")["windowStart"] == "2026-11-23T12:00:00.000Z"  # future
     assert _window(wf)["windowEnd"] == NOW
 
 
-def test_window_from_last_digest_capped_14_days_fallback_7():
+def test_window_from_last_digest_capped_7_days_fallback_7():
     check_window(_wf())
 
 
 def test_mutant_window_cap_is_caught():
     wf = _wf()
     n = _node(wf, "Window")
-    assert "14 * DAY" in n["parameters"]["jsCode"]
-    n["parameters"]["jsCode"] = n["parameters"]["jsCode"].replace("14 * DAY", "60 * DAY")
+    assert "CAP_MS = 7 * DAY" in n["parameters"]["jsCode"]
+    n["parameters"]["jsCode"] = n["parameters"]["jsCode"].replace("CAP_MS = 7 * DAY", "CAP_MS = 14 * DAY")
     with pytest.raises(AssertionError):
         check_window(wf)
 
@@ -306,7 +307,7 @@ def test_mutant_window_cap_is_caught():
 def test_mutant_window_fallback_is_caught():
     wf = _wf()
     n = _node(wf, "Window")
-    n["parameters"]["jsCode"] = n["parameters"]["jsCode"].replace("7 * DAY", "1 * DAY")
+    n["parameters"]["jsCode"] = n["parameters"]["jsCode"].replace("FALLBACK_MS = 7 * DAY", "FALLBACK_MS = 1 * DAY")
     with pytest.raises(AssertionError):
         check_window(wf)
 
@@ -335,7 +336,7 @@ def test_message_shape_and_decision_sentence():
         "pfSense Collector": _src("not-deployed"),
     })
     assert j["title"] == "Weekly update digest: Nov 23, 2026 to Nov 30, 2026 (Eastern)"
-    assert j["counts"] == {"applied": 2, "pending": 1, "notChecked": 2}
+    assert j["counts"] == {"applied": 2, "pending": 1, "notChecked": 2, "stale": 0}
     d = j["description"]
     assert "2 applied, 1 still pending, 2 sources not checked" in d
     for sec in ("**Applied**", "**Still pending**", "**Not checked**"):
@@ -556,7 +557,7 @@ def test_mutant_item_not_capped_is_caught():
 def test_doc_names_env_and_credentials_with_placeholders_only():
     text = DOC.read_text(encoding="utf-8")
     for needle in ("MATRIX_HOMESERVER", "MATRIX_ROOM_ID", "matrix-bot-auth", "Discord Webhook Alerts",
-                   "not-deployed", "America/New_York", "14 days", "never"):
+                   "not-deployed", "America/New_York", "7 days", "never"):
         assert needle in text, needle
     assert "\u2014" not in text, "no em dashes"
     assert not re.search(r"![A-Za-z0-9]{10,}:[A-Za-z0-9.-]+", text), "no real room id"
@@ -633,7 +634,7 @@ def check_collector_config(wf):
         n = _node(wf, qn)
         p = n["parameters"]
         assert n["type"] == "n8n-nodes-base.httpRequest" and p["method"] == "POST"
-        assert "$env.GRAFANA_BASE_URL" in p["url"] and p["url"].endswith("'/api/ds/query' }}")
+        assert "$env.GRAFANA_BASE_URL" in p["url"] and "'/api/ds/query'" in p["url"]
         assert not re.search(r"https?://", p["url"]), "base URL only from the environment"
         assert p["authentication"] == "genericCredentialType" and p["genericAuthType"] == "httpCustomAuth"
         assert n["credentials"] == {"httpCustomAuth": {"id": "YOUR_CREDENTIAL_ID", "name": "grafana-viewer-auth"}}
@@ -647,6 +648,13 @@ def check_collector_config(wf):
         assert body["queries"] and all(q["datasource"]["uid"] == QUERY_UIDS[qn] for q in body["queries"])
         assert all(q["rawQuery"] is True and "now() - 7d" in q["query"] for q in body["queries"])
         assert all("SLIMIT" in q["query"] or "check_success" in q["query"] for q in body["queries"])
+        cap = int(re.search(r"const MAX_SERIES = (\d+);", _js(wf, name)).group(1))
+        for q in body["queries"]:
+            m = re.search(r"SLIMIT (\d+)", q["query"])
+            assert m is None or int(m.group(1)) == cap + 1, "query limit is one above the series cap"
+        lookbacks = {int(x) for q in body["queries"] for x in re.findall(r"now\(\) - (\d+)d", q["query"])}
+        lookbacks |= {int(re.fullmatch(r"now-(\d+)d", body["from"]).group(1))}
+        assert lookbacks == {WINDOW_CAP_DAYS(wf)}, "every query looks back as far as the Window node allows"
         assert _js(wf, name).count("MAX_BYTES") >= 2, "response size cap present"
     blob = json.dumps(wf)
     assert not re.search(r"(?i)bearer\s+[A-Za-z0-9_-]{8,}|glsa_", blob), "no token in JSON"
@@ -727,7 +735,7 @@ def test_query_failure_never_renders_as_zero_updates_in_the_digest():
     wf = _wf()
     j = _collect(wf, "UniFi Collector", BAD_ANSWERS["HTTP 401"])
     out = _build(wf, {"UniFi Collector": j})
-    assert out["counts"] == {"applied": 0, "pending": 0, "notChecked": 1}
+    assert out["counts"] == {"applied": 0, "pending": 0, "notChecked": 1, "stale": 0}
     assert "UniFi: check failed - " in out["description"] and out["sources"]["unifi"] == "failed"
 
 
@@ -770,7 +778,7 @@ def check_size_caps(wf):
         assert j["status"] == "failed" and j["pending"] == [], name
         pts = _good_answer(name)
         fr = pts["body"]["results"]["A"]["frames"][0]
-        fr["data"]["values"] = [list(range(2500)), [True] * 2500]
+        fr["data"]["values"] = [[NOW_MS - 60000 - i for i in range(2500)], [1] * 2500]
         assert _collect(wf, name, pts)["status"] == "failed", name
         assert _collect(wf, name, _good_answer(name))["status"] == "ok", name
 
@@ -802,9 +810,9 @@ def check_unifi(wf):
     assert j["applied"] == [{"name": "sw2", "from": "upgrade pending", "to": "up to date"}]
     j = _unifi(wf, [("sw1", 60000, False)])
     assert j["status"] == "ok" and j["pending"] == [] and j["applied"] == []          # fresh and nothing pending
-    # a device whose last point is old is not current: ignored while another device is fresh
+    # a device whose last point is old is not current: it never vanishes, it is listed as stale
     j = _unifi(wf, [("ap1", 60000, False), ("gone", 5 * H, True)])
-    assert j["status"] == "ok" and j["pending"] == []
+    assert j["status"] == "ok" and j["pending"] == [] and j["stale"] == [{"name": "gone", "ageMs": 5 * H}]
     # stale: newest point older than 2 hours is failed, never ok with an empty list
     j = _unifi(wf, [("ap1", 3 * H, True), ("sw1", 4 * H, False)])
     assert j["status"] == "failed" and "stale" in j["reason"] and j["pending"] == []
@@ -957,3 +965,786 @@ def test_doc_covers_grafana_collectors():
         assert needle in text, needle
     assert "\u2014" not in text
     assert not re.search(r"glsa_[A-Za-z0-9_]+", text), "no token"
+
+
+# =================================================================================================
+# Fix round 1 (adversarial review): stale series are listed, the lookback matches the window, bad
+# values fail, truncation fails, the Grafana URL is guarded, and every guard has a test that bites.
+# =================================================================================================
+
+def WINDOW_CAP_DAYS(wf):
+    return int(re.search(r"const CAP_MS = (\d+) \* DAY;", _js(wf, "Window")).group(1))
+
+
+class _Worker:
+    """One long-lived node process per Code node source: many cases, one process start (mutant runs stay fast)."""
+
+    def __init__(self, js):
+        node = shutil.which("node")
+        assert node, "node is required for these tests (it must not be skipped or faked)"
+        harness = (
+            "const REAL=Date;\n"
+            "const NOWV=" + json.dumps(NOW) + ";\n"
+            "class FD extends REAL{constructor(...a){if(a.length){super(...a);}else{super(NOWV);}}"
+            "static now(){return new REAL(NOWV).getTime();}}\n"
+            "const rl=require('readline').createInterface({input:process.stdin});\n"
+            "let f=null;\n"
+            "rl.on('line',(line)=>{\n"
+            "  if(f===null){f=new Function('$','$getWorkflowStaticData','Date',JSON.parse(line));return;}\n"
+            "  let out;\n"
+            "  try{const ctx=new Function('return ('+line+')')();\n"
+            "    const $=(n)=>({first:()=>{if(!(n in ctx))throw new Error('no node '+n);return {json:ctx[n]};}});\n"
+            "    out={ok:true,items:f($,()=>({}),FD)};}\n"
+            "  catch(e){out={ok:false,err:String(e&&e.message)};}\n"
+            "  process.stdout.write(JSON.stringify(out)+'\\n');\n"
+            "});\n"
+        )
+        self.proc = subprocess.Popen([node, "-e", harness], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=subprocess.DEVNULL, text=True)
+        self.proc.stdin.write(json.dumps(js) + "\n")
+        self.proc.stdin.flush()
+
+    def call(self, ctx):
+        self.proc.stdin.write(json.dumps(ctx) + "\n")
+        self.proc.stdin.flush()
+        line = self.proc.stdout.readline()
+        assert line, "collector worker died"
+        return json.loads(line)
+
+    def close(self):
+        try:
+            self.proc.stdin.close()
+            self.proc.wait(timeout=10)
+        except Exception:
+            self.proc.kill()
+            self.proc.wait()
+        self.proc.stdout.close()
+
+
+_WORKER = {"js": None, "w": None}
+
+
+def _close_worker():
+    if _WORKER["w"] is not None:
+        _WORKER["w"].close()
+    _WORKER["js"] = _WORKER["w"] = None
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _worker_cleanup():
+    yield
+    _close_worker()
+
+
+def _strict(wf, name, answer):
+    """Run a collector; a crash is an AssertionError (a crashing mutant counts as caught, never as a pass)."""
+    js = _js(wf, name)
+    if _WORKER["js"] != js:
+        _close_worker()
+        _WORKER["js"], _WORKER["w"] = js, _Worker(js)
+    qn = REAL[name][0]
+    out = _WORKER["w"].call({qn: answer} if answer is not None else {})
+    assert out["ok"], "collector crashed: " + str(out.get("err"))
+    return out["items"][0]["json"]
+
+
+def _mut(name, old, new):
+    wf = _wf()
+    n = _node(wf, name)
+    assert n["parameters"]["jsCode"].count(old) == 1, (name, old)
+    n["parameters"]["jsCode"] = n["parameters"]["jsCode"].replace(old, new)
+    return wf
+
+
+def _mut_line(name, prefix, new_line):
+    """Replace the whole source line that starts with prefix."""
+    wf = _wf()
+    n = _node(wf, name)
+    lines = n["parameters"]["jsCode"].split("\n")
+    idx = [i for i, ln in enumerate(lines) if ln.startswith(prefix)]
+    assert len(idx) == 1, prefix
+    lines[idx[0]] = new_line
+    n["parameters"]["jsCode"] = "\n".join(lines)
+    return wf
+
+
+def _refs(name):
+    return "AB" if name == "UniFi Collector" else "ABC"
+
+
+def _one(name, label, t, v, extra_pts=()):
+    """A one-series answer: ref A carries (t, v) and any extra points; B is empty; C (where used) is a fresh true check."""
+    labels = {"UniFi Collector": {"name": label}, "Twingate Collector": {"connector": label},
+              "pfSense Collector": {"kind": label, "security": "false"}}[name]
+    refs = {"A": _res(_frame(labels, [(t, v), *extra_pts])), "B": _res()}
+    if name != "UniFi Collector":
+        refs["C"] = _res(_frame({}, [(NOW_MS - H, 1)]))
+    return _answer(**refs)
+
+
+def _with_ref(name, ref, res):
+    ans = _good_answer(name)
+    ans["body"]["results"][ref] = res
+    return ans
+
+
+def _raw_frame(fields, values):
+    return {"schema": {"fields": fields}, "data": {"values": values}}
+
+
+ALL = list(REAL)
+NAN, INF, NINF = float("nan"), float("inf"), float("-inf")
+
+
+# -- 1. a stale series never vanishes --
+
+def check_stale_listed(wf):
+    j = _unifi(wf, [("ap1", 60000, True), ("gone", 5 * H, True), ("old", 3 * H, False)])
+    assert j["status"] == "ok" and j["pending"] == [{"name": "ap1", "version": "upgrade available"}]
+    assert j["stale"] == [{"name": "gone", "ageMs": 5 * H}, {"name": "old", "ageMs": 3 * H}]
+    j = _twingate(wf, [("c1", H, 2), ("c2", 4 * H, 1)])
+    assert j["status"] == "ok" and [p["name"] for p in j["pending"]] == ["c1"]
+    assert j["stale"] == [{"name": "c2", "ageMs": 4 * H}]
+    j = _pfsense(wf, [("core", "false", H, 1), ("kernel", "false", 14 * H, 1)])
+    assert j["status"] == "ok" and [p["name"] for p in j["pending"]] == ["core"]
+    assert j["stale"] == [{"name": "kernel", "ageMs": 14 * H}]
+    # every series stale: failed, never ok
+    assert _unifi(wf, [("a", 3 * H, True), ("b", 9 * H, False)])["status"] == "failed"
+    assert _twingate(wf, [("c1", 4 * H, 2), ("c2", 5 * H, 1)])["status"] == "failed"
+    assert _pfsense(wf, [("core", "false", 14 * H, 1), ("kernel", "false", 15 * H, 1)])["status"] == "failed"
+    # a series with no points at all is listed too
+    a = _answer(A=_res(_frame({"name": "ap1"}, [(NOW_MS - 60000, False)]), _frame({"name": "empty"}, [])), B=_res())
+    j = _strict(wf, "UniFi Collector", a)
+    assert j["status"] == "ok" and j["stale"] == [{"name": "empty", "ageMs": None}]
+
+
+def test_stale_series_are_listed_and_all_stale_is_failed():
+    check_stale_listed(_wf())
+
+
+@pytest.mark.parametrize("name,old,new", [
+    ("UniFi Collector", "stale.push({ name, ageMs: lp ? now - lp.t : null }); continue;", "continue;"),
+    ("Twingate Collector", "stale.push({ name, ageMs: lp ? now - lp.t : null }); continue;", "continue;"),
+    ("pfSense Collector", "stale.push({ name, ageMs: lp ? now - lp.t : null }); continue;", "continue;"),
+    ("UniFi Collector", "if (state.size === 0) return failed(", "if (false) return failed("),
+    ("Twingate Collector", "if (seen === 0) return failed(", "if (false) return failed("),
+    ("pfSense Collector", "if (seen === 0) return failed(", "if (false) return failed("),
+    ("UniFi Collector", "return done('ok', '', applied, pending, stale);", "return done('ok', '', applied, pending);"),
+])
+def test_mutant_stale_listing_removed_is_caught(name, old, new):
+    with pytest.raises(AssertionError):
+        check_stale_listed(_mut(name, old, new))
+
+
+def _stale_digest(wf, stale):
+    return _build(wf, {"UniFi Collector": _src(pending=[{"name": "ap1", "version": "v"}], stale=stale)})
+
+
+def check_digest_prints_stale(wf):
+    out = _stale_digest(wf, [{"name": "gone", "ageMs": 5 * H + 10}, {"name": "m", "ageMs": 30 * 60000},
+                             {"name": "d", "ageMs": 72 * H}, {"name": "fut", "ageMs": -H}, {"name": "nul", "ageMs": None}])
+    d = out["description"]
+    assert out["counts"]["stale"] == 5 and out["counts"]["notChecked"] == 0
+    assert "5 stale series not checked" in d
+    for line in ("UniFi: gone (not checked, stale: last data 5 h ago)", "UniFi: m (not checked, stale: last data 30 min ago)",
+                 "UniFi: d (not checked, stale: last data 3 d ago)", "UniFi: fut (not checked, stale: timestamp in the future)",
+                 "UniFi: nul (not checked, stale: no usable timestamp)"):
+        assert line in d and line in out["matrixBody"], line
+    assert out["color"] == 15105570, "stale series make the digest orange, not green"
+    assert "1 stale series not checked" in _stale_digest(wf, [{"name": "x", "ageMs": H}])["description"]
+    quiet = _stale_digest(wf, [])
+    assert quiet["color"] == 3066993 and "stale" not in quiet["description"]
+    # a failed source never prints a stale list; a hostile name is sanitized like every other name
+    bad = _build(wf, {"UniFi Collector": _src("failed", reason="x", stale=[{"name": "zz", "ageMs": 1}])})
+    assert bad["counts"]["stale"] == 0 and "zz" not in bad["description"]
+    evil = _stale_digest(wf, [{"name": "@everyone [x](u)", "ageMs": H}, "plain", 7, None])["description"]
+    assert "@everyone" not in evil and "[x](" not in evil
+    # a long list is cut with a more marker inside the Not checked section; the footer survives
+    many = _stale_digest(wf, [{"name": "n" + str(i), "ageMs": H} for i in range(200)])
+    md = many["description"]
+    assert many["counts"]["stale"] == 200 and len(md) <= 4096
+    assert "more" in md.split("**Not checked**")[1] and "Mondays 07:00 Eastern" in md and "+ truncated" not in md
+
+
+def test_digest_prints_every_stale_series_with_name_and_age():
+    check_digest_prints_stale(_wf())
+
+
+@pytest.mark.parametrize("old,new", [
+    ("for (const x of s.stale) staleAll.push(", "for (const x of []) staleAll.push("),
+    ("stale: status === 'ok' ? list(j.stale) : [],", "stale: [],"),
+    ("if (ms < 0) return 'timestamp in the future';", ""),
+    ("return h < 48 ? 'last data ' + h + ' h ago'", "return h < 0 ? 'last data ' + h + ' h ago'"),
+    ("if (typeof ms !== 'number' || !isFinite(ms)) return 'no usable timestamp';", ""),
+    ("const m = Math.floor(ms / 60000);", "const m = 0;"),
+    ("fit(staleLines, STALE_BUDGET).text.split('\\n')", "staleLines"),
+    ("(nStale ? ', ' + nStale", "(false ? ', ' + nStale"),
+    ("color: (nNot === 0 && nStale === 0) ? 3066993 : 15105570,", "color: nNot === 0 ? 3066993 : 15105570,"),
+])
+def test_mutant_digest_stale_printing_is_caught(old, new):
+    with pytest.raises(AssertionError):
+        check_digest_prints_stale(_mutate("Build Digest", old, new))
+
+
+# -- 2. the Window never claims more than the queries look back --
+
+def test_window_cap_equals_every_query_lookback():
+    wf = _wf()
+    days = WINDOW_CAP_DAYS(wf)
+    for qn in QUERY_UIDS:
+        body = json.loads(_node(wf, qn)["parameters"]["jsonBody"])
+        assert body["from"] == "now-%dd" % days
+        assert all("now() - %dd" % days in q["query"] for q in body["queries"])
+    assert _window(wf, "2026-09-01T00:00:00.000Z")["windowStart"] == "2026-11-23T12:00:00.000Z"
+
+
+def test_mutant_query_lookback_not_matching_window_is_caught():
+    wf = _wf()
+    n = _node(wf, "Twingate Query")
+    n["parameters"]["jsonBody"] = n["parameters"]["jsonBody"].replace("now() - 7d", "now() - 3d")
+    with pytest.raises(AssertionError):
+        check_collector_config(wf)
+    wf = _wf()
+    n = _node(wf, "UniFi Query")
+    n["parameters"]["jsonBody"] = n["parameters"]["jsonBody"].replace('"from":"now-7d"', '"from":"now-14d"')
+    with pytest.raises(AssertionError):
+        check_collector_config(wf)
+    wf = _wf()
+    n = _node(wf, "Window")
+    n["parameters"]["jsCode"] = n["parameters"]["jsCode"].replace("CAP_MS = 7 * DAY", "CAP_MS = 14 * DAY")
+    with pytest.raises(AssertionError):
+        check_collector_config(wf)
+
+
+# -- 3. null, NaN and non-numeric values fail the source --
+
+BAD_VALUES = [None, NAN, INF, "1", "true", {"x": 1}, [1]]
+
+
+def check_bad_values_fail(wf):
+    for name in ALL:
+        for bad in BAD_VALUES:
+            j = _strict(wf, name, _one(name, "d1", NOW_MS - 60000, bad))
+            assert j["status"] == "failed" and j["pending"] == [] and j["applied"] == [], (name, bad)
+            assert "is not a" in j["reason"], (name, bad, j["reason"])
+        assert _strict(wf, name, _one(name, "d1", NOW_MS - 60000, 0))["status"] == "ok", name
+    # the history query and the check series carry the same rule
+    for name, ref in (("UniFi Collector", "B"), ("Twingate Collector", "B"), ("pfSense Collector", "B"),
+                      ("Twingate Collector", "C"), ("pfSense Collector", "C")):
+        for bad in (None, NAN, "1"):
+            labels = {"name": "d1", "connector": "c1", "kind": "core", "security": "false"}
+            j = _strict(wf, name, _with_ref(name, ref, _res(_frame(labels, [(NOW_MS - H, bad)]))))
+            assert j["status"] == "failed" and j["pending"] == [], (name, ref, bad)
+            assert "is not a" in j["reason"], (name, ref, bad, j["reason"])
+    # Twingate counts are numbers: a boolean is not a count
+    assert _strict(wf, "Twingate Collector", _one("Twingate Collector", "c1", NOW_MS - H, True))["status"] == "failed"
+
+
+def test_null_nan_and_non_numeric_values_fail_the_source():
+    check_bad_values_fail(_wf())
+
+
+def test_a_bad_value_on_a_stale_series_is_listed_not_fatal():
+    a = _answer(A=_res(_frame({"name": "ap1"}, [(NOW_MS - 60000, False)]), _frame({"name": "old"}, [(NOW_MS - 9 * H, None)])), B=_res())
+    j = _strict(_wf(), "UniFi Collector", a)
+    assert j["status"] == "ok" and j["stale"] == [{"name": "old", "ageMs": 9 * H}]
+
+
+@pytest.mark.parametrize("name,old", [
+    ("UniFi Collector", "if (!isBoolNum(lp.v)) return failed('UniFi current-state"),
+    ("UniFi Collector", "if (!isNum(lp.v)) return failed('UniFi history"),
+    ("Twingate Collector", "if (!isNum(lp.v)) return failed('Twingate connector"),
+    ("Twingate Collector", "if (!isNum(lp.v)) return failed('Twingate history"),
+    ("Twingate Collector", "if (!isBoolNum(cp.v)) return failed("),
+    ("pfSense Collector", "if (!isBoolNum(lp.v)) return failed('pfSense update value"),
+    ("pfSense Collector", "if (!isBoolNum(lp.v)) return failed('pfSense history"),
+    ("pfSense Collector", "if (!isBoolNum(cp.v)) return failed("),
+])
+def test_mutant_value_validation_removed_is_caught(name, old):
+    with pytest.raises(AssertionError):
+        check_bad_values_fail(_mut(name, old, old.replace("if (!", "if (false && !", 1)))
+
+
+@pytest.mark.parametrize("name", ["UniFi Collector", "Twingate Collector"])
+@pytest.mark.parametrize("old,new", [
+    ("const isNum = (v) => typeof v === 'number' && isFinite(v);", "const isNum = (v) => typeof v === 'number';"),
+    ("const isNum = (v) => typeof v === 'number' && isFinite(v);", "const isNum = (v) => isFinite(v);"),
+    ("const isBoolNum = (v) => typeof v === 'boolean' || isNum(v);",
+     "const isBoolNum = (v) => typeof v === 'boolean' || typeof v === 'string' || isNum(v);"),
+])
+def test_mutant_value_type_predicates_are_caught(name, old, new):
+    with pytest.raises(AssertionError):
+        check_bad_values_fail(_mut(name, old, new))
+
+
+# -- 4. truncated or empty answers do not pass as ok --
+
+def check_truncation_fails(wf):
+    for name in ALL:
+        cap = int(re.search(r"const MAX_SERIES = (\d+);", _js(wf, name)).group(1))
+        key = {"UniFi Collector": "name", "Twingate Collector": "connector", "pfSense Collector": "kind"}[name]
+
+        def mk(n):
+            return _res(*[_frame({key: "d%d" % i, "security": "false"}, [(NOW_MS - 60000, 0)]) for i in range(n)])
+        assert _strict(wf, name, _with_ref(name, "A", mk(cap)))["status"] == "ok", (name, "exactly the cap is fine")
+        j = _strict(wf, name, _with_ref(name, "A", mk(cap + 1)))
+        assert j["status"] == "failed" and "too many series" in j["reason"], (name, "one over the cap: truncated")
+        j = _strict(wf, name, _with_ref(name, "B", mk(cap + 1)))
+        assert j["status"] == "failed" and "too many series" in j["reason"], (name, "B")
+    # a current check with no current-state series is not a clean ok with zero entries
+    j = _twingate(wf, [], check=((H, 1),))
+    assert j["status"] == "failed" and "0 connectors" in j["reason"] and j["pending"] == []
+    j = _pfsense(wf, [], check=((H, 1),))
+    assert j["status"] == "failed" and "0 kinds" in j["reason"]
+
+
+def test_query_limit_truncation_and_empty_current_state_fail():
+    check_truncation_fails(_wf())
+
+
+@pytest.mark.parametrize("name,old,new", [
+    ("UniFi Collector", "res.frames.length > MAX_SERIES", "res.frames.length > MAX_SERIES + 1"),
+    ("Twingate Collector", "res.frames.length > MAX_SERIES", "res.frames.length > MAX_SERIES + 1"),
+    ("pfSense Collector", "res.frames.length > MAX_SERIES", "res.frames.length > MAX_SERIES + 1"),
+    ("pfSense Collector", "res.frames.length > MAX_SERIES", "res.frames.length >= MAX_SERIES"),
+    ("Twingate Collector", "if (cur.length === 0) return failed('the Twingate check is current",
+     "if (false) return failed('the Twingate check is current"),
+    ("pfSense Collector", "if (cur.length === 0) return failed('the pfSense check is current",
+     "if (false) return failed('the pfSense check is current"),
+])
+def test_mutant_truncation_guard_removed_is_caught(name, old, new):
+    with pytest.raises(AssertionError):
+        check_truncation_fails(_mut(name, old, new))
+
+
+@pytest.mark.parametrize("qn,old,new", [
+    ("UniFi Query", "SLIMIT 201", "SLIMIT 200"),
+    ("Twingate Query", "SLIMIT 201", "SLIMIT 200"),
+    ("pfSense Query", "SLIMIT 51", "SLIMIT 50"),
+])
+def test_mutant_query_limit_equal_to_cap_is_caught(qn, old, new):
+    wf = _wf()
+    n = _node(wf, qn)
+    assert old in n["parameters"]["jsonBody"]
+    n["parameters"]["jsonBody"] = n["parameters"]["jsonBody"].replace(old, new)
+    with pytest.raises(AssertionError):
+        check_collector_config(wf)
+
+
+# -- 5. the Grafana URL is https (plain http only for loopback) --
+
+def _urls(wf, qn, bases):
+    """Evaluate the node's URL expression for each base value (None = variable unset), in one node run."""
+    expr = _node(wf, qn)["parameters"]["url"]
+    assert expr.startswith("={{") and expr.endswith("}}")
+    harness = ("const bases=" + json.dumps(bases) + ";\n"
+               "const out=bases.map((b)=>{const $env=b===null?{}:{GRAFANA_BASE_URL:b};"
+               "return new Function('$env','return (' + " + json.dumps(expr[3:-2]) + " + ')')($env);});\n"
+               "process.stdout.write(JSON.stringify(out));")
+    r = subprocess.run([shutil.which("node"), "-"], input=harness, capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr[-200:]
+    return json.loads(r.stdout)
+
+
+GOOD_URLS = {
+    "https://grafana.example.org": "https://grafana.example.org/api/ds/query",
+    "https://grafana.example.org/": "https://grafana.example.org/api/ds/query",
+    "https://grafana.example.org:3000/sub//": "https://grafana.example.org:3000/sub/api/ds/query",
+    "http://localhost:3000": "http://localhost:3000/api/ds/query",
+    "http://127.0.0.1": "http://127.0.0.1/api/ds/query",
+    "http://[::1]:3000/": "http://[::1]:3000/api/ds/query",
+}
+BAD_URLS = [None, "", "http://grafana.example.org", "ftp://grafana.example.org", "https://", "grafana.example.org",
+            "http://localhost.evil.test", "http://127.0.0.1.evil.test", "http://localhost@evil.test",
+            "https://user:pw@evil.test", "https://grafana.example.org?x=1", " https://grafana.example.org",
+            "https://graf ana.example.org", "https://grafana.example.org\n", "http://localhost:80a"]
+
+
+def check_grafana_url_guard(wf):
+    for qn in QUERY_UIDS:
+        got = _urls(wf, qn, list(GOOD_URLS) + BAD_URLS)
+        for base, want, have in zip(list(GOOD_URLS) + BAD_URLS, list(GOOD_URLS.values()) + ["invalid-grafana-base-url"] * len(BAD_URLS), got):
+            assert have == want, (qn, base, have)
+
+
+def test_grafana_base_url_must_be_https_or_loopback_http():
+    check_grafana_url_guard(_wf())
+
+
+@pytest.mark.parametrize("old,new", [
+    (r"https:\/\/[^\s", r"https?:\/\/[^\s"),
+    (r"(localhost|127\.0\.0\.1|\[::1\])", r"(localhost|127\.0\.0\.1|\[::1\]|[a-z.]+)"),
+    (r"[^\s\/?#@]+", r"[^\s\/?#]+"),
+    (r"(\/[^\s?#]*)?$/", r"(\/[^\s?#]*)?/"),
+    ("'/api/ds/query' : 'invalid-grafana-base-url'", "'/api/ds/query' : String($env.GRAFANA_BASE_URL)"),
+])
+def test_mutant_url_guard_weakened_is_caught(old, new):
+    wf = _wf()
+    for qn in QUERY_UIDS:
+        n = _node(wf, qn)
+        assert old in n["parameters"]["url"], old
+        n["parameters"]["url"] = n["parameters"]["url"].replace(old, new)
+    with pytest.raises(AssertionError):
+        check_grafana_url_guard(wf)
+
+
+# -- 6. one test per guard whose mutant survived --
+
+def check_status_and_error_item(wf):
+    for name in ALL:
+        good = _good_answer(name)
+        assert _strict(wf, name, good)["status"] == "ok"
+        for code in (500, 401, 302, 204, "200", None):
+            assert _strict(wf, name, dict(good, statusCode=code))["status"] == "failed", (name, code)
+        assert _strict(wf, name, dict(good, error={"message": "ECONNREFUSED"}))["status"] == "failed", name
+        assert _strict(wf, name, dict(good, error="x"))["status"] == "failed", name
+
+
+def test_bad_status_or_error_item_with_a_valid_body_is_failed():
+    check_status_and_error_item(_wf())
+
+
+@pytest.mark.parametrize("name", ALL)
+@pytest.mark.parametrize("old,new", [
+    ("if (r.statusCode !== 200) return failed(", "if (false) return failed("),
+    ("if (r.error) return failed(", "if (false) return failed("),
+])
+def test_mutant_status_or_error_guard_removed_is_caught(name, old, new):
+    with pytest.raises(AssertionError):
+        check_status_and_error_item(_mut(name, old, new))
+
+
+def check_future_points(wf):
+    soon = NOW_MS + 10 * 60000
+    for name in ALL:
+        # a series whose newest point is in the future is not current: listed, never pending
+        ans = _one(name, "d1", soon, 1)
+        ans["body"]["results"]["A"]["frames"].append(
+            _frame({"name": "ok1", "connector": "ok1", "kind": "package", "security": "false"}, [(NOW_MS - 60000, 0)]))
+        j = _strict(wf, name, ans)
+        assert j["status"] == "ok" and j["pending"] == [], (name, j)
+        assert len(j["stale"]) == 1 and j["stale"][0]["ageMs"] == -10 * 60000, (name, j)
+        # all series in the future: failed
+        assert _strict(wf, name, _one(name, "d1", soon, 1))["status"] == "failed", name
+        # slightly ahead (clock skew under 5 minutes) is still current
+        assert _strict(wf, name, _one(name, "d1", NOW_MS + 60000, 1))["status"] == "ok", name
+    for name in ("Twingate Collector", "pfSense Collector"):
+        ans = _good_answer(name)
+        ans["body"]["results"]["C"] = _res(_frame({}, [(soon, 1)]))
+        assert _strict(wf, name, ans)["status"] == "failed", name
+
+
+def test_future_timestamps_are_not_current_for_series_and_checks():
+    check_future_points(_wf())
+
+
+@pytest.mark.parametrize("name", ALL)
+def test_mutant_future_guard_removed_is_caught(name):
+    with pytest.raises(AssertionError):
+        check_future_points(_mut(name, "FUTURE_MS = 300000;", "FUTURE_MS = 1e15;"))
+
+
+def check_time_values(wf):
+    for name in ALL:
+        for bad in ("x", "5", None, NAN, INF, NINF, True, [1]):
+            j = _strict(wf, name, _one(name, "d1", bad, 1))
+            assert j["status"] == "failed" and "malformed" in j["reason"], (name, bad, j)
+    for name in ("Twingate Collector", "pfSense Collector"):
+        ans = _good_answer(name)
+        ans["body"]["results"]["C"] = _res(_frame({}, [(NAN, 1)]))
+        j = _strict(wf, name, ans)
+        assert j["status"] == "failed" and "malformed" in j["reason"], name
+
+
+def test_non_finite_and_non_number_timestamps_are_failed():
+    check_time_values(_wf())
+
+
+@pytest.mark.parametrize("name", ALL)
+@pytest.mark.parametrize("new", ["if (typeof t !== 'number')", "if (!isFinite(t))"])
+def test_mutant_time_check_weakened_is_caught(name, new):
+    with pytest.raises(AssertionError):
+        check_time_values(_mut(name, "if (typeof t !== 'number' || !isFinite(t))", new))
+
+
+def check_frame_shape(wf):
+    t = [NOW_MS - 60000]
+    tf = {"name": "Time", "type": "time"}
+    vf = {"name": "value", "type": "number", "labels": {"name": "ap1", "connector": "ap1", "kind": "core"}}
+    for name in ALL:
+        def run(frame):
+            return _strict(wf, name, _with_ref(name, "A", _res(frame)))
+
+        def bad(frame):
+            j = run(frame)
+            assert j["status"] == "failed" and "malformed" in j["reason"], (name, frame, j)
+        assert run(_raw_frame([tf, vf], [t, [1]]))["status"] == "ok", name
+        bad(_raw_frame([tf, vf], [t, [1], [2]]))                       # more value arrays than fields
+        bad(_raw_frame([tf, vf], [t]))                                 # fewer
+        bad(_raw_frame([tf, vf], [t, [1, 0]]))                         # value column longer than the time column
+        bad(_raw_frame([tf, vf], [[t[0], t[0]], [1]]))                 # time column longer
+        bad({"schema": {"fields": "ab"}, "data": {"values": [[1], [2]]}})
+        bad(_raw_frame([tf, vf], "x"))
+        bad(_raw_frame([tf, vf], [t, "x"]))                            # value column is not an array
+        bad(_raw_frame([tf, None], [t, [1]]))
+        bad(_raw_frame([vf], [[1]]))                                   # no time field
+        bad(_raw_frame([tf], [t]))                                     # no value field
+        bad(None)
+        n = 2001                                                       # more than MAX_POINTS points
+        bad(_raw_frame([tf, vf], [[NOW_MS - 60000 - i for i in range(n)], [0] * n]))
+
+
+def test_frame_length_and_shape_checks():
+    check_frame_shape(_wf())
+
+
+@pytest.mark.parametrize("name", ALL)
+@pytest.mark.parametrize("old,new", [
+    ("vals.length !== fields.length", "false"),
+    ("vals[ti].length !== vals[vi].length ||", "false ||"),
+    ("|| vals[ti].length > MAX_POINTS", "|| false"),
+    ("if (fields.some((f) => !f || typeof f !== 'object')) return 'query ' + ref + ' answer malformed';", ""),
+    ("!Array.isArray(vals[vi])", "false"),
+    ("if (!Array.isArray(fields) ||", "if ("),
+])
+def test_mutant_frame_checks_removed_are_caught(name, old, new):
+    with pytest.raises(AssertionError):
+        check_frame_shape(_mut(name, old, new))
+
+
+def check_newest_point(wf):
+    for name in ALL:
+        for pts in ([(NOW_MS - 60000, 1), (NOW_MS - 5 * H, 0)], [(NOW_MS - 5 * H, 0), (NOW_MS - 60000, 1)],
+                    [(NOW_MS - 2 * H, 0), (NOW_MS - 60000, 1), (NOW_MS - 4 * H, 0)]):
+            j = _strict(wf, name, _one(name, "d1", pts[0][0], pts[0][1], extra_pts=pts[1:]))
+            assert j["status"] == "ok" and len(j["pending"]) == 1 and j["stale"] == [], (name, pts, j)
+        # the NEWEST point decides: an old pending point, then a newer clear point
+        j = _strict(wf, name, _one(name, "d1", NOW_MS - 5 * H, 1, extra_pts=[(NOW_MS - 60000, 0)]))
+        assert j["status"] == "ok" and j["pending"] == [], (name, j)
+    # the newest point across the check series decides, in either series order
+    for name, old in (("Twingate Collector", 20 * H), ("pfSense Collector", 30 * H)):
+        for frames, ok in (([(old, 0), (H, 1)], True), ([(H, 1), (old, 0)], True),
+                           ([(old, 1), (H, 0)], False), ([(H, 0), (old, 1)], False)):
+            ans = _good_answer(name)
+            ans["body"]["results"]["C"] = _res(*[_frame({}, [(NOW_MS - age, v)]) for age, v in frames])
+            assert (_strict(wf, name, ans)["status"] == "ok") == ok, (name, frames)
+
+
+def test_newest_point_of_many_decides():
+    check_newest_point(_wf())
+
+
+@pytest.mark.parametrize("name", ALL)
+@pytest.mark.parametrize("new", ["(a, b) => a", "(a, b) => b", "(a, b) => (b.t > a.t ? a : b)"])
+def test_mutant_newest_point_selection_is_caught(name, new):
+    with pytest.raises(AssertionError):
+        check_newest_point(_mut(name, "(a, b) => (b.t >= a.t ? b : a)", new))
+
+
+@pytest.mark.parametrize("name", ["Twingate Collector", "pfSense Collector"])
+@pytest.mark.parametrize("new", ["if (lp && !cp) cp = lp;", "if (lp) cp = lp;", "if (lp && (!cp || lp.t < cp.t)) cp = lp;"])
+def test_mutant_newest_check_across_series_is_caught(name, new):
+    with pytest.raises(AssertionError):
+        check_newest_point(_mut(name, "if (lp && (!cp || lp.t > cp.t)) cp = lp;", new))
+
+
+def check_duplicate_series(wf):
+    for order in ((True, False), (False, True)):
+        a = _answer(A=_res(*[_frame({"name": "ap1"}, [(NOW_MS - 60000, v)]) for v in order]), B=_res())
+        j = _strict(wf, "UniFi Collector", a)
+        assert j["status"] == "ok" and j["pending"] == [{"name": "ap1", "version": "upgrade available"}], order
+    a = _answer(A=_res(*[_frame({"name": "ap1"}, [(NOW_MS - 60000, 0)]) for _ in range(2)]),
+                B=_res(_frame({"name": "ap1"}, [(NOW_MS - H, 3)])))
+    j = _strict(wf, "UniFi Collector", a)
+    assert j["pending"] == [] and j["applied"] == [{"name": "ap1", "from": "upgrade pending", "to": "up to date"}]
+
+
+def test_duplicate_series_with_one_name_stay_pending():
+    check_duplicate_series(_wf())
+
+
+@pytest.mark.parametrize("new", ["state.set(name, pendingVal(lp.v));",
+                                 "state.set(name, (state.get(name) || false) && pendingVal(lp.v));"])
+def test_mutant_duplicate_series_merge_is_caught(new):
+    old = "state.set(name, (state.get(name) || false) || pendingVal(lp.v));"
+    with pytest.raises(AssertionError):
+        check_duplicate_series(_mut("UniFi Collector", old, new))
+
+
+def check_name_cap_and_coercion(wf):
+    for name in ALL:
+        for label, ch in (("n" * 500, "n"), ("a" * 121, "a")):
+            j = _strict(wf, name, _one(name, label, NOW_MS - 60000, 1))
+            got = j["pending"][0]["name"]
+            assert j["status"] == "ok" and got == ch * 120, (name, len(got))
+        for label in ({"x": 1}, [1], None, True):
+            j = _strict(wf, name, _one(name, label, NOW_MS - 60000, 1))
+            assert j["status"] == "ok" and "(invalid)" in j["pending"][0]["name"], (name, label)
+        assert "42" in _strict(wf, name, _one(name, 42, NOW_MS - 60000, 1))["pending"][0]["name"]
+
+
+def test_names_are_capped_and_coerced_for_every_collector():
+    check_name_cap_and_coercion(_wf())
+
+
+@pytest.mark.parametrize("name", ALL)
+@pytest.mark.parametrize("old,new", [
+    ("String(v).slice(0, NAME_MAX)", "String(v)"),
+    ("(typeof v === 'string' || typeof v === 'number') ?", "true ?"),
+])
+def test_mutant_name_cap_or_coercion_removed_is_caught(name, old, new):
+    with pytest.raises(AssertionError):
+        check_name_cap_and_coercion(_mut(name, old, new))
+
+
+def check_ref_errors(wf):
+    for name in ALL:
+        for ref in _refs(name):
+            for res in ({"status": 400, "error": "bad query", "frames": []}, {"status": 500, "frames": []},
+                        {"error": "x"}, "x", None, {"status": 200, "frames": {"a": 1}}):
+                j = _strict(wf, name, _with_ref(name, ref, res))
+                assert j["status"] == "failed" and j["pending"] == [], (name, ref, res)
+            ans = _good_answer(name)
+            del ans["body"]["results"][ref]
+            assert _strict(wf, name, ans)["status"] == "failed", (name, ref, "missing")
+
+
+def test_an_error_in_any_query_of_the_answer_fails_the_source():
+    check_ref_errors(_wf())
+
+
+@pytest.mark.parametrize("name,old", [
+    ("UniFi Collector", "if (typeof cur === 'string') return failed(cur);"),
+    ("UniFi Collector", "if (typeof ever === 'string') return failed(ever);"),
+    ("Twingate Collector", "if (typeof cur === 'string') return failed(cur);"),
+    ("Twingate Collector", "if (typeof mx === 'string') return failed(mx);"),
+    ("Twingate Collector", "if (typeof chk === 'string') return failed(chk);"),
+    ("pfSense Collector", "if (typeof cur === 'string') return failed(cur);"),
+    ("pfSense Collector", "if (typeof mx === 'string') return failed(mx);"),
+    ("pfSense Collector", "if (typeof chk === 'string') return failed(chk);"),
+])
+def test_mutant_query_error_handling_removed_is_caught(name, old):
+    with pytest.raises(AssertionError):
+        check_ref_errors(_mut(name, old, ""))
+
+
+@pytest.mark.parametrize("name", ALL)
+@pytest.mark.parametrize("old,new", [
+    ("if (res.error || (res.status !== undefined && res.status !== 200))", "if (res.error)"),
+    ("if (res.error || (res.status !== undefined && res.status !== 200))", "if (res.status !== undefined && res.status !== 200)"),
+    ("if (!res || typeof res !== 'object') return 'query ' + ref + ' missing from the answer';", ""),
+    ("if (!Array.isArray(res.frames)) return", "if (false) return"),
+])
+def test_mutant_per_query_guard_removed_is_caught(name, old, new):
+    with pytest.raises(AssertionError):
+        check_ref_errors(_mut(name, old, new))
+
+
+# -- truthy handling, and 8: any positive number is pending, not only 1 --
+
+def check_pending_values(wf):
+    for name in ("UniFi Collector", "pfSense Collector"):
+        for v, pending in ((True, 1), (1, 1), (2, 1), (7.5, 1), (False, 0), (0, 0), (-1, 0)):
+            j = _strict(wf, name, _one(name, "d1", NOW_MS - 60000, v))
+            assert j["status"] == "ok" and len(j["pending"]) == pending, (name, v, j)
+    # history: a positive number that is not 1 still counts as "was pending", so the clear is applied
+    ans = _one("pfSense Collector", "core", NOW_MS - 60000, 0)
+    for v, applied in ((2, True), (True, True), (1, True), (0, False), (False, False)):
+        ans["body"]["results"]["B"] = _res(_frame({"kind": "core", "security": "false"}, [(NOW_MS - H, v)]))
+        j = _strict(wf, "pfSense Collector", ans)
+        assert (j["applied"] == [{"name": "core", "from": "update pending", "to": "up to date"}]) == applied, (v, j)
+    # check success: true or 1 only
+    for name in ("Twingate Collector", "pfSense Collector"):
+        for v, ok in ((True, True), (1, True), (False, False), (0, False), (2, False), (-1, False)):
+            ans = _good_answer(name)
+            ans["body"]["results"]["C"] = _res(_frame({}, [(NOW_MS - H, v)]))
+            assert (_strict(wf, name, ans)["status"] == "ok") == ok, (name, v)
+
+
+def test_pending_values_positive_number_or_true_and_check_success_true_or_one():
+    check_pending_values(_wf())
+
+
+@pytest.mark.parametrize("name", ["UniFi Collector", "pfSense Collector"])
+@pytest.mark.parametrize("new", [
+    "const pendingVal = (v) => v === 1;",
+    "const pendingVal = (v) => typeof v === 'number' && v > 0;",
+    "const pendingVal = (v) => v === true || v === 1;",
+    "const pendingVal = (v) => v === true || (typeof v === 'number' && v >= 0);",
+    "const pendingVal = (v) => !!v;",
+])
+def test_mutant_pending_predicate_is_caught(name, new):
+    with pytest.raises(AssertionError):
+        check_pending_values(_mut_line(name, "const pendingVal", new))
+
+
+@pytest.mark.parametrize("name", ["Twingate Collector", "pfSense Collector"])
+@pytest.mark.parametrize("new", [
+    "const successVal = (v) => v === 1;",
+    "const successVal = (v) => v === true;",
+    "const successVal = (v) => v === true || v >= 1;",
+    "const successVal = (v) => v === true || v >= 0;",
+])
+def test_mutant_check_success_predicate_is_caught(name, new):
+    with pytest.raises(AssertionError):
+        check_pending_values(_mut_line(name, "const successVal", new))
+
+
+# -- 9. the value field is chosen by name; ambiguity fails --
+
+def check_value_field_selection(wf):
+    tf = {"name": "Time", "type": "time"}
+    lab = {"name": "ap1", "connector": "ap1", "kind": "core", "security": "false"}
+    host = {"name": "host", "type": "string"}
+
+    def num(field_name):
+        return {"name": field_name, "type": "number", "labels": lab}
+    t = [NOW_MS - 60000]
+    for name in ALL:
+        def run(fields, values):
+            return _strict(wf, name, _with_ref(name, "A", _res(_raw_frame(fields, values))))
+        # an extra non-time field before or after the value field: the named one is used
+        j = run([tf, host, num("last")], [t, ["h1"], [1]])
+        assert j["status"] == "ok" and len(j["pending"]) == 1, (name, j)
+        j = run([tf, num("last"), host], [t, [0], ["h1"]])
+        assert j["status"] == "ok" and j["pending"] == [], (name, j)
+        j = run([host, tf, num("value")], [["h1"], t, [1]])
+        assert j["status"] == "ok" and len(j["pending"]) == 1, (name, j)
+        # a single non-time field is used whatever it is called
+        assert run([tf, num("weird")], [t, [1]])["status"] == "ok", name
+        # ambiguity fails: two value-named fields, two unnamed fields, an unnamed one beside a host field, two time fields
+        for fields, values in (([tf, num("last"), num("max")], [t, [1], [0]]), ([tf, num("a"), num("b")], [t, [1], [0]]),
+                               ([tf, host, num("x")], [t, ["h"], [1]]), ([tf, {"name": "T2", "type": "time"}, num("last")], [t, t, [1]])):
+            j = run(fields, values)
+            assert j["status"] == "failed" and "malformed" in j["reason"], (name, fields, j)
+
+
+def test_value_field_is_selected_by_name_and_ambiguity_fails():
+    check_value_field_selection(_wf())
+
+
+@pytest.mark.parametrize("name", ALL)
+@pytest.mark.parametrize("old,new", [
+    ("if (others.length === 1) vi = others[0];", "if (others.length >= 1) vi = others[0];"),
+    ("if (named.length === 1) vi = named[0];", "if (named.length >= 1) vi = named[0];"),
+    ("if (named.length === 1) vi = named[0];", "if (others.length >= 1) vi = others[0];"),
+    ("const named = others.filter((i) => VALUE_NAMES.includes(fields[i].name));", "const named = others;"),
+    ("const named = others.filter((i) => VALUE_NAMES.includes(fields[i].name));", "const named = others.slice(-1);"),
+    ("const ti = times.length === 1 ? times[0] : -1;", "const ti = times.length >= 1 ? times[0] : -1;"),
+])
+def test_mutant_value_field_selection_is_caught(name, old, new):
+    with pytest.raises(AssertionError):
+        check_value_field_selection(_mut(name, old, new))
+
+
+# -- docs --
+
+def test_doc_covers_round_1_review_fixes():
+    text = " ".join(DOC.read_text(encoding="utf-8").split())
+    for needle in ("not checked (stale)", "every series of a source is stale", "https", "loopback", "Allowed HTTP Request Domains",
+                   "N8N_BLOCK_ENV_ACCESS_IN_NODE=false", "datasources:query", "one above", "7 days",
+                   "boolean or a finite number", "0 connectors"):
+        assert needle in text, needle
+    assert "older devices are ignored" not in text and "are ignored)" not in text
+    assert "14 days" not in text and "max 14" not in text
+    assert "—" not in text
