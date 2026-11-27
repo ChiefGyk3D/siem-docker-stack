@@ -207,3 +207,114 @@ def test_script_is_read_only_shape():
     for bad in ("-X DELETE", "-X PUT", "-X PATCH", "set -x", "--insecure", " -k "):
         assert bad not in text
     assert "set -eu" in text and "--max-time" in text
+
+
+# ---- --discover mode and the empty model/version warning ----
+
+MEASUREMENTS = ["uap", "usw", "ugw", "udm", "uxg"]
+
+
+def kframe(col, keys, types=None):
+    fields = [{"name": col}]
+    values = [keys]
+    if types is not None:
+        fields.append({"name": "fieldType"})
+        values.append(types)
+    return {"schema": {"fields": fields}, "data": {"values": values}}
+
+
+def discover_answer(fields=None, tags=None):
+    """fields/tags: dict measurement -> list of (key, type) / list of key."""
+    fields = fields or {}
+    tags = tags or {}
+    res = {}
+    for i, m in enumerate(MEASUREMENTS, 1):
+        fk = fields.get(m, [])
+        tk = tags.get(m, [])
+        res[f"F{i}"] = {"status": 200, "frames": [kframe("fieldKey", [k for k, _ in fk], [t for _, t in fk])] if fk else []}
+        res[f"T{i}"] = {"status": 200, "frames": [kframe("tagKey", tk)] if tk else []}
+    return {"results": res}
+
+
+def run_discover(env, body, **extra):
+    e, d = env
+    (d / "body.json").write_text(body if isinstance(body, str) else json.dumps(body))
+    e = {**e, **extra}
+    return subprocess.run(["bash", SCRIPT, "--discover"], capture_output=True, text=True, env=e,
+                          stdin=subprocess.DEVNULL, timeout=60, check=False)
+
+
+def test_discover_happy_output_sorted_and_keys_only(env):
+    _, d = env
+    body = discover_answer(
+        fields={"uap": [("version", "string"), ("upgradeable", "boolean"), ("model", "string")],
+                "usw": [("upgradeable", "boolean")]},
+        tags={"uap": ["site_name", "name"], "usw": ["name"]})
+    r = run_discover(env, body)
+    assert r.returncode == 0, r.stderr
+    lines = r.stdout.splitlines()
+    assert "[uap]" in lines and "[usw]" in lines and "[uxg]" in lines
+    uap = lines[lines.index("[uap]") + 1:lines.index("[usw]")]
+    fields = [ln.split() for ln in uap if ln.split()[:1] == ["field"]]
+    assert [f[1] for f in fields] == ["model", "upgradeable", "version"]
+    assert [f[2] for f in fields] == ["string", "boolean", "string"]
+    tags = [ln.split()[1] for ln in uap if ln.split()[:1] == ["tag"]]
+    assert tags == ["name", "site_name"]
+    # the request is read-only SHOW statements, ten of them, token only on stdin
+    sent = (d / "curl.argv").read_text()
+    assert sent.count("SHOW FIELD KEYS") == 5 and sent.count("SHOW TAG KEYS") == 5
+    assert "SELECT" not in sent
+    assert TOKEN not in sent and TOKEN not in r.stdout + r.stderr
+    assert f"Authorization: Bearer {TOKEN}" in (d / "curl.stdin").read_text()
+
+
+def test_discover_hostile_key_names_stripped(env):
+    esc, bel = chr(27), chr(7)
+    body = discover_answer(fields={"uap": [(f"k{esc}[31mx{bel}\r\nFAKE", f"str{esc}ing")]},
+                           tags={"uap": [f"t\tag{chr(0x202e)}{chr(0x85)}"]})
+    r = run_discover(env, body)
+    assert r.returncode == 0, r.stderr
+    for ch in (esc, bel, "\r", "\t", chr(0x202e), chr(0x85)):
+        assert ch not in r.stdout
+    assert len([ln for ln in r.stdout.splitlines() if "FAKE" in ln]) == 1
+
+
+def test_discover_error_response_fails_closed(env):
+    body = discover_answer(fields={"uap": [("a", "float")]})
+    body["results"]["T3"] = {"error": "bad", "status": 400}
+    r = run_discover(env, body)
+    assert r.returncode == 1 and r.stdout == "" and r.stderr.strip()
+    assert run_discover(env, "{not json").returncode == 1
+    r = run_discover(env, "{}", FAKE_CURL_CODE="502")
+    assert r.returncode == 1 and "502" in r.stderr
+
+
+def test_discover_empty_answer(env):
+    r = run_discover(env, discover_answer())
+    assert r.returncode == 1 and r.stdout == "" and "no keys" in r.stderr
+
+
+def test_discover_rejects_unknown_argument(env):
+    e, d = env
+    (d / "body.json").write_text("{}")
+    r = subprocess.run(["bash", SCRIPT, "--bogus"], capture_output=True, text=True, env=e,
+                       stdin=subprocess.DEVNULL, timeout=60, check=False)
+    assert r.returncode == 1 and "usage" in r.stderr.lower()
+
+
+def test_empty_model_and_version_frames_warn_with_discover_hint(env):
+    t = [now_ms() - 60000]
+    body = {"results": {"A": {"frames": [frame("AP", [True], t), frame("SW", [False], t)]},
+                        "B": {"frames": []}, "C": {"frames": []}}}
+    r = run(env, body)
+    assert r.returncode == 0, r.stderr
+    assert r.stderr.count("--discover") == 2 and "no data" in r.stderr
+    assert "AP" in r.stdout and "?" in r.stdout
+
+
+def test_no_warning_when_model_present_for_some(env):
+    t = [now_ms() - 60000]
+    body = {"results": {"A": {"frames": [frame("AP", [True], t), frame("SW", [False], t)]},
+                        "B": {"frames": [frame("AP", ["U6"], t)]}, "C": {"frames": [frame("AP", ["1"], t)]}}}
+    r = run(env, body)
+    assert r.returncode == 0 and r.stderr == ""

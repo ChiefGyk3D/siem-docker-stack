@@ -32,6 +32,14 @@ die() { echo "unifi-fleet-inventory: $*" >&2; exit 1; }
 command -v jq > /dev/null 2>&1 || die "jq is required"
 command -v curl > /dev/null 2>&1 || die "curl is required"
 
+MODE=table
+case "${1-}" in
+    "") ;;
+    --discover) MODE=discover ;;
+    *) die "usage: unifi-fleet-inventory.sh [--discover]" ;;
+esac
+[ "$#" -le 1 ] || die "usage: unifi-fleet-inventory.sh [--discover]"
+
 BASE="${GRAFANA_BASE_URL-}"
 [ -n "$BASE" ] || die "GRAFANA_BASE_URL is not set; set it to your Grafana address (http(s)://host[:port])"
 BASE="${BASE%/}"
@@ -51,6 +59,16 @@ payload=$(jq -nc --arg s "$SERIES" '
     rawQuery: true, resultFormat: "time_series",
     query: ("SELECT last(\"" + $field + "\") FROM " + $s + " WHERE time > now() - 7d GROUP BY \"name\" SLIMIT 201")};
   {from: "now-7d", to: "now", queries: [q("A"; "upgradeable"), q("B"; "model"), q("C"; "version")]}')
+MEASUREMENTS=(uap usw ugw udm uxg)
+if [ "$MODE" = discover ]; then
+    # Read-only schema discovery: key names and field types only, no values.
+    payload=$(jq -nc --args '
+      def s($ref; $stmt): {refId: $ref, datasource: {type: "influxdb", uid: "influxdb-unifi"},
+        rawQuery: true, resultFormat: "table", query: $stmt};
+      {from: "now-7d", to: "now", queries: ([$ARGS.positional | to_entries[] |
+        s("F\(.key + 1)"; "SHOW FIELD KEYS FROM \"\(.value)\""), s("T\(.key + 1)"; "SHOW TAG KEYS FROM \"\(.value)\"")])}' \
+        "${MEASUREMENTS[@]}")
+fi
 
 rc=0
 resp=$(printf 'header = "Authorization: Bearer %s"\n' "$TOK" \
@@ -61,6 +79,42 @@ resp=$(printf 'header = "Authorization: Bearer %s"\n' "$TOK" \
 code="${resp##*$'\n'}"
 body="${resp%$'\n'*}"
 [ "$code" = "200" ] || die "Grafana answered HTTP $code"
+
+if [ "$MODE" = discover ]; then
+    out=$(printf '%s' "$body" | jq -r --args '
+      def clean: tostring | gsub("[\\x{0}-\\x{1f}\\x{7f}-\\x{9f}\\x{200e}\\x{200f}\\x{202a}-\\x{202e}\\x{2066}-\\x{2069}]"; "")
+        | .[0:60] | if . == "" then "(blank)" else . end;
+      def keys($ref):
+        .results[$ref] as $r
+        | if ($r | type) != "object" then error("the answer has no result " + $ref)
+          elif ($r | has("error")) then error("query " + $ref + " returned an error")
+          elif (($r.frames | type) != "array") then error("result " + $ref + " has no frames")
+          else [$r.frames[]
+            | if ((.schema.fields | type) == "array") and ((.schema.fields | length) >= 1)
+                 and ((.data.values | type) == "array") and ((.data.values | length) == (.schema.fields | length))
+                 and ([.data.values[] | type] | all(. == "array")) and ([.data.values[] | length] | unique | length) <= 1
+              then (.schema.fields | map(.name)) as $n
+                | (($n | index("fieldKey")) // ($n | index("tagKey")) // 0) as $k
+                | ($n | index("fieldType")) as $t
+                | [range(0; (.data.values[0] | length)) as $i
+                   | (.data.values[$k][$i]) as $key
+                   | if ($key | type) != "string" then error("a key name is not a string")
+                     else {key: $key, type: (if $t == null then null else (.data.values[$t][$i] | if type == "string" then . else "?" end) end)} end]
+              else error("a result frame is malformed") end] | add // [] end;
+      if (type) != "object" or has("message") or has("error") or ((.results | type) != "object")
+      then error("the answer is not a Grafana query result") else . end
+      | . as $root | [$ARGS.positional | to_entries[] as $e
+          | {m: $e.value, f: ($root | keys("F\($e.key + 1)") | unique_by(.key)), t: ($root | keys("T\($e.key + 1)") | map(.key) | unique)}] as $all
+      | if ([$all[] | (.f | length) + (.t | length)] | add) == 0 then error("no keys returned for any measurement")
+        else $all[]
+          | "[\(.m)]",
+            (.f | sort_by(.key)[] | "  field  \(.key | clean)  \((.type // "?") | clean)"),
+            (.t | sort[] | "  tag    \(. | clean)"),
+            "" end' "${MEASUREMENTS[@]}" 2>&1) \
+        || die "could not read the discovery answer: $(printf '%s' "$out" | head -c 300 | tr -d '[:cntrl:]')"
+    printf '%s\n' "$out"
+    exit 0
+fi
 
 NOW=$(date +%s)
 
@@ -97,7 +151,9 @@ parsed=$(printf '%s' "$body" | jq -c --argjson now "$NOW" --argjson max "$MAX_DE
       else
         def lookup($list): if $list == null then {} else ($list | map({key: .name, value: .v}) | from_entries) end;
         (lookup($b)) as $m | (lookup($c)) as $f
-        | { warnings: ([ (if $b == null then "WARNING: the model query returned an error; the MODEL column shows ? (field name UNVERIFIED against live data)" else empty end),
+        | { warnings: ([ (if $b != null and (($b | length) == 0 or ($b | all(.v == null))) then "WARNING: the model query returned no data for any device; the field name may be wrong (run with --discover to list the real field names)" else empty end),
+                         (if $c != null and (($c | length) == 0 or ($c | all(.v == null))) then "WARNING: the firmware query returned no data for any device; the field name may be wrong (run with --discover to list the real field names)" else empty end),
+                         (if $b == null then "WARNING: the model query returned an error; the MODEL column shows ? (field name UNVERIFIED against live data)" else empty end),
                          (if $c == null then "WARNING: the firmware query returned an error; the FIRMWARE column shows ? (field name UNVERIFIED against live data)" else empty end) ]),
             devices: ($a | sort_by(.name) | map({
               name, t,

@@ -15,6 +15,22 @@ GRAFANA_BASE_URL=<your Grafana address, e.g. http://host:3000> bash scripts/unif
 address sends the token unencrypted, the same as the Grafana export script does. Needs `jq`, `curl`
 and a logged-in `doppler` (token `GRAFANA_VIEWER_TOKEN`, project `homelab`, config `prd_network`).
 
+## Find the real field names (`--discover`)
+
+If MODEL or FIRMWARE show `?` for every device, the script prints a stderr WARNING that the query
+returned no data. The guessed field names are then wrong. List what the database really holds:
+
+```bash
+GRAFANA_BASE_URL=<your Grafana address> bash scripts/unifi-fleet-inventory.sh --discover
+```
+
+It runs `SHOW FIELD KEYS` and `SHOW TAG KEYS` for `uap`, `usw`, `ugw`, `udm` and `uxg` through the same
+`/api/ds/query` call and the same token handling, and prints per measurement the sorted field keys with
+their types and the sorted tag keys. Key names only, no values. Key names are stripped of control
+characters. The answer format for these statements (a table frame with `fieldKey`, `fieldType` or
+`tagKey` columns, or the first column as a fallback) is UNVERIFIED against live Grafana; an unexpected
+shape stops the script with a message.
+
 ## Columns
 
 | Column | Meaning |
