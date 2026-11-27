@@ -2,9 +2,9 @@
 
 Status: design for review, nothing deployed. Issue #236, epic #62.
 Owner decisions of 2026-11-27 are recorded below and marked **DECIDED**; what
-is still undecided is marked **OPEN**. Open items: the Doppler config for the
-backup secrets (section 7.4), F4 Public Key Only and the optional Auto Config
-Backup copy (section 7.1).
+is still undecided is marked **OPEN**. **DECIDED**: the backup secrets go in a
+dev config of Doppler project `homelab` first (section 7.4). Open items: F4
+Public Key Only and the optional Auto Config Backup copy (section 7.1).
 All hostnames and addresses are placeholders: `fw.example.internal` is the
 firewall, `nas.example.internal` is the NAS, `mon.example.internal` is the
 host that runs monitoring.
@@ -79,7 +79,7 @@ Key custody (the age or GPG private key, "restore key"):
   NAS therefore cannot decrypt past backups. Honest limit: it can still use
   the pull key to read the live `config.xml`, so the pull key's restriction
   (section 2) is what protects the live file.
-- Stored in Doppler (`homelab`, `prd_network`) and in one offline copy under
+- Stored in Doppler (project `homelab`, dev config first, section 7.4) and in one offline copy under
   the owner's physical control, so losing Doppler or the laptop cannot lose
   all copies. The restore drill (section 6) proves the key works.
 - Rotation: a new key pair means new backups use the new recipient; old
@@ -312,22 +312,23 @@ paid; Auto Config Backup is free (P-ACB VERIFIED).
 | S3 | Reader credential `pfbackup-read` | Restore drill only | `s3:GetObject`, `s3:GetObjectVersion`, `s3:ListBucket` on the prefix; used from the owner's workstation, never stored on the NAS | OWNER |
 | S4 | Lifecycle rule | Expire non-current versions after 365 days | Bucket setting, no credential | OWNER |
 
-### 7.4 Doppler (project `homelab`, config `prd_network`, as named by the owner)
+### 7.4 Doppler (project `homelab`, dev config first)
 
-**OPEN** (owner decision pending): whether the backup secrets go in config
-`prd_network` or a dev config first.
-
-Note: the dev-before-prd rule applies to new projects; this is an existing
-live project and config the owner named, so no dev config is proposed. Reject
-if you want a dev first.
+**DECIDED** (owner, 2026-11-27): the backup secrets (restore key, S3 write and
+read keys, the monitor's NAS password, optional Auto Config Backup items) go
+first in a dev config of Doppler project `homelab`, never in prd. They stay
+there until the owner says in his own words that the backup is live in
+production. Promotion to prd is then its own step, with its own access plan
+and approval.
 
 | # | Secret name | Why | Holder |
 |---|-------------|-----|--------|
-| D1 | `PFSENSE_BACKUP_AGE_IDENTITY` | Restore key (private half), for drills and disaster recovery only | Owner reads it; never on the NAS or in CI |
-| D2 | `PFSENSE_BACKUP_S3_PUT_KEY_ID`, `PFSENSE_BACKUP_S3_PUT_SECRET` | The NAS upload (copied to the NAS task by the owner) | Source of truth for rotation |
-| D3 | `PFSENSE_BACKUP_S3_READ_KEY_ID`, `PFSENSE_BACKUP_S3_READ_SECRET` | Restore drill | Owner |
-| D4 | `PFSENSE_BACKUP_MON_SMB_PASSWORD` | The monitor's read-only mount of the share | The monitoring host reads it with its existing secret-reader pattern |
-| D5 | (Optional) `PFSENSE_ACB_DEVICE_KEY`, `PFSENSE_ACB_ENCRYPTION_PASSWORD` | Third copy recovery; P-ACB (VERIFIED) says a lost encryption password makes backups unrecoverable | Owner |
+| D0 | A dev config of project `homelab` (name: `<dev-config-name>`, placeholder) must exist | Home for D1 to D5. The lead checks the real config list read-only before any command is given to the owner | OWNER creates it only if the check finds none |
+| D1 | `PFSENSE_BACKUP_AGE_IDENTITY` in `<dev-config-name>` | Restore key (private half), for drills and disaster recovery only | Owner reads it; never on the NAS or in CI |
+| D2 | `PFSENSE_BACKUP_S3_PUT_KEY_ID`, `PFSENSE_BACKUP_S3_PUT_SECRET` in `<dev-config-name>` | The NAS upload (copied to the NAS task by the owner) | Source of truth for rotation |
+| D3 | `PFSENSE_BACKUP_S3_READ_KEY_ID`, `PFSENSE_BACKUP_S3_READ_SECRET` in `<dev-config-name>` | Restore drill | Owner |
+| D4 | `PFSENSE_BACKUP_MON_SMB_PASSWORD` in `<dev-config-name>` | The monitor's read-only mount of the share | The monitoring host reads it with its existing secret-reader pattern |
+| D5 | (Optional) `PFSENSE_ACB_DEVICE_KEY`, `PFSENSE_ACB_ENCRYPTION_PASSWORD` in `<dev-config-name>` | Third copy recovery; P-ACB (VERIFIED) says a lost encryption password makes backups unrecoverable | Owner |
 
 Not stored in Doppler: the NAS-to-firewall SSH private key. It is rebuildable
 (generate a new pair, paste a new public line) and a copy elsewhere only widens
