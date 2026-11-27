@@ -16,7 +16,8 @@ real NAS or real systemd**. The tests run the script against fake `mount`, `umou
 2. Looks at the source folder. A missing folder, or a folder without a single `.unf` file that
    matches the exact name `autobackup_<version>_<date>_<time>_<epoch>.unf`, is a **failure**, not
    a success.
-3. Mounts the NAS share read-write for the run only (or uses an already mounted path, see
+3. Mounts the NAS share read-write for the run only, then bind-remounts it with `nosymfollow` and
+   checks the mount table (or uses an already mounted path, see
    `NAS_USE_EXISTING_MOUNT`). It unmounts on every exit path, including errors and a signal.
 4. Stages each source file (see "Links and races"), checks size and SHA-256, and then:
    - if a file of that name already exists on the NAS, its content is hashed and must equal the
@@ -107,11 +108,23 @@ the script runs as root, so it does not trust paths between a check and a use.
   candidate must be a plain file (a symlink is never followed or removed) on that same device and
   match the exact backup name; otherwise it is left alone and the run fails with code 6. The
   destination must also be owned by root and not writable by group or others (code 3).
-- The share is mounted with `nosymfollow`. Source: `mount(8)`, util-linux 2.41.5, read 2026-11-27
-  on the build machine: "nosymfollow: Do not follow symlinks when resolving paths", a VFS flag
-  applied to the mount point. That the CIFS client of your Pi kernel honors it (and which kernel
-  version added it) is **inferred**, not read from a vendor page, and not tested on a real mount.
-  `mount.cifs(8)` documents `mfsymlinks` (off unless set); it is not set.
+- The share is mounted in two steps, because the cifs driver of the Pi kernel rejects
+  `nosymfollow` inside `-o` (`mount error(22): Invalid argument`, kernel log `cifs: Unknown
+  parameter 'nosymfollow'`; seen on the owner's first dry run). Step 1 mounts with
+  `rw` (or `ro` for `--dry-run`), `nosuid`, `nodev`, `noexec` and no `nosymfollow`. Step 2 runs
+  `/usr/bin/mount -o remount,bind,nosymfollow <mount point>`. Step 3 reads `/proc/self/mountinfo`
+  and requires `rw`/`ro` as asked plus `nosymfollow`, `nosuid`, `nodev` and `noexec` on the mount
+  point. If the remount fails or any option is missing, the script unmounts the share and fails
+  with code 3 before anything is written to it. `nosymfollow` is a VFS flag applied to the mount
+  point (`mount(8)`, util-linux 2.41.5, read 2026-11-27: "Do not follow symlinks when resolving
+  paths").
+  **Verified by hand on a real Pi** (kernel 6.8.0-1068-raspi, util-linux mount 2.39.3, mount.cifs
+  7.0): a cifs mount with `ro,vers=3.0,uid=0,gid=0,file_mode=0600,dir_mode=0700,nosuid,nodev,noexec`
+  followed by `mount -o remount,bind,nosymfollow <mount point>` works, and `findmnt` then lists
+  `ro,nosuid,nodev,noexec,relatime,nosymfollow,vers=3.0,...`. **Not yet verified:** the script's own
+  run of this sequence on the Pi (tested only with fake mount binaries that, like the real driver,
+  reject `nosymfollow` in `-o`). Whether the kernel enforces the flag on symlinks inside the share
+  is also not tested.
 - With `NAS_USE_EXISTING_MOUNT=1` the script reads the mount options of `NAS_MOUNT_POINT` from
   `/proc/self/mountinfo` (the entry whose mount point equals the physical path) and refuses with
   code 3 unless `nosymfollow` is among them, or when the mount is not listed. `nosuid`, `nodev` and
@@ -299,6 +312,12 @@ restore needs a compatible controller version. Test a restore once before you ne
 
 ## Honest limits
 
+- **Share scope (least privilege).** The NAS account in the credentials file can see and, as
+  mounted, write the WHOLE share, and the script runs as root on the Pi, so a compromise of the Pi
+  or of this script reaches everything on that share. Use a dedicated share, or a dedicated NAS
+  account that can write only the backup folder (and read nothing else), instead of an account on a
+  share that also holds unrelated files. The destination folder rules above do not make up for a
+  too-wide account.
 - **Credentials.** The SMB password sits in a root-only file on the Pi. The script never reads or
   prints it; it only passes the path to `mount.cifs` (`credentials=<path>`), so the password is
   not in argv. Anyone with root on the Pi can read it, and a lost Pi means a rotated NAS account.

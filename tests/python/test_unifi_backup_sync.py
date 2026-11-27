@@ -70,8 +70,26 @@ class Env:
         me = os.getuid()
         _fake(self.bin / "id", 'echo "${FAKE_UID:-%d}"\n' % me)
         _fake(self.bin / "date", 'echo "$FAKE_NOW"\n')
-        _fake(self.bin / "mount", 'echo "mount $*" >> "$FAKE_LOG"\n'
-              '[ "${FAKE_MOUNT_FAIL:-0}" = 1 ] && exit 32\n: > "$FAKE_MARKER"\n')
+        # Like the real cifs driver, the fake refuses `nosymfollow` inside -o of the first mount
+        # ("cifs: Unknown parameter"); only the later bind remount may set it. The fake keeps its
+        # current options in a file and rewrites the fake mountinfo after every call.
+        opts_file, mi, mp = root / "fake-opts", root / "mountinfo", self.mp.resolve()
+        _fake(self.bin / "mount", (
+            'echo "mount $*" >> "$FAKE_LOG"\n'
+            '[ "${FAKE_MOUNT_FAIL:-0}" = 1 ] && exit 32\n'
+            'o=""; p=""; for a; do [ "$p" = -o ] && o=$a; p=$a; done\n'
+            'gen() { printf "22 1 0:21 / / rw - ext4 /dev/sda1 rw\\n36 22 0:30 / %%s %%s shared:1 - cifs //nas.example.internal/unifi-backups rw\\n" "%s" "$(cat "%s")" > "%s"; }\n'
+            'case "$o" in\n'
+            '  remount,*)\n'
+            '    [ "${FAKE_REMOUNT_FAIL:-0}" = 1 ] && exit 32\n'
+            '    [ "${FAKE_REMOUNT_NOEFFECT:-0}" = 1 ] && exit 0\n'
+            '    cur=$(cat "%s"); new="$cur,nosymfollow"\n'
+            '    [ "${FAKE_REMOUNT_DROP_NOSUID:-0}" = 1 ] && new=$(echo "$new" | sed "s/,nosuid//")\n'
+            '    [ "${FAKE_REMOUNT_FLIP_RO:-0}" = 1 ] && new=$(echo "$new" | sed "s/^rw/ro/")\n'
+            '    echo "$new" > "%s"; gen ;;\n'
+            '  *nosymfollow*) echo "cifs: Unknown parameter nosymfollow" >&2; exit 32 ;;\n'
+            '  *) m=${o%%%%,*}; echo "$m,nosuid,nodev,noexec" > "%s"; gen; : > "$FAKE_MARKER" ;;\n'
+            'esac\n') % (mp, opts_file, mi, opts_file, opts_file, opts_file))
         _fake(self.bin / "umount", 'echo "umount $*" >> "$FAKE_LOG"\n'
               '[ "${FAKE_UMOUNT_FAIL:-0}" = 1 ] && exit 1\nrm -f "$FAKE_MARKER"\n')
         _fake(self.bin / "mountpoint", '[ -e "$FAKE_MARKER" ]\n')
@@ -210,7 +228,7 @@ def _populate(e):
 
 def _assert_unmounted_clean(e):
     calls = e.calls()
-    mounts = [c for c in calls if c.startswith("mount ")]
+    mounts = [c for c in calls if c.startswith("mount ") and "remount" not in c]
     umounts = [c for c in calls if c.startswith("umount ")]
     assert len(mounts) == len(umounts), calls
     assert not e.marker.exists()
@@ -623,7 +641,39 @@ def test_mount_options_do_not_follow_symlinks(env):
     _populate(env)
     env.run()
     mounts = [c for c in env.calls() if c.startswith("mount ")]
-    assert mounts and all("nosymfollow" in c for c in mounts)
+    assert len(mounts) == 2, mounts
+    first, second = mounts
+    assert "nosymfollow" not in first and "-t cifs" in first  # the cifs driver rejects it in -o
+    assert "-o remount,bind,nosymfollow " in second + " " and str(env.mp) in second
+    assert "nosymfollow" in env.mountinfo.read_text(encoding="utf-8")
+
+
+def _remount_failure_is_closed(env, **extra):
+    _populate(env)
+    r = env.run(**extra)
+    assert r.returncode == 1
+    assert _metrics(r.stdout)["unifi_backup_sync_result_code"] == 3
+    assert not env.nas.exists() and env.nas_files() == []  # nothing was written to the share
+    assert not (env.state / "last-success").exists()
+    _assert_unmounted_clean(env)
+    return r
+
+
+def test_remount_failure_fails_closed_and_unmounts(env):
+    _remount_failure_is_closed(env, FAKE_REMOUNT_FAIL="1")
+
+
+def test_remount_without_the_option_in_mountinfo_fails_closed(env):
+    r = _remount_failure_is_closed(env, FAKE_REMOUNT_NOEFFECT="1")
+    assert "nosymfollow" in r.stderr
+
+
+def test_remount_that_drops_nosuid_fails_closed(env):
+    _remount_failure_is_closed(env, FAKE_REMOUNT_DROP_NOSUID="1")
+
+
+def test_remount_that_flips_read_write_fails_closed(env):
+    _remount_failure_is_closed(env, FAKE_REMOUNT_FLIP_RO="1")
 
 
 # --- Daybreak round 1 findings (PR 240) -----------------------------------------------------------
@@ -902,8 +952,8 @@ def test_dry_run_changes_nothing(env):
     assert r.stdout == ""
     assert env.nas_files() == [] and not (env.state / "last-success").exists()
     mounts = [c for c in env.calls() if c.startswith("mount ")]
-    assert mounts and all(re.search(r"(^|[ ,])ro([ ,]|$)", c) for c in mounts)
-    assert not any(re.search(r"(^|[ ,])rw([ ,]|$)", c) for c in mounts)
+    assert len(mounts) == 2 and "remount,bind,nosymfollow" in mounts[1]
+    assert re.search(r"(^|[ ,])ro([ ,]|$)", mounts[0]) and not re.search(r"(^|[ ,])rw([ ,]|$)", mounts[0])
     _assert_unmounted_clean(env)
 
 
