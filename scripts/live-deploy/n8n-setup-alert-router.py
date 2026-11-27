@@ -25,7 +25,7 @@ credential ids mapped; import the error handler first and pass its id, as for th
 --with-grafana-viewer works the same way for the Custom Auth credential grafana-viewer-auth
 (the weekly digest collectors read Grafana with it): the token of a Grafana Viewer service
 account comes from the environment value GRAFANA_VIEWER_TOKEN, over stdin, never argv, never
-printed. After a successful viewer import the command exits 3 (imported, Allowed HTTP Request
+printed. After a successful viewer import the command exits 40 (imported, Allowed HTTP Request
 Domains lock not verified; 0 is never returned for it, 1 and above otherwise mean the import failed).
 The flags can be combined; every needed value and id is checked BEFORE n8n is changed,
 so a bad value leaves nothing half done. Tokens lose surrounding whitespace; an empty or
@@ -166,7 +166,10 @@ def docker_in(script, payload):
     out = (proc.stdout + proc.stderr).decode(errors="replace")
     # Never echo anything that could contain a value; keep only plain status lines.
     lines = [ln for ln in out.splitlines() if ln.strip() and "Error tracking" not in ln]
-    return proc.returncode, lines
+    rc = proc.returncode
+    if rc == EXIT_DOMAIN_LOCK_UNVERIFIED:
+        rc = 1   # a child must never look like "imported, lock not verified"
+    return rc, lines
 
 
 # Secret-bearing imports. The plaintext JSON arrives over stdin and is written inside the container
@@ -193,7 +196,12 @@ CRED_IMPORT_SCRIPT = (
 
 # Exit code of the viewer flow when the import itself worked: the credential exists but nothing proves
 # its Allowed HTTP Request Domains lock, so automation must not treat the run as fully done.
-EXIT_DOMAIN_LOCK_UNVERIFIED = 3
+EXIT_DOMAIN_LOCK_UNVERIFIED = 40
+
+
+def failure_code(rc):
+    """A failed child never reports the 'imported, lock not verified' code (or 0): it becomes 1."""
+    return 1 if rc in (0, EXIT_DOMAIN_LOCK_UNVERIFIED) else rc
 
 VIEWER_REMINDER = (
     "REQUIRED NEXT STEP: an import file cannot lock a credential to a host. In the n8n editor open\n"
@@ -512,7 +520,7 @@ def grafana_viewer_credentials():
         print(VIEWER_REMINDER)
         print("exit code %d: imported, domain lock not verified (see docs/live-deploy-runbook.md)" % EXIT_DOMAIN_LOCK_UNVERIFIED)
         return EXIT_DOMAIN_LOCK_UNVERIFIED
-    return rc
+    return failure_code(rc)
 
 
 def digest_workflow(path, reuse_id="", error_workflow_id=""):

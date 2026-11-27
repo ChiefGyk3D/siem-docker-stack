@@ -141,15 +141,21 @@ shown as `(invalid)`), and so does a second frame with the same identity in one 
 frames, or two kinds that print the same name), so a series can never be both applied and pending.
 Each source's check query returns exactly one series.
 
-Identities are normalized before anything else: Unicode NFC, then a conservative allowlist (letters,
-digits, combining marks, space and `. _ : / ( ) # + -`; no leading or trailing space), and one script
-family per name (Latin, Cyrillic or Greek, never mixed). A name that fails any of this fails the
-source. Because the normalized form is used for the length check, the duplicate check and the join of
+Identities are normalized before anything else: Unicode NFKC (so full-width look-alikes become plain
+letters and canonically equivalent spellings join), then a conservative allowlist (letters, ASCII
+digits, combining marks, space and `. _ ( ) -`; it must start with a letter or digit and have no
+trailing space). Every letter must be Latin, Cyrillic or Greek and one name uses only one of the
+three; any other script (Han, Arabic and so on) fails the source. There is no slash, colon, hash, plus
+or at sign, so a name cannot read as a URL scheme, a Matrix room alias or a mention. A bare host name
+such as `ap-1.example.com` is still accepted and a chat client may turn it into a plain link; it can
+carry no scheme or path. A name that fails any of this fails the source. Because the normalized form is used for the length check, the duplicate check and the join of
 current and history data, two spellings of the same name collide (a failed source) and a decomposed
 name still joins history written precomposed. Look-alikes from different scripts that are each a
 single-script name (an all-Cyrillic name that reads like a Latin one) are not detected.
 
-Frame-level errors fail the source. A frame whose schema meta carries a notice with any severity other
+Frame-level errors fail the source, wherever Grafana puts them: an `error`, `errorSource`, `message`,
+`errors` or `notices` key on the result, the frame, its schema or its data fails the source (the only
+accepted notices are the ones inside `schema.meta`, checked below). A frame whose schema meta carries a notice with any severity other
 than `info` or `warning` (an `error` notice is how Grafana marks a partial result), a notice without a
 severity, malformed notices or an error field on the frame make the source `failed`; the reason never
 copies the notice text.
@@ -188,7 +194,7 @@ is activated. Nothing here is a fix; each item states what stays open.
    value would send the token to the new host. The token is read-only (Viewer role). Mitigations: the
    editor step and the post-import check in docs/live-deploy-runbook.md; keep `GRAFANA_BASE_URL`
    under change control. The setup script cannot prove the lock, so after a successful viewer import
-   it exits with code 3 ("imported, domain lock not verified"), never 0.
+   it exits with code 40 ("imported, domain lock not verified"), never 0.
 
 Also open: the credential file used during import is in memory (`/dev/shm`) when the container has a
 memory-backed mount there, otherwise in `/tmp` (the script prints a warning). A SIGKILL or crash

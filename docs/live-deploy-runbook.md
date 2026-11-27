@@ -134,11 +134,11 @@ Details that were learned live:
   token goes to whatever `https` host `GRAFANA_BASE_URL` names. The script prints a reminder after a
   successful import and cannot check the setting itself.
 
-  **Exit codes of the viewer flow.** After a successful import the command exits with **exit code 3**
+  **Exit codes of the viewer flow.** After a successful import the command exits with **exit code 40**
   (imported, domain lock not verified), never 0, so automation cannot treat the step as fully done.
   Handle it as "done except for the manual lock": do the post-import check below, then record the
   owner's acceptance of the residuals in docs/update-digest.md (Accepted residuals) before activating
-  the workflow. A failed import keeps the importer's own nonzero code (1 and above, never 3). A run
+  the workflow. A failed import keeps the importer's own nonzero code, except that a child code of 40 is reported as 1, so 40 means only "imported, domain lock not verified" and 1 and every other nonzero code mean the import failed (40 is outside the codes the script and the container engine use: 1, 2, 70, 125 to 127). A run
   without `--with-grafana-viewer` still exits 0 on success.
 
   The credential file for each import is created under `/dev/shm` when it is a memory-backed mount

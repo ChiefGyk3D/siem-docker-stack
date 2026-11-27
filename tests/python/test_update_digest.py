@@ -1727,7 +1727,7 @@ def test_partial_and_error_bearing_answers_are_failed_never_ok_or_not_deployed()
 
 
 _BODY_ERR = "body.error !== undefined || body.message !== undefined"
-_RES_ERR = "res.error !== undefined || res.errorSource !== undefined || res.status !== 200"
+_RES_ERR = "hasErr(res) || res.status !== 200"
 
 
 @pytest.mark.parametrize("name", ALL)
@@ -1736,10 +1736,11 @@ _RES_ERR = "res.error !== undefined || res.errorSource !== undefined || res.stat
     (_BODY_ERR, "body.error !== undefined"),
     (_BODY_ERR, "false"),
     ("if (gotRefs.length !== EXPECTED.length) return", "if (false) return"),
-    (_RES_ERR, "res.errorSource !== undefined || res.status !== 200"),
-    (_RES_ERR, "res.error !== undefined || res.status !== 200"),
-    (_RES_ERR, "res.error !== undefined || res.errorSource !== undefined"),
-    (_RES_ERR, "res.error !== undefined || res.errorSource !== undefined || (res.status !== undefined && res.status !== 200)"),
+    (_RES_ERR, "res.status !== 200"),
+    (_RES_ERR, "hasErr(res)"),
+    (_RES_ERR, "hasErr(res) || (res.status !== undefined && res.status !== 200)"),
+    ("const ERR_KEYS = ['error', 'errorSource', 'message', 'errors'];", "const ERR_KEYS = ['errorSource', 'message', 'errors'];"),
+    ("const ERR_KEYS = ['error', 'errorSource', 'message', 'errors'];", "const ERR_KEYS = ['error', 'message', 'errors'];"),
     ("if (!Array.isArray(res.frames)) return", "if (res.frames === undefined || res.frames === null) return []; if (false) return"),
 ])
 def test_mutant_partial_answer_guard_removed_is_caught(name, old, new):
@@ -1791,8 +1792,8 @@ def test_mutant_query_error_handling_removed_is_caught(name, old):
 
 @pytest.mark.parametrize("name", ALL)
 @pytest.mark.parametrize("old,new", [
-    ("if (res.error !== undefined || res.errorSource !== undefined || res.status !== 200)", "if (res.error)"),
-    ("if (res.error !== undefined || res.errorSource !== undefined || res.status !== 200)", "if (res.error !== undefined || res.errorSource !== undefined)"),
+    ("if (hasErr(res) || res.status !== 200)", "if (res.error)"),
+    ("if (hasErr(res) || res.status !== 200)", "if (hasErr(res))"),
     ("if (!res || typeof res !== 'object') return 'query ' + ref + ' missing from the answer';", ""),
     ("if (!Array.isArray(res.frames)) return", "if (false) return"),
 ])
@@ -1996,6 +1997,35 @@ def check_frame_errors(wf):
         bad = _good_answer(name)
         bad["body"]["results"]["A"]["frames"][0]["error"] = "boom"
         assert _collect(wf, name, bad)["status"] == "failed", name
+        # error-bearing keys at the result, frame, schema and data levels, not only schema.meta
+        for where in ("result", "frame", "schema", "data", "meta"):
+            for key, val in (("notices", [{"severity": "error"}]), ("notices", []), ("message", "x"), ("errors", ["x"]), ("errorSource", "plugin")):
+                bad = _good_answer(name)
+                res = bad["body"]["results"]["A"]
+                fr = res["frames"][0]
+                target = {"result": res, "frame": fr, "schema": fr["schema"], "data": fr["data"]}.get(where)
+                if where == "meta":
+                    if key == "notices":
+                        continue
+                    fr["schema"]["meta"] = {key: val}
+                else:
+                    target[key] = val
+                j = _collect(wf, name, bad)
+                assert j["status"] == "failed" and j["pending"] == [], (name, where, key)
+
+
+@pytest.mark.parametrize("name", list(REAL))
+@pytest.mark.parametrize("old,new", [
+    ("(o.notices !== undefined || ", "(false || "),
+    ("hasErr(fr.data)", "false"),
+    ("hasErr(fr) ||", "false ||"),
+    ("if (hasErr(res) || res.status", "if (res.status"),
+    ("ERR_KEYS.some((k) => fr.schema.meta[k] !== undefined)", "false"),
+])
+def test_mutant_error_keys_at_other_levels_are_caught(name, old, new):
+    wf = _mutate(name, old, new)
+    with pytest.raises(AssertionError):
+        check_frame_errors(wf)
 
 
 def test_frame_level_error_notices_make_the_source_failed():
@@ -2041,6 +2071,20 @@ def check_identities(wf):
             j = _named(wf, name, bad)
             assert j["status"] == "failed" and j["pending"] == [], (name, bad)
         assert _named(wf, name, CYR_A * 3 + "-1")["status"] == "ok", name   # one script is fine
+        # every letter must be Latin, Cyrillic or Greek, whatever else is present
+        for bad in (chr(0x6F22) + chr(0x639), chr(0x6F22), "a" + chr(0x6F22), chr(0x301),
+                    "a" + chr(0x639), "A1" + chr(0x5D0)):
+            j = _named(wf, name, bad)
+            assert j["status"] == "failed" and j["pending"] == [], (name, bad)
+        # full-width forms fold to ASCII (NFKC), so they join the plain spelling and collide with it
+        j = _named(wf, name, chr(0xFF21) + "p", "Ap")
+        assert j["status"] == "failed" and "duplicate" in j["reason"], name
+        assert _named(wf, name, chr(0xFF21) + "p")["pending"][0]["name"] == "Ap", name
+        # no link-like or room-alias-like punctuation; ASCII digits only
+        for bad in ("https://evil.test/#room:server", "a/b", "a:b", "#room", "a#b", "a+b", chr(0x661) + "a", "(a"):
+            j = _named(wf, name, bad)
+            assert j["status"] == "failed" and j["pending"] == [], (name, bad)
+        assert _named(wf, name, "ap-1.example (office)")["status"] == "ok", name
 
 
 def test_identities_are_nfc_allowlisted_and_not_mixed_script():
@@ -2054,11 +2098,27 @@ def test_decomposed_name_joins_history_written_precomposed():
 
 @pytest.mark.parametrize("name", list(REAL))
 @pytest.mark.parametrize("old,new", [
-    ("v.normalize('NFC')", "v"),
-    ("scripts > 1 ? null : n", "n"),
-    ("if (!/^[\\p{L}\\p{N}\\p{M} ._:\\/()#+-]+$/u.test(n)) return null;", ""),
+    ("v.normalize('NFKC')", "v"),
+    ("return family.size > 1 ? null : n;", "return n;"),
+    ("if (!/^[\\p{L}0-9][\\p{L}\\p{M}0-9 ._()-]*$/u.test(n)) return null;", ""),
+    ("if (i < 0) return null;", ""),
 ])
 def test_mutant_identity_check_removed_is_caught(name, old, new):
     wf = _mutate(name, old, new)
     with pytest.raises(AssertionError):
         check_identities(wf)
+
+
+def test_accepted_names_reach_the_digest_without_link_or_mention_characters():
+    wf = _wf()
+    for name in REAL:
+        j = _named(wf, name, "ap-1.example.com (office)")
+        assert j["status"] == "ok", name
+        shown = _build(wf, {"UniFi Collector": _src(pending=j["pending"])})
+        assert "ap-1.example.com \\(office\\)" in shown["description"] and "ap-1.example.com (office)" in shown["matrixBody"]
+        for text in (shown["description"], shown["matrixBody"]):
+            line = [ln for ln in text.split("\n") if "ap-1.example.com" in ln][0]
+            assert not any(c in line.split("UniFi: ", 1)[1] for c in "@#<>[]/:"), line
+        # the rejected link-like form never reaches the digest at all
+        bad = _named(wf, name, "https://evil.test/#room:server")
+        assert bad["status"] == "failed" and bad["pending"] == [] and "evil.test" not in json.dumps(bad), name

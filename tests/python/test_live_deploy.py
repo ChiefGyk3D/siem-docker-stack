@@ -895,13 +895,13 @@ def test_full_credentials_run_ends_with_the_reminder(setup, monkeypatch, capsys)
 # --- issue #202 fix round 3: distinct exit code for "imported, domain lock not verified" ------------------
 
 def check_viewer_exit_code(setup, monkeypatch, capsys):
-    assert setup.EXIT_DOMAIN_LOCK_UNVERIFIED == 3
+    assert setup.EXIT_DOMAIN_LOCK_UNVERIFIED == 40
     _canary_env(monkeypatch)
     _record_docker(setup, monkeypatch)
     for argv in (["--credentials", "--with-grafana-viewer"], FLAGS):
-        assert setup.main(argv) == 3
+        assert setup.main(argv) == 40
     out = capsys.readouterr().out
-    assert "REQUIRED NEXT STEP" in out and "exit code 3: imported, domain lock not verified" in out and CANARY not in out
+    assert "REQUIRED NEXT STEP" in out and "exit code 40: imported, domain lock not verified" in out and CANARY not in out
     assert setup.main(["--credentials"]) == 0, "without the viewer the run is fully done"
 
 
@@ -909,12 +909,28 @@ def test_viewer_success_never_exits_zero_and_uses_the_documented_code(setup, mon
     check_viewer_exit_code(setup, monkeypatch, capsys)
 
 
-@pytest.mark.parametrize("rc", [1, 2, 127])
+@pytest.mark.parametrize("rc", [1, 2, 3, 40, 127])
 def test_viewer_import_failure_keeps_its_own_nonzero_code(setup, monkeypatch, capsys, rc):
     _canary_env(monkeypatch)
     monkeypatch.setattr(setup, "docker_in", lambda script, payload: (rc, []))
-    assert setup.grafana_viewer_credentials() == rc
+    got = setup.grafana_viewer_credentials()
+    assert got == (1 if rc == 40 else rc) and got != setup.EXIT_DOMAIN_LOCK_UNVERIFIED and got != 0
     assert "domain lock not verified" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("rc", [3, 40])
+def test_failed_import_code_never_equals_the_unverified_code_on_any_path(setup, monkeypatch, rc):
+    _canary_env(monkeypatch)
+    monkeypatch.setattr(setup, "engine_run", lambda args, **kw: _Proc(rc, b"", b""))
+    for argv in (["--credentials"], ["--credentials", "--with-grafana-viewer"]):
+        got = setup.main(argv)
+        assert got != setup.EXIT_DOMAIN_LOCK_UNVERIFIED and got != 0, (argv, got)
+
+
+def test_mutant_failure_mapping_removed_is_caught(setup, monkeypatch, capsys):
+    monkeypatch.setattr(setup, "failure_code", lambda rc: rc)
+    with pytest.raises(AssertionError):
+        test_viewer_import_failure_keeps_its_own_nonzero_code(setup, monkeypatch, capsys, 40)
 
 
 def test_mutant_viewer_success_returning_zero_is_caught(setup, monkeypatch, capsys):
@@ -925,7 +941,7 @@ def test_mutant_viewer_success_returning_zero_is_caught(setup, monkeypatch, caps
 
 def test_runbook_explains_exit_code_3_and_the_accepted_residuals():
     run = " ".join((REPO_ROOT / "docs" / "live-deploy-runbook.md").read_text(encoding="utf-8").split())
-    for needle in ("exit code 3", "imported, domain lock not verified", "/dev/shm"):
+    for needle in ("exit code 40", "imported, domain lock not verified", "/dev/shm"):
         assert needle in run, needle
     doc = " ".join((REPO_ROOT / "docs" / "update-digest.md").read_text(encoding="utf-8").split())
     for needle in ("Accepted residuals", "owner must accept", "before the workflow is activated", "no response size limit"):
