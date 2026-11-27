@@ -40,7 +40,7 @@ Container service status:
 ● unifi.service - UniFi Network
      Loaded: loaded (/lib/systemd/system/unifi.service; enabled)
      Active: active (running)
-     Status: {{"state":"running","version":"10.6.109","uptime":12}}
+     Status: {{"version":"10.6.109","state":"running","uptime":12}}
 ● other.service - Other
      Status: {{"version":"9.9.9"}}
 """
@@ -281,59 +281,31 @@ def test_network_version_missing_is_unknown_not_error(env):
     net_unknown(env.run())
 
 
-def test_two_top_level_version_fields_are_not_guessed(env):
-    env.sfix.write_text(status_with('{"version":"10.6.109","other":1,"version":"1.2.3"}'), encoding="utf-8")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def test_oversized_status_line_is_unknown_even_with_version_first(env):
+    env.sfix.write_text(status_with('{"version":"10.6.109","pad":"' + "x" * 9000 + '"}'), encoding="utf-8")
     net_unknown(env.run())
 
 
-def test_nested_only_version_is_not_the_network_version(env):
-    env.sfix.write_text(status_with('{"metadata":{"version":"1.2.3"}}'), encoding="utf-8")
-    net_unknown(env.run())
-
-
-def test_nested_member_list_with_version_is_not_the_network_version(env):
-    env.sfix.write_text(status_with('{"meta":{"a":1,"version":"1.2.3"}}'), encoding="utf-8")
-    net_unknown(env.run())
-
-
-def test_nested_version_before_the_real_top_level_one_is_ignored(env):
-    env.sfix.write_text(status_with('{"meta":{"version":"1.2.3"},"list":[{"version":"2.2.2"}],'
-                                    '"version":"10.6.109"}'), encoding="utf-8")
-    assert_ok(env.run())
-
-
-def test_version_text_inside_a_string_value_is_ignored(env):
-    js = '{"note":"x \\"version\\":\\"1.1.1\\" y","version":"10.6.109"}'
-    env.sfix.write_text(status_with(js), encoding="utf-8")
-    assert_ok(env.run())
-
-
-def test_version_text_only_inside_a_string_value_is_unknown(env):
-    env.sfix.write_text(status_with('{"note":"\\"version\\":\\"1.1.1\\""}'), encoding="utf-8")
-    net_unknown(env.run())
-
-
-@pytest.mark.parametrize("js", ['{"version":"10.6.109"} trailing', '{"version":"10.6.109"', '"version":"10.6.109"',
-                                '{"version":"10.6.109"}}', '[{"version":"10.6.109"}]', '{"a":1 "version":"10.6.109"}',
-                                '{"version":{"x":"10.6.109"}}', '{"version":["10.6.109"]}'])
-def test_malformed_status_json_is_unknown(env, js):
-    env.sfix.write_text(status_with(js), encoding="utf-8")
-    net_unknown(env.run())
-
-
-def test_oversized_status_json_is_unknown(env):
-    env.sfix.write_text(status_with('{"pad":"' + "x" * 9000 + '","version":"10.6.109"}'), encoding="utf-8")
-    net_unknown(env.run())
-
-
-# the parse is bounded in size (the walker never sees more than the cap) and so in time
+# a line over the 8192 byte cap is never looked at, whatever it holds
 HOSTILE_JSON = {
-    "pad-just-over-cap": '{"pad":"' + "x" * 3000 + '","version":"10.6.109"}',
-    "pad-8k": '{"pad":"' + "x" * 8150 + '","version":"10.6.109"}',
-    "deep-in-cap": '{"a":' + "[" * 1500 + "]" * 1500 + ',"version":"10.6.109"}',
+    "pad-9k": '{"version":"10.6.109","pad":"' + "x" * 9000 + '"}',
     "deep-huge": '{"a":' + "[" * 200000 + "]" * 200000 + ',"version":"10.6.109"}',
     "opens-only": "{" + '"a":{' * 3000,
-    "one-mebibyte": '{"pad":"' + "x" * 1000000 + '","version":"10.6.109"}',
+    "one-mebibyte": '{"version":"10.6.109","pad":"' + "x" * 1000000 + '"}',
 }
 
 
@@ -376,91 +348,26 @@ def test_whole_run_bound_constants_and_wrapper_are_the_documented_ones():
     assert 2 * (20 + 10 + 2) + 5 < 120
 
 
-@pytest.mark.parametrize("js", ['{,"version":"10.6.109"}', '{"version":"10.6.109",}', '{"a":1,,"version":"10.6.109"}',
-                                '{"version":"10.6.109",,}', '{"note":"bad\\q","version":"10.6.109"}',
-                                '{"note":"bad\\u12G4","version":"10.6.109"}', '{"note":"bad\\u12","version":"10.6.109"}'])
-def test_malformed_json_grammar_is_unknown(env, js):
-    env.sfix.write_text(status_with(js), encoding="utf-8")
-    net_unknown(env.run())
 
 
-def test_valid_escapes_are_accepted(env):
-    js = '{"note":"a\\"b\\\\c\\/d\\n\\t\\u00e9\\uABCD","a":[1,2,{"b":null}],"version":"10.6.109"}'
-    env.sfix.write_text(status_with(js), encoding="utf-8")
-    assert_ok(env.run())
 
 
-@pytest.mark.parametrize("js", [
-    '{"version":"10.6.109","ver\\u0073ion":"1.2.3"}',   # escaped spelling of version beside the real one
-    '{"ver\\u0073ion":"10.6.109"}',                      # an escaped name alone is not trusted
-    '{"a\\nb":1,"version":"10.6.109"}',                  # any escape in a top-level name
-    '{"version":"10.6.109","\\u0076ersion":"1.2.3"}',
-])
-def test_escaped_top_level_member_name_is_not_trusted(env, js):
-    env.sfix.write_text(status_with(js), encoding="utf-8")
-    r = env.run()
-    net_unknown(r)
-    assert "member name contains an escape" in etext(r)
 
 
-def test_escapes_in_nested_names_and_values_are_still_fine(env):
-    js = '{"m":{"x\\ny":1,"ver\\u0073ion":"9.9.9"},"note":"a\\u0041","version":"10.6.109"}'
-    env.sfix.write_text(status_with(js), encoding="utf-8")
-    assert_ok(env.run())
 
 
-@pytest.mark.parametrize("js", [
-    '{"a":[},"version":"10.6.109"}', '{"a":{],"version":"10.6.109"}', '{"a":garbage,"version":"10.6.109"}',
-    '{"a" 1,"version":"10.6.109"}', '{"a":,"version":"10.6.109"}', '{1:2,"version":"10.6.109"}',
-    '{"version":"10.6.109"}]', '{"a":[1]],"version":"10.6.109"}', '{"a":[1}],"version":"10.6.109"}',
-    '{"a":"x\x00y","version":"10.6.109"}', '{"a":"x\x01y","version":"10.6.109"}',
-    '{"a":1;2,"version":"10.6.109"}', '{"a":\'x\',"version":"10.6.109"}',
-])
-def test_structurally_malformed_json_is_unknown(env, js):
-    env.sfix.write_bytes(status_with(js).encode("utf-8"))
-    net_unknown(env.run())
 
 
-@pytest.mark.parametrize("js", [
-    '{"version":"10.6.109"}\r', '{\r"version"\t:\r"10.6.109"\t}', '{ "a" : [ 1 , -2.5e+10 , true , false , null , {} , [] ] , "version" : "10.6.109" }',
-    '\t{"version":"10.6.109"} \t\r',
-])
-def test_all_json_whitespace_and_valid_scalars_are_accepted(env, js):
-    env.sfix.write_bytes(status_with(js).encode("utf-8"))
-    assert_ok(env.run())
 
 
-def test_mutant_key_escape_guard_bites(env):
-    env.sfix.write_text(status_with('{"version":"10.6.109","ver\\u0073ion":"1.2.3"}'), encoding="utf-8")
-    net_unknown(env.run())
-    m = mutant(env, "net-key-escape", ":")
-    assert 'network_version="10.6.109"' in text(env.run(script=m))
 
 
-def test_mutant_bracket_type_guard_bites(env):
-    env.sfix.write_text(status_with('{"a":[},"version":"10.6.109"}'), encoding="utf-8")
-    net_unknown(env.run())
-    m = mutant(env, "net-bracket-type", "*) ;;")
-    assert 'network_version="10.6.109"' in text(env.run(script=m))
 
 
-def test_mutant_token_charset_guard_bites(env):
-    env.sfix.write_text(status_with('{"a":garbage,"version":"10.6.109"}'), encoding="utf-8")
-    net_unknown(env.run())
-    m = mutant(env, "net-token", '*) lit="" ;;')
-    assert 'network_version="10.6.109"' in text(env.run(script=m))
 
 
-def test_empty_object_is_unknown(env):
-    env.sfix.write_text(status_with("{}"), encoding="utf-8")
-    net_unknown(env.run())
 
 
-def test_mutant_json_cap_guard_bites(env):
-    env.sfix.write_text(status_with(HOSTILE_JSON["pad-just-over-cap"]), encoding="utf-8")
-    net_unknown(env.run())
-    m = mutant(env, "net-json-cap", ":")
-    assert 'network_version="10.6.109"' in text(env.run(script=m, timeout=120))
 
 
 def test_mutant_line_cap_guard_bites(env):
@@ -470,18 +377,8 @@ def test_mutant_line_cap_guard_bites(env):
     assert 'network_version="10.6.109"' in text(env.run(script=m))
 
 
-def test_mutant_comma_guard_bites(env):
-    env.sfix.write_text(status_with('{"version":"10.6.109",}'), encoding="utf-8")
-    net_unknown(env.run())
-    m = mutant(env, "net-comma", '",") st=k; continue ;;')
-    assert 'network_version="10.6.109"' in text(env.run(script=m))
 
 
-def test_mutant_escape_guard_bites(env):
-    env.sfix.write_text(status_with('{"note":"bad\\q","version":"10.6.109"}'), encoding="utf-8")
-    net_unknown(env.run())
-    m = mutant(env, "net-escape", "*) ;;")
-    assert 'network_version="10.6.109"' in text(env.run(script=m))
 
 
 def test_doc_cron_line_does_not_deliver_an_empty_line(env):
@@ -547,6 +444,73 @@ def test_detached_survivor_in_status_only_gives_unknown_in_time(env):
     net_unknown(r)
 
 
+# ---- the one accepted shape: the Status value is an object whose FIRST member is "version"
+@pytest.mark.parametrize("js", [
+    '{"version":"10.6.109"}', '{"version":"10.6.109",}', '{"version":"10.6.109","state":"running"}',
+    '{ "version" : "10.6.109", "x":1}', '{\t"version"\t:\t"10.6.109"}',
+    # nothing after the first member is read: junk there is not validated (documented)
+    '{"version":"10.6.109","note":"bad\\q",,]]garbage',
+])
+def test_version_first_member_is_accepted(env, js):
+    env.sfix.write_text(status_with(js), encoding="utf-8")
+    assert_ok(env.run())
+    assert etext(env.run()) == ""
+
+
+@pytest.mark.parametrize("js", [
+    '{"state":"running","version":"10.6.109"}',            # version not first
+    '{"meta":{"version":"1.2.3"}}',                        # a nested version
+    '{"meta":{"version":"1.2.3"},"version":"10.6.109"}',   # nested first, real second
+    '{"ver\\u0073ion":"10.6.109"}',                         # an escaped name
+    '{"version":"10.6.\\u0031"}',                           # an escape in the value
+    '{"version":"10.6.x"}', '{"version":""}', '{"version":10.6}', '{"version":["10.6.109"]}',
+    'x{"version":"10.6.109"}', '"{"version":"10.6.109"}', '[{"version":"10.6.109"}]', '"version":"10.6.109"}',
+    '{"version":"10.6.109" ,"a":1}',                       # not directly followed by a comma or brace
+    '{"version":"10.6.109"x}', '{"version":"10.6.109"',    # not followed by a comma or brace
+    '{"version" "10.6.109"}', '{"version":"10.6.109', '{', '{}', '', '   ',
+])
+def test_any_other_shape_is_unknown_with_a_reason(env, js):
+    env.sfix.write_text(status_with(js), encoding="utf-8")
+    r = env.run()
+    net_unknown(r)
+    assert "Network version unknown" in etext(r)
+
+
+def test_two_matches_are_unknown_two_status_lines(env):
+    env.sfix.write_text(status_with('{"version":"10.6.109"}', '     Status: {"version":"10.6.109"}\n'),
+                        encoding="utf-8")
+    net_unknown(env.run())
+
+
+def test_mutant_brace_rule_bites(env):
+    env.sfix.write_text(status_with('"version":"10.6.109"}'), encoding="utf-8")
+    net_unknown(env.run())
+    m = mutant(env, "net-brace", "*) ;;")
+    assert 'network_version="10.6.109"' in text(env.run(script=m))
+
+
+def test_mutant_first_member_rule_bites(env):
+    for js in ('{"state":"running","version":"10.6.109"}', '{"meta":{"version":"10.6.109"}}'):
+        env.sfix.write_text(status_with(js), encoding="utf-8")
+        net_unknown(env.run())
+        m = mutant(env, "net-first", "*) rest=${rest#*'\"version\"'} ;;")
+        assert 'network_version="10.6.109"' in text(env.run(script=m)), js
+
+
+def test_mutant_delimiter_rule_bites(env):
+    env.sfix.write_text(status_with('{"version":"10.6.109"x}'), encoding="utf-8")
+    net_unknown(env.run())
+    m = mutant(env, "net-delim", "*) ;;")
+    assert 'network_version="10.6.109"' in text(env.run(script=m))
+
+
+def test_mutant_value_check_rule_bites(env):
+    env.sfix.write_text(status_with('{"version":"10.6.1x9"}'), encoding="utf-8")
+    net_unknown(env.run())
+    m = mutant(env, "charset", ":")
+    assert 'network_version="10.6.1x9"' in text(env.run(script=m))
+
+
 def test_two_status_lines_in_unifi_block_are_not_guessed(env):
     env.sfix.write_text(status_with('{"version":"10.6.109"}',
                                     '     Status: {"version":"10.7.1"}\n'), encoding="utf-8")
@@ -577,7 +541,7 @@ def test_odd_network_version_is_unknown(env, js):
 
 
 def test_version_field_with_spaces_is_accepted(env):
-    env.sfix.write_text(status_with('{ "version" : "10.6.109" }'), encoding="utf-8")
+    env.sfix.write_text(status_with('{ "version" : "10.6.109"}'), encoding="utf-8")
     assert_ok(env.run())
 
 
@@ -711,20 +675,8 @@ def test_mutant_net_status_count_guard_bites(env):
     assert 'network_version="unknown"' not in text(env.run(script=m))
 
 
-def test_mutant_net_version_count_guard_bites(env):
-    env.sfix.write_text(status_with('{"version":"10.6.109","x":1,"version":"1.2.3"}'), encoding="utf-8")
-    net_unknown(env.run())
-    m = mutant(env, "net-version-count", ":")
-    assert 'network_version="unknown"' not in text(env.run(script=m))
 
 
-def test_mutant_net_depth_guard_bites(env):
-    # without the depth scoping, the member-position rules would apply inside nested objects and
-    # reject (or mis-read) a perfectly valid nested value
-    env.sfix.write_text(status_with('{"meta":{"a":1,"b":[1,2]},"version":"10.6.109"}'), encoding="utf-8")
-    assert_ok(env.run())
-    m = mutant(env, "net-depth", "top=1")
-    assert 'network_version="10.6.109"' not in text(env.run(script=m))
 
 
 def test_mutant_root_guard_bites(env):
@@ -752,11 +704,6 @@ def test_mutant_net_block_scope_guard_bites(env):
     assert 'network_version="7.0.14"' in text(env.run(script=m))
 
 
-def test_mutant_net_charset_guard_bites(env):
-    env.sfix.write_text(status_with('{"version":"10.6.1x9"}'), encoding="utf-8")
-    net_unknown(env.run())
-    m = mutant(env, "charset", ":")
-    assert 'network_version="unknown"' not in text(env.run(script=m))
 
 
 def test_mutant_timeout_guard_bites(env):

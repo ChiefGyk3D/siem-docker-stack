@@ -21,8 +21,9 @@
 # Success (exit 0), one line:
 #   unifi_os_version,host=<label> os_version="5.1.42",network_version="10.6.109",collected_ts=<n>i,result="ok"
 # network_version is "unknown" and result is "network_unknown" when the Network app version is missing
-# or not understood (no unifi service block, not exactly one Status line in it, not exactly one
-# top-level version member, a value that is not digits and dots). That is not an error: it is never guessed.
+# or not understood (no unifi service block, not exactly one Status line in it, a Status value that is
+# not an object whose FIRST member is "version" with a strict version string). That is not an error:
+# it is never guessed. Only that first member is read; the rest of the JSON is not validated.
 #
 # Failure (the OS version cannot be read or is not a strict version string, a time limit, a missing
 # command, a bad label, a failed write): NOTHING on stdout, a short fixed reason on stderr, exit 1.
@@ -137,8 +138,8 @@ valid_ver "$os_ver" || fail "uosserver version is not a strict version string"
 # ---------------------------------------------------------------- Network app version (never fatal)
 # From the Status line of the unifi service block only. Block headers are the first word of a line
 # (or the second, after a bullet) ending in .service. Exactly one Status line in the unifi block(s)
-# and, in that line's JSON object, exactly one TOP-LEVEL member named version holding a strict version
-# string (see top_version); anything else is "unknown". Prints one word.
+# and its value must be an object whose FIRST member is "version" with a strict version string; nothing
+# after that member is read or validated (display only). Anything else is "unknown". Prints one word.
 # A bound was hit: a fixed reason on stderr (never any status text) and an unknown Network version.
 net_cap() {
     echo "unifi-os-version-metric: $1; Network version unknown" >&2
@@ -184,179 +185,45 @@ net_version() {
         return 0
     fi
     if [ "$n_status" -ne 1 ]; then echo unknown; return 0; fi # MUTATE:net-status-count
+    # The Network version is trusted ONLY when the Status value starts with an opening brace and its
+    # FIRST member is "version" with a plain string value that passes the strict version check, directly
+    # followed by a comma or the closing brace. Nothing after that point is read or validated, and any
+    # other shape (version not first, an escaped name, a nested version, extra text before the brace)
+    # is unknown. The value is for display only: no decision depends on it.
     rest=${status_line#"Status:"}
     rest=${rest#"${rest%%[!"$ws"]*}"}
-    # Hard cap on what the walker is fed: the shell walks one character at a time, so its time grows
-    # with the square of the size. A real Status object is a few hundred bytes.
-    if [ "${#rest}" -gt 2048 ]; then net_cap "status JSON is over 2048 bytes"; return 0; fi # MUTATE:net-json-cap
-    top_version "$rest"
-}
-
-# Strict reader of one JSON object text. Prints the value of the TOP-LEVEL (depth 1) member named
-# version when there is exactly one such member and its value is a string holding a strict version;
-# otherwise prints unknown. Brackets nested inside values and string contents (with backslash escapes)
-# are tracked, so a version key in a nested object or inside a string is never taken. Any text outside
-# the one object, or an unexpected token in a member position, gives unknown.
-valid_lit() {
-    case "$1" in
-        true | false | null) return 0 ;;
-        -[0-9]* | [0-9]*) ;;
-        *) return 1 ;;
+    case "$rest" in
+        "{"*) rest=${rest#"{"} ;;
+        *) net_cap "the Status value does not start with an opening brace"; return 0 ;; # MUTATE:net-brace
     esac
-    case "$1" in *[!0-9.eE+-]*) return 1 ;; esac
-    return 0
-}
-
-top_version() {
-    js=$1
-    depth=0
-    instr=0
-    esc=0
-    uhex=0
-    cur=""
-    st=k
-    pv=0
-    nv=0
-    ver=""
-    done_obj=0
-    stack=""
-    lit=""
-    while [ -n "$js" ]; do
-        rest_js=${js#?}
-        c=${js%"$rest_js"}
-        js=$rest_js
-        top=0
-        [ "$depth" -eq 1 ] && top=1 # MUTATE:net-depth
-        if [ "$instr" -eq 1 ]; then
-            if [ "$uhex" -gt 0 ]; then
-                # four hex digits after \u
-                case "$c" in
-                    [0-9A-Fa-f]) uhex=$((uhex - 1)); cur="$cur$c" ;;
-                    *) echo unknown; return 0 ;;
-                esac
-            elif [ "$esc" -eq 1 ]; then
-                esc=0
-                case "$c" in
-                    '"' | "\\" | "/" | b | f | n | r | t) ;;
-                    u) uhex=4 ;;
-                    *) echo unknown; return 0 ;; # MUTATE:net-escape
-                esac
-                cur="$cur$c"
-            else
-                case "$c" in
-                    "\\") esc=1; cur="$cur$c" ;;
-                    '"')
-                        instr=0
-                        if [ "$top" -eq 1 ]; then
-                            case "$st" in
-                                K)
-                                    # member names are never decoded: a name with any escape is not trusted
-                                    case "$cur" in *"\\"*) net_cap "a top-level member name contains an escape"; return 0 ;; esac # MUTATE:net-key-escape
-                                    st=c
-                                    pv=0
-                                    [ "$cur" != version ] || pv=1
-                                    ;;
-                                V)
-                                    st=o
-                                    if [ "$pv" -eq 1 ]; then nv=$((nv + 1)); ver=$cur; pv=0; fi
-                                    ;;
-                            esac
-                        fi
-                        ;;
-                    [[:cntrl:]]) echo unknown; return 0 ;;
-                    *) cur="$cur$c" ;;
-                esac
-            fi
-            continue
-        fi
-        # A run of token characters outside strings (a number, true, false, null) is checked as a whole
-        # when it ends.
-        case "$c" in
-            [0-9A-Za-z+.-]) lit="$lit$c" ;;
-            *) if [ -n "$lit" ]; then valid_lit "$lit" || { echo unknown; return 0; }; lit=""; fi ;; # MUTATE:net-token
-        esac
-        case "$c" in
-            " " | "$tab" | "$cr")
-                if [ "$st" = s ]; then st=o; fi
-                continue
-                ;;
-        esac
-        if [ "$done_obj" -eq 1 ]; then echo unknown; return 0; fi
-        if [ "$depth" -eq 0 ]; then
-            if [ "$c" != "{" ]; then echo unknown; return 0; fi
-            stack="{"
-            depth=1
-            st=k
-            continue
-        fi
-        if [ "$top" -eq 1 ]; then
-            case "$st" in
-                k | m)
-                    # k: right after the opening brace (a key or the closing brace);
-                    # m: right after a comma (a key only, so no leading, doubled or trailing comma)
-                    case "$c" in
-                        '"') instr=1; cur=""; st=K; continue ;;
-                        "}") [ "$st" = k ] || { echo unknown; return 0; } ;;
-                        *) echo unknown; return 0 ;;
-                    esac
-                    ;;
-                c)
-                    if [ "$c" != ":" ]; then echo unknown; return 0; fi
-                    st=v
-                    continue
-                    ;;
-                v)
-                    case "$c" in
-                        '"') instr=1; cur=""; st=V; continue ;;
-                        "," | "}" | ":") echo unknown; return 0 ;;
-                        "{" | "[") st=o ;;
-                        *) st=s ;;
-                    esac
-                    # a value that is not a string: a version member holding one is not accepted
-                    if [ "$pv" -eq 1 ]; then nv=$((nv + 1)); ver=""; pv=0; fi
-                    ;;
-                o)
-                    # a value is complete: only a comma or the closing brace may follow
-                    case "$c" in
-                        ",") st=m; continue ;; # MUTATE:net-comma
-                        "}") ;;
-                        *) echo unknown; return 0 ;;
-                    esac
-                    ;;
-                s)
-                    # inside a number, true, false or null
-                    case "$c" in
-                        ",") st=m; continue ;;
-                        "}" | [0-9A-Za-z+.-]) ;;
-                        *) echo unknown; return 0 ;;
-                    esac
-                    ;;
-            esac
-        fi
-        case "$c" in
-            "{" | "[")
-                stack="$stack$c"
-                depth=${#stack}
-                ;;
-            "}" | "]")
-                if [ -z "$stack" ]; then echo unknown; return 0; fi
-                open=${stack#"${stack%?}"}
-                stack=${stack%?}
-                depth=${#stack}
-                case "$c$open" in
-                    "}{" | "][") ;;
-                    *) echo unknown; return 0 ;; # MUTATE:net-bracket-type
-                esac
-                if [ "$depth" -eq 0 ]; then done_obj=1; fi
-                ;;
-            '"') instr=1; cur="" ;;
-            [0-9A-Za-z+.-] | ":" | ",") ;;
-            *) echo unknown; return 0 ;;
-        esac
-    done
-    if [ "$done_obj" -ne 1 ] || [ "$instr" -ne 0 ] || [ "$depth" -ne 0 ]; then echo unknown; return 0; fi
-    if [ "$nv" -ne 1 ]; then echo unknown; return 0; fi # MUTATE:net-version-count
-    if valid_ver "$ver"; then echo "$ver"; else echo unknown; fi
+    rest=${rest#"${rest%%[!"$ws"]*}"}
+    case "$rest" in
+        '"version"'*) rest=${rest#'"version"'} ;;
+        *) net_cap "the first member of the Status object is not version"; return 0 ;; # MUTATE:net-first
+    esac
+    rest=${rest#"${rest%%[!"$ws"]*}"}
+    case "$rest" in
+        ":"*) rest=${rest#:} ;;
+        *) net_cap "no colon after the version name"; return 0 ;;
+    esac
+    rest=${rest#"${rest%%[!"$ws"]*}"}
+    case "$rest" in
+        '"'*) rest=${rest#'"'} ;;
+        *) net_cap "the version value is not a string"; return 0 ;;
+    esac
+    case "$rest" in
+        *'"'*)
+            v=${rest%%'"'*}
+            rest=${rest#*'"'}
+            ;;
+        *) net_cap "the version string is not closed"; return 0 ;;
+    esac
+    if ! valid_ver "$v"; then net_cap "the version value is not a strict version"; return 0; fi
+    case "$rest" in
+        "," | ","* | "}" | "}"*) ;;
+        *) net_cap "the version member is not followed by a comma or a closing brace"; return 0 ;; # MUTATE:net-delim
+    esac
+    echo "$v"
 }
 
 # A failed or hung status command, an oversized output or a missing marker all mean "unknown".

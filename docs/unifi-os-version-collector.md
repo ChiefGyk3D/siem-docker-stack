@@ -27,23 +27,26 @@ fails or reports `unknown` in time:
 - `uosserver version` prints one line, the version (for example `5.1.42`). Only a strict string is
   accepted: digits and dots, starting and ending with a digit, no empty component, at most 32
   characters. Output is cut at 128 bytes while it is read. Anything else fails the run.
-- `uosserver status` is read **only** for the top-level `version` member of the JSON object on the
-  Status line of the `unifi.service` block (the Network app version, for example `10.6.109`). Work is bounded in size and time: output is
-  cut at 1 MiB and 20000 lines, a single line over 8192 bytes and a Status JSON over 2048 bytes are
-  not parsed (the shell walks the JSON one character at a time, so time grows with the square of its
-  size; a real Status object is a few hundred bytes). Hitting any of these bounds gives
-  `network_version="unknown"` and a fixed reason on stderr, never any status text. The accepted
-  limit: a legitimately longer status output (the unifi block past the first 1 MiB or 20000 lines)
-  also gives `unknown`; the real output is a few KB, and bounded work wins over completeness here.
-  The 8192-byte line check runs after the shell has read the line, so what really bounds a single
-  line's cost is the 1 MiB read cap (the line is already inside that bounded buffer); the line check
-  only keeps the later per-line work small. The whole Status object must be well formed JSON as the
-  walker reads it: matching `{}` and `[]`, a colon after every name, a value after every colon, no
-  leading, doubled or trailing comma, valid string escapes, no control character in a string, numbers
-  and `true`/`false`/`null` as values, and any of the four JSON whitespace characters between tokens.
-  Member names are never decoded: if **any top-level member name contains an escape** (a backslash),
-  the object is not trusted and the result is `unknown` with a fixed reason, so an escaped spelling of
-  `version` can never hide a duplicate. Nothing else in that output is parsed, stored or printed.
+- `uosserver status` is read **only** for the `version` of the Status line of the `unifi.service`
+  block (the Network app version, for example `10.6.109`). The collector is **not a JSON parser**. It
+  trusts exactly one shape: after `Status:` comes an opening brace, optional spaces, then the
+  **first member**, named `version` with a plain string value that passes the strict version check
+  above, directly followed by a comma or the closing brace. For example
+  `Status: {"version":"10.6.109",...}`. Anything else (the version is not the first member, a nested
+  `version`, an escaped name, an escape in the value, extra text before the brace, a value that is not
+  a string, a missing delimiter) gives `network_version="unknown"` and a fixed reason on stderr.
+  **Everything after that first member is not read and not validated**: the rest of the object may be
+  malformed and the Network version is still reported. That is enough because the value is for display
+  only (the digest line, with the reminder to check for updates in the UI): no alert, decision or
+  other metric depends on it, and the value itself is checked as strictly as the OS version. The cost
+  is that a vendor release that reorders the members shows `unknown` until this rule is revisited.
+  An earlier hand-written JSON walker was removed because every review round found another gap in it.
+  Work is bounded in size: output is cut at 1 MiB and 20000 lines; a line over 8192 bytes is not
+  looked at (that check runs after the shell has read the line, so what really bounds one line's
+  cost is the 1 MiB read cap; the line check only keeps the later per-line work small); hitting a
+  bound gives `unknown` and a fixed reason on stderr, never any status text. The accepted limit: a
+  legitimately longer status output (the unifi block past the first 1 MiB or 20000 lines) also gives
+  `unknown`. Nothing else in that output is parsed, stored or printed.
 
 plus `id`, `date`, `head`, `tr`, `timeout` and `env`. No sudo, no network, no write to disk.
 
@@ -76,10 +79,9 @@ unifi_os_version,host=pi-example os_version="5.1.42",network_version="10.6.109",
 - `result="ok"`: both versions were read.
 - `result="network_unknown"` with `network_version="unknown"`: the OS version was read but the
   Network app version was not. This is **not an error** and the exit code is 0. It is the answer when
-  there is no `unifi.service` block, not exactly one `Status:` line in it, not exactly one top-level
-  `version` member in that line's JSON object (a `version` in a nested object, an array or a string
-  value is never taken), a value that is not digits and dots, the status command failed or
-  timed out, or its output was too large. The Network version is never guessed.
+  there is no `unifi.service` block, not exactly one `Status:` line in it, the Status value is not an
+  object whose first member is `version` with a strict version string (see above), the status
+  command failed or timed out, or its output was too large. The Network version is never guessed.
 
 ## Failure
 
@@ -153,7 +155,10 @@ Verified: `uosserver version` prints one line with the version, and the Network 
 bound and a clean-mutant revert proof per guard are in `tests/python/test_unifi_os_version_metric.py`,
 with fake binaries.
 
-Not verified: the exact layout of the `uosserver status` blocks. The parser treats a block header as
+Not verified in this repo: that `version` is the first member of that object on every vendor release
+(the rule was chosen to match the real output; if the order differs the dry run shows
+`network_version="unknown"`, never a wrong value). Also not verified: the exact layout of the
+`uosserver status` blocks. The parser treats a block header as
 the first word of a line (the second after a bullet) ending in `.service`, which is an assumption;
 a different layout gives `unknown`, never a wrong version. Also not verified: the absolute path of
 `uosserver`, and that the CLI works under the fixed environment (it may need variables such as
