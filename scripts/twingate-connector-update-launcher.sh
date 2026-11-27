@@ -13,17 +13,31 @@ umask 077
 TRUSTED_UID=0
 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export PATH
+# Every external program is run by a fixed absolute path; the launcher itself
+# never resolves a command through PATH (PATH is only handed to the updater).
+# On Debian 13 and Ubuntu 24.04 /usr/bin holds all of them (/bin is a link to it).
+ID=/usr/bin/id
+DIRNAME=/usr/bin/dirname
+FIND=/usr/bin/find
+LS=/usr/bin/ls
+GETFACL=/usr/bin/getfacl
+HEAD=/usr/bin/head
+WC=/usr/bin/wc
+OD=/usr/bin/od
+TR=/usr/bin/tr
+ENV=/usr/bin/env
+SH=/usr/bin/sh
 UPDATER="/usr/local/libexec/twingate-connector-update/twingate-connector-update.sh"
 NL='
 '
 WHY=""
 case "$0" in /*) ;; *) WHY="run this launcher by its absolute installed path" ;; esac
-if [ -z "$WHY" ] && [ "$(id -u)" != "$TRUSTED_UID" ]; then WHY="it must be run as root (use sudo)"; fi
+if [ -z "$WHY" ] && [ "$("$ID" -u)" != "$TRUSTED_UID" ]; then WHY="it must be run as root (use sudo)"; fi
 if [ -z "$WHY" ]; then
     if [ -f "$UPDATER" ] && [ ! -L "$UPDATER" ] && [ -r "$UPDATER" ]; then exec 4<"$UPDATER"; else WHY="the updater is missing, not a regular file, or is a symbolic link"; fi
 fi
 if [ -z "$WHY" ]; then
-    DIR=$(cd "$(dirname -- "$UPDATER")" 2>/dev/null && pwd -P) || DIR=""
+    DIR=$(cd "$("$DIRNAME" -- "$UPDATER")" 2>/dev/null && pwd -P) || DIR=""
     if [ "$DIR/${UPDATER##*/}" != "$UPDATER" ]; then WHY="the updater path is not canonical (a directory in it is a symbolic link)"; fi
 fi
 # The updater and EVERY directory above it, up to /: owned by root, not group-
@@ -32,16 +46,16 @@ fi
 # entry). Anything that cannot be read counts as untrusted.
 p="$UPDATER"
 while [ -z "$WHY" ]; do
-    if [ -z "$(find "$p" -maxdepth 0 -user "$TRUSTED_UID" ! -perm /022 2>/dev/null)" ]; then
+    if [ -z "$("$FIND" "$p" -maxdepth 0 -user "$TRUSTED_UID" ! -perm /022 2>/dev/null)" ]; then
         WHY="the updater or one of its parent directories is not owned by root or is group- or world-writable"; break
     fi
     ACL=1
-    L=$(ls -ldn -- "$p" 2>/dev/null) || L=""
+    L=$("$LS" -ldn -- "$p" 2>/dev/null) || L=""
     case "$L" in
         [-d]?????????" "*|[-d]?????????.*) ACL=0 ;;
     esac
-    if [ "$ACL" = 0 ] && command -v getfacl >/dev/null 2>&1; then
-        X=$(getfacl -p -c -- "$p" 2>/dev/null) || ACL=1
+    if [ "$ACL" = 0 ] && [ -x "$GETFACL" ]; then
+        X=$("$GETFACL" -p -c -- "$p" 2>/dev/null) || ACL=1
         NU=0; NG=0; NO=0
         while [ "$ACL" = 0 ] && IFS= read -r LN; do
             case "$LN" in
@@ -65,18 +79,21 @@ EOF_ACL
 done
 if [ -n "$WHY" ]; then printf 'refused: %s\n' "$WHY" >&2; exit 2; fi
 # Read the text ONCE from the open descriptor; the path is not reopened.
-TEXT=$(cat <&4) || { printf 'refused: cannot read the updater\n' >&2; exit 2; }
+# At most 100001 bytes are ever read (a bounded read, then a sentinel so that
+# trailing newlines are counted); 100000 or more is refused.
+RAW=$({ "$HEAD" -c 100001 <&4 || exit 1; printf x; }) || { printf 'refused: cannot read the updater\n' >&2; exit 2; }
 exec 4<&-
-if ! { [ -n "$TEXT" ] && [ "$(printf '%s' "$TEXT" | wc -c)" -lt 100000 ]; }; then printf 'refused: the updater is empty or too large\n' >&2; exit 2; fi
+TEXT=${RAW%x}
+if ! { [ -n "$TEXT" ] && [ "$(printf '%s' "$TEXT" | "$WC" -c)" -lt 100000 ]; }; then printf 'refused: the updater is empty or too large\n' >&2; exit 2; fi
 for v in "${TWINGATE_API_KEY:-}" "${TWINGATE_NETWORK_URL:-}" "${TWINGATE_UPDATE_WAIT_SECS:-}" \
     "${TWINGATE_UPDATE_POLL_SECS:-}" "${NOTIFY_WEBHOOK_URL:-}" "${NOTIFY_WEBHOOK_ALLOWED_HOSTS:-}" "${HOST_LABEL:-}"; do
     case "$v" in *"$NL"*) printf 'refused: an input variable contains a newline\n' >&2; exit 2 ;; esac
 done
-TOKEN=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n') || TOKEN=""
+TOKEN=$("$OD" -An -N16 -tx1 /dev/urandom 2>/dev/null | "$TR" -d ' \n') || TOKEN=""
 case "$TOKEN" in ''|*[!0-9a-f]*) printf 'refused: cannot create a run token\n' >&2; exit 2 ;; esac
 # Only the documented inputs are carried over, on fd 3 (never argv).
-exec env -i PATH="$PATH" LC_ALL=C LANG=C TWINGATE_UPDATE_CLEAN_ENV=1 \
-    TWINGATE_UPDATE_RUN_TOKEN="$TOKEN" sh -c "$TEXT" "$UPDATER" "$@" 3<<EOF
+exec "$ENV" -i PATH="$PATH" LC_ALL=C LANG=C TWINGATE_UPDATE_CLEAN_ENV=1 \
+    TWINGATE_UPDATE_RUN_TOKEN="$TOKEN" "$SH" -c "$TEXT" "$UPDATER" "$@" 3<<EOF
 TWINGATE_API_KEY=${TWINGATE_API_KEY:-}
 TWINGATE_NETWORK_URL=${TWINGATE_NETWORK_URL:-}
 TWINGATE_UPDATE_WAIT_SECS=${TWINGATE_UPDATE_WAIT_SECS:-}

@@ -51,8 +51,9 @@ The launcher refuses (fixed message, exit code 2) unless ALL of these hold:
   checked.
 
 So EVERY invocation from a path that fails it is refused, before one byte of
-the updater has run. The launcher opens the updater ONCE and reads its text (at
-most 100000 bytes) from that open file descriptor, then runs that text with
+the updater has run. The launcher opens the updater ONCE and reads its text from that open file
+descriptor with a bounded read (`head -c 100001`: never more than 100001 bytes
+are read, and 100000 or more is refused), then runs that text with
 `env -i` and `sh -c`; the path is never opened again (not for the restart, not
 for `--help`), so a file swapped after the check is never executed. The
 updater and its directories can only be changed by root, so the remaining
@@ -80,7 +81,10 @@ sudo /usr/local/sbin/twingate-connector-update --yes --force <connector-name>  #
 `<connector-name>` is the container name (letters, digits, `_`, `.`, `-`; max 63).
 Needs `docker` and `jq` on the host. Every run, `--dry-run` and `--help`
 included, goes through the launcher and needs root; any other user is refused
-with a clear message. `PATH` is fixed
+with a clear message. The launcher runs every program it needs (`id`, `dirname`, `find`, `ls`,
+`getfacl`, `head`, `wc`, `od`, `tr`, `env`, `sh`) by a fixed absolute path under
+`/usr/bin` (the real location on Debian 13 and Ubuntu 24.04, where `/bin` is a
+link to it), never through `PATH`. `PATH` for the updater is fixed
 to the system directories
 (`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`); the inherited
 `PATH`, `TMPDIR` and `XDG_RUNTIME_DIR` are never used, and there is no environment variable that changes which programs run. Only one
@@ -256,7 +260,7 @@ environment; one fake `docker` also parses the env file with a conservative mode
 of the env-file grammar and the tests compare the result with `Config.Env`); nothing
 touches a real engine. The shipped scripts have no test seam: the test harness
 writes a test-only copy of the updater in which exactly four fixed lines (`PATH`,
-`LOCK_BASE`, `RUN_BASE`, `TRUSTED_UID`) point at the fakes, at scratch directories and at the test user (the tests do not run as root), and a test-only copy of the launcher in which exactly three lines (`PATH`, `TRUSTED_UID`, `UPDATER`) do; tests check that each copy differs from the shipped file in those lines only. The launcher tests put a marker on the very first line of the updater and prove it never runs when the path is refused. The shellcheck test fails (never skips) in CI when
+`LOCK_BASE`, `RUN_BASE`, `TRUSTED_UID`) point at the fakes, at scratch directories and at the test user (the tests do not run as root), and a test-only copy of the launcher in which exactly six lines (`PATH`, `TRUSTED_UID`, `UPDATER` and the absolute paths of the fake `find`, `ls` and `getfacl`) do; tests check that each copy differs from the shipped file in those lines only. The launcher tests put a marker on the very first line of the updater and prove it never runs when the path is refused. The shellcheck test fails (never skips) in CI when
 shellcheck is missing and falls back to `sh -n` locally.
 
 ## Confirming the layout on a real host

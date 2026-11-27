@@ -236,7 +236,7 @@ def make_test_copy(dest, bin_dir, lock_base, run_base):
 
 def make_launcher_copy(dest, bin_dir, updater):
     """Test-only copy of the launcher: PATH, TRUSTED_UID and UPDATER are rewritten."""
-    out, hits = [], {"path": 0, "uid": 0, "updater": 0}
+    out, hits = [], {"path": 0, "uid": 0, "updater": 0, "find": 0, "ls": 0, "getfacl": 0}
     for line in LAUNCHER.read_text().splitlines(keepends=True):
         if line.rstrip("\n") == PATH_LINE:
             line = f'PATH="{bin_dir}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n'
@@ -247,8 +247,13 @@ def make_launcher_copy(dest, bin_dir, updater):
         elif line.startswith("UPDATER="):
             line = f'UPDATER="{updater}"\n'
             hits["updater"] += 1
+        elif line.rstrip("\n") in ("FIND=/usr/bin/find", "LS=/usr/bin/ls", "GETFACL=/usr/bin/getfacl"):
+            # the fakes in the test bin directory, by absolute path (never found through PATH)
+            name = line.split("=")[0].lower()
+            line = f"{name.upper()}={bin_dir}/{name}\n"
+            hits[name] += 1
         out.append(line)
-    assert hits == {"path": 1, "uid": 1, "updater": 1}, hits
+    assert hits == {"path": 1, "uid": 1, "updater": 1, "find": 1, "ls": 1, "getfacl": 1}, hits
     dest.write_text("".join(out))
     return dest
 
@@ -441,11 +446,12 @@ def test_test_copy_differs_from_the_shipped_script_in_four_lines_only(env):
     b = env.script.read_text().splitlines()
     assert len(a) == len(b)
     assert len([1 for x, y in zip(a, b) if x != y]) == 4
-    # the launcher copy differs in three lines only: PATH, TRUSTED_UID, UPDATER
+    # the launcher copy differs in six lines only: PATH, TRUSTED_UID, UPDATER and
+    # the absolute paths of the three fakes (FIND, LS, GETFACL)
     a = LAUNCHER.read_text().splitlines()
     b = env.launcher.read_text().splitlines()
     assert len(a) == len(b)
-    assert len([1 for x, y in zip(a, b) if x != y]) == 3
+    assert len([1 for x, y in zip(a, b) if x != y]) == 6
 
 
 # --- finding 5: layout allowlist ----------------------------------------------
@@ -1829,7 +1835,7 @@ def make_race_copy(env, hook):
     """A mutant of the launcher copy: `hook` runs right before the clean exec."""
     out, n = [], 0
     for line in env.launcher.read_text().splitlines(keepends=True):
-        if line.startswith("exec env -i "):
+        if line.startswith('exec "$ENV" -i '):
             out.append(hook + "\n")
             n += 1
         out.append(line)
@@ -2027,7 +2033,7 @@ def test_the_launcher_defines_no_functions_and_checks_come_first():
             break
         head.append(l)
     # only fixed assignments and umask/export before the first check
-    assert all(re.match(r"(umask 077|TRUSTED_UID=0|PATH=|export PATH|UPDATER=|NL=|'$)", l) for l in head), head
+    assert all(re.match(r"(umask 077|TRUSTED_UID=0|PATH=|export PATH|UPDATER=|NL=|[A-Z]+=/usr/bin/[a-z]+$|'$)", l) for l in head), head
     assert len(code) < 100
 
 
@@ -2345,3 +2351,169 @@ def test_an_unreadable_or_empty_mount_table_refuses_the_removal(env):
     assert (rd / "docker-config" / "keep").exists()
     assert "cannot check whether" in r.stderr
     assert changed(env) == []
+
+
+# --- round 9 (Daybreak round 8): no command is found through PATH; bounded read -----
+CMD_CONSTANTS = {"ID": "id", "DIRNAME": "dirname", "FIND": "find", "LS": "ls", "GETFACL": "getfacl",
+                 "HEAD": "head", "WC": "wc", "OD": "od", "TR": "tr", "ENV": "env", "SH": "sh"}
+
+
+def test_the_shipped_launcher_names_every_command_by_a_fixed_absolute_path():
+    text = LAUNCHER.read_text()
+    for var, name in CMD_CONSTANTS.items():
+        assert re.search(rf"^{var}=/usr/bin/{name}$", text, re.M), var
+    # the constants are the only way a command is run: no bare name at a command position
+    code = [l for l in text.splitlines() if l.strip() and not l.lstrip().startswith("#")]
+    body = "\n".join(l for l in code if not re.match(r"[A-Z]+=/usr/bin/", l))
+    assert not re.search(r"(^|[|;&(`]|\$\(|\{)\s*(" + "|".join(CMD_CONSTANTS.values()) + r"|cat|dd|command|sleep|grep|sed)\s", body, re.M), body
+
+
+def _probe_copy(env, shims, mutate=None):
+    """Launcher copy for the command-resolution tests: every command constant points
+    at a shim in `shims` (a dict VAR -> path); `mutate` names one VAR whose uses go
+    back to the bare command name."""
+    out, seen = [], set()
+    for line in LAUNCHER.read_text().splitlines(keepends=True):
+        s = line.rstrip("\n")
+        m = re.match(r"([A-Z]+)=/usr/bin/[a-z]+$", s)
+        if m and m.group(1) in CMD_CONSTANTS:
+            var = m.group(1)
+            seen.add(var)
+            line = f"{var}={shims[var]}\n"
+        elif s == PATH_LINE:
+            line = f'PATH="{env.trap}:/usr/bin:/bin"\n'
+        elif s == "TRUSTED_UID=0":
+            line = f"TRUSTED_UID={os.getuid()}\n"
+        elif s.startswith("UPDATER="):
+            line = f'UPDATER="{env.probe_updater}"\n'
+        out.append(line)
+    assert seen == set(CMD_CONSTANTS)
+    text = "".join(out)
+    if mutate:
+        old = '$("$GETFACL" -p' if mutate == "GETFACL" else f'"${mutate}"'
+        new = "$(getfacl -p" if mutate == "GETFACL" else CMD_CONSTANTS[mutate]
+        assert old in text
+        text = text.replace(old, new)
+    dest = env.root / "launcher-probe.sh"
+    dest.write_text(text)
+    return dest
+
+
+@pytest.fixture
+def probe(env):
+    trap = env.root / "trap"
+    trap.mkdir()
+    marks = env.root / "marks"
+    marks.mkdir()
+    env.trap = trap
+    # a fake of EVERY command name, first in PATH, each recording a marker
+    for n in list(CMD_CONSTANTS.values()) + ["cat", "dd", "grep", "sed", "sleep", "printf"]:
+        f = trap / n
+        f.write_text(f'#!/bin/sh\n: >"{marks}/path-{n}"\nexit 99\n')
+        f.chmod(0o755)
+    # shims by ABSOLUTE path: record the use, then run the real program
+    shims = {}
+    shimdir = env.root / "shims"
+    shimdir.mkdir()
+    for var, n in CMD_CONSTANTS.items():
+        f = shimdir / n
+        if n == "find":
+            body = f'printf "%s\\n" "$1"'   # the test tree is not root-owned: answer "trusted"
+        elif n == "getfacl":
+            body = "printf 'user::rwx\\ngroup::r-x\\nother::r-x\\n'"
+        else:
+            body = f'exec /usr/bin/{n} "$@"'
+        f.write_text(f'#!/bin/sh\n: >"{marks}/abs-{n}"\n{body}\n')
+        f.chmod(0o755)
+        shims[var] = str(f)
+    env.probe_updater = env.root / "probe-updater.sh"
+    env.probe_updater.write_text(f'#!/bin/sh\n: >"{marks}/updater-ran"\nexit 0\n')
+    env.probe_updater.chmod(0o600)
+    env.marks = marks
+    env.shims = shims
+    return env
+
+
+def _run_probe(env, copy):
+    return subprocess.run(["/usr/bin/sh", str(copy), "--dry-run", NAME], capture_output=True, text=True,
+                          env={"PATH": f"{env.trap}:/usr/bin:/bin", "HOME": str(env.root)},
+                          cwd=str(env.root), timeout=60)
+
+
+def test_the_launcher_never_resolves_a_command_through_path(probe):
+    r = _run_probe(probe, _probe_copy(probe, probe.shims))
+    assert r.returncode == 0, r.stderr
+    assert (probe.marks / "updater-ran").exists()
+    assert sorted(m.name for m in probe.marks.iterdir() if m.name.startswith("path-")) == []
+
+
+def test_an_executable_at_the_absolute_path_is_the_one_used(probe):
+    r = _run_probe(probe, _probe_copy(probe, probe.shims))
+    assert r.returncode == 0, r.stderr
+    used = {m.name[4:] for m in probe.marks.iterdir() if m.name.startswith("abs-")}
+    assert used == set(CMD_CONSTANTS.values()), used
+
+
+@pytest.mark.parametrize("var", sorted(CMD_CONSTANTS))
+def test_a_bare_command_name_is_found_through_path_and_the_probe_catches_it(probe, var):
+    # mutant: this one command goes back to a bare name, which PATH resolves to the trap
+    name = CMD_CONSTANTS[var]
+    r = _run_probe(probe, _probe_copy(probe, probe.shims, mutate=var))
+    assert (probe.marks / f"path-{name}").exists(), (var, r.returncode, r.stderr)
+
+
+def test_the_updater_is_handed_the_launchers_fixed_path(probe):
+    probe.probe_updater.write_text(f'#!/bin/sh\nprintf "%s" "$PATH" >"{probe.marks}/updater-path"\nexit 0\n')
+    r = _run_probe(probe, _probe_copy(probe, probe.shims))
+    assert r.returncode == 0, r.stderr
+    assert (probe.marks / "updater-path").read_text() == f"{probe.trap}:/usr/bin:/bin"
+    assert f'PATH="{PATH_VALUE}"' in LAUNCHER.read_text()
+
+
+PATH_VALUE = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+def _bounded_read_copy(env, text=None):
+    """Launcher copy whose HEAD is a recorder: it logs the arguments, keeps the bytes
+    the real head produced and passes them on. The updater is a 5 MB regular file."""
+    rec = env.root / "head-recorder"
+    rec.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >>"{env.d}/head.args"\n'
+                   f'/usr/bin/head "$@" >"{env.d}/head.out"; st=$?\n/usr/bin/cat "{env.d}/head.out"\nexit $st\n')
+    rec.chmod(0o755)
+    t = env.launcher.read_text()
+    assert t.count("HEAD=/usr/bin/head\n") == 1
+    t = t.replace("HEAD=/usr/bin/head\n", f"HEAD={rec}\n")
+    if text:
+        t = text(t)
+    copy = env.root / "launcher-bounded.sh"
+    copy.write_text(t)
+    env.script.write_text("#!/bin/sh\n" + "#" * (5 * 1024 * 1024) + "\n")
+    return copy
+
+
+def _run_copy(env, copy):
+    return subprocess.run(["sh", str(copy), "--dry-run", NAME], capture_output=True, text=True,
+                          env=env.environ(), cwd=str(env.root), timeout=60)
+
+
+def test_a_huge_updater_is_read_with_a_bounded_read_of_the_cap_plus_one(env):
+    r = _run_copy(env, _bounded_read_copy(env))
+    assert r.returncode == 2 and "empty or too large" in r.stderr, r.stderr
+    assert (env.d / "head.args").read_text().split() == ["-c", "100001"]
+    assert (env.d / "head.out").stat().st_size == 100001  # never more than the cap plus one byte
+    assert env.log() == []
+
+
+def test_without_the_bound_the_recorder_sees_the_whole_file(env):
+    # the mutant: the byte limit is removed from the reader, the same test goes red
+    r = _run_copy(env, _bounded_read_copy(env, lambda t: t.replace('"$HEAD" -c 100001', '"$HEAD" -c 100000000')))
+    assert r.returncode == 2
+    assert (env.d / "head.args").read_text().split() == ["-c", "100000000"]
+    assert (env.d / "head.out").stat().st_size > 100001
+
+
+def test_a_file_that_ends_in_many_newlines_after_the_cap_is_still_refused(env):
+    # trailing newlines are dropped by command substitution; the sentinel keeps them counted
+    env.script.write_text("#!/bin/sh\nexit 0\n" + "\n" * 100010)
+    r = _run_copy(env, env.launcher)
+    assert r.returncode == 2 and "empty or too large" in r.stderr
