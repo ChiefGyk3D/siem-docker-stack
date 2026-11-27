@@ -97,8 +97,14 @@ the n8n container without that volume loses all of them:
 Details that were learned live:
 
 - Credentials import takes plain data and n8n encrypts it. The script sends it
-  over stdin to `n8n import:credentials` inside the container, so no file with
-  a value stays on the host.
+  over stdin to the container, so no file with a value stays on the host. Inside
+  the container the n8n command line needs a file (its documented form is
+  `--input=<file>`; no stdin form is documented, n8n docs "CLI commands", read
+  2026-11-26), so the script writes it into a private directory made by
+  `mktemp -d` (mode 700, random name) with `umask 077` (file mode 600 from
+  creation) and removes both in a shell `trap` on exit or signal. The n8n output
+  is discarded in the container and never printed: the script reports only the
+  exit code, so no error path can show a token.
 - Workflow import needs an `id`. The script makes a fresh 16-hex id, or reuses
   the one you pass as the second argument so a re-run overwrites the earlier
   import (import overwrites by id).
@@ -123,7 +129,23 @@ Details that were learned live:
   Every needed value and every credential id (8 to 32 letters or digits, all different) is checked
   before n8n is changed, so a bad value leaves nothing half done. The token loses surrounding
   whitespace; an empty or multi-line token stops the run. After the import, set the credential's
-  **Allowed HTTP Request Domains** to the Grafana host only (see docs/update-digest.md).
+  **Allowed HTTP Request Domains** to the Grafana host only (see docs/update-digest.md). This step
+  is required: an import file cannot lock the credential to a host, so until it is done the Viewer
+  token goes to whatever `https` host `GRAFANA_BASE_URL` names. The script prints a reminder after a
+  successful import and cannot check the setting itself.
+
+  **Grafana Viewer credential: post-import check.** Do this before activating the digest workflow:
+  1. In the n8n editor open `grafana-viewer-auth` and confirm **Allowed HTTP Request Domains** is
+     set to Specific Domains with only the Grafana host (no wildcard, no other host).
+  2. In the n8n container confirm the base URL names that same host (value is not a secret; print
+     only that line): `docker exec n8n printenv GRAFANA_BASE_URL`.
+  3. Run the three query nodes once by hand (Execute step). All three must answer HTTP 200.
+  4. Negative check, only with a scratch credential that has the same domain setting but a dummy
+     token (never the real Viewer token) and a scratch copy of the workflow: point its base URL at a
+     host you control that is not on the list; n8n must refuse the request. If the request arrives,
+     the restriction is not in effect: stop and fix the credential before going on.
+  Not verified: whether the domain restriction applies to a Custom Auth credential, and whether n8n
+  reports the refusal as an error (check 4 shows both on your install).
 - `--digest-workflow n8n/weekly-update-digest.json [ID] [--error-workflow-id HANDLER_ID]`
   imports the weekly digest inactive and maps its Discord and `matrix-bot-auth`
   credential ids. Import the error handler first and pass its id, as for the

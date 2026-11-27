@@ -167,6 +167,33 @@ def docker_in(script, payload):
     return proc.returncode, lines
 
 
+# Secret-bearing imports. The plaintext JSON arrives over stdin and is written inside the container
+# into a private directory (mktemp -d is mode 700, umask 077 makes the file mode 600 from creation)
+# with an unpredictable name; the trap removes both on exit or on a signal. The n8n CLI is documented
+# with --input=<file> only (no stdin form), so a file is used. The n8n output is thrown away inside the
+# container and never printed here: it is not needed to judge success (the exit code is), and a CLI
+# error could echo its input.
+CRED_IMPORT_SCRIPT = (
+    "umask 077; d=$(mktemp -d /tmp/n8n-cred.XXXXXXXXXX) || exit 70; "
+    "trap 'rm -f \"$d/c.json\"; rmdir \"$d\"' EXIT HUP INT TERM; "
+    "cat > \"$d/c.json\" && n8n import:credentials --input=\"$d/c.json\" >/dev/null 2>&1"
+)
+
+VIEWER_REMINDER = (
+    "REQUIRED NEXT STEP: an import file cannot lock a credential to a host. In the n8n editor open\n"
+    "credential grafana-viewer-auth and set Allowed HTTP Request Domains to the Grafana host only,\n"
+    "then run the post-import check in docs/live-deploy-runbook.md. Until then the Viewer token can be\n"
+    "sent to any https host that GRAFANA_BASE_URL names."
+)
+
+
+def import_credential_records(records):
+    """Import credential records through the private-file script. Returns only the exit code: child
+    output is never shown, so no error path can print the token or the credential JSON."""
+    rc, _hidden = docker_in(CRED_IMPORT_SCRIPT, json.dumps(records))
+    return rc
+
+
 def docker_out(*args):
     proc = engine_run(list(args))
     return proc.returncode, proc.stdout.decode(errors="replace").strip()
@@ -444,10 +471,7 @@ def check(with_matrix=False, with_viewer=False):
 def credentials():
     creds = build_credentials(need("GRAFANA_WEBHOOK_SECRET"), need("PUSHOVER_API_KEY"),
                               need("PUSHOVER_USER_KEY"))
-    script = "cat > /tmp/cred.json && n8n import:credentials --input=/tmp/cred.json; rc=$?; rm -f /tmp/cred.json; exit $rc"
-    rc, lines = docker_in(script, json.dumps(creds))
-    for ln in lines[:6]:
-        print(ln[:160])
+    rc = import_credential_records(creds)
     print("credentials import exit code:", rc)
     return rc
 
@@ -455,10 +479,7 @@ def credentials():
 def matrix_credentials():
     """Create only matrix-bot-auth. The token is read from the environment and sent over stdin."""
     cred = build_matrix_credential(bearer_token("MATRIX_BOT_TOKEN"))
-    script = "cat > /tmp/cred.json && n8n import:credentials --input=/tmp/cred.json; rc=$?; rm -f /tmp/cred.json; exit $rc"
-    rc, lines = docker_in(script, json.dumps([cred]))
-    for ln in lines[:6]:
-        print(ln[:160])
+    rc = import_credential_records([cred])
     print("matrix credential import exit code:", rc)
     return rc
 
@@ -467,11 +488,10 @@ def grafana_viewer_credentials():
     """Create only grafana-viewer-auth. The token is read from the environment and sent over stdin."""
     check_credential_ids()
     cred = build_grafana_viewer_credential(bearer_token("GRAFANA_VIEWER_TOKEN"))
-    script = "cat > /tmp/cred.json && n8n import:credentials --input=/tmp/cred.json; rc=$?; rm -f /tmp/cred.json; exit $rc"
-    rc, lines = docker_in(script, json.dumps([cred]))
-    for ln in lines[:6]:
-        print(ln[:160])
+    rc = import_credential_records([cred])
     print("grafana viewer credential import exit code:", rc)
+    if rc == 0:
+        print(VIEWER_REMINDER)
     return rc
 
 

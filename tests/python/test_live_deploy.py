@@ -701,3 +701,163 @@ def test_viewer_credential_id_equal_to_another_credential_is_refused(setup, monk
     with pytest.raises(SystemExit):
         setup.grafana_viewer_credentials()
     assert calls == []
+
+
+# --- issue #202 fix round 2: no secret on any error path, private credential file, host reminder ---------
+
+CANARY = "CANARYTOKEN-9f3a7c51d2"
+IMPORTERS = [("credentials", "credentials import exit code:"),
+             ("matrix_credentials", "matrix credential import exit code:"),
+             ("grafana_viewer_credentials", "grafana viewer credential import exit code:")]
+
+
+def _canary_env(monkeypatch):
+    _env(monkeypatch, GRAFANA_WEBHOOK_SECRET=CANARY + "-w", PUSHOVER_API_KEY=CANARY + "-p",
+         PUSHOVER_USER_KEY=CANARY + "-u", MATRIX_BOT_TOKEN=CANARY + "-m", GRAFANA_VIEWER_TOKEN=CANARY + "-v")
+
+
+class _Proc:
+    def __init__(self, rc, out, err):
+        self.returncode, self.stdout, self.stderr = rc, out, err
+
+
+@pytest.mark.parametrize("fn,status_line", IMPORTERS)
+@pytest.mark.parametrize("rc", [0, 1, 127])
+def test_credential_import_never_prints_child_output(setup, monkeypatch, capsys, fn, status_line, rc):  # GUARD
+    """The container runner returns the payload on both streams (what a failing CLI could do): nothing of it is shown."""
+    _canary_env(monkeypatch)
+    echoed = []
+
+    def fake_engine_run(args, **kwargs):
+        echoed.append(kwargs["input"])
+        return _Proc(rc, kwargs["input"], kwargs["input"] + b"\nError: " + kwargs["input"])
+
+    monkeypatch.setattr(setup, "engine_run", fake_engine_run)
+    assert getattr(setup, fn)() == rc
+    seen = capsys.readouterr()
+    assert echoed and CANARY.encode() in echoed[0], "the fake really did see the token"
+    assert CANARY not in seen.out and CANARY not in seen.err
+    assert status_line in seen.out
+
+
+@pytest.mark.parametrize("fn,status_line", IMPORTERS)
+def test_credential_import_lines_from_a_runner_are_ignored(setup, monkeypatch, capsys, fn, status_line):  # GUARD
+    _canary_env(monkeypatch)
+    monkeypatch.setattr(setup, "docker_in", lambda script, payload: (1, ["Authorization: Bearer " + CANARY, payload]))
+    assert getattr(setup, fn)() == 1
+    seen = capsys.readouterr()
+    assert CANARY not in seen.out and CANARY not in seen.err and "Bearer" not in seen.out
+
+
+@pytest.mark.parametrize("fn,status_line", IMPORTERS)
+def test_credential_import_engine_errors_carry_no_secret(setup, monkeypatch, capsys, fn, status_line):  # GUARD
+    _canary_env(monkeypatch)
+
+    def boom(*a, **kw):
+        raise setup.container_engine.ContainerEngineError("container engine is not usable")
+
+    monkeypatch.setattr(setup.container_engine, "engine_run", boom)
+    with pytest.raises(SystemExit) as err:
+        getattr(setup, fn)()
+    seen = capsys.readouterr()
+    assert CANARY not in str(err.value) and CANARY not in seen.out and CANARY not in seen.err
+
+
+def test_every_credential_import_uses_the_private_script(setup, monkeypatch):
+    calls = _record_docker(setup, monkeypatch)
+    _canary_env(monkeypatch)
+    assert setup.main(FLAGS) == 0
+    assert len(calls) == 3 and all(script == setup.CRED_IMPORT_SCRIPT for script, _p in calls)
+    assert "/tmp/cred.json" not in setup.CRED_IMPORT_SCRIPT
+
+
+_STUB = """#!/bin/sh
+for a in "$@"; do case "$a" in --input=*) f=${a#--input=};; esac; done
+d=$(dirname "$f")
+{ echo "$f"; stat -c %a "$f"; stat -c %a "$d"; cat "$f"; } > "$REC"
+echo "CANARY-OUT"; echo "CANARY-ERR" >&2
+exit 3
+"""
+
+
+def _run_cred_script(script, tmp_path, payload, umask=0o000):
+    """Run the credential script under sh with a stub n8n; returns (result, record lines, listing of the temp base)."""
+    import os
+    stub = tmp_path / "bin"
+    stub.mkdir(exist_ok=True)
+    (stub / "n8n").write_text(_STUB, encoding="utf-8")
+    (stub / "n8n").chmod(0o755)
+    base = tmp_path / "base"
+    base.mkdir(exist_ok=True)
+    assert "/tmp/n8n-cred." in script
+    local = script.replace("/tmp/n8n-cred.", str(base) + "/n8n-cred.")
+    rec = tmp_path / "rec.txt"
+    env = {"PATH": str(stub) + ":" + os.environ["PATH"], "REC": str(rec)}
+    r = subprocess.run(["sh", "-c", local], input=payload.encode(), capture_output=True, env=env, timeout=30,
+                       preexec_fn=lambda: os.umask(umask))
+    lines = rec.read_text(encoding="utf-8").splitlines() if rec.exists() else []
+    if rec.exists():
+        rec.unlink()
+    return r, lines, sorted(p.name for p in base.iterdir())
+
+
+def check_cred_script(script, tmp_path):
+    names = set()
+    for i in range(3):
+        r, lines, left = _run_cred_script(script, tmp_path, "PAYLOAD-" + str(i) + "-" + CANARY)
+        assert r.returncode == 3, "the n8n exit code must come back"
+        assert r.stdout == b"" and r.stderr == b"", "n8n output is discarded inside the container"
+        path, fmode, dmode, content = lines[0], lines[1], lines[2], "\n".join(lines[3:])
+        assert fmode == "600" and dmode == "700", (fmode, dmode)
+        assert content == "PAYLOAD-" + str(i) + "-" + CANARY
+        assert re.search(r"/n8n-cred\.[A-Za-z0-9]{10}/c\.json$", path), path
+        assert left == [], "the file and its directory are removed afterwards: " + str(left)
+        names.add(path)
+    assert len(names) == 3, "the file name is unpredictable: a fresh random directory every run"
+
+
+def test_credential_script_creates_a_private_unpredictable_file_and_removes_it(setup, tmp_path):  # GUARD
+    check_cred_script(setup.CRED_IMPORT_SCRIPT, tmp_path)
+
+
+@pytest.mark.parametrize("old,new", [
+    ("umask 077; ", ""),                                             # file would be 0644 under a normal umask
+    ("trap 'rm -f \"$d/c.json\"; rmdir \"$d\"' EXIT HUP INT TERM; ", ""),   # nothing removes the plaintext
+    (">/dev/null 2>&1", ""),                                         # n8n output would reach the caller
+])
+def test_mutant_credential_script_weakened_is_caught(setup, tmp_path, old, new):
+    script = setup.CRED_IMPORT_SCRIPT
+    assert script.count(old) == 1
+    with pytest.raises(AssertionError):
+        check_cred_script(script.replace(old, new), tmp_path)
+
+
+def test_mutant_credential_script_with_a_fixed_name_is_caught(setup, tmp_path):
+    script = setup.CRED_IMPORT_SCRIPT
+    fixed = re.sub(r"d=\$\(mktemp -d [^)]*\) \|\| exit 70", "d=/tmp/n8n-cred.FIXED00000; mkdir -m 700 \"$d\" 2>/dev/null || true", script)
+    assert fixed != script
+    with pytest.raises(AssertionError):
+        check_cred_script(fixed, tmp_path)
+
+
+def test_viewer_import_prints_the_host_restriction_reminder_without_the_token(setup, monkeypatch, capsys):
+    _canary_env(monkeypatch)
+    _record_docker(setup, monkeypatch)
+    assert setup.grafana_viewer_credentials() == 0
+    out = capsys.readouterr().out
+    assert "REQUIRED NEXT STEP" in out and "Allowed HTTP Request Domains" in out and "grafana-viewer-auth" in out
+    assert "post-import check" in out and CANARY not in out
+
+
+def test_viewer_import_failure_does_not_claim_a_next_step(setup, monkeypatch, capsys):
+    _canary_env(monkeypatch)
+    monkeypatch.setattr(setup, "docker_in", lambda script, payload: (1, []))
+    assert setup.grafana_viewer_credentials() == 1
+    assert "REQUIRED NEXT STEP" not in capsys.readouterr().out
+
+
+def test_full_credentials_run_ends_with_the_reminder(setup, monkeypatch, capsys):
+    _canary_env(monkeypatch)
+    _record_docker(setup, monkeypatch)
+    assert setup.main(FLAGS) == 0
+    assert capsys.readouterr().out.rstrip().endswith("sent to any https host that GRAFANA_BASE_URL names.")

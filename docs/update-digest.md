@@ -79,8 +79,16 @@ executions.
    None. Not verified: that the field is shown for the Custom Auth type (n8n's `HttpCustomAuth`
    credential is a generic auth type, which suggests it is) and the exact keys and values an
    `import:credentials` file would need to preset it, so this tooling does not set it and you set it
-   in the editor after the import. In addition the workflow only accepts an `https` base URL (see
-   the environment table), and the query nodes follow no redirects.
+   in the editor after the import.
+
+   **This is a required step, not an optional hardening.** Until it is done the credential is
+   unrestricted: the import cannot lock it to a host, so any valid `https` value of
+   `GRAFANA_BASE_URL` receives the Viewer token with the request. The setup script prints this
+   reminder after a successful import (no secret in it) but cannot verify the setting, because
+   reading it back is not something the n8n command line is documented to do. After the editor step
+   run the post-import check in the live deploy runbook ("Grafana Viewer credential: post-import
+   check"). In addition the workflow only accepts an `https` base URL (see the environment table),
+   and the query nodes follow no redirects; neither limits which `https` host gets the token.
 5. Environment: set these on the n8n container, values from your own deployment (never committed):
 
    | Name | Meaning | Placeholder |
@@ -119,19 +127,45 @@ anything unexpected: a response size cap (256 KB of JSON), at most 200 series (p
 points per series, queries that use `SLIMIT` set one above that cap (201 and 51), so a truncated
 answer arrives with one series too many and reads as "too many series" instead of passing as ok,
 and a status of `failed` for a request error, any HTTP status
-other than 200 (including a redirect), a non-JSON body, a per-query error, a missing query or a
-malformed frame. The reason names only the HTTP status, never text copied from Grafana. The n8n
-HTTP node downloads the whole answer before the size check, so the real bound on download size is
-the `SLIMIT` in each query. The value of each series must be a boolean or a finite number: a null,
+other than 200 (including a redirect), a non-JSON body, an `error` or `message` at the top of the
+body, a result list that is not exactly the queries sent (a missing or an extra query), a per-query
+error (`error`, `errorSource` or a status other than exactly 200), a query whose `frames` is absent
+or not a list, or a malformed frame. A source is `not-deployed` only when every query succeeded and
+every one is empty; history with no current data is `failed` (history proves it was deployed). The
+reason names only the HTTP status, never text copied from Grafana.
+
+Series identity is strict. UniFi needs a `name` label, Twingate a `connector` label and pfSense a
+`kind` label plus a `security` label that is exactly `true` or `false`; each must be a non-empty
+string of at most 120 characters. A missing or malformed identity fails the source (nothing is
+shown as `(invalid)`), and so does a second frame with the same identity in one query (split
+frames, or two kinds that print the same name), so a series can never be both applied and pending.
+Each source's check query returns exactly one series.
+
+**Download size: a limit that is only partly closed.** The n8n HTTP Request node downloads and
+parses the whole answer before the Code node can look at it, and the node has no option to cap the
+response size (checked on the n8n HTTP Request node docs page, its Options list, read 2026-11-26:
+timeout, redirects, proxy, pagination, batching and response format; the "Truncate Response" option
+on that page belongs to the AI tool variant for HTML extraction, not to this node). So the size
+check above runs after the download. What bounds a well-behaved Grafana is the query design: every
+series query is one aggregate (`last`, `max` or `count`) with no time grouping, so each series
+returns one point, and `SLIMIT` caps the number of series. That does not bound a compromised or
+fake Grafana, which can ignore both and send a very large answer: n8n would use memory until it
+fails, and the 15 second timeout limits duration, not size. The real mitigations are outside the
+workflow: reach Grafana only over a trusted network path, restrict the credential to the Grafana
+host (above, so the token never goes elsewhere), and give the n8n container a memory limit so an
+oversized answer restarts n8n instead of the host. A byte limit at a reverse proxy in front of
+Grafana would close it, and is not part of this change.
+
+The value of each series must be a boolean or a finite number: a null,
 NaN, string or object in the newest point fails the source (a series that is already stale is only
 listed). The value field of a frame is the only non-time field, or the only one named `value`,
 `last`, `max` or `count`; two candidates fail as malformed. A frame needs exactly one time field.
 
 | Source | Data source | Pending (current state) | Applied (state change in the window) | `ok` only when | `not-deployed` when |
 | --- | --- | --- | --- | --- | --- |
-| UniFi | `influxdb-unifi`, measurements `uap`, `usw`, `ugw`, `udm`, `uxg` | devices whose newest `upgradeable` is true or a positive number | device now false and true at some point in 7 days | at least one device has a point newer than 2 hours (older devices are listed as not checked (stale), see below) | no series at all |
-| pfSense | `influxdb-pfsense`, `pfsense_update_pending` | kinds (core, kernel, package; security marked) whose newest value is true or a positive number | newest 0 and 1 at some point in 7 days | `pfsense_update_check_success` newest point is 1 (or true) and under 13 hours old, and at least one kind series is current | no pending and no check series |
-| Twingate | `influxdb-twingate`, `twingate_connector_behind` | connectors whose newest behind count is above 0 | newest 0 and above 0 at some point in 7 days | `twingate_update_check_success` newest point is 1 (or true) and under 3 hours old, and at least one connector series is current | no behind and no check series |
+| UniFi | `influxdb-unifi`, measurements `uap`, `usw`, `ugw`, `udm`, `uxg` | devices whose newest `upgradeable` is true or a positive number | device now false and true at some point in 7 days | at least one device has a point newer than 2 hours (older devices are listed as not checked (stale), see below) | no current and no history series (every query empty) |
+| pfSense | `influxdb-pfsense`, `pfsense_update_pending` | kinds (core, kernel, package; security marked) whose newest value is true or a positive number | newest 0 and 1 at some point in 7 days | `pfsense_update_check_success` newest point is 1 (or true) and under 13 hours old, and at least one kind series is current | no pending, no history and no check series (every query empty) |
+| Twingate | `influxdb-twingate`, `twingate_connector_behind` | connectors whose newest behind count is above 0 | newest 0 and above 0 at some point in 7 days | `twingate_update_check_success` newest point is 1 (or true) and under 3 hours old, and at least one connector series is current | no behind, no history and no check series (every query empty) |
 | OS packages | none yet | none | none | never: stub | always (issue #219, host collectors) |
 
 A series that is not current (its newest point is older than the source's freshness limit, in
