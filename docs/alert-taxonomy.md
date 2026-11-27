@@ -72,7 +72,7 @@ they are not authored.
 Tier rules (checked by the test):
 
 - P1 = `severity=critical` and `phone=true`.
-- P2 = `severity=warning` and `phone=false`. Two owner-decided exceptions may page: a pending-update warning (`alert_group=updates`, `update_alert=true`; issues #199, #200) and a stale-backup warning (`alert_group=backup`; owner decision 2026-11-27, issue #228, "warn at 8 days": phone twice a week, repeat 84h).
+- P2 = `severity=warning` and `phone=false`. Two owner-decided exceptions may page: a pending-update warning (`alert_group=updates`, `update_alert=true`; issues #199, #200) and exactly one stale-backup warning, the rule uid `unifi-backup-stale-8d` (`alert_group=backup`; owner decision 2026-11-27, issue #228, "warn at 8 days": phone twice a week, repeat 84h). The set `PAGING_P2_BACKUP_UIDS` in the test is the authority: any other P2 backup rule with `phone=true` fails the test.
 - P3 = `severity=info`, `phone=false` and `digest=true`.
 - `tier=none` only with `heartbeat=true`, which must be `severity=info`,
   `phone=false`, no `digest`.

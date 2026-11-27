@@ -62,17 +62,17 @@ umask 077
 id_bin=/usr/bin/id
 date_bin=/usr/bin/date
 stat_bin=/usr/bin/stat
-dd_bin=/usr/bin/dd
 perl_bin=/usr/bin/perl
+env_bin=/usr/bin/env
 df_bin=/usr/bin/df
 mv_bin=/usr/bin/mv
 rm_bin=/usr/bin/rm
-touch_bin=/usr/bin/touch
 mkdir_bin=/usr/bin/mkdir
 sha256_bin=/usr/bin/sha256sum
 mount_bin=/usr/bin/mount
 umount_bin=/usr/bin/umount
 mountpoint_bin=/usr/bin/mountpoint
+mountinfo_file=/proc/self/mountinfo
 root_uid=0
 
 rc_code=7
@@ -324,39 +324,177 @@ file_dev() {
     printf '%s\n' "$fd"
 }
 
-# One-open copy helper (perl-base is Essential on Debian, so /usr/bin/perl is always there). It
-# opens the source ONCE with O_NOFOLLOW|O_NONBLOCK (a symlink is not followed, a FIFO does not
-# block), requires the open file itself (fstat) to be a plain file with the device, inode, size and
-# time the path showed before and a link count of 1, copies at most size+1 bytes from that one
-# descriptor into a new root-only file (O_EXCL|O_NOFOLLOW), and checks the descriptor again after
-# the read. Exit 0 = copied; 10 to 13, 17 and 18 = the file is not what was checked; other = I/O.
-run_copy_helper() { # <src> <dst> <dev> <ino> <size> <mtime>; the perl program comes on stdin
-    "$perl_bin" - "$@" <<'PERL'
-use strict; use Fcntl; my ($src, $dst, $dev, $ino, $size, $mtime) = @ARGV;
-sysopen(my $in, $src, O_RDONLY | O_NOFOLLOW | O_NONBLOCK) or exit 10;
-my @s = stat($in) or exit 11;
-exit 12 unless -f $in;
-exit 13 unless $s[0] == $dev && $s[1] == $ino && $s[3] == 1 && $s[7] == $size && $s[9] == $mtime;
-sysopen(my $out, $dst, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600) or exit 14;
-my ($left, $got, $buf) = ($size + 1, 0, "");
-while ($left > 0) {
-    my $n = sysread($in, $buf, $left > 1048576 ? 1048576 : $left);
-    exit 15 unless defined $n;
-    last if $n == 0;
-    $got += $n; $left -= $n;
-    for (my $o = 0; $o < $n; ) { my $w = syswrite($out, $buf, $n - $o, $o); exit 16 unless defined $w; $o += $w; }
+# The perl helper (perl-base is Essential on Debian, so /usr/bin/perl is always there) does every
+# operation that must be bound to ONE opened object: staging a source file, hashing a file, the
+# upload and rename, and the prune. It runs with a cleared environment (no PERL5OPT, PERL5LIB or
+# locale from the caller). Exit codes: 0 ok; 10-13, 17, 18, 21-23, 31 and 33 mean the object was
+# not the one that was checked; 20 the folder is not the checked folder; 24 the hash tool failed;
+# 25 too large; 26 the final name exists; the rest are I/O errors.
+run_helper() { # <op> <args...>; the perl program comes on stdin
+    helper_op=$1
+    shift
+    "$env_bin" -i PATH=/usr/bin:/bin LC_ALL=C "$perl_bin" - "$helper_op" "$sha256_bin" "$@" <<'PERL'
+use strict; use Fcntl; use IO::Handle;
+$SIG{PIPE} = 'IGNORE';
+my ($op, $shabin, @a) = @ARGV;
+my $BUF = 1048576;
+sub bye { exit $_[0] }
+
+# The destination (or staging) folder is opened ONCE with O_DIRECTORY|O_NOFOLLOW and must be the
+# folder the script checked (device and inode). Names are then used only below that open folder
+# (/proc/self/fd/<n>/<name>), so a swapped path component cannot redirect an operation.
+sub open_dir {
+    my ($path, $dev, $ino) = @_;
+    sysopen(my $d, $path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW) or bye(20);
+    my @s = stat($d) or bye(20);
+    bye(20) unless $s[0] == $dev && $s[1] == $ino;
+    return ($d, "/proc/self/fd/" . fileno($d) . "/");
 }
-close($out) or exit 16;
-my @t = stat($in) or exit 17;
-exit 18 unless -f $in && $got == $size && $t[0] == $dev && $t[1] == $ino && $t[3] == 1 && $t[7] == $size && $t[9] == $mtime;
-exit 0;
+
+# SHA-256 of at most $max+1 bytes read from ONE open handle, through sha256sum whose exit status
+# is checked. Returns (hash, bytes read); any failure of the read or of sha256sum ends the helper.
+sub hash_fh {
+    my ($fh, $max) = @_;
+    pipe(my $r1, my $w1) or bye(24);
+    pipe(my $r2, my $w2) or bye(24);
+    my $pid = fork();
+    bye(24) unless defined $pid;
+    if (!$pid) {
+        close $w1; close $r2;
+        open(STDIN, "<&", $r1) or exit 127;
+        open(STDOUT, ">&", $w2) or exit 127;
+        exec($shabin) or exit 127;
+    }
+    close $r1; close $w2;
+    my ($left, $got, $buf) = ($max + 1, 0, "");
+    while ($left > 0) {
+        my $n = sysread($fh, $buf, $left > $BUF ? $BUF : $left);
+        if (!defined $n) { kill 9, $pid; waitpid($pid, 0); bye(21); }
+        last if $n == 0;
+        $got += $n; $left -= $n;
+        for (my $o = 0; $o < $n; ) {
+            my $w = syswrite($w1, $buf, $n - $o, $o);
+            if (!defined $w) { kill 9, $pid; waitpid($pid, 0); bye(24); }
+            $o += $w;
+        }
+    }
+    close $w1;
+    my $line = <$r2>;
+    waitpid($pid, 0);
+    bye(24) if $? != 0;
+    bye(24) unless defined $line && $line =~ /^([0-9a-f]{64})[ \t]/;
+    return ($1, $got);
+}
+
+sub same_file { my ($x, $y) = @_; return $x->[0] == $y->[0] && $x->[1] == $y->[1]; }
+
+if ($op eq "stage") {
+    # stage SRC DST DEV INO SIZE MTIME: copy a source file through one open descriptor.
+    my ($src, $dst, $dev, $ino, $size, $mtime) = @a;
+    sysopen(my $in, $src, O_RDONLY | O_NOFOLLOW | O_NONBLOCK) or exit 10;
+    my @s = stat($in) or exit 11;
+    exit 12 unless -f $in;
+    exit 13 unless $s[0] == $dev && $s[1] == $ino && $s[3] == 1 && $s[7] == $size && $s[9] == $mtime;
+    sysopen(my $out, $dst, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600) or exit 14;
+    my ($left, $got, $buf) = ($size + 1, 0, "");
+    while ($left > 0) {
+        my $n = sysread($in, $buf, $left > $BUF ? $BUF : $left);
+        exit 15 unless defined $n;
+        last if $n == 0;
+        $got += $n; $left -= $n;
+        for (my $o = 0; $o < $n; ) { my $w = syswrite($out, $buf, $n - $o, $o); exit 16 unless defined $w; $o += $w; }
+    }
+    close($out) or exit 16;
+    my @t = stat($in) or exit 17;
+    exit 18 unless -f $in && $got == $size && $t[0] == $dev && $t[1] == $ino && $t[3] == 1 && $t[7] == $size && $t[9] == $mtime;
+    exit 0;
+}
+
+if ($op eq "hash") {
+    # hash DIR DDEV DINO NAME MAX: hash one plain file below a checked folder; prints "hash".
+    my ($dir, $ddev, $dino, $name, $max) = @a;
+    my ($d, $pre) = open_dir($dir, $ddev, $dino);
+    sysopen(my $f, $pre . $name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK) or bye(21);
+    my @s = stat($f) or bye(21);
+    bye(22) unless -f $f && $s[3] == 1;
+    bye(25) if $s[7] > $max;
+    my ($h, $got) = hash_fh($f, $max);
+    # test-hook: after-hash
+    my @t = stat($f) or bye(23);
+    bye(23) unless same_file(\@s, \@t) && $t[7] == $s[7] && $t[9] == $s[9] && $got == $s[7];
+    my @n = lstat($pre . $name);
+    bye(23) unless @n && same_file(\@s, \@n);
+    print "$h\n";
+    exit 0;
+}
+
+if ($op eq "publish") {
+    # publish DIR DDEV DINO SDIR SDEV SINO SNAME NAME SIZE MTIME SHA MAX: upload a staged file to
+    # a new partial file, verify it through the SAME open handle, set its time, rename it into
+    # place and confirm the final name is that same file.
+    my ($dir, $ddev, $dino, $sdir, $sdev, $sino, $sname, $name, $size, $mtime, $sha, $max) = @a;
+    my ($d, $pre) = open_dir($dir, $ddev, $dino);
+    my ($sd, $spre) = open_dir($sdir, $sdev, $sino);
+    sysopen(my $in, $spre . $sname, O_RDONLY | O_NOFOLLOW | O_NONBLOCK) or bye(21);
+    my @is = stat($in) or bye(21);
+    bye(22) unless -f $in && $is[3] == 1 && $is[7] == $size;
+    my $pn = ".partial-$name";
+    unlink($pre . $pn);    # a leftover or planted name is removed as a name, never followed
+    my @e = lstat($pre . $name);
+    bye(26) if @e;
+    sysopen(my $out, $pre . $pn, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0600) or bye(27);
+    my ($left, $got, $buf) = ($size + 1, 0, "");
+    while ($left > 0) {
+        my $n = sysread($in, $buf, $left > $BUF ? $BUF : $left);
+        bye(28) unless defined $n;
+        last if $n == 0;
+        $got += $n; $left -= $n;
+        for (my $o = 0; $o < $n; ) { my $w = syswrite($out, $buf, $n - $o, $o); bye(28) unless defined $w; $o += $w; }
+    }
+    bye(28) unless $got == $size;
+    $out->sync or bye(28);
+    # test-hook: after-upload-write
+    sysseek($out, 0, 0) or bye(28);
+    my ($h, $got2) = hash_fh($out, $max);
+    bye(29) unless $h eq $sha && $got2 == $size;
+    my @os = stat($out) or bye(28);
+    bye(29) unless -f $out && $os[3] == 1 && $os[7] == $size;
+    utime($mtime, $mtime, $out) or bye(30);
+    my @pn = lstat($pre . $pn);
+    bye(31) unless @pn && same_file(\@os, \@pn);
+    @e = lstat($pre . $name);
+    bye(26) if @e;
+    # test-hook: before-rename
+    rename($pre . $pn, $pre . $name) or bye(32);
+    my @fin = lstat($pre . $name);
+    bye(33) unless @fin && same_file(\@os, \@fin);
+    exit 0;
+}
+
+if ($op eq "prune") {
+    # prune DIR DDEV DINO NAME INO MTIME: remove one old plain file below a checked folder, only
+    # if the opened file is the one that was chosen (inode and time) and is on the same device.
+    my ($dir, $ddev, $dino, $name, $ino, $mtime) = @a;
+    my ($d, $pre) = open_dir($dir, $ddev, $dino);
+    sysopen(my $f, $pre . $name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK) or bye(21);
+    my @s = stat($f) or bye(21);
+    bye(22) unless -f $f && $s[3] == 1 && $s[0] == $ddev;
+    bye(23) unless $s[1] == $ino && $s[9] == $mtime;
+    # test-hook: before-unlink
+    my @n = lstat($pre . $name);
+    bye(23) unless @n && same_file(\@s, \@n);
+    unlink($pre . $name) or bye(34);
+    exit 0;
+}
+
+exit 99;
 PERL
 }
 
-# True when the helper's exit code says the opened file was not the file that was checked.
+# True when the helper's exit code says an object was not the one that was checked.
 helper_says_changed() {
     case "$1" in
-        10 | 11 | 12 | 13 | 17 | 18) return 0 ;;
+        10 | 11 | 12 | 13 | 17 | 18 | 20 | 22 | 23 | 26 | 29 | 31 | 33) return 0 ;;
     esac
     return 1
 }
@@ -366,19 +504,33 @@ meta_of() {
     "$stat_bin" -c '%F|%d|%i|%h|%s|%Y' -- "$1" 2>/dev/null
 }
 
-# SHA-256 of a plain file, read by dd with O_NOFOLLOW and O_NONBLOCK and bounded to <max>+1
-# bytes, so a symlink, a FIFO swapped in or an endless file cannot hang or mislead the read. A
-# read that fails or is cut short gives a different hash, never a matching one.
-sha_of_file() { # <path> <max bytes>
-    shs=$("$dd_bin" if="$1" iflag=nofollow,nonblock,count_bytes bs=1M count="$(($2 + 1))" status=none 2>/dev/null | "$sha256_bin" 2>/dev/null)
-    read -r fh _ <<EOF || return 1
-$shs
+# Device and inode of a folder, as "dev ino".
+dir_id() {
+    di=$(meta_of "$1") || return 1
+    IFS='|' read -r di_type di_dev di_ino _ _ _ <<EOF
+$di
 EOF
-    case "$fh" in
+    [ "$di_type" = "directory" ] || return 1
+    if ! is_uint "$di_dev" || ! is_uint "$di_ino"; then
+        return 1
+    fi
+    printf '%s %s\n' "$di_dev" "$di_ino"
+}
+
+# SHA-256 of one plain file below a folder, through the helper (one open file, the exit status of
+# sha256sum checked, bound to the checked folder). Prints the hash; any failure returns nonzero
+# and prints nothing, so a failed read can never yield a hash that is compared as if valid.
+helper_hash() { # <folder> <name> <max bytes>
+    hh_id=$(dir_id "$1") || return 1
+    read -r hh_dev hh_ino <<EOF
+$hh_id
+EOF
+    hh_out=$(run_helper hash "$1" "$hh_dev" "$hh_ino" "$2" "$3") || return 1
+    case "$hh_out" in
         "" | *[!0-9a-f]*) return 1 ;;
     esac
-    [ "${#fh}" -eq 64 ] || return 1
-    printf '%s\n' "$fh"
+    [ "${#hh_out}" -eq 64 ] || return 1
+    printf '%s\n' "$hh_out"
 }
 
 # Free bytes on the filesystem of a path.
@@ -423,6 +575,28 @@ local_newest=$scan_newest
 [ -d "$NAS_MOUNT_POINT" ] || fail 1 "NAS_MOUNT_POINT does not exist"
 if [ "$use_existing" -eq 1 ]; then
     "$mountpoint_bin" -q -- "$NAS_MOUNT_POINT" || fail 3 "NAS_USE_EXISTING_MOUNT is set but nothing is mounted there"
+    # The script cannot choose the options of a mount it did not make, so it reads them from
+    # mountinfo and refuses unless symlinks are not followed. nosuid, nodev and noexec are
+    # recommended: a missing one is logged, not fatal.
+    em_phys=$(cd -P -- "$NAS_MOUNT_POINT" 2>/dev/null && pwd -P) || fail 3 "cannot resolve the mount point"
+    [ -r "$mountinfo_file" ] || fail 3 "cannot read the mount table"
+    em_opts=""
+    while read -r _ _ _ _ em_mp em_o _; do
+        if [ "$em_mp" = "$em_phys" ]; then
+            em_opts=$em_o
+        fi
+    done < "$mountinfo_file"
+    [ -n "$em_opts" ] || fail 3 "the existing mount is not in the mount table"
+    case ",$em_opts," in
+        *,nosymfollow,*) ;;
+        *) fail 3 "the existing mount lacks the nosymfollow option; refusing" ;;
+    esac
+    for em_want in nosuid nodev noexec; do
+        case ",$em_opts," in
+            *",$em_want,"*) ;;
+            *) log "warning: the existing mount lacks $em_want (recommended)" ;;
+        esac
+    done
 else
     if "$mountpoint_bin" -q -- "$NAS_MOUNT_POINT"; then
         fail 3 "something is already mounted on NAS_MOUNT_POINT (set NAS_USE_EXISTING_MOUNT=1 to use it)"
@@ -459,6 +633,37 @@ if [ -e "$dest" ] || [ -L "$dest" ]; then
     [ "$dest_phys" = "${mp_phys%/}/$dest_subdir" ] || fail 3 "destination resolves outside the mount point; refusing"
     dest_dev=$(file_dev "$dest") || fail 3 "cannot stat the destination"
     [ "$dest_dev" = "$mp_dev" ] || fail 3 "destination is on another device than the mount point; refusing"
+    # Only the service account may write the folder: owned by root and not writable by group or
+    # others. On CIFS the mode is the one this mount gives (dir_mode), so this proves nothing about
+    # the server's own permissions; on an existing mount of another kind it is a real check.
+    dest_perm=$("$stat_bin" -c '%u %a' -- "$dest" 2>/dev/null) || fail 3 "cannot stat the destination"
+    read -r dp_uid dp_mode <<EOF
+$dest_perm
+EOF
+    is_uint "$dp_mode" || fail 3 "cannot read the destination mode"
+    dp_mode=$((dp_mode % 1000))
+    if [ "$dp_uid" != "$root_uid" ] || [ $(((dp_mode / 10 % 10) & 2)) -ne 0 ] || [ $((dp_mode % 10 & 2)) -ne 0 ]; then
+        fail 3 "destination must be owned by root and not writable by group or others; refusing"
+    fi
+fi
+
+dest_id=""
+dest_dev_id=""
+dest_ino_id=""
+if [ -d "$dest" ]; then
+    dest_id=$(dir_id "$dest") || fail 3 "cannot read the identity of the destination"
+    read -r dest_dev_id dest_ino_id <<EOF
+$dest_id
+EOF
+fi
+
+stage_dev=""
+stage_ino=""
+if [ "$dry_run" -eq 0 ]; then
+    stage_id=$(dir_id "$stage_dir") || fail 1 "cannot read the identity of the staging directory"
+    read -r stage_dev stage_ino <<EOF
+$stage_id
+EOF
 fi
 
 # ---------------------------------------------------------------- copy
@@ -474,7 +679,7 @@ for f in "$src_dir"/*.unf; do
     fi
     target=$dest/$name
     pre=$(meta_of "$f") || pre=""
-    IFS='|' read -r s_type _ _ s_nl s_size s_mtime <<EOF
+    IFS='|' read -r s_type s_dev s_ino s_nl s_size s_mtime <<EOF
 $pre
 EOF
     if [ "$s_type" != "regular file" ] || [ "$s_nl" != 1 ] || ! is_uint "$s_size" || ! is_uint "$s_mtime"; then
@@ -501,20 +706,17 @@ EOF
         log "not enough free space in the state directory for $name; refusing it"
         continue
     fi
-    # Stage through the one-open helper above (identity bound to the opened file, no FIFO hang,
-    # at most size+1 bytes, so an endless file cannot fill the disk) into a root-only file.
+    # Stage through the one-open helper (identity bound to the opened file, no FIFO hang, at most
+    # size+1 bytes, so an endless file cannot fill the disk) into a root-only file.
     staged=$stage_dir/current
     partial=$dest/.partial-$name
     "$rm_bin" -f -- "$staged"
-    IFS='|' read -r _ s_dev s_ino _ _ _ <<EOF
-$pre
-EOF
-    run_copy_helper "$f" "$staged" "$s_dev" "$s_ino" "$s_size" "$s_mtime"
+    run_helper stage "$f" "$staged" "$s_dev" "$s_ino" "$s_size" "$s_mtime"
     helper_rc=$?
     step_rc=0
     post=$(meta_of "$f") || post=""
     stg_size=$(file_size "$staged") || stg_size=""
-    stg_sha=$(sha_of_file "$staged" "$max_bytes") || stg_sha=""
+    stg_sha=$(helper_hash "$stage_dir" current "$max_bytes") || stg_sha=""
     if [ "$post" != "$pre" ] || helper_says_changed "$helper_rc"; then
         step_rc=5
         log "source $name is not the file that was checked (changed, swapped or replaced); refusing it"
@@ -525,50 +727,28 @@ EOF
         step_rc=5
         log "verification of the staged copy of $name failed (size or checksum)"
     elif [ -e "$target" ] || [ -L "$target" ]; then
-        # Never overwrite and never delete. An existing copy must hold exactly the same bytes.
-        tgt_sha=""
-        if regular_file "$target"; then
-            tgt_sha=$(sha_of_file "$target" "$max_bytes") || tgt_sha=""
-        fi
+        # Never overwrite and never delete. An existing copy must hold exactly the same bytes; it
+        # is hashed through one open file, and the hash counts only if the name still shows that
+        # same file afterwards.
+        tgt_sha=$(helper_hash "$dest" "$name" "$max_bytes") || tgt_sha=""
         if [ -z "$tgt_sha" ] || [ "$tgt_sha" != "$stg_sha" ]; then
             step_rc=5
-            log "existing copy of $name differs from the source; left untouched (move it aside by hand to re-copy)"
+            log "existing copy of $name differs from the source or could not be verified; left untouched (move it aside by hand to re-copy)"
         else
             step_rc=-1
         fi
     else
-        # Upload the staged copy to a fresh partial file: a leftover or planted partial name (a
-        # symlink included) is removed as a name, never followed, and dd must create the new file
-        # exclusively (conv=excl, O_EXCL) and without following.
-        "$rm_bin" -f -- "$partial"
-        if ! "$dd_bin" if="$staged" iflag=nofollow of="$partial" oflag=nofollow conv=excl bs=1M status=none; then
-            step_rc=4
-            log "upload of $name failed"
-        else
-            up_meta=$(meta_of "$partial") || up_meta=""
-            IFS='|' read -r u_type u_dev u_ino u_nl u_size _ <<EOF
-$up_meta
-EOF
-            dst_sha=$(sha_of_file "$partial" "$max_bytes") || dst_sha=""
-            if [ "$u_type" != "regular file" ] || [ "$u_nl" != 1 ] || [ "$u_size" != "$s_size" ] || [ "$dst_sha" != "$stg_sha" ]; then
+        # Upload, verify, set the time, rename and confirm, all in one helper bound to the opened
+        # destination folder and to the partial file's own open handle.
+        run_helper publish "$dest" "$dest_dev_id" "$dest_ino_id" "$stage_dir" "$stage_dev" "$stage_ino" current "$name" "$s_size" "$s_mtime" "$stg_sha" "$max_bytes"
+        pub_rc=$?
+        if [ "$pub_rc" -ne 0 ]; then
+            if helper_says_changed "$pub_rc" || [ "$pub_rc" -eq 29 ]; then
                 step_rc=5
-                log "verification of the uploaded $name failed (type, size or checksum); not published"
-            elif ! "$touch_bin" -h -d "@$s_mtime" -- "$partial"; then
-                # Keep the backup's own time: the age metric and the retention use it.
-                step_rc=4
-                log "could not set the time of the copy of $name"
+                log "publishing $name failed its checks (rc $pub_rc); the final name is not a verified copy of the source"
             else
-                fin_meta=$(meta_of "$partial") || fin_meta=""
-                IFS='|' read -r f_type f_dev f_ino _ _ _ <<EOF
-$fin_meta
-EOF
-                if [ "$f_type" != "regular file" ] || [ "$f_dev" != "$u_dev" ] || [ "$f_ino" != "$u_ino" ]; then
-                    step_rc=5
-                    log "the partial copy of $name was replaced during the upload; not published"
-                elif ! "$mv_bin" -T -- "$partial" "$target"; then
-                    step_rc=4
-                    log "could not finalize the copy of $name"
-                fi
+                step_rc=4
+                log "upload of $name failed (rc $pub_rc)"
             fi
         fi
     fi
@@ -596,24 +776,30 @@ if [ "$copy_rc" -eq 0 ] && [ -d "$dest" ]; then
         [ -e "$f" ] || continue
         name=${f##*/}
         valid_name "$name" || continue
-        regular_file "$f" || continue
-        t=$(file_mtime "$f") || { prune_rc=6; continue; }
-        if [ "$t" -eq "$protect" ] || [ $((now - t)) -le "$limit" ]; then
+        cand=$(meta_of "$f") || cand=""
+        IFS='|' read -r c_type c_dev c_ino c_nl _ c_mtime <<EOF
+$cand
+EOF
+        [ "$c_type" = "regular file" ] || continue
+        if ! is_uint "$c_mtime" || ! is_uint "$c_ino" || [ "$c_mtime" -gt $((now + 300)) ]; then
+            prune_rc=6
             continue
         fi
-        cand_dev=$(file_dev "$f") || cand_dev=""
-        if [ "$cand_dev" != "$mp_dev" ]; then
+        if [ "$c_mtime" -eq "$protect" ] || [ $((now - c_mtime)) -le "$limit" ]; then
+            continue
+        fi
+        if [ "$c_dev" != "$mp_dev" ] || [ "$c_nl" != 1 ]; then
             prune_rc=6
-            log "prune candidate $name is on another device than the mount point; left alone"
+            log "prune candidate $name is on another device or has several links; left alone"
             continue
         fi
         if [ "$dry_run" -eq 1 ]; then
             log "dry run: would remove $name (older than $retention_days days)"
-        elif "$rm_bin" -f -- "$f"; then
+        elif run_helper prune "$dest" "$dest_dev_id" "$dest_ino_id" "$name" "$c_ino" "$c_mtime"; then
             log "removed $name (older than $retention_days days)"
         else
             prune_rc=6
-            log "could not remove $name"
+            log "could not remove $name (it was not the file chosen, or the folder changed)"
         fi
     done
 fi

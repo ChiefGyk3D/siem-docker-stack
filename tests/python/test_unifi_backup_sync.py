@@ -39,8 +39,8 @@ GOOD_NAMES = (
 )
 
 REAL = {
-    "mv_bin": "/usr/bin/mv", "rm_bin": "/usr/bin/rm",
-    "touch_bin": "/usr/bin/touch", "mkdir_bin": "/usr/bin/mkdir", "sha256_bin": "/usr/bin/sha256sum",
+    "mv_bin": "/usr/bin/mv", "rm_bin": "/usr/bin/rm", "env_bin": "/usr/bin/env",
+    "mkdir_bin": "/usr/bin/mkdir",
 }
 
 
@@ -81,27 +81,33 @@ class Env:
             'if [ -n "${FAKE_OTHER_DEV:-}" ] && [ "$*" = "-c %d -- $last" ]; then\n'
             '  case "$last" in */"$FAKE_OTHER_DEV") out=999999999 ;; esac\n'
             'fi\n'
+            'if [ -n "${FAKE_OTHER_DEV:-}" ]; then\n'
+            '  case "$*" in *"%F|"*) case "$last" in */"$FAKE_OTHER_DEV") out=$(printf "%s" "$out" | /usr/bin/sed "s/^\\([^|]*\\)|[^|]*|/\\1|999999999|/") ;; esac ;; esac\n'
+            'fi\n'
             'printf "%s\\n" "$out"\n'
             'if [ -n "${FAKE_SWAP_PATH:-}" ] && [ -z "${FAKE_SWAP_AFTER_CP:-}" ] && [ ! -e "$FAKE_SWAP_DONE" ] && [ "$last" = "$FAKE_SWAP_PATH" ]; then\n'
             '  case "$*" in *"%F|"*) : > "$FAKE_SWAP_DONE"; /usr/bin/rm -f "$last"\n'
-            '    if [ -n "${FAKE_SWAP_FIFO:-}" ]; then /usr/bin/mkfifo "$last"; elif [ -n "${FAKE_SWAP_HARDLINK:-}" ]; then /usr/bin/ln "$FAKE_SWAP_TARGET" "$last"; else /usr/bin/ln -s "$FAKE_SWAP_TARGET" "$last"; fi ;; esac\n'
+            '    if [ -n "${FAKE_SWAP_WRITE:-}" ]; then printf "new backup" > "$last"; elif [ -n "${FAKE_SWAP_FIFO:-}" ]; then /usr/bin/mkfifo "$last"; elif [ -n "${FAKE_SWAP_HARDLINK:-}" ]; then /usr/bin/ln "$FAKE_SWAP_TARGET" "$last"; else /usr/bin/ln -s "$FAKE_SWAP_TARGET" "$last"; fi ;; esac\n'
             'fi\n'
             'exit $rc\n'))
-        _fake(self.bin / "dd", (
-            '/usr/bin/dd "$@" || exit 1\n'
-            'case "$*" in *conv=excl*)\n'
-            '  if [ "${FAKE_UPLOAD_CORRUPT:-0}" = 1 ]; then\n'
-            '    for a; do case "$a" in of=*) printf Z | /usr/bin/dd of="${a#of=}" bs=1 seek=0 conv=notrunc 2>/dev/null ;; esac; done\n'
-            '  fi ;;\n'
-            'esac\n'))
-        _fake(self.bin / "perl", (
-            '[ "${FAKE_CP_FAIL:-0}" = 1 ] && exit 1\n'
-            'if [ -n "${FAKE_CP_SLEEP:-}" ]; then : > "$FAKE_STARTED"; /usr/bin/sleep "$FAKE_CP_SLEEP"; fi\n'
+        # The helper runs under `env -i`, so the fakes it reaches read their switches from a file.
+        src_env = '. "%s"\n' % (root / "fake.env")
+        _fake(self.bin / "perl", src_env + (
+            'op=$2\n'
+            'if [ "$op" = stage ]; then\n'
+            '  [ "${FAKE_CP_FAIL:-0}" = 1 ] && exit 1\n'
+            '  if [ -n "${FAKE_CP_SLEEP:-}" ]; then : > "$FAKE_STARTED"; /usr/bin/sleep "$FAKE_CP_SLEEP"; fi\n'
+            'fi\n'
             '/usr/bin/perl "$@"; rc=$?\n'
-            'if [ -n "${FAKE_SWAP_AFTER_CP:-}" ] && [ ! -e "$FAKE_SWAP_DONE" ]; then\n'
+            'if [ "$op" = stage ] && [ -n "${FAKE_SWAP_AFTER_CP:-}" ] && [ ! -e "$FAKE_SWAP_DONE" ]; then\n'
             '  : > "$FAKE_SWAP_DONE"; /usr/bin/rm -f "$FAKE_SWAP_PATH"; /usr/bin/ln -s "$FAKE_SWAP_TARGET" "$FAKE_SWAP_PATH"\n'
             'fi\n'
             'exit $rc\n'))
+        _fake(self.bin / "sha256sum", src_env + (
+            'n=$(/usr/bin/cat "%s" 2>/dev/null || echo 0); n=$((n + 1)); echo $n > "%s"\n'
+            '/usr/bin/sha256sum "$@"; rc=$?\n'
+            '[ -n "${FAKE_SHA_FAIL_FROM:-}" ] && [ "$n" -ge "$FAKE_SHA_FAIL_FROM" ] && exit 1\n'
+            'exit $rc\n') % (root / "sha.count", root / "sha.count"))
         _fake(self.bin / "df", 'if [ -n "${FAKE_DF_AVAIL:-}" ]; then\n'
               '  echo "Filesystem 1024-blocks Used Available Capacity Mounted on"\n'
               '  echo "fake 100 1 $FAKE_DF_AVAIL 1% /"\n'
@@ -111,7 +117,8 @@ class Env:
         repl.update({
             "stat_bin": str(self.bin / "stat"),
             "id_bin": str(self.bin / "id"), "date_bin": str(self.bin / "date"),
-            "dd_bin": str(self.bin / "dd"), "perl_bin": str(self.bin / "perl"),
+            "perl_bin": str(self.bin / "perl"), "sha256_bin": str(self.bin / "sha256sum"),
+            "mountinfo_file": str(root / "mountinfo"),
             "df_bin": str(self.bin / "df"), "mount_bin": str(self.bin / "mount"),
             "umount_bin": str(self.bin / "umount"), "mountpoint_bin": str(self.bin / "mountpoint"),
             "root_uid": str(me),
@@ -119,12 +126,29 @@ class Env:
         for name, val in repl.items():
             text, n = re.subn(r"(?m)^%s=\S+$" % name, "%s=%s" % (name, val), text)
             assert n == 1, "fixed line %s not found exactly once" % name
+        self.mountinfo = root / "mountinfo"
+        self.set_mountinfo("rw,nosuid,nodev,noexec,nosymfollow")
+        self.text = text
         if mutate:
-            text = mutate(text)
+            self.text = mutate(self.text)
         self.script = root / "unifi-backup-sync.sh"
-        self.script.write_text(text, encoding="utf-8")
+        self.script.write_text(self.text, encoding="utf-8")
         self.script.chmod(0o755)
         self.nas = self.mp / "unifi-autobackup"
+
+    def set_mountinfo(self, opts):
+        """A fake /proc/self/mountinfo: the NAS mount point with the given per-mount options."""
+        lines = ["22 1 0:21 / / rw - ext4 /dev/sda1 rw"]
+        if opts is not None:
+            lines.append("36 22 0:30 / %s %s shared:1 - cifs //nas.example.internal/unifi-backups rw" % (self.mp.resolve(), opts))
+        self.mountinfo.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def set_hook(self, marker, perl_code):
+        """Replace a `# test-hook: <marker>` comment of the helper by perl code in the scratch copy."""
+        needle = "# test-hook: %s" % marker
+        assert self.text.count(needle) == 1, marker
+        self.text = self.text.replace(needle, perl_code)
+        self.script.write_text(self.text, encoding="utf-8")
 
     def add_source(self, name, content=None, age_days=0, size=2048):
         p = self.src / name
@@ -143,6 +167,9 @@ class Env:
             "SMB_CREDENTIALS_FILE": str(self.creds), "STATE_DIRECTORY": str(self.state),
         }
         e.update(extra)
+        fake = {k: v for k, v in e.items() if k.startswith("FAKE_")}
+        (self.root / "fake.env").write_text(
+            "".join("export %s='%s'\n" % (k, v) for k, v in fake.items()), encoding="utf-8")
         return e
 
     def run(self, *args, **extra):
@@ -159,8 +186,12 @@ class Env:
 @pytest.fixture()
 def env():
     SCRATCH_ROOT.mkdir(exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=SCRATCH_ROOT) as d:
-        yield Env(Path(d))
+    old_umask = os.umask(0o022)
+    try:
+        with tempfile.TemporaryDirectory(dir=SCRATCH_ROOT) as d:
+            yield Env(Path(d))
+    finally:
+        os.umask(old_umask)
 
 
 def _metrics(out):
@@ -329,7 +360,8 @@ def test_failing_copy(env):
 
 def test_checksum_mismatch_never_publishes_the_file(env):
     _populate(env)
-    r = env.run(FAKE_UPLOAD_CORRUPT="1")
+    env.set_hook("after-upload-write", "sysseek($out, 0, 0); syswrite($out, \"Z\", 1);")
+    r = env.run()
     assert r.returncode == 1
     assert _metrics(r.stdout)["unifi_backup_sync_result_code"] == 5
     assert env.nas_files() == []  # no final file and no leftover temp file
@@ -535,7 +567,7 @@ def test_source_swapped_for_a_symlink_during_the_copy(env):
 def test_staging_file_is_removed_after_every_run(env):
     _populate(env)
     env.run()
-    env.run(FAKE_UPLOAD_CORRUPT="1")
+    env.run(FAKE_CP_FAIL="1")
     assert not (env.state / "stage" / "current").exists()
 
 
@@ -687,7 +719,8 @@ def test_low_free_space_refuses_before_staging(env):
 
 def test_upload_corruption_is_never_published(env):
     _populate(env)
-    r = env.run(FAKE_UPLOAD_CORRUPT="1")
+    env.set_hook("after-upload-write", "sysseek($out, 0, 0); syswrite($out, \"Z\", 1);")
+    r = env.run()
     assert r.returncode == 1
     assert _metrics(r.stdout)["unifi_backup_sync_result_code"] == 5
     assert env.nas_files() == []
@@ -696,11 +729,11 @@ def test_upload_corruption_is_never_published(env):
 def test_reads_go_through_one_open_file_and_are_bounded():
     code = _code()
     assert "O_RDONLY | O_NOFOLLOW | O_NONBLOCK" in code
-    assert "O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW" in code
+    assert "O_RDONLY | O_DIRECTORY | O_NOFOLLOW" in code
+    assert "O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW" in code
     assert "$size + 1" in code and "exit 13 unless $s[0] == $dev && $s[1] == $ino && $s[3] == 1" in code
-    assert 'iflag=nofollow,nonblock,count_bytes bs=1M count="$(($2 + 1))"' in code
-    assert 'oflag=nofollow conv=excl' in code
-    assert 'touch_bin" -h' in code and 'mv_bin" -T' in code
+    assert "bye(24) if $? != 0" in code
+    assert '"$env_bin" -i PATH=/usr/bin:/bin LC_ALL=C "$perl_bin"' in code
 
 
 def test_source_swapped_for_a_hardlink_between_check_and_open(env):
@@ -716,10 +749,144 @@ def test_source_swapped_for_a_hardlink_between_check_and_open(env):
     _assert_unmounted_clean(env)
 
 
+# --- Daybreak round 2 (PR 240) -------------------------------------------------------------------
+
+def test_failing_hash_tool_is_never_accepted_as_a_match(env):
+    _populate(env)
+    assert env.run().returncode == 0
+    r = env.run(FAKE_SHA_FAIL_FROM="1")  # every sha256sum exits 1 after printing a valid hash
+    assert r.returncode == 1
+    assert _metrics(r.stdout)["unifi_backup_sync_result_code"] == 5
+    assert "copied and verified" not in r.stderr
+
+
+def test_failing_hash_tool_publishes_nothing(env):
+    _populate(env)
+    r = env.run(FAKE_SHA_FAIL_FROM="1")
+    assert r.returncode == 1 and env.nas_files() == []
+
+
+def test_failing_hash_of_the_existing_copy_is_a_failure_not_a_match(env):
+    _populate(env)
+    assert env.run().returncode == 0
+    (env.root / "sha.count").unlink()
+    r = env.run(FAKE_SHA_FAIL_FROM="2")  # the staged hash works, the hash of the NAS copy fails
+    assert r.returncode == 1
+    assert _metrics(r.stdout)["unifi_backup_sync_result_code"] == 5
+
+
+def test_existing_copy_replaced_while_it_is_hashed_is_not_accepted(env):
+    _populate(env)
+    assert env.run().returncode == 0
+    env.set_hook("after-hash", 'unlink($pre . $name); open(my $x, ">", $pre . $name); print $x "Z" x $s[7]; close $x;')
+    r = env.run()
+    assert r.returncode == 1
+    assert _metrics(r.stdout)["unifi_backup_sync_result_code"] == 5
+
+
+def test_partial_replaced_before_the_rename_is_reported_and_never_accepted_later(env):
+    _populate(env)
+    clean_text = env.text
+    env.set_hook("before-rename", 'unlink($pre . $pn); open(my $x, ">", $pre . $pn); print $x "attacker bytes"; close $x;')
+    r = env.run()
+    assert r.returncode == 1
+    assert _metrics(r.stdout)["unifi_backup_sync_result_code"] == 5
+    assert "rc 33" in r.stderr
+    # the substituted file now sits under a final name: a later clean run must still refuse it
+    env.text = clean_text
+    env.script.write_text(clean_text, encoding="utf-8")
+    again = env.run()
+    assert again.returncode == 1
+    assert _metrics(again.stdout)["unifi_backup_sync_result_code"] == 5
+    assert (env.nas / GOOD_NAMES[0]).read_bytes() == b"attacker bytes"  # never overwritten, never deleted
+
+
+def test_prune_candidate_replaced_before_the_helper_opens_it_is_kept(env):
+    _populate(env)
+    env.nas.mkdir()
+    old = "autobackup_8.0.1_20250101_0300_1735700000.unf"
+    (env.nas / old).write_bytes(b"old")
+    os.utime(env.nas / old, (NOW - 400 * DAY,) * 2)
+    r = env.run(FAKE_SWAP_PATH=str(env.nas / old), FAKE_SWAP_WRITE="1")
+    assert (env.root / "swapped").exists(), "the fake did not swap; the test proves nothing"
+    assert r.returncode == 1
+    assert _metrics(r.stdout)["unifi_backup_sync_result_code"] == 6
+    assert (env.nas / old).read_bytes() == b"new backup"
+
+
+def test_prune_candidate_replaced_before_the_unlink_is_kept(env):
+    _populate(env)
+    env.nas.mkdir()
+    old = "autobackup_8.0.1_20250101_0300_1735700000.unf"
+    (env.nas / old).write_bytes(b"old")
+    os.utime(env.nas / old, (NOW - 400 * DAY,) * 2)
+    env.set_hook("before-unlink", 'unlink($pre . $name); open(my $x, ">", $pre . $name); print $x "new backup"; close $x;')
+    r = env.run()
+    assert r.returncode == 1
+    assert _metrics(r.stdout)["unifi_backup_sync_result_code"] == 6
+    assert (env.nas / old).read_bytes() == b"new backup"
+
+
+def test_helper_runs_with_a_cleared_environment(env):
+    _populate(env)
+    lib = env.root / "perllib"
+    lib.mkdir()
+    marker = env.root / "probe-ran"
+    (lib / "Probe.pm").write_text('package Probe; open(my $m, ">", "%s"); close $m; 1;\n' % marker, encoding="utf-8")
+    probe = {"PERL5OPT": "-MProbe", "PERL5LIB": str(lib)}
+    # control: the probe does fire when the environment is not cleared
+    subprocess.run(["/usr/bin/perl", "-e", "1"], env=dict(PATH="/usr/bin", **probe), check=True)
+    assert marker.exists()
+    marker.unlink()
+    r = env.run(**probe)
+    assert r.returncode == 0, r.stderr
+    assert not marker.exists()
+
+
+def test_existing_mount_needs_nosymfollow(env):
+    _populate(env)
+    env.marker.write_text("")
+    env.set_mountinfo("rw,nosuid,nodev,noexec")
+    r = env.run(NAS_USE_EXISTING_MOUNT="1")
+    assert r.returncode == 1
+    assert _metrics(r.stdout)["unifi_backup_sync_result_code"] == 3
+    assert env.nas_files() == []
+
+
+def test_existing_mount_missing_from_the_mount_table_is_refused(env):
+    _populate(env)
+    env.marker.write_text("")
+    env.set_mountinfo(None)
+    r = env.run(NAS_USE_EXISTING_MOUNT="1")
+    assert r.returncode == 1
+    assert _metrics(r.stdout)["unifi_backup_sync_result_code"] == 3
+
+
+def test_existing_mount_missing_hardening_flags_only_warns(env):
+    _populate(env)
+    env.marker.write_text("")
+    env.set_mountinfo("rw,nosymfollow")
+    r = env.run(NAS_USE_EXISTING_MOUNT="1")
+    assert r.returncode == 0, r.stderr
+    for flag in ("nosuid", "nodev", "noexec"):
+        assert "lacks %s" % flag in r.stderr
+
+
+def test_destination_writable_by_others_is_refused(env):
+    _populate(env)
+    env.nas.mkdir()
+    env.nas.chmod(0o777)
+    r = env.run()
+    assert r.returncode == 1
+    assert _metrics(r.stdout)["unifi_backup_sync_result_code"] == 3
+    assert env.nas_files() == [] or not any(p.is_file() for p in env.nas.iterdir())
+    _assert_unmounted_clean(env)
+
+
 # --- credentials and dry run ----------------------------------------------------------------------
 
 @pytest.mark.parametrize("extra", [{}, {"FAKE_MOUNT_FAIL": "1"}, {"FAKE_CP_FAIL": "1"},
-                                   {"FAKE_UPLOAD_CORRUPT": "1"}, {"FAKE_UMOUNT_FAIL": "1"}])
+                                   {"FAKE_SHA_FAIL_FROM": "2"}, {"FAKE_UMOUNT_FAIL": "1"}])
 def test_credentials_never_printed(env, extra):
     _populate(env)
     r = env.run(**extra)
@@ -764,7 +931,7 @@ def test_script_has_no_delete_mirroring_or_eval():
 
 def test_script_uses_absolute_command_paths_only():
     code = _code()
-    for name in ("id", "date", "stat", "dd", "perl", "df", "mv", "rm", "touch", "mkdir", "sha256sum", "mount",
+    for name in ("id", "date", "stat", "env", "perl", "df", "mv", "rm", "mkdir", "sha256sum", "mount",
                  "umount", "mountpoint"):
         assert not re.search(r"(?m)(^\s*|[;&|(]\s*|\$\()%s\s" % name, code), name
 
