@@ -20,7 +20,8 @@
 # source path again) is what gets checksummed and uploaded. On the NAS the destination must not
 # be a symlink, must resolve physically under the mount point and sit on its device; prune
 # candidates must be plain files (never followed) on that device with the exact backup name. The
-# share is mounted with nosymfollow.
+# share is mounted without nosymfollow (the cifs driver rejects it in -o), then bind-remounted with
+# it and the mount table is checked before anything is written to the share.
 #
 # Settings (environment; systemd EnvironmentFile=):
 #   UNIFI_BACKUP_SRC       source folder (default: the UniFi OS rootless container volume path)
@@ -572,27 +573,34 @@ local_count=$scan_count
 local_newest=$scan_newest
 
 # ---------------------------------------------------------------- mount
+# Read the options of the mount on NAS_MOUNT_POINT from the mount table and set mount_opts (empty
+# when the mount is not listed). Octal escapes are not decoded: the path has plain characters only.
+read_mount_opts() {
+    mount_opts=""
+    mo_phys=$(cd -P -- "$NAS_MOUNT_POINT" 2>/dev/null && pwd -P) || return 1
+    [ -r "$mountinfo_file" ] || return 1
+    while read -r _ _ _ _ mo_mp mo_o _; do
+        if [ "$mo_mp" = "$mo_phys" ]; then
+            mount_opts=$mo_o
+        fi
+    done < "$mountinfo_file"
+    return 0
+}
+
 [ -d "$NAS_MOUNT_POINT" ] || fail 1 "NAS_MOUNT_POINT does not exist"
 if [ "$use_existing" -eq 1 ]; then
     "$mountpoint_bin" -q -- "$NAS_MOUNT_POINT" || fail 3 "NAS_USE_EXISTING_MOUNT is set but nothing is mounted there"
     # The script cannot choose the options of a mount it did not make, so it reads them from
     # mountinfo and refuses unless symlinks are not followed. nosuid, nodev and noexec are
     # recommended: a missing one is logged, not fatal.
-    em_phys=$(cd -P -- "$NAS_MOUNT_POINT" 2>/dev/null && pwd -P) || fail 3 "cannot resolve the mount point"
-    [ -r "$mountinfo_file" ] || fail 3 "cannot read the mount table"
-    em_opts=""
-    while read -r _ _ _ _ em_mp em_o _; do
-        if [ "$em_mp" = "$em_phys" ]; then
-            em_opts=$em_o
-        fi
-    done < "$mountinfo_file"
-    [ -n "$em_opts" ] || fail 3 "the existing mount is not in the mount table"
-    case ",$em_opts," in
+    read_mount_opts || fail 3 "cannot read the mount table"
+    [ -n "$mount_opts" ] || fail 3 "the existing mount is not in the mount table"
+    case ",$mount_opts," in
         *,nosymfollow,*) ;;
         *) fail 3 "the existing mount lacks the nosymfollow option; refusing" ;;
     esac
     for em_want in nosuid nodev noexec; do
-        case ",$em_opts," in
+        case ",$mount_opts," in
             *",$em_want,"*) ;;
             *) log "warning: the existing mount lacks $em_want (recommended)" ;;
         esac
@@ -611,7 +619,35 @@ else
     fi
     log "mounting the share ($mode)"
     we_mounted=1
-    "$mount_bin" -t cifs -o "$mode,credentials=$creds_file,vers=$smb_vers,uid=0,gid=0,file_mode=0600,dir_mode=0700,nosuid,nodev,noexec,nosymfollow" -- "$nas_share" "$NAS_MOUNT_POINT" || fail 3 "mount failed"
+    # Step 1: the cifs driver rejects nosymfollow inside -o ("Unknown parameter"), so the share is
+    # mounted without it. Step 2: a bind remount sets the VFS flag. Step 3: the result is read back
+    # from the mount table; nothing touches the share before that check passes. Any failure leaves
+    # through fail, whose exit trap unmounts.
+    "$mount_bin" -t cifs -o "$mode,credentials=$creds_file,vers=$smb_vers,uid=0,gid=0,file_mode=0600,dir_mode=0700,nosuid,nodev,noexec" -- "$nas_share" "$NAS_MOUNT_POINT" || fail 3 "mount failed"
+    "$mount_bin" -o remount,bind,nosymfollow "$NAS_MOUNT_POINT" || fail 3 "could not make the mount refuse symlinks (bind remount failed)"
+    read_mount_opts || fail 3 "cannot read the mount table"
+    [ -n "$mount_opts" ] || fail 3 "the new mount is not in the mount table"
+    # The mode must be listed exactly once, as a whole token, and be the one that was asked for:
+    # a listing with both ro and rw, or with neither, or with the other one, is not accepted.
+    om_modes=0
+    om_seen=""
+    for om_m in ro rw; do
+        case ",$mount_opts," in
+            *",$om_m,"*)
+                om_modes=$((om_modes + 1))
+                om_seen=$om_m
+                ;;
+        esac
+    done
+    if [ "$om_modes" -ne 1 ] || [ "$om_seen" != "$mode" ]; then
+        fail 3 "the mount is missing the required option $mode (exactly one of ro or rw must be listed, and it must be the requested one); refusing"
+    fi
+    for om_want in nosymfollow nosuid nodev noexec; do
+        case ",$mount_opts," in
+            *",$om_want,"*) ;;
+            *) fail 3 "the mount is missing the required option $om_want after the remount; refusing" ;;
+        esac
+    done
 fi
 
 dest=$NAS_MOUNT_POINT/$dest_subdir
