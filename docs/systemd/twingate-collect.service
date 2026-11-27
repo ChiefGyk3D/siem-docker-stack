@@ -1,0 +1,54 @@
+# Twingate collector, step 1 of 3: the secret broker (issue #222). Install by hand; see
+# docs/live-deploy-runbook.md, section "Twingate collector". Replace /opt/siem with the checkout
+# of this repository (root-owned, not writable by others: three commands below run as root).
+#
+# The secret manager's service token is a root-owned file (/etc/siem/doppler-token, mode 400).
+# systemd copies it into this unit's private credential directory (LoadCredential=), readable
+# only by this unit. This unit runs as a DYNAMIC user: no reusable account exists, so no other
+# process can ever share its identity, and ProtectProc=invisible hides its processes (and their
+# environment) from every other service. It fetches only the Twingate secrets and writes ONE
+# generation (a directory named by a random run id, with a manifest) into its own runtime
+# directory. The root-run ExecStartPost validates it and publishes it for the other two units;
+# the broker's runtime directory is deleted by systemd when this unit stops, on success, failure,
+# timeout or kill alike. The collector and the writer run as their own dynamic users and can reach
+# neither this token nor each other's secrets. No secret value belongs in this file.
+[Unit]
+Description=Twingate collector step 1: fetch the stage secrets
+Wants=network-online.target
+# After= the later steps: a new run waits until the previous chain has finished.
+After=network-online.target twingate-collect-metric.service twingate-collect-write.service
+OnSuccess=twingate-collect-metric.service
+OnFailure=twingate-collect-failure.service
+
+[Service]
+Type=oneshot
+DynamicUser=yes
+LoadCredential=doppler-token:/etc/siem/doppler-token
+RuntimeDirectory=twingate-broker
+RuntimeDirectoryMode=0700
+# Root-run (+): drop every unclaimed generation left by an earlier run, then (after the fetch)
+# validate and publish this run's generation, and drop everything again if the run failed.
+ExecStartPre=+/usr/bin/python3 -I /opt/siem/scripts/live-deploy/twingate-generation.py purge --dest /run/twingate-collect
+# The first command starts with an empty environment (env -i); only these names are set.
+ExecStart=/usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LC_ALL=C SIEM_TOKEN_FILE=%d/doppler-token SIEM_CONFIG_DIR=%t/twingate-broker/doppler-cfg TWINGATE_STAGE_DIR=%t/twingate-broker SIEM_ONLY_SECRETS=TWINGATE_API_KEY,TWINGATE_NETWORK_URL,TWINGATE_CONNECTOR_MANAGED_BY_FILE,TWINGATE_CONNECTOR_MANAGED_BY,TWINGATE_EXPECTED_CONNECTORS,TWINGATE_INFLUX_USER,TWINGATE_INFLUX_PASSWORD /opt/siem/scripts/live-deploy/siem-run /usr/bin/python3 -I /opt/siem/scripts/live-deploy/twingate-fetch-secrets.py
+ExecStartPost=+/usr/bin/python3 -I /opt/siem/scripts/live-deploy/twingate-generation.py publish --src /run/twingate-broker --dest /run/twingate-collect
+ExecStopPost=+/usr/bin/python3 -I /opt/siem/scripts/live-deploy/twingate-generation.py purge --dest /run/twingate-collect --if-failed
+TimeoutStartSec=120
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+CapabilityBoundingSet=
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+SystemCallArchitectures=native
+ProtectProc=invisible
+ProcSubset=pid
+LimitCORE=0

@@ -224,6 +224,35 @@ ready. The rules assume one run per hour.
 To act on a "behind" alert, follow
 [twingate-connector-update.md](twingate-connector-update.md).
 
+#### Collector deployment (issue #222)
+
+The collector that feeds these metrics runs hourly from `docs/systemd/twingate-collect.timer` as a chain of three
+sandboxed units (broker, check, write; runbook section 10). The check pipes
+`twingate-update-metric.py` into `scripts/live-deploy/twingate-influx-write.py`
+(one write to the database `telegraf`, Basic auth, 5 s timeout, no redirects, no
+retry, counts only in its output). The InfluxDB account is `twingate_wo` with
+`GRANT WRITE ON "telegraf"` only; its user name and password are stored in the
+secret manager config `prd_network` as `TWINGATE_INFLUX_USER` and
+`TWINGATE_INFLUX_PASSWORD`. The owner steps (account, install, dry run, first run,
+landing check, `twingate-collect.timer`) and the Rollback are in
+`docs/live-deploy-runbook.md`, section 10. For a host without Telegraf this replaces
+the exec input above; use one or the other, not both.
+
+The collector requires `TWINGATE_EXPECTED_CONNECTORS`, a JSON array of the Connector
+names (supplied by the owner in the secret manager config, never kept in the repo).
+Unset, empty, `[]` or malformed fails the check closed. An expected Connector that the
+API does not return is written as `twingate_connector_up` value 0 (so the "not ALIVE"
+rule fires) and the check fails; a returned Connector that is not on the list is counted
+in `twingate_unexpected_connector` without failing the check (the warning rule "Twingate unexpected Connector" alerts on it). Duplicate names or ids and
+a repeated page cursor also fail the check. The units start from an empty environment, and each stage receives only its own secrets as
+a credential file from a per-run generation that it checks against a manifest; the broker is a dynamic user and the secret manager's token is not readable by either stage (runbook section 10, including the minimum systemd version, 249).
+
+A cleanly stopped Connector is still listed by the Admin API, so
+`twingate_connector_up` becomes 0 (it does not go missing). A dead collector does not
+look green: all six rules use `noDataState: Alerting`, and "Twingate update check
+failing or stale" reads a 6 hour window, so no point for 6 hours (or a 0) alerts once
+the rules are unpaused. The rules stay paused until the landing check passes.
+
 #### How each Connector is managed (`managed_by`)
 
 Connectors are not all updated the same way, and the mix will change. The
@@ -251,7 +280,7 @@ the phone, and because the weekly digest lists every alert that fired, they
 show up there. Behind for 14 days means the Operator itself is stuck. The
 manual rules read only `managed_by` other than `operator`, so the two sets
 never overlap. The rules "Twingate Connector not ALIVE" and "Twingate update
-check failing or stale" apply to every mode.
+check failing or stale" apply to every mode. "Twingate unexpected Connector" (`severity=warning`, `phone=false`) fires when `twingate_unexpected_connector` is above 0 in every sample of the last 3 hours and there are at least two samples (the rule takes the minimum over the window), so a Connector that stays unexpected is noticed up to about 3 hours after it first appears, once the last zero sample ages out, and one that goes away again sooner is recorded but not alerted; both its no-data and error states alert, so a missing metric never looks like a clean inventory (a silent collector also trips the stale rule, which is the accepted duplicate).
 
 ### Label taxonomy
 
@@ -259,7 +288,7 @@ check failing or stale" apply to every mode.
 |-------|------------------|
 | `update_alert` | `true` marks an update-alerting rule: it matches the notification policy route with the 84h and 24h repeats, and its title belongs in `ALLOWED_ALERTNAMES` |
 | `severity` | `warning` or `critical`: the repeat interval, and the Pushover priority (1, or 2 for an allowlisted name with an urgent label) |
-| `phone` | `true` is the only way an alert reaches Pushover; any other value or no label keeps it off the phone (Discord is unaffected). The exact value per rule is in the table under "Update rule matrix" below; four rules are `phone=false`: the UniFi 24h warning, the pfSense 24h warning, the Twingate operator-managed rule and the UniFi poller-stale watchdog |
+| `phone` | `true` is the only way an alert reaches Pushover; any other value or no label keeps it off the phone (Discord is unaffected). The exact value per rule is in the table under "Update rule matrix" below; five rules are `phone=false`: the UniFi 24h warning, the pfSense 24h warning, the Twingate operator-managed rule, the Twingate unexpected Connector rule and the UniFi poller-stale watchdog |
 | `alert_group` | Grouping and display (`updates` for these rules); no routing effect |
 | `update_security` | `true` marks a security release: emergency priority for allowlisted names |
 
