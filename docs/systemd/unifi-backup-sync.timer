@@ -1,0 +1,16 @@
+# Weekly sync after the UniFi OS auto-backup (Mondays), plus a daily retry (issue #228).
+# The UniFi backup time is ASSUMED, not verified: read the <time> part of the file names in the
+# source folder (autobackup_<version>_<date>_<time>_<epoch>.unf) and keep the Monday run at least
+# one hour after it. The daily run only copies what is new, so a missed or failed run catches up.
+[Unit]
+Description=Weekly UniFi backup sync with a daily retry
+
+[Timer]
+OnCalendar=Mon *-*-* 06:30:00
+OnCalendar=*-*-* 18:30:00
+RandomizedDelaySec=300
+Persistent=yes
+Unit=unifi-backup-sync.service
+
+[Install]
+WantedBy=timers.target

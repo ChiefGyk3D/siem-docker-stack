@@ -13,6 +13,7 @@ Usage:
   siem-run python3 -I n8n-setup-alert-router.py --error-workflow handler.json [HANDLER_ID]
   siem-run python3 -I n8n-setup-alert-router.py --check --with-matrix
   siem-run python3 -I n8n-setup-alert-router.py --credentials --with-matrix
+  siem-run python3 -I n8n-setup-alert-router.py --credentials --with-grafana-viewer
   siem-run python3 -I n8n-setup-alert-router.py --digest-workflow weekly-update-digest.json [WORKFLOW_ID] [--error-workflow-id HANDLER_ID]
   siem-run python3 -I n8n-setup-alert-router.py --workflow router.json [WORKFLOW_ID] [--pushover-on] [--error-workflow-id HANDLER_ID]
 
@@ -21,6 +22,15 @@ Custom Auth credential matrix-bot-auth: the bearer token comes from the environm
 MATRIX_BOT_TOKEN and goes to n8n over stdin like the other secrets (never argv, never
 printed). --digest-workflow imports n8n/weekly-update-digest.json inactive with its
 credential ids mapped; import the error handler first and pass its id, as for the router.
+--with-grafana-viewer works the same way for the Custom Auth credential grafana-viewer-auth
+(the weekly digest collectors read Grafana with it): the token of a Grafana Viewer service
+account comes from the environment value GRAFANA_VIEWER_TOKEN, over stdin, never argv, never
+printed. After a successful viewer import the command exits 40 (imported, Allowed HTTP Request
+Domains lock not verified; 0 is never returned for it, 1 and above otherwise mean the import failed).
+The flags can be combined; every needed value and id is checked BEFORE n8n is changed,
+so a bad value leaves nothing half done. Tokens lose surrounding whitespace; an empty or
+multi-line token stops the run. GRAFANA_BASE_URL is not a secret: a pass-through line
+(name only) in the n8n container environment.
 MATRIX_HOMESERVER and MATRIX_ROOM_ID are not secrets and not handled here: they are
 pass-through lines (names only) in the n8n container environment of the compose file.
 
@@ -41,6 +51,9 @@ Environment (all optional, the current values are the defaults):
   N8N_CRED_PUSHOVER_ID    id for the pushover-api credential (default: pushoverapi0001)
   N8N_CRED_MATRIX_ID      id for the matrix-bot-auth credential (default: matrixbotauth01)
   MATRIX_BOT_TOKEN        only with --with-matrix: the Matrix bot's access token (secret)
+  N8N_CRED_GRAFANA_VIEWER_ID  id for the grafana-viewer-auth credential (default: grafanaviewer01)
+                          (every credential id is 8 to 32 letters or digits, and no two are equal)
+  GRAFANA_VIEWER_TOKEN    only with --with-grafana-viewer: a Grafana Viewer service account token (secret)
   N8N_CRED_DISCORD_ID     id of the existing Discord webhook credential in n8n
                           (default: dscwhk1479574998; an n8n internal id, not a secret)
   N8N_DISCORD_CRED_NAME   name of that credential (default: Discord Webhook Alerts)
@@ -67,6 +80,7 @@ EXPIRY_PATH_FILE = os.path.join(CONFIG_DIR, "expiry-path")
 CRED_HEADER_ID = os.environ.get("N8N_CRED_HEADER_ID", "gfwebhookauth01")
 CRED_PUSHOVER_ID = os.environ.get("N8N_CRED_PUSHOVER_ID", "pushoverapi0001")
 CRED_MATRIX_ID = os.environ.get("N8N_CRED_MATRIX_ID", "matrixbotauth01")
+CRED_GRAFANA_VIEWER_ID = os.environ.get("N8N_CRED_GRAFANA_VIEWER_ID", "grafanaviewer01")
 CRED_DISCORD_ID = os.environ.get("N8N_CRED_DISCORD_ID", "dscwhk1479574998")
 DISCORD_NAME = os.environ.get("N8N_DISCORD_CRED_NAME", "Discord Webhook Alerts")
 NEW_NAME = os.environ.get("N8N_ROUTER_NAME", "Grafana SOAR — Alert Router (authenticated)")
@@ -84,6 +98,50 @@ def need(name):
     if not value:
         sys.exit("missing environment value: " + name)
     return value
+
+
+def bearer_token(name):
+    """A secret from the environment for a Bearer header: surrounding whitespace is stripped; empty, or
+    anything with a line break or other control character inside, stops the run (it would corrupt the header)."""
+    value = os.environ.get(name, "").strip()
+    if not value:
+        sys.exit("missing environment value: " + name)
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        sys.exit(name + " must be one line without control characters")
+    return value
+
+
+def credential_ids():
+    """Every credential id this tooling creates or expects, by credential name."""
+    return {
+        "grafana-webhook-auth": CRED_HEADER_ID,
+        "pushover-api": CRED_PUSHOVER_ID,
+        DISCORD_NAME: CRED_DISCORD_ID,
+        "matrix-bot-auth": CRED_MATRIX_ID,
+        "grafana-viewer-auth": CRED_GRAFANA_VIEWER_ID,
+    }
+
+
+def check_credential_ids():
+    """Each credential id is 8 to 32 letters or digits and no two credentials share one."""
+    seen = {}
+    for name, value in credential_ids().items():
+        if not re.match(r"^[A-Za-z0-9]{8,32}$", value or ""):
+            sys.exit("credential id for %s must be 8 to 32 letters or digits" % name)
+        if value in seen:
+            sys.exit("credential id for %s equals the id for %s: every credential needs its own id" % (name, seen[value]))
+        seen[value] = name
+
+
+def preflight(with_matrix=False, with_viewer=False):
+    """Check everything a credential run needs BEFORE n8n is changed, so a bad value never leaves a partial result."""
+    check_credential_ids()
+    for name in NEEDED:
+        need(name)
+    if with_matrix:
+        bearer_token("MATRIX_BOT_TOKEN")
+    if with_viewer:
+        bearer_token("GRAFANA_VIEWER_TOKEN")
 
 
 def engine():
@@ -108,7 +166,58 @@ def docker_in(script, payload):
     out = (proc.stdout + proc.stderr).decode(errors="replace")
     # Never echo anything that could contain a value; keep only plain status lines.
     lines = [ln for ln in out.splitlines() if ln.strip() and "Error tracking" not in ln]
-    return proc.returncode, lines
+    rc = proc.returncode
+    if rc == EXIT_DOMAIN_LOCK_UNVERIFIED:
+        rc = 1   # a child must never look like "imported, lock not verified"
+    return rc, lines
+
+
+# Secret-bearing imports. The plaintext JSON arrives over stdin and is written inside the container
+# into a private directory (mktemp -d is mode 700, umask 077 makes the file mode 600 from creation)
+# with an unpredictable name; the trap removes both on exit or on a signal. The n8n CLI is documented
+# with --input=<file> only (no stdin form), so a file is used. The n8n output is thrown away inside the
+# container and never printed here: it is not needed to judge success (the exit code is), and a CLI
+# error could echo its input.
+# The directory is under /dev/shm when that is a memory-backed mount (the filesystem type is read with
+# stat and must be tmpfs), so a SIGKILL or crash, which skips the trap, leaves the plaintext in RAM only
+# and not in the container's writable layer. Otherwise /tmp is used and WARN_NOT_TMPFS is printed by the
+# caller (it is a fixed line; no other child output is ever shown).
+SHM_DIR = "/dev/shm"
+FALLBACK_DIR = "/tmp"
+WARN_NOT_TMPFS = "warning: /dev/shm is not a memory-backed mount; the credential file uses /tmp (it survives a SIGKILL)"
+CRED_IMPORT_SCRIPT = (
+    "umask 077; shm=" + SHM_DIR + "; base=" + FALLBACK_DIR + "; "
+    "if [ -d \"$shm\" ] && [ -w \"$shm\" ] && [ \"$(stat -f -c %T \"$shm\" 2>/dev/null)\" = tmpfs ]; then base=$shm; "
+    "else echo '" + WARN_NOT_TMPFS + "'; fi; "
+    "d=$(mktemp -d \"$base/n8n-cred.XXXXXXXXXX\") || exit 70; "
+    "trap 'rm -f \"$d/c.json\"; rmdir \"$d\"' EXIT HUP INT TERM; "
+    "cat > \"$d/c.json\" && n8n import:credentials --input=\"$d/c.json\" >/dev/null 2>&1"
+)
+
+# Exit code of the viewer flow when the import itself worked: the credential exists but nothing proves
+# its Allowed HTTP Request Domains lock, so automation must not treat the run as fully done.
+EXIT_DOMAIN_LOCK_UNVERIFIED = 40
+
+
+def failure_code(rc):
+    """A failed child never reports the 'imported, lock not verified' code (or 0): it becomes 1."""
+    return 1 if rc in (0, EXIT_DOMAIN_LOCK_UNVERIFIED) else rc
+
+VIEWER_REMINDER = (
+    "REQUIRED NEXT STEP: an import file cannot lock a credential to a host. In the n8n editor open\n"
+    "credential grafana-viewer-auth and set Allowed HTTP Request Domains to the Grafana host only,\n"
+    "then run the post-import check in docs/live-deploy-runbook.md. Until then the Viewer token can be\n"
+    "sent to any https host that GRAFANA_BASE_URL names."
+)
+
+
+def import_credential_records(records):
+    """Import credential records through the private-file script. Returns only the exit code: child
+    output is never shown, so no error path can print the token or the credential JSON."""
+    rc, lines = docker_in(CRED_IMPORT_SCRIPT, json.dumps(records))
+    if WARN_NOT_TMPFS in lines:
+        print(WARN_NOT_TMPFS)   # the one fixed line the script itself prints; nothing else from the child
+    return rc
 
 
 def docker_out(*args):
@@ -146,14 +255,19 @@ def build_matrix_credential(token):
     }
 
 
+def build_grafana_viewer_credential(token):
+    """The Custom Auth credential the weekly digest's Grafana query nodes use: one Authorization header."""
+    return {
+        "id": CRED_GRAFANA_VIEWER_ID,
+        "name": "grafana-viewer-auth",
+        "type": "httpCustomAuth",
+        "data": {"json": json.dumps({"headers": {"Authorization": "Bearer " + token}})},
+    }
+
+
 def credential_id_map():
     """Credential name -> the n8n credential id this tooling creates or expects."""
-    return {
-        "grafana-webhook-auth": CRED_HEADER_ID,
-        "pushover-api": CRED_PUSHOVER_ID,
-        DISCORD_NAME: CRED_DISCORD_ID,
-        "matrix-bot-auth": CRED_MATRIX_ID,
-    }
+    return credential_ids()
 
 
 def choose_webhook_path(existing, token_fn=None, prefix=PATH_PREFIX, token_len=None):
@@ -373,8 +487,8 @@ def patch_workflow(wf, reuse_id="", pushover_on=False, origin="", webhook_path="
 
 # ---- command line ----------------------------------------------------------------
 
-def check(with_matrix=False):
-    names = NEEDED + (("MATRIX_BOT_TOKEN",) if with_matrix else ())
+def check(with_matrix=False, with_viewer=False):
+    names = NEEDED + (("MATRIX_BOT_TOKEN",) if with_matrix else ()) + (("GRAFANA_VIEWER_TOKEN",) if with_viewer else ())
     for name in names:
         print("%s: %s" % (name, "present" if os.environ.get(name) else "MISSING"))
     return 0 if all(os.environ.get(n) for n in names) else 1
@@ -383,23 +497,30 @@ def check(with_matrix=False):
 def credentials():
     creds = build_credentials(need("GRAFANA_WEBHOOK_SECRET"), need("PUSHOVER_API_KEY"),
                               need("PUSHOVER_USER_KEY"))
-    script = "cat > /tmp/cred.json && n8n import:credentials --input=/tmp/cred.json; rc=$?; rm -f /tmp/cred.json; exit $rc"
-    rc, lines = docker_in(script, json.dumps(creds))
-    for ln in lines[:6]:
-        print(ln[:160])
+    rc = import_credential_records(creds)
     print("credentials import exit code:", rc)
     return rc
 
 
 def matrix_credentials():
     """Create only matrix-bot-auth. The token is read from the environment and sent over stdin."""
-    cred = build_matrix_credential(need("MATRIX_BOT_TOKEN"))
-    script = "cat > /tmp/cred.json && n8n import:credentials --input=/tmp/cred.json; rc=$?; rm -f /tmp/cred.json; exit $rc"
-    rc, lines = docker_in(script, json.dumps([cred]))
-    for ln in lines[:6]:
-        print(ln[:160])
+    cred = build_matrix_credential(bearer_token("MATRIX_BOT_TOKEN"))
+    rc = import_credential_records([cred])
     print("matrix credential import exit code:", rc)
     return rc
+
+
+def grafana_viewer_credentials():
+    """Create only grafana-viewer-auth. The token is read from the environment and sent over stdin."""
+    check_credential_ids()
+    cred = build_grafana_viewer_credential(bearer_token("GRAFANA_VIEWER_TOKEN"))
+    rc = import_credential_records([cred])
+    print("grafana viewer credential import exit code:", rc)
+    if rc == 0:
+        print(VIEWER_REMINDER)
+        print("exit code %d: imported, domain lock not verified (see docs/live-deploy-runbook.md)" % EXIT_DOMAIN_LOCK_UNVERIFIED)
+        return EXIT_DOMAIN_LOCK_UNVERIFIED
+    return failure_code(rc)
 
 
 def digest_workflow(path, reuse_id="", error_workflow_id=""):
@@ -483,11 +604,20 @@ def workflow(path, reuse_id="", pushover_on=False, error_workflow_id=""):
 
 
 def main(argv):
-    if argv[:1] == ["--check"] and argv[1:] in ([], ["--with-matrix"]):
-        return check(bool(argv[1:]))
-    if argv[:1] == ["--credentials"] and argv[1:] in ([], ["--with-matrix"]):
+    flags = argv[1:]
+    known = {"--with-matrix", "--with-grafana-viewer"}
+    if argv[:1] in (["--check"], ["--credentials"]) and len(set(flags)) == len(flags) and set(flags) <= known:
+        if argv[0] == "--check":
+            return check("--with-matrix" in flags, "--with-grafana-viewer" in flags)
+        preflight("--with-matrix" in flags, "--with-grafana-viewer" in flags)
         rc = credentials()
-        return rc if rc or not argv[1:] else matrix_credentials()
+        if rc:
+            return rc
+        if "--with-matrix" in flags:
+            rc = matrix_credentials()
+        if not rc and "--with-grafana-viewer" in flags:
+            rc = grafana_viewer_credentials()
+        return rc
     if argv[:1] == ["--digest-workflow"] and len(argv) >= 2:
         try:
             reuse_id, _unused, error_id = parse_workflow_args(argv[2:])
