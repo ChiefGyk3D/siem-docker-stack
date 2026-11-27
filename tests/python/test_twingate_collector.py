@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 
 import pytest
 import yaml
@@ -893,6 +894,125 @@ def test_cleanup_removes_the_consumed_generation_and_the_current_pointer(gen_dir
     assert run_gen("cleanup", "--dest", str(dest)).returncode == 0
     assert not generations(dest) and not (dest / "current").is_symlink() and not (dest / "claim").exists()
     assert run_gen("claim", "--dest", str(dest)).returncode != 0            # nothing to claim: the writer fails closed
+
+
+PAUSING_PUBLISH = """
+import importlib.util, os, sys, time
+spec = importlib.util.spec_from_file_location("gen", sys.argv[1])
+gen = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gen)
+real = os.replace
+def replace(a, b, *rest, **kw):
+    real(a, b, *rest, **kw)
+    if os.path.basename(b) == "current":       # pause between the link replace and the cleanup loop
+        open(sys.argv[4], "w").close()
+        for _ in range(300):
+            if os.path.exists(sys.argv[5]):
+                break
+            time.sleep(0.05)
+os.replace = replace
+sys.exit(gen.main(["g", "publish", "--src", sys.argv[2], "--dest", sys.argv[3]]))
+"""
+
+
+def test_two_concurrent_publishes_never_leave_current_pointing_at_a_removed_generation(gen_dirs, tmp_path):
+    # R6-1: the second publish must wait for the first one to finish its cleanup
+    src_a, dest = gen_dirs
+    src_b = tmp_path / "broker-b"
+    ga = broker_generation(src_a)
+    gb = broker_generation(src_b)
+    child = tmp_path / "pausing_publish.py"
+    child.write_text(PAUSING_PUBLISH)
+    paused, go = tmp_path / "paused", tmp_path / "go"
+    a = subprocess.Popen([sys.executable, "-I", str(child), str(GENERATION), str(src_a), str(dest), str(paused), str(go)],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env={"PATH": "/usr/bin"})
+    try:
+        for _ in range(200):
+            if paused.exists():
+                break
+            time.sleep(0.05)
+        assert paused.exists(), "first publish never reached the pause point"
+        b = subprocess.Popen([sys.executable, "-I", str(GENERATION), "publish", "--src", str(src_b), "--dest", str(dest)],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env={"PATH": "/usr/bin"})
+        time.sleep(1.0)                      # without the lock the second publish completes (and is then removed) here
+        go.write_text("go")
+        out_a, err_a = a.communicate(timeout=30)
+        out_b, err_b = b.communicate(timeout=30)
+    finally:
+        go.write_text("go")
+        for proc in (a, b if "b" in locals() else None):
+            if proc and proc.poll() is None:
+                proc.kill()
+    assert a.returncode == 0 and b.returncode == 0, (err_a, err_b)
+    assert os.path.isfile(dest / "current" / "writer.json")            # current resolves to a complete generation
+    assert os.readlink(dest / "current") == gb.name and [x.name for x in generations(dest)] == [gb.name]
+    assert ga.name != gb.name and not list(dest.glob("current.*"))
+
+
+def test_publish_never_touches_a_shared_current_tmp_name(gen_dirs):
+    # R6-1: every invocation uses its own temporary link name
+    src, dest = gen_dirs
+    dest.mkdir(mode=0o700)
+    (dest / "current.tmp").symlink_to("somebody-elses-link")
+    g = broker_generation(src)
+    assert run_gen("publish", "--src", str(src), "--dest", str(dest)).returncode == 0
+    assert os.readlink(dest / "current.tmp") == "somebody-elses-link"
+    assert os.readlink(dest / "current") == g.name
+
+
+def load_generation_module():
+    spec = importlib.util.spec_from_file_location("twingate_generation_under_test", GENERATION)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_a_held_destination_lock_makes_every_mutation_fail_closed_after_a_bounded_wait(gen_dirs, monkeypatch):
+    # R6-1: no mutation proceeds without the lock; the wait is bounded and ends in an error
+    import fcntl
+    src, dest = gen_dirs
+    g = broker_generation(src)
+    mod = load_generation_module()
+    monkeypatch.setattr(mod, "LOCK_WAIT", 0.3)
+    assert mod.main(["g", "publish", "--src", str(src), "--dest", str(dest)]) == 0
+    assert mod.main(["g", "claim", "--dest", str(dest)]) == 0
+    fd = os.open(dest, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        for args in (["claim"], ["cleanup"], ["purge"], ["publish", "--src", str(src)]):
+            assert mod.main(["g", args[0], *args[1:], "--dest", str(dest)]) == 1, args
+        assert (dest / g.name / "writer.json").exists() and (dest / "claim").exists()      # nothing was touched
+    finally:
+        os.close(fd)
+    assert mod.main(["g", "cleanup", "--dest", str(dest)]) == 0
+
+
+@pytest.mark.parametrize("content", [b" ", b"\t", b"\n", b"\n\n", b"\r\n"])
+@pytest.mark.parametrize("where", ["prefix", "suffix", "both"])
+def test_a_claim_with_surrounding_whitespace_is_not_a_claim(gen_dirs, content, where):
+    # R6-2: only the id, or the id plus one newline, names a claimed generation
+    src, dest = gen_dirs
+    g = broker_generation(src)
+    assert run_gen("publish", "--src", str(src), "--dest", str(dest)).returncode == 0
+    raw = {"prefix": content + g.name.encode(), "suffix": g.name.encode() + content,
+           "both": content + g.name.encode() + content}[where]
+    if raw == g.name.encode() + b"\n":
+        pytest.skip("the one allowed form")
+    (dest / "claim").write_bytes(raw)
+    assert run_gen("purge", "--dest", str(dest)).returncode == 0
+    assert not generations(dest)                 # unclaimed: purge removed it
+
+
+@pytest.mark.parametrize("suffix", [b"", b"\n"])
+def test_a_claim_of_exactly_the_id_with_at_most_one_newline_is_honoured(gen_dirs, suffix):
+    src, dest = gen_dirs
+    g = broker_generation(src)
+    assert run_gen("publish", "--src", str(src), "--dest", str(dest)).returncode == 0
+    (dest / "claim").write_bytes(g.name.encode() + suffix)
+    assert run_gen("purge", "--dest", str(dest)).returncode == 0
+    assert [x.name for x in generations(dest)] == [g.name]
+    assert run_gen("cleanup", "--dest", str(dest)).returncode == 0
+    assert not generations(dest)
 
 
 def test_purge_after_a_failed_broker_removes_leftover_credentials_but_not_after_success(gen_dirs):
