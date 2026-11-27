@@ -3,48 +3,68 @@
 `scripts/twingate-connector-update.sh` automates the manual procedure in
 `docs/twingate-connector-update.md` (PR #221, not merged when this page was
 written; this page stands alone and is meant to be merged into that one's
-"script" section later). Issue #220.
+"script" section later). Issue #220. It is started only through the installed
+launcher, `scripts/twingate-connector-update-launcher.sh` (see Install).
 
 Owner decision 2026-11-26: Connector updates stay a one-command action that the
 owner runs on each host, one host at a time. There are no automatic updates.
 
-## Install location (required for every run as root)
+## Install: a root-owned launcher and a root-owned updater (required)
 
-The script restarts itself in a cleared environment, so it must live where only
-root can change it. It makes its own path absolute (the directory is resolved
-with `pwd -P`; the file itself must not be a symbolic link) and then requires
-the file and every directory above it, up to `/`, to be owned by root, not
-group- or world-writable, and free of an extended ACL. ACLs are detected by the
-plus sign that the long listing (`ls -ldn`) shows after the mode when an
-extended ACL exists, which needs no extra package; where `getfacl` is installed
-it is checked as well: it must report exactly one `user::`, one `group::` and
-one `other::` entry and nothing else (named entries, a mask, default entries,
-empty, malformed, duplicate or incomplete output all count as an ACL). If the
-listing or `getfacl` cannot be read, the path is treated as untrusted. File
-systems whose permissions neither the listing marker nor POSIX `getfacl` can see
-(for example network file systems with server-side ACLs) are unsupported for the
-install location; install on a local file system. Other
-extended attributes (`security.*`, `user.*`) do not change who may write a file,
-so they are not checked.
-
-The check runs inside the script, after the shell has started reading it, so
-EVERY invocation from a path that fails it is refused with a fixed message
-and exit code 2: any user, a dry run included. A user who can reach the Docker
-socket is root-equivalent, so an unprivileged run of an untrusted copy is inside
-the threat model too. To preview, run `--dry-run` from the installed, trusted
-copy. A checkout or any other writable location is not a supported place to run
-it from.
-The restart does not reopen the path:
-the script text is read once, after that check, and the clean second stage runs
-from that text (`sh -c`), so a file swapped between the two stages is never
-executed. Install it, for example:
+Two files are installed. The updater (`scripts/twingate-connector-update.sh`)
+does the work. The launcher (`scripts/twingate-connector-update-launcher.sh`) is
+the ONLY supported way to start it. A shell file cannot check its own location:
+it has already started running its first lines when it would do so. So the check
+lives in a separate, tiny launcher, and the launcher is the one trust root: its
+install location is the control, and nothing can vouch for it. It is POSIX `sh`,
+defines no functions, and runs nothing but its own checks before it hands over.
 
 ```bash
-sudo install -o root -g root -m 0755 scripts/twingate-connector-update.sh /usr/local/sbin/twingate-connector-update
+# the updater, in a root-only directory (mode 0700 root:root; the launcher reads it as root)
+sudo install -d -o root -g root -m 0700 /usr/local/libexec/twingate-connector-update
+sudo install -o root -g root -m 0600 scripts/twingate-connector-update.sh /usr/local/libexec/twingate-connector-update/twingate-connector-update.sh
+# the launcher, the only thing you run (mode 0755 root:root in a root-only directory)
+sudo install -o root -g root -m 0755 scripts/twingate-connector-update-launcher.sh /usr/local/sbin/twingate-connector-update
 sudo /usr/local/sbin/twingate-connector-update --dry-run <connector-name>
 ```
 
-Running it from a checkout that a non-root user can write to is refused.
+The launcher refuses (fixed message, exit code 2) unless ALL of these hold:
+
+- it is run by an absolute path and as root (a dry run and `--help` included: a
+  user who can reach the Docker socket is root-equivalent, so a non-root run is
+  not offered);
+- the updater is at its fixed installed path (it is a constant in the launcher,
+  never taken from an argument or the environment), is a regular file and not a
+  symbolic link, and no directory in its path is a symbolic link;
+- the updater and EVERY directory above it, up to `/`, are owned by root, not
+  group- or world-writable, and free of an extended ACL. ACLs are detected by the
+  plus sign that the long listing (`ls -ldn`) shows after the mode when an
+  extended ACL exists, which needs no extra package; where `getfacl` is installed
+  it is checked as well: it must report exactly one `user::`, one `group::` and
+  one `other::` entry and nothing else (named entries, a mask, default entries,
+  empty, malformed, duplicate or incomplete output all count as an ACL). If the
+  listing or `getfacl` cannot be read, the path is treated as untrusted. File
+  systems whose permissions neither the listing marker nor POSIX `getfacl` can see
+  (for example network file systems with server-side ACLs) are unsupported for the
+  install location; install on a local file system. Other extended attributes
+  (`security.*`, `user.*`) do not change who may write a file, so they are not
+  checked.
+
+So EVERY invocation from a path that fails it is refused, before one byte of
+the updater has run. The launcher opens the updater ONCE and reads its text (at
+most 100000 bytes) from that open file descriptor, then runs that text with
+`env -i` and `sh -c`; the path is never opened again (not for the restart, not
+for `--help`), so a file swapped after the check is never executed. The
+updater and its directories can only be changed by root, so the remaining
+window (between opening the file and checking its path) needs root as well.
+
+What this does not do: the updater cannot refuse a direct run by root in a way
+an attacker could not imitate. It stops an accidental direct run (it needs the
+launcher's marker and run token and a cleared environment, and says so), but
+the environment is attacker-controlled, so that is not a trust check. The
+launcher, installed root-owned, is the only documented entry point. A checkout or
+any other writable location is not a supported place to run either file from;
+never run `sudo scripts/...` from a checkout.
 
 ## Use
 
@@ -58,8 +78,9 @@ sudo /usr/local/sbin/twingate-connector-update --yes --force <connector-name>  #
 ```
 
 `<connector-name>` is the container name (letters, digits, `_`, `.`, `-`; max 63).
-Needs `docker` and `jq` on the host. A real run needs root and refuses as any
-other user with a clear message; `--dry-run` works without root only for a user who can reach the Docker socket (which is root-equivalent), and only from the installed trusted copy. `PATH` is fixed
+Needs `docker` and `jq` on the host. Every run, `--dry-run` and `--help`
+included, goes through the launcher and needs root; any other user is refused
+with a clear message. `PATH` is fixed
 to the system directories
 (`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`); the inherited
 `PATH`, `TMPDIR` and `XDG_RUNTIME_DIR` are never used, and there is no environment variable that changes which programs run. Only one
@@ -81,11 +102,11 @@ symlink) is shredded and removed first, so a SIGKILL cannot leave the env file
 behind past the next run. A live holder blocks a second run. The env file lives in a private
 directory `/run/twingate-connector-update` that must be a real directory (no
 symlink), owned by root, mode 700, or the run refuses.
-The whole environment is cleared. At start the script re-executes itself under
+The whole environment is cleared. The launcher starts the updater under
 `env -i` with a fixed `PATH`, `LANG=C`, `DOCKER_HOST=unix:///var/run/docker.sock`,
 a `DOCKER_CONFIG` of its own (a root-only directory, emptied by the script each run,
 `/run/twingate-connector-update/docker-config`) and a `HOME` of its own (an empty
-root-only directory, `/run/twingate-connector-update/home`). The two directories are removed with a routine that stays on one filesystem and never follows links; if either holds a mount point, or either scan or the one-file-system removal fails, the run refuses and removes nothing more (there is no unrestricted fallback, so an `rm` without `--one-file-system` is refused). `DOCKER_CONTEXT`,
+root-only directory, `/run/twingate-connector-update/home`). The two directories are removed with a routine that stays on one filesystem and never follows links; if the directory itself is a mount point (checked against the kernel mount table, `/proc/self/mountinfo`; an unreadable table also refuses), if it holds a mount point, or if either scan or the one-file-system removal fails, the run refuses and removes nothing more (there is no unrestricted fallback, so an `rm` without `--one-file-system` is refused). `DOCKER_CONTEXT`,
 `DOCKER_TLS_VERIFY`, `DOCKER_CERT_PATH`, `SSL_CERT_FILE`, `SSL_CERT_DIR`,
 `CURL_CA_BUNDLE`, the proxy variables, `XDG_*` and everything else the caller had
 set never reach `docker`, `curl` or `jq`, so an environment-preserving `sudo`
@@ -96,7 +117,7 @@ rule cannot point the script at a different daemon. Only the documented inputs
 descriptor, never in argv; none of them may contain a newline (the run is
 refused). They live in unexported shell variables, so `docker` and `jq` never
 see them; the key reaches only the single `curl` call that needs it, on stdin.
-The restarted process refuses to run if its environment holds any other name.
+The updater refuses to run if its environment holds any other name.
 `TWINGATE_UPDATE_WAIT_SECS` and `TWINGATE_UPDATE_POLL_SECS` must be plain
 integers 1 to 60 without a sign or leading zero; anything else uses the default.
 
@@ -185,13 +206,20 @@ does not pass `--hostname`).
    says the same in a note and exits 0 after the local check.
 
 The temp dir and env file are shredded and removed on every exit path and on
-INT, TERM, HUP, PIPE and QUIT. SIGKILL cannot be handled by any program. The
+INT, TERM, HUP, PIPE and QUIT. SIGKILL cannot be handled by any program. If that
+removal fails, the run does not look successful: it exits non-zero (5 if it
+would have exited 0, otherwise its own code), prints the path of the directory
+that was kept (it may still hold the token file), and keeps the lock record
+that names it, so the next run's stale-lock recovery removes it. That recovery
+itself stops, with the lock record untouched, when it cannot remove the old
+directory, so a directory holding secrets is never left without a record. The
 rollback tag is kept after the run (remove it with `docker rmi` when you no
 longer need it); images are never pruned.
 
 Exit codes: 0 updated or already current (or dry-run), 1 failed or rolled back,
 2 refused or rollback failed, 3 aborted (prompt or pre-check warning),
-4 updated but health not confirmed in Twingate.
+4 updated but health not confirmed in Twingate, 5 the run otherwise succeeded
+but the private directory could not be removed (see above).
 
 `--dry-run` prints every step and runs only read-only commands (`docker inspect`,
 `docker image inspect`, `docker info`, `docker exec ... --version`, the optional
@@ -226,10 +254,9 @@ the label (default: short hostname). A failed notice never fails the update.
 their own settings from a file next to them, since the script clears its
 environment; one fake `docker` also parses the env file with a conservative model
 of the env-file grammar and the tests compare the result with `Config.Env`); nothing
-touches a real engine. The shipped script has no test seam: the test harness
-writes a test-only copy in which exactly four fixed lines (`PATH`,
-`LOCK_BASE`, `RUN_BASE`, `TRUSTED_UID`) point at the fakes, at scratch directories and at the test user (the tests do not run as root), and a
-test checks that the copy differs from the shipped file in those lines only. The shellcheck test fails (never skips) in CI when
+touches a real engine. The shipped scripts have no test seam: the test harness
+writes a test-only copy of the updater in which exactly four fixed lines (`PATH`,
+`LOCK_BASE`, `RUN_BASE`, `TRUSTED_UID`) point at the fakes, at scratch directories and at the test user (the tests do not run as root), and a test-only copy of the launcher in which exactly three lines (`PATH`, `TRUSTED_UID`, `UPDATER`) do; tests check that each copy differs from the shipped file in those lines only. The launcher tests put a marker on the very first line of the updater and prove it never runs when the path is refused. The shellcheck test fails (never skips) in CI when
 shellcheck is missing and falls back to `sh -n` locally.
 
 ## Confirming the layout on a real host

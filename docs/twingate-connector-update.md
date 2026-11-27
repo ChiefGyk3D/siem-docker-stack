@@ -104,6 +104,25 @@ docker run -d --network host --env-file ~/connector.env \
   --name <connector-name> --restart=unless-stopped <old-image-id>
 ```
 
+## The scripted way (launcher and updater)
+
+The manual steps above are automated by `scripts/twingate-connector-update.sh`,
+started only through a small root-owned launcher,
+`scripts/twingate-connector-update-launcher.sh`. Install both as root (the
+launcher is the trust root, so where it is installed is the control; a checkout
+is not a supported place to run either from):
+
+```bash
+sudo install -d -o root -g root -m 0700 /usr/local/libexec/twingate-connector-update
+sudo install -o root -g root -m 0600 scripts/twingate-connector-update.sh /usr/local/libexec/twingate-connector-update/twingate-connector-update.sh
+sudo install -o root -g root -m 0755 scripts/twingate-connector-update-launcher.sh /usr/local/sbin/twingate-connector-update
+sudo /usr/local/sbin/twingate-connector-update --dry-run <connector-name>
+```
+
+Every run goes through `/usr/local/sbin/twingate-connector-update` and needs
+root. Details, checks and exit codes are in
+[twingate-connector-update-script.md](twingate-connector-update-script.md).
+
 ## Failure modes seen
 
 - A Connector can stop cleanly (exit 0) and stay stopped under `unless-stopped`

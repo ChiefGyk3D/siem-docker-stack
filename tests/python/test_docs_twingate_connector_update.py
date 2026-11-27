@@ -72,6 +72,33 @@ def test_script_doc_never_shows_a_root_run_from_a_checkout():
     assert "root-equivalent" in t and "unsupported for the install location" in " ".join(t.split())
 
 
+def test_docs_describe_the_launcher_as_the_trust_root_and_not_a_self_check():
+    t = " ".join(SCRIPT_DOC.read_text().split())
+    r = " ".join(DOC.read_text().split())
+    assert "twingate-connector-update-launcher.sh" in t and "twingate-connector-update-launcher.sh" in r
+    assert "the launcher is the one trust root" in t
+    assert "A shell file cannot check its own location" in t
+    # the old claims that the updater validates itself must be gone
+    for old in ("The check runs inside the script", "the script restarts itself", "re-executes itself"):
+        assert old.lower() not in t.lower()
+    assert "never opened again" in t
+    assert "-m 0700 /usr/local/libexec/twingate-connector-update" in r
+
+
+def test_every_documented_root_command_calls_the_installed_launcher():
+    for doc in (SCRIPT_DOC, DOC):
+        for line in doc.read_text().splitlines():
+            if line.lstrip().startswith("sudo ") and "twingate-connector-update" in line and "install" not in line:
+                assert "/usr/local/sbin/twingate-connector-update" in line, line
+
+
+def test_script_doc_documents_cleanup_failure_and_the_launcher_exit_codes():
+    t = " ".join(SCRIPT_DOC.read_text().split())
+    assert "prints the path of the directory that was kept" in t
+    assert "5 the run otherwise succeeded" in t
+    assert "mount table" in t
+
+
 @pytest.mark.parametrize("bad", ["sudo ./scripts/twingate-connector-update.sh --dry-run x",
                                  "sudo scripts/twingate-connector-update.sh --dry-run x"])
 def test_checkout_guard_bites(bad):

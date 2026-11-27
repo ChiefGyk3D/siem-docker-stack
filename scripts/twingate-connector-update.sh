@@ -3,7 +3,8 @@
 # host it runs on. Issue #220. Owner decision 2026-11-26: a one-command action
 # the owner runs on each host, one host at a time. No automatic updates.
 #
-# Usage: twingate-connector-update.sh [--dry-run] [--yes] [--force] <connector-container-name>
+# Usage: twingate-connector-update [--dry-run] [--yes] [--force] <connector-container-name>
+# (the launcher's installed name; see docs/twingate-connector-update-script.md)
 #
 # Fail closed. It refuses unless NOTHING would be dropped by a recreate that
 # uses only: --network host, --env-file, --name, --restart=unless-stopped and
@@ -24,12 +25,15 @@
 # are copied into unexported shell variables and unset at once, so no child
 # process (docker, jq) inherits them.
 #
-# The whole environment is cleared: at start the script re-executes itself under
-# `env -i` with a fixed PATH, LANG=C, DOCKER_HOST=unix:///var/run/docker.sock,
+# Start it only through the installed launcher
+# (scripts/twingate-connector-update-launcher.sh, installed root-owned). The
+# launcher validates where this file is installed, reads it once and runs it
+# under `env -i` with a fixed PATH, LANG=C, DOCKER_HOST=unix:///var/run/docker.sock,
 # and a DOCKER_CONFIG and HOME of its own (empty root-only dirs under /run).
 # Only the inputs listed below are carried over, once, through a private file
 # descriptor (never argv). DOCKER_*, SSL_CERT_*, CURL_CA_BUNDLE, proxy and XDG_*
-# variables from the caller never reach docker, curl or jq.
+# variables from the caller never reach docker, curl or jq. This file does not
+# validate its own path: it cannot, because it is already running.
 #
 # Environment (all optional, never put secrets in argv):
 #   NOTIFY_WEBHOOK_URL   https URL; a short JSON notice is POSTed at the end
@@ -59,113 +63,14 @@ PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export PATH
 
 early_die() { printf 'refused: %s\n' "$1" >&2; exit 2; }
-NL='
-'
-# acl_present PATH: succeeds (0) when PATH has an extended ACL OR when that
-# cannot be determined (fail closed). Mode bits alone do not show a POSIX ACL
-# that gives another user write access. Two detections, no extra package needed
-# for the first: (1) the long listing of the mode ends in a plus sign when an
-# extended ACL exists (GNU ls); (2) where getfacl is installed, anything beyond
-# the three base entries (named users or groups, mask, default entries, or
-# empty, malformed or duplicate output) counts.
-# Other extended attributes (security.*, user.*) do not change who may write a
-# file, so they are not checked; the ACL attributes are the ones that do.
-acl_present() {
-    _l=$(ls -ldn -- "$1" 2>/dev/null) || return 0
-    case "$_l" in
-        [-d]?????????+*) return 0 ;;
-        [-d]?????????" "*|[-d]?????????.*) ;;
-        *) return 0 ;;
-    esac
-    if command -v getfacl >/dev/null 2>&1; then
-        _x=$(getfacl -p -c -- "$1" 2>/dev/null) || return 0
-        # Fail closed: exactly one user::, one group:: and one other:: base entry
-        # and nothing else. Empty, malformed, duplicate or incomplete output
-        # (and any named, mask or default entry) counts as "cannot be trusted".
-        _nu=0; _ng=0; _no=0
-        while IFS= read -r _ln; do
-            case "$_ln" in
-                "") ;;
-                user::[r-][w-][x-]) _nu=$((_nu + 1)) ;;
-                group::[r-][w-][x-]) _ng=$((_ng + 1)) ;;
-                other::[r-][w-][x-]) _no=$((_no + 1)) ;;
-                *) return 0 ;;
-            esac
-        done <<EOF_ACL
-$_x
-EOF_ACL
-        if [ "$_nu" != 1 ] || [ "$_ng" != 1 ] || [ "$_no" != 1 ]; then return 0; fi
-    fi
-    return 1
-}
-# ---- clean environment --------------------------------------------------------
-# First run: collect the documented inputs and re-exec under `env -i`. The
-# inputs travel on fd 3 (a heredoc), so secrets never appear in argv.
+# This updater is not meant to be run directly. The installed launcher
+# (twingate-connector-update-launcher.sh) validates this file's location, reads
+# its text once and runs it in a cleared environment with a run token. The
+# marker below only catches an accidental direct run; it is NOT a trust check
+# (anyone can set a variable), and a file cannot validate its own path before
+# its first lines have run. The launcher and where it is installed are the control.
 if [ "${TWINGATE_UPDATE_CLEAN_ENV:-}" != "1" ]; then
-    SELF="$0"
-    case "$SELF" in
-        */*) ;;
-        *) [ -f "./$SELF" ] && SELF="./$SELF" ;;
-    esac
-    [ -f "$SELF" ] || early_die "cannot locate this script to restart it with a clean environment"
-    # Hardening: the script must live in a root-owned location. Make the path
-    # absolute and physical (the directory through `pwd -P`; the file itself must
-    # not be a link), then require the file and EVERY directory up to / to be
-    # owned by root and not group- or world-writable. Every invocation refuses
-    # otherwise (any user, dry run included).
-    PATH_OK=1
-    PATH_WHY=""
-    SELF_DIR=$(cd "$(dirname -- "$SELF")" 2>/dev/null && pwd -P) || SELF_DIR=""
-    if [ -z "$SELF_DIR" ] || [ -L "$SELF" ]; then
-        PATH_OK=0; PATH_WHY="cannot resolve this script to a canonical path (it must not be a symbolic link)"
-    else
-        case "$SELF_DIR" in
-            /) SELF="/${SELF##*/}" ;;
-            *) SELF="$SELF_DIR/${SELF##*/}" ;;
-        esac
-        p="$SELF"
-        while :; do
-            if [ -z "$(find "$p" -maxdepth 0 -user "${TRUSTED_UID:-0}" ! -perm /022 2>/dev/null)" ]; then
-                PATH_OK=0; PATH_WHY="this script or one of its parent directories is not owned by root or is group- or world-writable; install it in a root-owned location such as /usr/local/sbin (mode 0755 root:root)"
-                break
-            fi
-            if acl_present "$p"; then
-                PATH_OK=0; PATH_WHY="this script or one of its parent directories has an extended access control list (ACL) or its ACL cannot be checked; install it in a root-owned location such as /usr/local/sbin (mode 0755 root:root, no ACL)"
-                break
-            fi
-            [ "$p" = "/" ] && break
-            p="${p%/*}"
-            [ -n "$p" ] || p="/"
-        done
-    fi
-    if [ "$PATH_OK" != 1 ]; then
-        # EVERY invocation from a path that fails validation is refused, whatever
-        # the user and whether or not it is a dry run. This shell is already
-        # reading the file, and a user with access to the Docker socket is
-        # root-equivalent, so even an unprivileged run of an untrusted copy is
-        # inside the threat model. Use the installed, trusted copy to preview.
-        early_die "$PATH_WHY"
-    fi
-    # Read the script text ONCE and run the clean second stage from that text,
-    # so the path is never opened a second time.
-    SCRIPT_TEXT=$(cat -- "$SELF" 2>/dev/null) || early_die "cannot read this script"
-    if ! { [ -n "$SCRIPT_TEXT" ] && [ "$(printf '%s' "$SCRIPT_TEXT" | wc -c)" -lt 100000 ]; }; then early_die "this script is empty or too large to restart"; fi
-    for v in "${TWINGATE_API_KEY:-}" "${TWINGATE_NETWORK_URL:-}" "${TWINGATE_UPDATE_WAIT_SECS:-}" \
-        "${TWINGATE_UPDATE_POLL_SECS:-}" "${NOTIFY_WEBHOOK_URL:-}" "${NOTIFY_WEBHOOK_ALLOWED_HOSTS:-}" "${HOST_LABEL:-}"; do
-        case "$v" in *"$NL"*) early_die "an input variable contains a newline" ;; esac
-    done
-    RUN_TOKEN=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n') || RUN_TOKEN=""
-    case "$RUN_TOKEN" in ''|*[!0-9a-f]*) early_die "cannot create a run token" ;; esac
-    exec env -i PATH="$PATH" LC_ALL=C LANG=C TWINGATE_UPDATE_CLEAN_ENV=1 \
-        TWINGATE_UPDATE_RUN_TOKEN="$RUN_TOKEN" sh -c "$SCRIPT_TEXT" "$SELF" "$@" 3<<EOF
-TWINGATE_API_KEY=${TWINGATE_API_KEY:-}
-TWINGATE_NETWORK_URL=${TWINGATE_NETWORK_URL:-}
-TWINGATE_UPDATE_WAIT_SECS=${TWINGATE_UPDATE_WAIT_SECS:-}
-TWINGATE_UPDATE_POLL_SECS=${TWINGATE_UPDATE_POLL_SECS:-}
-NOTIFY_WEBHOOK_URL=${NOTIFY_WEBHOOK_URL:-}
-NOTIFY_WEBHOOK_ALLOWED_HOSTS=${NOTIFY_WEBHOOK_ALLOWED_HOSTS:-}
-HOST_LABEL=${HOST_LABEL:-}
-EOF
+    early_die "run this through the installed launcher (twingate-connector-update), never directly"
 fi
 # Second run: the environment must hold nothing but the fixed names.
 for n in $(env | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p'); do
@@ -242,6 +147,21 @@ step() { if [ "$DRY" = 1 ]; then printf 'DRY-RUN would: %s\n' "$*"; else printf 
 # filesystem (find -xdev). The removal itself also stays on one filesystem and
 # never follows links.
 secure_rmdir() {
+    # DIR itself must not be a mount point: both scans and rm stay inside the
+    # filesystem they start on, so they cannot tell. The kernel mount table
+    # (field 5 of /proc/self/mountinfo) is the check; unreadable means refuse.
+    if ! _real=$(cd "$1" 2>/dev/null && pwd -P) || ! _mi=$(cat /proc/self/mountinfo 2>/dev/null) || [ -z "$_mi" ]; then
+        printf 'refused: cannot check whether %s is a mount point; not removing it\n' "$1" >&2
+        return 1
+    fi
+    while read -r _a _b _c _d _mp _rest; do
+        if [ "$_mp" = "$_real" ]; then
+            printf 'refused: %s is a mount point; not removing it\n' "$1" >&2
+            return 1
+        fi
+    done <<EOF_MI
+$_mi
+EOF_MI
     if ! _all=$(find "$1" -mindepth 1 2>/dev/null); then
         printf 'refused: cannot scan %s; not removing it\n' "$1" >&2
         return 1
@@ -266,21 +186,36 @@ secure_rmdir() {
     fi
 }
 
+# cleanup returns 1 when the private run directory could not be removed. Then
+# the lock metadata (which records that directory) is KEPT, so the next run's
+# stale-lock recovery still knows where it is; the directory is never orphaned.
 cleanup() {
+    _crc=0
     if [ -n "$TMPD" ] && [ -d "$TMPD" ] && [ "$KEEP_TMPD" != 1 ]; then
-        secure_rmdir "$TMPD"
+        if ! secure_rmdir "$TMPD"; then
+            _crc=1
+            printf 'ERROR: the private directory %s could not be removed and may still hold the Connector token file. Remove it by hand (shred -u its files, then rmdir) or run this updater again.\n' "$TMPD" >&2
+        fi
     fi
-    if [ "$LOCKED" = 1 ] && [ -n "$LOCKD" ]; then
+    if [ "$LOCKED" = 1 ] && [ -n "$LOCKD" ] && [ "$_crc" = 0 ]; then
         rmdir "$RUNDIR/docker-config" "$RUNDIR/home" 2>/dev/null
         [ -z "$RUNDIR" ] || rmdir "$RUNDIR" 2>/dev/null
         rm -f "$LOCKD/pid" "$LOCKD/start" "$LOCKD/ident" "$LOCKD/rundir"
         rmdir "$LOCKD" 2>/dev/null
         LOCKED=0
     fi
-    return 0
+    return "$_crc"
+}
+# EXIT handler: a failed cleanup forces a nonzero exit status.
+on_exit() {
+    _st=$?
+    if ! cleanup; then
+        if [ "$_st" = 0 ]; then exit 5; fi
+        exit "$_st"
+    fi
 }
 set_traps() {
-    trap 'cleanup' EXIT
+    trap 'on_exit' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM HUP
     trap 'exit 141' PIPE
@@ -370,17 +305,27 @@ die() { say "refused: $1" >&2; exit 2; }
 warn() { say "WARNING: $*"; PRECHECK_WARN=1; }
 
 # ---- arguments -------------------------------------------------------------
+# Help is static text: no file (this script's path included) is opened for it.
+usage() {
+    printf '%s\n' \
+        "Usage: twingate-connector-update [--dry-run] [--yes] [--force] <connector-container-name>" \
+        "  --dry-run  read-only preview; --yes  no prompt; --force  ignore pre-check warnings" \
+        "Optional inputs (environment): TWINGATE_API_KEY, TWINGATE_NETWORK_URL," \
+        "  TWINGATE_UPDATE_WAIT_SECS, TWINGATE_UPDATE_POLL_SECS, NOTIFY_WEBHOOK_URL," \
+        "  NOTIFY_WEBHOOK_ALLOWED_HOSTS, HOST_LABEL" \
+        "Run it through the installed launcher as root. Docs: docs/twingate-connector-update-script.md"
+}
 for a in "$@"; do
     case "$a" in
         --dry-run) DRY=1 ;;
         --yes) YES=1 ;;
         --force) FORCE=1 ;;
-        -h|--help) sed -n '2,/^umask 077/{/^umask 077/!p;}' "$0"; exit 0 ;;
+        -h|--help) usage; exit 0 ;;
         -*) die "unknown option '$a'" ;;
         *) [ -z "$NAME" ] || die "exactly one container name is allowed"; NAME="$a" ;;
     esac
 done
-[ -n "$NAME" ] || die "usage: $0 [--dry-run] [--yes] [--force] <connector-container-name>"
+[ -n "$NAME" ] || die "usage: twingate-connector-update [--dry-run] [--yes] [--force] <connector-container-name>"
 case "$NAME" in
     [A-Za-z0-9]*) ;;
     *) die "invalid container name" ;;
@@ -446,7 +391,9 @@ if [ "$DRY" != 1 ]; then
                     */*|*..*) ;;
                     *) if [ -d "$old_run" ] && [ ! -L "$old_run" ] && owned "$old_run"; then
                            say "removing the private dir left by the dead run"
-                           secure_rmdir "$old_run"
+                           # If it cannot be removed, keep the lock metadata (the only
+                           # record of this directory) and stop.
+                           secure_rmdir "$old_run" || die "cannot remove the private dir $old_run left by the dead run; the lock is kept so a later run can retry. Remove it by hand (shred -u its files, then rmdir) if it keeps failing."
                        fi ;;
                 esac ;;
         esac

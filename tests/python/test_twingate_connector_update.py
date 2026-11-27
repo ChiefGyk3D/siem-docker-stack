@@ -24,6 +24,7 @@ import pytest
 from conftest import REPO_ROOT
 
 SCRIPT = REPO_ROOT / "scripts" / "twingate-connector-update.sh"
+LAUNCHER = REPO_ROOT / "scripts" / "twingate-connector-update-launcher.sh"
 NAME = "connector-a"
 OLD_ID = "sha256:" + "a" * 64
 NEW_ID = "sha256:" + "b" * 64
@@ -168,6 +169,23 @@ if [ -f "$FD/getfacl" ] && grep -qxF "$last" "$FD/getfacl"; then printf 'user:so
 printf 'group::r-x\nother::r-x\n'
 '''
 
+# Fake `cat` and `sed`: they record their arguments (the help test proves that no
+# program is handed the updater's path) and otherwise behave as the real ones. A
+# file fake/mountinfo replaces the kernel mount table for the starting-point
+# mount test.
+FAKE_CAT = r'''#!/bin/sh
+FD="$(cd "$(dirname "$0")/.." && pwd)/fake"
+printf '%s\n' "$*" >>"$FD/cat.args"
+if [ "$1" = /proc/self/mountinfo ] && [ -f "$FD/mountinfo" ]; then exec /bin/cat "$FD/mountinfo"; fi
+exec /bin/cat "$@"
+'''
+
+FAKE_SED = r'''#!/bin/sh
+FD="$(cd "$(dirname "$0")/.." && pwd)/fake"
+printf '%s\n' "$*" >>"$FD/sed.args"
+exec /bin/sed "$@"
+'''
+
 # A model of how `docker run --env-file` reads a file. It is deliberately
 # conservative: it trims leading whitespace of a line, skips blank and '#' lines,
 # splits at the first '=', trims trailing whitespace of the value and strips one
@@ -212,6 +230,25 @@ def make_test_copy(dest, bin_dir, lock_base, run_base):
             hits["uid"] += 1
         out.append(line)
     assert hits == {"path": 1, "lock": 1, "run": 1, "uid": 1}, hits
+    dest.write_text("".join(out))
+    return dest
+
+
+def make_launcher_copy(dest, bin_dir, updater):
+    """Test-only copy of the launcher: PATH, TRUSTED_UID and UPDATER are rewritten."""
+    out, hits = [], {"path": 0, "uid": 0, "updater": 0}
+    for line in LAUNCHER.read_text().splitlines(keepends=True):
+        if line.rstrip("\n") == PATH_LINE:
+            line = f'PATH="{bin_dir}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"\n'
+            hits["path"] += 1
+        elif line.rstrip("\n") == "TRUSTED_UID=0":
+            line = f"TRUSTED_UID={os.getuid()}\n"
+            hits["uid"] += 1
+        elif line.startswith("UPDATER="):
+            line = f'UPDATER="{updater}"\n'
+            hits["updater"] += 1
+        out.append(line)
+    assert hits == {"path": 1, "uid": 1, "updater": 1}, hits
     dest.write_text("".join(out))
     return dest
 
@@ -262,9 +299,10 @@ class Env:
         for p in (self.d, self.bin, self.tmp, self.run_dir, self.lock_base, self.hostile):
             p.mkdir()
         self.script = make_test_copy(tmp_path / "script-under-test.sh", self.bin, self.lock_base, self.run_dir)
+        self.launcher = make_launcher_copy(tmp_path / "launcher-under-test.sh", self.bin, self.script)
         (self.bin / "envparse.py").write_text(ENV_PARSER)
         for n, body in (("docker", FAKE_DOCKER), ("curl", FAKE_CURL), ("find", FAKE_FIND),
-                        ("ls", FAKE_LS), ("getfacl", FAKE_GETFACL)):
+                        ("ls", FAKE_LS), ("getfacl", FAKE_GETFACL), ("cat", FAKE_CAT), ("sed", FAKE_SED)):
             f = self.bin / n
             f.write_text(body)
             f.chmod(0o755)
@@ -289,13 +327,13 @@ class Env:
         return {k: v for k, v in e.items() if not k.startswith("FAKE_")}
 
     def run(self, *args, stdin="", original=False, **env):
-        script = SCRIPT if original else self.script
+        script = LAUNCHER if original else self.launcher
         return subprocess.run(["sh", str(script), *args], input=stdin, capture_output=True,
                               text=True, env=self.environ(**env), timeout=60,
                               cwd=str(self.root))
 
     def start(self, *args, **env):
-        return subprocess.Popen(["sh", str(self.script), *args], stdin=subprocess.DEVNULL,
+        return subprocess.Popen(["sh", str(self.launcher), *args], stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                 env=self.environ(**env), cwd=str(self.root))
 
@@ -395,7 +433,7 @@ def test_no_bin_dir_seam_is_honored_by_the_shipped_script(env):
     # r2 finding 2: an env var must never put a directory in front of the trusted PATH
     r = env.run("--dry-run", NAME, original=True, TWINGATE_UPDATE_BIN_DIR=str(env.bin))
     assert env.log() == [] and env.curl_argv() == ""
-    assert "TWINGATE_UPDATE_BIN_DIR" not in SCRIPT.read_text()
+    assert "TWINGATE_UPDATE_BIN_DIR" not in SCRIPT.read_text() + LAUNCHER.read_text()
 
 
 def test_test_copy_differs_from_the_shipped_script_in_four_lines_only(env):
@@ -403,6 +441,11 @@ def test_test_copy_differs_from_the_shipped_script_in_four_lines_only(env):
     b = env.script.read_text().splitlines()
     assert len(a) == len(b)
     assert len([1 for x, y in zip(a, b) if x != y]) == 4
+    # the launcher copy differs in three lines only: PATH, TRUSTED_UID, UPDATER
+    a = LAUNCHER.read_text().splitlines()
+    b = env.launcher.read_text().splitlines()
+    assert len(a) == len(b)
+    assert len([1 for x, y in zip(a, b) if x != y]) == 3
 
 
 # --- finding 5: layout allowlist ----------------------------------------------
@@ -700,7 +743,7 @@ def test_only_a_twingate_env_file_exists_during_the_window(env):
 
 
 def test_head_n_1_leaves_no_secret_file_behind(env):
-    cmd = f'sh "{env.script}" --yes {NAME} | head -n 1'
+    cmd = f'sh "{env.launcher}" --yes {NAME} | head -n 1'
     r = subprocess.run(["sh", "-c", cmd], capture_output=True, text=True, timeout=60,
                        env=env.environ(), cwd=str(env.root))
     assert len(r.stdout.splitlines()) == 1
@@ -1366,10 +1409,11 @@ def test_empty_api_answer_is_not_trusted(env):
 
 # --- static checks -----------------------------------------------------------
 
-def test_script_is_executable_and_syntax_valid():
-    assert SCRIPT.exists()
-    assert SCRIPT.stat().st_mode & stat.S_IXUSR
-    assert subprocess.run(["sh", "-n", str(SCRIPT)]).returncode == 0
+@pytest.mark.parametrize("path", [SCRIPT, LAUNCHER], ids=["updater", "launcher"])
+def test_script_is_executable_and_syntax_valid(path):
+    assert path.exists()
+    assert path.stat().st_mode & stat.S_IXUSR
+    assert subprocess.run(["sh", "-n", str(path)]).returncode == 0
 
 
 def run_shellcheck(path):
@@ -1381,11 +1425,12 @@ def test_script_shellcheck_clean():
     sc = shutil.which("shellcheck")
     if sc is None and os.environ.get("CI"):
         pytest.fail("shellcheck must be on PATH in CI; this check never skips there")
-    if sc:
-        r = run_shellcheck(SCRIPT)
-        assert r.returncode == 0, r.stdout
-    else:  # local run without shellcheck: syntax check only
-        assert subprocess.run(["sh", "-n", str(SCRIPT)]).returncode == 0
+    for path in (SCRIPT, LAUNCHER):
+        if sc:
+            r = run_shellcheck(path)
+            assert r.returncode == 0, r.stdout
+        else:  # local run without shellcheck: syntax check only
+            assert subprocess.run(["sh", "-n", str(path)]).returncode == 0
     text = SCRIPT.read_text()
     assert "umask 077" in text and "mktemp -d" in text and "trap" in text
     assert "docker image prune" not in text and "docker system prune" not in text
@@ -1453,10 +1498,27 @@ def test_docker_and_curl_never_see_the_callers_environment(env):
 
 
 def test_an_environment_that_was_not_cleared_is_refused(env):
-    # a caller that claims the environment is clean while it holds more is refused
-    r = env.run("--yes", NAME, TWINGATE_UPDATE_CLEAN_ENV="1", SSL_CERT_FILE="/nonexistent-evil")
+    # The launcher always clears the environment, so this starts the updater
+    # directly: a caller that claims the environment is clean while it holds more
+    # is refused.
+    r = subprocess.run(["sh", str(env.script), "--yes", NAME], capture_output=True, text=True,
+                       env=env.environ(TWINGATE_UPDATE_CLEAN_ENV="1", SSL_CERT_FILE="/nonexistent-evil"),
+                       cwd=str(env.root), timeout=60)
     assert r.returncode == 2 and "not cleared" in r.stderr
     assert env.log() == []
+
+
+def test_the_updater_refuses_a_direct_run_and_names_the_launcher(env):
+    r = subprocess.run(["sh", str(env.script), "--dry-run", NAME], capture_output=True, text=True,
+                       env=env.environ(), cwd=str(env.root), timeout=60)
+    assert r.returncode == 2 and "launcher" in r.stderr
+    assert env.log() == []
+
+
+def test_a_hostile_environment_through_the_launcher_never_reaches_the_updater(env):
+    r = env.run("--dry-run", NAME, TWINGATE_UPDATE_CLEAN_ENV="1", SSL_CERT_FILE="/nonexistent-evil")
+    assert r.returncode == 0, r.stderr
+    assert "nonexistent-evil" not in env.envdump()
 
 
 def test_docker_config_and_home_dirs_are_private_and_empty_during_the_run(env):
@@ -1759,14 +1821,15 @@ def test_a_live_pid_that_is_not_this_updater_is_stale(env, which):
         live.wait()
 
 
-# --- round 4: re-exec path hardening (R3-1) and empty docker dirs (R3-2) -------
+# --- round 8 (Daybreak round 7): the launcher is the one trust root -----------------
+# The path checks live in scripts/twingate-connector-update-launcher.sh. They run
+# before any updater text does. The updater (SCRIPT) cannot vouch for its own path.
 
 def make_race_copy(env, hook):
-    """A mutant of the test copy: `hook` runs right before the clean re-exec."""
-    lines = env.script.read_text().splitlines(keepends=True)
+    """A mutant of the launcher copy: `hook` runs right before the clean exec."""
     out, n = [], 0
-    for line in lines:
-        if line.startswith("    exec env -i "):
+    for line in env.launcher.read_text().splitlines(keepends=True):
+        if line.startswith("exec env -i "):
             out.append(hook + "\n")
             n += 1
         out.append(line)
@@ -1776,15 +1839,15 @@ def make_race_copy(env, hook):
     return race
 
 
-def test_script_swapped_at_the_reexec_boundary_is_not_executed(env):
+def test_updater_swapped_at_the_exec_boundary_is_not_executed(env):
     marker = env.root / "pwned"
     race = make_race_copy(
-        env, f': >"{env.d}/at_reexec"; i=0; while [ ! -f "{env.d}/swapped" ] && [ "$i" -lt 300 ]; do sleep 0.1; i=$((i+1)); done')
+        env, f': >"{env.d}/at_exec"; i=0; while [ ! -f "{env.d}/swapped" ] && [ "$i" -lt 300 ]; do sleep 0.1; i=$((i+1)); done')
     p = subprocess.Popen(["sh", str(race), "--yes", NAME], stdin=subprocess.DEVNULL,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                          env=env.environ(), cwd=str(env.root))
-    env.wait_for("at_reexec")
-    race.write_text(f'#!/bin/sh\n: >"{marker}"\nexit 0\n')
+    env.wait_for("at_exec")
+    env.script.write_text(f'#!/bin/sh\n: >"{marker}"\nexit 0\n')
     (env.d / "swapped").write_text("")
     out, err = p.communicate(timeout=60)
     assert not marker.exists(), "the replacement file was executed"
@@ -1792,9 +1855,16 @@ def test_script_swapped_at_the_reexec_boundary_is_not_executed(env):
     assert "result=updated" in out
 
 
-def test_relative_invocation_runs_from_the_canonical_absolute_path(env):
+def test_a_relative_launcher_path_is_refused(env):
+    r = subprocess.run(["sh", "launcher-under-test.sh", "--dry-run", NAME], capture_output=True, text=True,
+                       env=env.environ(), cwd=str(env.root), timeout=60)
+    assert r.returncode == 2 and "absolute" in r.stderr
+    assert env.log() == []
+
+
+def test_the_lock_records_the_fixed_updater_path(env):
     (env.d / "pull_hold").write_text("")
-    p = subprocess.Popen(["sh", "script-under-test.sh", "--yes", NAME], stdin=subprocess.DEVNULL,
+    p = subprocess.Popen(["sh", str(env.launcher), "--yes", NAME], stdin=subprocess.DEVNULL,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                          env=env.environ(FAKE_PULL_HOLD="1"), cwd=str(env.root))
     try:
@@ -1807,23 +1877,59 @@ def test_relative_invocation_runs_from_the_canonical_absolute_path(env):
     assert p.returncode == 0
 
 
-def test_symlinked_directory_is_resolved_to_the_physical_path(env):
+def test_the_updater_path_is_fixed_not_taken_from_arguments_or_environment(env):
+    marker = env.root / "hostile-ran"
+    hostile = env.root / "hostile.sh"
+    hostile.write_text(f'#!/bin/sh\n: >"{marker}"\nexit 0\n')
+    r = env.run("--dry-run", NAME, str(hostile), UPDATER=str(hostile), TWINGATE_UPDATER=str(hostile))
+    assert r.returncode == 2  # two names: refused by the REAL updater
+    assert not marker.exists()
+    r = env.run("--dry-run", NAME, UPDATER=str(hostile))
+    assert r.returncode == 0, r.stderr
+    assert not marker.exists()
+
+
+def test_a_symlinked_directory_in_the_updater_path_is_refused(env):
     link = env.root / "linkdir"
     link.symlink_to(env.root)
-    r = subprocess.run(["sh", str(link / "script-under-test.sh"), "--dry-run", NAME], capture_output=True,
-                       text=True, env=env.environ(), cwd=str(env.root), timeout=60)
-    assert r.returncode == 0, r.stderr
-    assert "WARNING" not in r.stderr
+    t = env.launcher.read_text().replace(f'UPDATER="{env.script}"', f'UPDATER="{link}/script-under-test.sh"')
+    assert str(link) in t
+    env.launcher.write_text(t)
+    r = env.run("--dry-run", NAME)
+    assert r.returncode == 2 and "symbolic link" in r.stderr
+    assert env.log() == []
 
 
-def test_symlinked_script_file_is_refused(env):
+def test_a_symlinked_updater_file_is_refused(env):
     link = env.root / "link.sh"
     link.symlink_to(env.script)
-    r = subprocess.run(["sh", str(link), "--yes", NAME], capture_output=True, text=True,
-                       env=env.environ(), cwd=str(env.root), timeout=60)
-    assert r.returncode == 2
-    assert "symbolic link" in r.stderr
+    t = env.launcher.read_text().replace(f'UPDATER="{env.script}"', f'UPDATER="{link}"')
+    assert str(link) in t
+    env.launcher.write_text(t)
+    r = env.run("--yes", NAME)
+    assert r.returncode == 2 and "symbolic link" in r.stderr
     assert env.log() == []
+
+
+def test_a_missing_updater_is_refused(env):
+    env.script.unlink()
+    r = env.run("--yes", NAME)
+    assert r.returncode == 2 and "missing" in r.stderr
+    assert env.log() == []
+
+
+def test_an_empty_or_oversized_updater_is_refused_and_one_just_under_the_cap_runs(env):
+    base = env.script.read_text()
+    env.script.write_text("")
+    r = env.run("--dry-run", NAME)
+    assert r.returncode == 2 and "empty or too large" in r.stderr
+    env.script.write_text(base + "#" * 100000 + "\n")
+    r = env.run("--dry-run", NAME)
+    assert r.returncode == 2 and "empty or too large" in r.stderr
+    assert env.log() == []
+    env.script.write_text(base + "#" * (99000 - len(base)) + "\n")  # under the cap
+    r = env.run("--dry-run", NAME)
+    assert r.returncode == 0, r.stderr
 
 
 def _ancestors(path):
@@ -1838,78 +1944,91 @@ def _ancestors(path):
 
 @pytest.mark.parametrize("which", ["file", "dir", "parent", "root"])
 @pytest.mark.parametrize("listfile,reason", [("foreign", "not owned by root"), ("gw", "writable")])
-def test_untrusted_script_path_or_ancestor_is_refused(env, which, listfile, reason):
+def test_untrusted_updater_path_or_ancestor_is_refused(env, which, listfile, reason):
     chain = _ancestors(os.path.realpath(env.script))
     target = {"file": chain[0], "dir": chain[1], "parent": chain[2], "root": chain[-1]}[which]
     (env.d / listfile).write_text(target + "\n")
     r = env.run("--yes", NAME)
     assert r.returncode == 2
-    assert reason in r.stderr and "/usr/local/sbin" in r.stderr
+    assert reason in r.stderr and "updater" in r.stderr
     assert env.log() == []
     assert env.leftovers() == []
 
 
-def _as_non_root(env):
-    # TRUSTED_UID=0 in this copy: the test user is not the trusted user (not root)
-    t = env.script.read_text().replace(f"TRUSTED_UID={os.getuid()}", "TRUSTED_UID=0")
+def _launcher_as_non_root(env):
+    # TRUSTED_UID=0 in this copy: the test user is not root
+    t = env.launcher.read_text().replace(f"TRUSTED_UID={os.getuid()}", "TRUSTED_UID=0")
     assert "TRUSTED_UID=0" in t
-    env.script.write_text(t)
+    env.launcher.write_text(t)
 
 
-@pytest.mark.parametrize("args", [("--dry-run",), ("--dry-run", "--yes"), ("--yes",), ()])
-def test_a_non_root_run_from_an_untrusted_path_is_refused_dry_run_or_not(env, args):
-    _as_non_root(env)
-    (env.d / "gw").write_text(os.path.dirname(os.path.realpath(env.script)) + "\n")
+@pytest.mark.parametrize("args", [("--dry-run",), ("--dry-run", "--yes"), ("--yes",), ("--help",), ()])
+def test_the_launcher_refuses_every_non_root_run_dry_run_help_or_not(env, args):
+    if os.getuid() == 0:
+        pytest.skip("needs a non-root test user")
+    _launcher_as_non_root(env)
     r = env.run(*args, NAME)
-    assert r.returncode == 2
-    assert "WARNING" not in r.stderr
-    assert "not owned by root or is group- or world-writable" in r.stderr
+    assert r.returncode == 2 and "must be run as root" in r.stderr
     assert env.log() == []
 
 
-def test_a_non_root_dry_run_from_an_untrusted_copy_executes_none_of_its_code(env):
-    _as_non_root(env)
-    marker = env.root / "executed-marker-nonroot"
-    t = env.script.read_text()
-    anchor = "    SCRIPT_TEXT=$(cat -- \"$SELF\""
-    assert t.count(anchor) == 1
-    env.script.write_text(t.replace(anchor, f": >{shlex.quote(str(marker))}\n" + anchor, 1))
-    (env.d / "gw").write_text(os.path.dirname(os.path.realpath(env.script)) + "\n")
-    r = env.run("--dry-run", NAME)
-    assert r.returncode == 2
-    assert not marker.exists()
-    assert env.log() == []
-    # control: with a trusted path the same marker line does run, so the probe is live
-    (env.d / "gw").write_text("")
-    r = env.run("--dry-run", NAME)
-    assert marker.exists(), r.stderr
+def _marker_at_top(path, marker):
+    lines = path.read_text().splitlines(keepends=True)
+    assert lines[0].startswith("#!")
+    lines.insert(1, f": >{shlex.quote(str(marker))}\n")
+    path.write_text("".join(lines))
 
 
 @pytest.mark.parametrize("listfile", ["gw", "foreign", "acl", "getfacl"])
-@pytest.mark.parametrize("args", [("--dry-run",), ("--dry-run", "--yes"), ("--yes",), ()])
-def test_every_invocation_as_the_trusted_user_from_an_untrusted_path_is_refused(env, listfile, args):
+@pytest.mark.parametrize("args", [("--dry-run",), ("--yes",), ("--help",), ()])
+def test_the_launcher_executes_no_updater_text_before_validating_it(env, listfile, args):
+    # The marker is the very FIRST line of the updater, not a line after some check.
+    marker = env.root / "updater-top-marker"
+    _marker_at_top(env.script, marker)
     (env.d / listfile).write_text(os.path.dirname(os.path.realpath(env.script)) + "\n")
     r = env.run(*args, NAME)
     assert r.returncode == 2
-    assert "WARNING" not in r.stderr
+    assert not marker.exists()
     assert env.log() == []
+    # control: with a trusted path the same first line runs, so the probe is live
+    (env.d / listfile).write_text("")
+    env.run("--dry-run", NAME)
+    assert marker.exists()
 
 
-def test_a_root_dry_run_from_an_untrusted_copy_executes_none_of_its_code(env):
-    # The marker line sits after the path check: it must never run when refused.
-    marker = env.root / "executed-marker"
-    t = env.script.read_text()
-    anchor = "    SCRIPT_TEXT=$(cat -- \"$SELF\""
-    assert t.count(anchor) == 1
-    env.script.write_text(t.replace(anchor, f": >{shlex.quote(str(marker))}\n" + anchor, 1))
+def test_a_non_root_run_executes_no_updater_text(env):
+    if os.getuid() == 0:
+        pytest.skip("needs a non-root test user")
+    marker = env.root / "updater-top-marker-nonroot"
+    _marker_at_top(env.script, marker)
+    _launcher_as_non_root(env)
+    r = env.run("--dry-run", NAME)
+    assert r.returncode == 2 and not marker.exists()
+
+
+def test_the_launchers_own_first_line_is_the_trust_root_and_runs_unconditionally(env):
+    # The launcher cannot validate itself: its own text is the trust root, and its
+    # install location is the control. A marker at its top runs even when it then
+    # refuses, which is why the docs say so and why it holds no functions.
+    marker = env.root / "launcher-top-marker"
+    _marker_at_top(env.launcher, marker)
     (env.d / "gw").write_text(os.path.dirname(os.path.realpath(env.script)) + "\n")
     r = env.run("--dry-run", NAME)
-    assert r.returncode == 2
-    assert not marker.exists()
-    # control: with a trusted path the same marker line does run, so the probe is live
-    (env.d / "gw").write_text("")
-    r = env.run("--dry-run", NAME)
-    assert marker.exists(), r.stderr
+    assert r.returncode == 2 and marker.exists()
+
+
+def test_the_launcher_defines_no_functions_and_checks_come_first():
+    code = [l for l in LAUNCHER.read_text().splitlines() if l.strip() and not l.lstrip().startswith("#")]
+    assert not [l for l in code if re.match(r"\s*[A-Za-z_][A-Za-z0-9_]*\s*\(\)", l)]
+    assert not [l for l in code if l.lstrip().startswith("function ")]
+    head = []
+    for l in code:
+        if l.startswith(("WHY=", "case \"$0\" in")):
+            break
+        head.append(l)
+    # only fixed assignments and umask/export before the first check
+    assert all(re.match(r"(umask 077|TRUSTED_UID=0|PATH=|export PATH|UPDATER=|NL=|'$)", l) for l in head), head
+    assert len(code) < 100
 
 
 def _chain(env):
@@ -1919,11 +2038,11 @@ def _chain(env):
 
 @pytest.mark.parametrize("which", ["file", "dir", "parent", "root"])
 @pytest.mark.parametrize("listfile", ["acl", "getfacl"])
-def test_an_extended_acl_on_the_script_or_any_ancestor_is_refused(env, which, listfile):
+def test_an_extended_acl_on_the_updater_or_any_ancestor_is_refused(env, which, listfile):
     (env.d / listfile).write_text(_chain(env)[which] + "\n")
     r = env.run("--yes", NAME)
     assert r.returncode == 2
-    assert "access control list" in r.stderr and "/usr/local/sbin" in r.stderr
+    assert "access control list" in r.stderr
     assert env.log() == []
     assert env.leftovers() == []
 
@@ -1964,6 +2083,22 @@ def test_acl_check_fails_closed_when_the_listing_cannot_be_read(env):
 def test_no_acl_means_the_path_check_passes(env):
     r = env.run("--yes", NAME)
     assert r.returncode == 0, r.stderr
+
+
+# --- R7-4: help is static text; no program is handed the updater path ----------------
+
+@pytest.mark.parametrize("flag", ["--help", "-h"])
+def test_help_prints_static_text_and_never_reopens_the_updater_path(env, flag):
+    r = env.run(flag)
+    assert r.returncode == 0, r.stderr
+    assert "Usage: twingate-connector-update" in r.stdout
+    assert env.log() == []
+    seen = ""
+    for f in ("cat.args", "sed.args"):
+        if (env.d / f).exists():
+            seen += (env.d / f).read_text()
+    assert seen != ""  # the recorders were live (the updater itself calls sed)
+    assert str(env.script) not in seen
 
 
 def test_a_nested_mount_in_a_reset_directory_is_never_descended_into(env):
@@ -2041,14 +2176,28 @@ def test_a_failing_removal_is_refused_with_no_unrestricted_fallback(env):
     assert changed(env) == []
 
 
-def test_real_find_refuses_a_user_owned_copy_of_the_shipped_script(env):
-    # no fake find: the real ownership and mode checks run on a user-owned copy
-    copy = env.root / "shipped-copy.sh"
-    shutil.copy(SCRIPT, copy)
-    r = subprocess.run(["sh", "shipped-copy.sh", "--yes", NAME], capture_output=True, text=True,
+def test_real_find_refuses_an_updater_that_root_does_not_own_as_the_trusted_user(env):
+    # no fake find: the launcher copy's PATH is reset to the system directories, so
+    # the real ownership and mode checks run. The trusted user in this copy is the
+    # test user, and the "updater" is a file owned by someone else (root).
+    if os.getuid() == 0:
+        pytest.skip("needs a non-root test user")
+    t = LAUNCHER.read_text().replace("TRUSTED_UID=0", f"TRUSTED_UID={os.getuid()}")
+    t = t.replace("UPDATER=\"/usr/local/libexec/twingate-connector-update/twingate-connector-update.sh\"",
+                  'UPDATER="/etc/hostname"')
+    assert "/etc/hostname" in t and f"TRUSTED_UID={os.getuid()}" in t
+    copy = env.root / "launcher-real-find.sh"
+    copy.write_text(t)
+    r = subprocess.run(["sh", str(copy), "--yes", NAME], capture_output=True, text=True,
                        env=env.environ(), cwd=str(env.root), timeout=60)
     assert r.returncode == 2
     assert "not owned by root or is group- or world-writable" in r.stderr
+    assert env.log() == []
+
+
+def test_the_shipped_launcher_refuses_when_no_updater_is_installed(env):
+    r = env.run("--dry-run", NAME, original=True)
+    assert r.returncode == 2
     assert env.log() == []
 
 
@@ -2081,3 +2230,118 @@ def test_docker_config_that_is_a_symlink_is_replaced(env):
     assert (other / "config.json").exists()
     seen = (env.d / "cfgls").read_text().split() if (env.d / "cfgls").exists() else []
     assert "config.json" not in seen
+
+
+# =============================================================================
+# Round 8 (Daybreak round 7): R7-2 cleanup failures, R7-3 starting-point mount
+# =============================================================================
+
+def _fail_scan_of_run_dirs(env):
+    # Every directory scan of a per-run private dir (run.<pid>) fails; the trust
+    # queries are answered as usual. Models `find` failing inside the EXIT handler
+    # and inside stale-lock recovery.
+    f = env.bin / "find"
+    body = f.read_text().replace(
+        "# The test tree is not root-owned",
+        'case " $* " in *"/run."*" -mindepth "*) exit 1 ;; esac\n# The test tree is not root-owned', 1)
+    assert body != f.read_text()
+    f.write_text(body)
+
+
+def _fail_one_file_system_removal(env):
+    (env.bin / "rm").write_text(
+        "#!/bin/sh\n"
+        'case " $* " in *" --one-file-system "*) exit 1 ;; esac\n'
+        'exec /bin/rm "$@"\n')
+    (env.bin / "rm").chmod(0o755)
+
+
+FAILERS = [_fail_scan_of_run_dirs, _fail_one_file_system_removal]
+FAILER_IDS = ["find-fails", "removal-fails"]
+
+
+def _dead_lock_with_old_run_dir(env):
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    base = env.run_dir / "twingate-connector-update"
+    base.mkdir(mode=0o700)
+    old = base / "run.4242"
+    old.mkdir(mode=0o700)
+    (old / "connector.env").write_text(f"TWINGATE_ACCESS_TOKEN={SECRET}\n")
+    lock = env.lock_base / LOCK_NAME
+    lock.mkdir()
+    (lock / "pid").write_text(f"{dead.pid}\n")
+    (lock / "rundir").write_text(f"{old}\n")
+    return old, lock
+
+
+@pytest.mark.parametrize("failer", FAILERS, ids=FAILER_IDS)
+@pytest.mark.parametrize("scenario,want_rc", [("ok", 5), ("pullfail", 1)])
+def test_a_failed_cleanup_forces_a_nonzero_exit_and_names_the_retained_directory(env, failer, scenario, want_rc):
+    failer(env)
+    kw = {"FAKE_PULL_FAIL": "1"} if scenario == "pullfail" else {}
+    r = env.run("--yes", NAME, **kw)
+    assert r.returncode == want_rc, (r.returncode, r.stderr)
+    kept = list(env.run_dir.glob("twingate-connector-update/run.*"))
+    assert len(kept) == 1
+    assert f"ERROR: the private directory {kept[0]} could not be removed" in r.stderr
+    if scenario == "ok":
+        assert "result=updated" in r.stdout  # the update itself had finished
+    # the lock record of that directory is kept, so the next run can still find it
+    assert (env.lock_base / LOCK_NAME / "rundir").read_text().strip() == str(kept[0])
+    assert SECRET not in r.stdout + r.stderr
+
+
+@pytest.mark.parametrize("failer", FAILERS, ids=FAILER_IDS)
+def test_a_directory_kept_by_a_failed_cleanup_is_removed_by_the_next_run(env, failer):
+    failer(env)
+    r = env.run("--yes", NAME)
+    assert r.returncode == 5
+    kept = list(env.run_dir.glob("twingate-connector-update/run.*"))
+    assert len(kept) == 1
+    # the fault is gone
+    if (env.bin / "rm").exists():
+        (env.bin / "rm").unlink()
+    f = env.bin / "find"
+    f.write_text(f.read_text().replace('case " $* " in *"/run."*" -mindepth "*) exit 1 ;; esac\n', ""))
+    r = env.run("--yes", NAME)
+    assert r.returncode == 0, r.stderr
+    assert "private dir left by the dead run" in r.stdout
+    assert not kept[0].exists()
+
+
+@pytest.mark.parametrize("failer", FAILERS, ids=FAILER_IDS)
+def test_stale_lock_recovery_keeps_the_lock_record_when_the_old_directory_cannot_be_removed(env, failer):
+    old, lock = _dead_lock_with_old_run_dir(env)
+    failer(env)
+    r = env.run("--yes", NAME)
+    assert r.returncode == 2
+    assert f"cannot remove the private dir {old}" in r.stderr
+    assert old.exists()
+    assert (lock / "rundir").read_text().strip() == str(old)  # the only record is not erased
+    assert changed(env) == []
+    assert SECRET not in r.stdout + r.stderr
+
+
+# --- R7-3: the directory passed to the removal must not itself be a mount point ---------
+
+def test_a_reset_directory_that_is_itself_a_mount_point_is_refused(env):
+    rd = _prepopulate_run_dir(env)
+    dc = os.path.realpath(rd / "docker-config")
+    (env.d / "mountinfo").write_text(
+        f"20 1 0:5 / /proc rw - proc proc rw\n36 35 0:30 / {dc} rw,relatime - tmpfs tmpfs rw\n")
+    r = env.run("--yes", NAME)
+    assert r.returncode != 0
+    assert (rd / "docker-config" / "keep").exists()
+    assert "is a mount point" in r.stderr
+    assert changed(env) == []
+
+
+def test_an_unreadable_or_empty_mount_table_refuses_the_removal(env):
+    rd = _prepopulate_run_dir(env)
+    (env.d / "mountinfo").write_text("")
+    r = env.run("--yes", NAME)
+    assert r.returncode != 0
+    assert (rd / "docker-config" / "keep").exists()
+    assert "cannot check whether" in r.stderr
+    assert changed(env) == []
