@@ -49,3 +49,6 @@ portainer_data/
 *.backup
 __pycache__/
 *.pyc
+
+# Scratch directories of tests/python/test_unifi_backup_sync.py
+tests/python/_scratch/

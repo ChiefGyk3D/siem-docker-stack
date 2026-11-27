@@ -21,7 +21,7 @@ FILES = sorted(list(ALERTING.glob("*.yml")) + list(ALERTING.glob("*.yml.example"
 SEVERITIES = {"critical", "warning", "info"}
 TIERS = {"P1", "P2", "P3", "none"}
 BOOL = {"true", "false"}
-ALERT_GROUPS = {"updates", "heartbeat", "alert-path", "infrastructure"}
+ALERT_GROUPS = {"updates", "heartbeat", "alert-path", "infrastructure", "backup"}
 SOURCES = {"unifi", "pfsense", "twingate"}
 # Every label a rule may carry. A label outside this set is a defect: nothing
 # reads it, so it is either a typo or an unrecorded routing key.
@@ -34,7 +34,7 @@ REQUIRED = ("severity", "tier", "phone", "alert_group")
 POLICY_VALUES = {
     "severity": SEVERITIES, "tier": TIERS, "phone": BOOL, "digest": {"true"},
     "update_alert": {"true"}, "update_security": {"true"},
-    "heartbeat": {"true"}, "delivery_failure": {"true"},
+    "heartbeat": {"true"}, "delivery_failure": {"true"}, "alert_group": ALERT_GROUPS,
 }
 
 # uid -> reason. Empty: the two 24h update rules were fixed to P2, phone=false
@@ -64,8 +64,10 @@ def check_labels(labels):
         problems.append(f"phone {phone!r} not allowed")
     if "alert_group" in labels and labels["alert_group"] not in ALERT_GROUPS:
         problems.append(f"alert_group {labels['alert_group']!r} not allowed")
-    if labels.get("alert_group") == "updates" and labels.get("source") not in SOURCES:
-        problems.append("updates rule needs source in " + "/".join(sorted(SOURCES)))
+    if labels.get("alert_group") in ("updates", "backup") and labels.get("source") not in SOURCES:
+        problems.append("updates and backup rules need source in " + "/".join(sorted(SOURCES)))
+    if labels.get("alert_group") == "backup" and ("update_alert" in labels or "update_security" in labels):
+        problems.append("backup rule must not carry update labels")
     if "source" in labels and labels["source"] not in SOURCES:
         problems.append(f"source {labels['source']!r} not allowed")
     for k in ("update_alert", "update_security", "heartbeat", "delivery_failure", "digest"):
@@ -90,10 +92,13 @@ def check_labels(labels):
     elif tier == "P2" and sev != "warning":
         problems.append("P2 needs severity warning")
     elif tier == "P2" and phone != "false" and not (
-            phone == "true" and labels.get("alert_group") == "updates" and labels.get("update_alert") == "true"):
+            phone == "true" and (
+                (labels.get("alert_group") == "updates" and labels.get("update_alert") == "true")
+                or labels.get("alert_group") == "backup")):
         # Owner decision (#199, #200): a warning-level pending-update rule for critical infrastructure
-        # pages the phone (84h repeats). No other P2 rule may.
-        problems.append("P2 needs phone false (only an update-alerting warning may page)")
+        # pages the phone (84h repeats). Owner decision 2026-11-27 (#228): so does a stale-backup
+        # warning ("warn at 8 days"). No other P2 rule may.
+        problems.append("P2 needs phone false (only an update-alerting or a backup warning may page)")
     elif tier == "P3" and (sev, phone) != ("info", "false"):
         problems.append("P3 needs severity info and phone false")
     if "digest" in labels and tier != "P3":
@@ -242,6 +247,20 @@ def test_checker_requires_label(missing):
     labels = dict(GOOD["P1"])
     del labels[missing]
     assert any("missing" in p for p in check_labels(labels))
+
+
+def test_checker_allows_a_paging_backup_warning_only_in_the_backup_group():
+    ok = dict(GOOD["P2"], phone="true", alert_group="backup", source="unifi")
+    assert check_labels(ok) == []
+    assert check_labels(dict(ok, source="other")) != []
+    assert check_labels({k: v for k, v in ok.items() if k != "source"}) != []
+    assert check_labels(dict(ok, update_alert="true")) != []
+    assert check_labels(dict(GOOD["P2"], phone="true", alert_group="alert-path")) != []
+    assert check_labels(dict(GOOD["P1"], alert_group="backup", source="unifi")) == []
+
+
+def test_backup_policy_matcher_is_allowed():
+    assert "backup" in POLICY_VALUES["alert_group"]
 
 
 def test_checker_accepts_infrastructure_p1_and_p2():
