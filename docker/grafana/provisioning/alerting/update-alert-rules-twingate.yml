@@ -1,0 +1,389 @@
+# Twingate Connector pending-update alerts (issue #200). Provisioned PAUSED.
+#
+# These rules ship paused (isPaused: true). Enable them once the Telegraf exec
+# input from docs/update-alerting.md is deployed and the metrics
+# `twingate_connector_behind`, `twingate_connector_up` and
+# `twingate_update_check_success` are arriving in InfluxDB database `telegraf`
+# (datasource `influxdb-twingate`). To enable: set isPaused to false and
+# restart Grafana, or unpause in the UI (a UI change is overwritten by the file
+# on the next provisioning run).
+#
+# Data: scripts/twingate-update-metric.py runs every hour. Per Connector it
+# writes `twingate_connector_behind` (releases behind, integer) and
+# `twingate_connector_up` (1 when the state is ALIVE), both tagged `connector`
+# and `managed_by` (docker, systemd or operator). The Twingate Admin API has no
+# update-available field, so "behind" is the Connector version against the
+# newest release on Docker Hub.
+#
+# Clocks are in the condition, not in `for`, because a `for` clock restarts on
+# a data gap. The query reads the minimum of `behind` over 7 or 14 days: it is
+# above 0 only when the Connector was behind at every sample. A count of
+# samples (one per hour, so 168 in 7 days and 336 in 14) must also be high
+# enough that a few missed runs do not matter and a newly tracked Connector
+# does not alert early. Warning: 150 or more samples in 7 days and not yet
+# the critical. Critical: 320 or more samples in 14 days. Same numbers in both
+# rules, so there is no overlap and no gap. A Connector behind only briefly
+# resets the minimum to 0, so the rule clears when the update is applied.
+#
+# managed_by: docker and systemd Connectors are updated by hand, so they page
+# (phone "true"). A Connector run by the Kubernetes Operator updates itself:
+# the rule "Twingate Connector (operator) behind over 14 days" covers it with
+# phone "false" (Discord and Matrix only), and the weekly digest lists it
+# because the digest reads every alert that fired. A Connector name that the
+# collector config does not list is docker, so it pages.
+#
+# Missing data or a failing query (noDataState and execErrState Alerting)
+# raises an alert: these are security detectors and a broken check must not
+# look healthy.
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: Update pending - Twingate
+    folder: Update Alerts
+    interval: 15m
+    rules:
+      - uid: update-twingate-pending-7d
+        title: "Twingate Connector behind over 7 days"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 604800, to: 0}
+            datasourceUid: influxdb-twingate
+            model:
+              refId: A
+              datasource: {type: influxdb, uid: influxdb-twingate}
+              rawQuery: true
+              resultFormat: time_series
+              query: >-
+                SELECT min("value") FROM "twingate_connector_behind" WHERE "managed_by" != 'operator' AND time > now() - 7d GROUP BY "connector"
+          - refId: N
+            relativeTimeRange: {from: 604800, to: 0}
+            datasourceUid: influxdb-twingate
+            model:
+              refId: N
+              datasource: {type: influxdb, uid: influxdb-twingate}
+              rawQuery: true
+              resultFormat: time_series
+              query: >-
+                SELECT count("value") FROM "twingate_connector_behind" WHERE "managed_by" != 'operator' AND time > now() - 7d GROUP BY "connector"
+          - refId: Q
+            relativeTimeRange: {from: 1209600, to: 0}
+            datasourceUid: influxdb-twingate
+            model:
+              refId: Q
+              datasource: {type: influxdb, uid: influxdb-twingate}
+              rawQuery: true
+              resultFormat: time_series
+              query: >-
+                SELECT min("value") FROM "twingate_connector_behind" WHERE "managed_by" != 'operator' AND time > now() - 14d GROUP BY "connector"
+          - refId: M
+            relativeTimeRange: {from: 1209600, to: 0}
+            datasourceUid: influxdb-twingate
+            model:
+              refId: M
+              datasource: {type: influxdb, uid: influxdb-twingate}
+              rawQuery: true
+              resultFormat: time_series
+              query: >-
+                SELECT count("value") FROM "twingate_connector_behind" WHERE "managed_by" != 'operator' AND time > now() - 14d GROUP BY "connector"
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: B, type: reduce, expression: A, reducer: last, settings: {mode: dropNN}}
+          - refId: Nc
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: Nc, type: reduce, expression: N, reducer: last, settings: {mode: dropNN}}
+          - refId: Qc
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: Qc, type: reduce, expression: Q, reducer: last, settings: {mode: dropNN}}
+          - refId: Mc
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: Mc, type: reduce, expression: M, reducer: last, settings: {mode: dropNN}}
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: C, type: math, expression: "$B > 0 && $Nc >= 150 && !($Qc > 0 && $Mc >= 320)"}
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 0s
+        isPaused: true
+        annotations:
+          summary: "Twingate Connector {{ $labels.connector }} ({{ $labels.managed_by }}) has been behind the latest release for over 7 days"
+          description: "Update the Connector by hand (it is not managed by the Kubernetes Operator). This alert clears only when the Connector runs the latest release."
+        labels:
+          severity: "warning"
+          tier: "P2"
+          source: "twingate"
+          alert_group: "updates"
+          update_alert: "true"
+          phone: "true"
+
+      - uid: update-twingate-pending-14d
+        title: "Twingate Connector behind over 14 days"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 604800, to: 0}
+            datasourceUid: influxdb-twingate
+            model:
+              refId: A
+              datasource: {type: influxdb, uid: influxdb-twingate}
+              rawQuery: true
+              resultFormat: time_series
+              query: >-
+                SELECT min("value") FROM "twingate_connector_behind" WHERE "managed_by" != 'operator' AND time > now() - 7d GROUP BY "connector"
+          - refId: N
+            relativeTimeRange: {from: 604800, to: 0}
+            datasourceUid: influxdb-twingate
+            model:
+              refId: N
+              datasource: {type: influxdb, uid: influxdb-twingate}
+              rawQuery: true
+              resultFormat: time_series
+              query: >-
+                SELECT count("value") FROM "twingate_connector_behind" WHERE "managed_by" != 'operator' AND time > now() - 7d GROUP BY "connector"
+          - refId: Q
+            relativeTimeRange: {from: 1209600, to: 0}
+            datasourceUid: influxdb-twingate
+            model:
+              refId: Q
+              datasource: {type: influxdb, uid: influxdb-twingate}
+              rawQuery: true
+              resultFormat: time_series
+              query: >-
+                SELECT min("value") FROM "twingate_connector_behind" WHERE "managed_by" != 'operator' AND time > now() - 14d GROUP BY "connector"
+          - refId: M
+            relativeTimeRange: {from: 1209600, to: 0}
+            datasourceUid: influxdb-twingate
+            model:
+              refId: M
+              datasource: {type: influxdb, uid: influxdb-twingate}
+              rawQuery: true
+              resultFormat: time_series
+              query: >-
+                SELECT count("value") FROM "twingate_connector_behind" WHERE "managed_by" != 'operator' AND time > now() - 14d GROUP BY "connector"
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: B, type: reduce, expression: A, reducer: last, settings: {mode: dropNN}}
+          - refId: Nc
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: Nc, type: reduce, expression: N, reducer: last, settings: {mode: dropNN}}
+          - refId: Qc
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: Qc, type: reduce, expression: Q, reducer: last, settings: {mode: dropNN}}
+          - refId: Mc
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: Mc, type: reduce, expression: M, reducer: last, settings: {mode: dropNN}}
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: C, type: math, expression: "$Qc > 0 && $Mc >= 320"}
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 0s
+        isPaused: true
+        annotations:
+          summary: "Twingate Connector {{ $labels.connector }} ({{ $labels.managed_by }}) has been behind the latest release for over 14 days"
+          description: "Escalated: update the Connector by hand now. This alert clears only when the Connector runs the latest release."
+        labels:
+          severity: "critical"
+          tier: "P1"
+          source: "twingate"
+          alert_group: "updates"
+          update_alert: "true"
+          phone: "true"
+
+      - uid: update-twingate-operator-behind
+        title: "Twingate Connector (operator) behind over 14 days"
+        condition: C
+        data:
+          - refId: Q
+            relativeTimeRange: {from: 1209600, to: 0}
+            datasourceUid: influxdb-twingate
+            model:
+              refId: Q
+              datasource: {type: influxdb, uid: influxdb-twingate}
+              rawQuery: true
+              resultFormat: time_series
+              query: >-
+                SELECT min("value") FROM "twingate_connector_behind" WHERE "managed_by" = 'operator' AND time > now() - 14d GROUP BY "connector"
+          - refId: M
+            relativeTimeRange: {from: 1209600, to: 0}
+            datasourceUid: influxdb-twingate
+            model:
+              refId: M
+              datasource: {type: influxdb, uid: influxdb-twingate}
+              rawQuery: true
+              resultFormat: time_series
+              query: >-
+                SELECT count("value") FROM "twingate_connector_behind" WHERE "managed_by" = 'operator' AND time > now() - 14d GROUP BY "connector"
+          - refId: Qc
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: Qc, type: reduce, expression: Q, reducer: last, settings: {mode: dropNN}}
+          - refId: Mc
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: Mc, type: reduce, expression: M, reducer: last, settings: {mode: dropNN}}
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: C, type: math, expression: "$Qc > 0 && $Mc >= 320"}
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 0s
+        isPaused: true
+        annotations:
+          summary: "Operator-managed Twingate Connector {{ $labels.connector }} has been behind the latest release for over 14 days"
+          description: "The Kubernetes Operator should update this Connector by itself. Behind for 14 days means the Operator is stuck or its image pin is old. This is a digest-level notice and does not page the phone."
+        labels:
+          severity: "warning"
+          tier: "P2"
+          source: "twingate"
+          alert_group: "updates"
+          update_alert: "true"
+          phone: "false"
+
+      # Health of the data the rules above depend on. The collector runs every
+      # hour, so no success point in 6 hours (or a 0) means the check is broken.
+      - uid: update-twingate-check-failing
+        title: "Twingate update check failing or stale"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 21600, to: 0}
+            datasourceUid: influxdb-twingate
+            model:
+              refId: A
+              datasource: {type: influxdb, uid: influxdb-twingate}
+              rawQuery: true
+              resultFormat: time_series
+              query: >-
+                SELECT last("value") FROM "twingate_update_check_success" WHERE time > now() - 6h
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: B, type: reduce, expression: A, reducer: last, settings: {mode: dropNN}}
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: C, type: threshold, expression: B, conditions: [{evaluator: {type: lt, params: [1]}}]}
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 10m
+        isPaused: true
+        annotations:
+          summary: "The Twingate update check is failing, or no result has arrived for over 6 hours"
+          description: "The metric twingate_update_check_success is 0 or missing. Update alerts cannot be trusted until the check works again. Check the Telegraf exec input, the API key and scripts/twingate-update-metric.py."
+        labels:
+          severity: "critical"
+          tier: "P1"
+          source: "twingate"
+          alert_group: "updates"
+          update_alert: "true"
+          phone: "true"
+
+      # A Connector that is not ALIVE (any management mode).
+      - uid: update-twingate-connector-down
+        title: "Twingate Connector not ALIVE"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 10800, to: 0}
+            datasourceUid: influxdb-twingate
+            model:
+              refId: A
+              datasource: {type: influxdb, uid: influxdb-twingate}
+              rawQuery: true
+              resultFormat: time_series
+              query: >-
+                SELECT last("value") FROM "twingate_connector_up" WHERE time > now() - 3h GROUP BY "connector"
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: B, type: reduce, expression: A, reducer: last, settings: {mode: dropNN}}
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: C, type: threshold, expression: B, conditions: [{evaluator: {type: lt, params: [1]}}]}
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 15m
+        isPaused: true
+        annotations:
+          summary: "Twingate Connector {{ $labels.connector }} is not ALIVE"
+          description: "The Twingate Admin API reports a state other than ALIVE for this Connector. Check the Connector host or pod and its logs."
+        labels:
+          severity: "critical"
+          tier: "P1"
+          source: "twingate"
+          alert_group: "updates"
+          update_alert: "true"
+          phone: "true"
+
+      # A Connector that the API returns but the owner's expected list does not name
+      # (issue #222, review round 3). The collector counts them in
+      # `twingate_unexpected_connector` once per run. Two or more runs in the 3 hour window,
+      # every one above 0, mean it is not a one-off glitch. Warning only, no phone: the owner
+      # decides whether it is a new Connector to add to the list or one to investigate.
+      # noDataState and execErrState are Alerting on purpose (fail closed). A silent
+      # collector also raises "Twingate update check failing or stale"; the second notice
+      # is a cheap price for never letting a missing metric look like "no unexpected Connector".
+      - uid: update-twingate-unexpected-connector
+        title: "Twingate unexpected Connector"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 10800, to: 0}
+            datasourceUid: influxdb-twingate
+            model:
+              refId: A
+              datasource: {type: influxdb, uid: influxdb-twingate}
+              rawQuery: true
+              resultFormat: time_series
+              query: >-
+                SELECT min("value") FROM "twingate_unexpected_connector" WHERE time > now() - 3h
+          - refId: N
+            relativeTimeRange: {from: 10800, to: 0}
+            datasourceUid: influxdb-twingate
+            model:
+              refId: N
+              datasource: {type: influxdb, uid: influxdb-twingate}
+              rawQuery: true
+              resultFormat: time_series
+              query: >-
+                SELECT count("value") FROM "twingate_unexpected_connector" WHERE time > now() - 3h
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: B, type: reduce, expression: A, reducer: last, settings: {mode: dropNN}}
+          - refId: Nc
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: Nc, type: reduce, expression: N, reducer: last, settings: {mode: dropNN}}
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: C, type: math, expression: "$B > 0 && $Nc >= 2"}
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 0s
+        isPaused: true
+        annotations:
+          summary: "Twingate returned a Connector that is not on the expected list"
+          description: "The collector counts Connectors from the Twingate Admin API that are not named in TWINGATE_EXPECTED_CONNECTORS (metric twingate_unexpected_connector, above 0 in every sample of the last 3 hours, with at least two samples; a Connector that stays unexpected is noticed up to about 3 hours after it first appears, and one that goes away sooner is not alerted). If it is a new Connector on purpose, add its name to the list; if not, investigate it in the Twingate admin console."
+        labels:
+          severity: "warning"
+          tier: "P2"
+          source: "twingate"
+          alert_group: "updates"
+          update_alert: "true"
+          phone: "false"

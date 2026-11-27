@@ -99,7 +99,7 @@ All scripts read configuration from environment variables. Passwords and API key
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `N8N_BASE` | N8N internal URL (Docker bridge IP) | `http://172.20.0.16:80` |
+| `N8N_BASE` | N8N internal URL. Optional: when unset, scripts look up the container's address on the siem network at run time (`scripts/n8n_address.py`; `N8N_CONTAINER`, `SIEM_NETWORK`, `N8N_PORT` adjust the lookup; `CONTAINER_ENGINE` picks docker or podman, see [container-engine.md](container-engine.md)) | `http://192.0.2.10:80` (placeholder) |
 | `N8N_API_KEY` | N8N public API key (Settings → API; required, no default) | `eyJhbGci...` |
 | `N8N_EMAIL` | N8N login email (for internal API) | `admin@example.com` |
 | `N8N_PASSWORD` | N8N login password (required, no default) | set from your secrets manager |
@@ -148,12 +148,16 @@ All scripts read configuration from environment variables. Passwords and API key
 
 Alternatively, query the API:
 ```bash
-curl -s -u admin:password http://localhost:3000/api/datasources | python3 -c "
+scripts/secure-curl.sh admin -s http://localhost:3000/api/datasources | python3 -c "
 import sys, json
 for ds in json.load(sys.stdin):
     print(f'{ds[\"name\"]:30s} UID: {ds[\"uid\"]}')
 "
 ```
+
+Run it from the repository root. It asks for the Grafana admin password
+without echo and hands it to curl on stdin, never as an argument, so it stays
+out of the process list, shell history and shell traces. It needs bash 4.2 or newer.
 
 ### Grafana Alert Folder UID
 
@@ -185,13 +189,14 @@ There are three deployment scripts, depending on your needs:
 Deploys both N8N workflows AND Grafana alert rules in one pass via SSH:
 
 ```bash
-# Set required variables
-export N8N_API_KEY="your-n8n-api-key"
-export SIEM_USER="your-ssh-user"
-export ALERT_FOLDER_UID="your-folder-uid"
+# Read the secrets without echo into unexported variables, then pass each to the one process that needs it
+IFS= read -rs -p 'N8N API key: ' key; echo >&2
+IFS= read -rs -p 'Grafana admin password: ' gpw; echo >&2
 
-# Deploy everything
-./scripts/deploy-n8n-soar.sh 10.0.0.100
+# Deploy everything (the prefixed variables exist only for this one command)
+N8N_API_KEY=$key GRAFANA_PASS=$gpw SIEM_USER="your-ssh-user" ALERT_FOLDER_UID="your-folder-uid" \
+  ./scripts/deploy-n8n-soar.sh 10.0.0.100
+unset key gpw
 ```
 
 This script:
@@ -206,16 +211,17 @@ This script:
 For deploying just the Grafana alert router workflow to N8N. This script uses a two-step strategy to work around an N8N public API validation bug with Switch V3 nodes:
 
 ```bash
-# Set environment variables
-export N8N_BASE="http://172.20.0.16:80"
-export N8N_API_KEY="your-n8n-api-key"
-export N8N_EMAIL="admin@example.com"
-export N8N_PASSWORD="<n8n login password>"
-export DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/ID/TOKEN"
-export DISCORD_MENTION="<@YOUR_USER_ID>"
+# On the SIEM server, from a checkout of this repository.
+# Optional: the address is looked up at run time when N8N_BASE is unset (N8N_BASE="http://192.0.2.10:80").
+# Read the secrets without echo into unexported variables, then pass each to the one process that needs it.
+IFS= read -rs -p 'N8N API key: ' key; echo >&2
+IFS= read -rs -p 'N8N login password: ' npw; echo >&2
+IFS= read -rs -p 'Discord webhook URL: ' hook; echo >&2
 
-# Deploy via SSH pipe (no file copy needed)
-ssh user@siem-server 'python3 -' < scripts/deploy-n8n-grafana-router.py
+N8N_API_KEY=$key N8N_PASSWORD=$npw DISCORD_WEBHOOK_URL=$hook \
+  N8N_EMAIL="admin@example.com" DISCORD_MENTION="<@YOUR_USER_ID>" \
+  python3 scripts/deploy-n8n-grafana-router.py
+unset key npw hook
 ```
 
 ### Option C: Deploy Grafana Alert Rules Only (Python)
@@ -223,15 +229,14 @@ ssh user@siem-server 'python3 -' < scripts/deploy-n8n-grafana-router.py
 For deploying just the 7 Grafana SIEM alert rules:
 
 ```bash
-export GRAFANA_URL="http://localhost:3000"
-export GRAFANA_USER="admin"
-export GRAFANA_PASS="<grafana admin password>"
-export ALERT_FOLDER_UID="your-folder-uid"
-export DS_WAZUH="your-wazuh-ds-uid"
-export DS_SURICATA="your-suricata-ds-uid"
-export DS_PROMETHEUS="your-prometheus-ds-uid"
+# On the SIEM server, from a checkout of this repository.
+IFS= read -rs -p 'Grafana admin password: ' gpw; echo >&2
 
-ssh user@siem-server 'python3 -' < scripts/deploy-grafana-alerts.py
+GRAFANA_PASS=$gpw GRAFANA_URL="http://localhost:3000" GRAFANA_USER="admin" \
+  ALERT_FOLDER_UID="your-folder-uid" DS_WAZUH="your-wazuh-ds-uid" \
+  DS_SURICATA="your-suricata-ds-uid" DS_PROMETHEUS="your-prometheus-ds-uid" \
+  python3 scripts/deploy-grafana-alerts.py
+unset gpw
 ```
 
 ### Option D: Manual Import via N8N UI

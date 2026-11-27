@@ -1,0 +1,22 @@
+# Direct Discord contact point for the notification failure alert (issue #81).
+# SHIPPED AS AN EXAMPLE: Grafana ignores .example files.
+#
+# This is deliberately NOT the n8n router. The alert about failed deliveries must
+# not travel the path that may be failing. To use it, add the entry below to the
+# contactPoints list of contact-points.yml (or load it as its own file), and put
+# the Discord webhook URL in the Grafana container environment as
+# DISCORD_FAILURE_WEBHOOK_URL (Grafana interpolates $VARIABLE; never write the
+# URL here). Use a different webhook or channel from the one n8n posts to if you
+# can, so one revoked webhook does not silence both. Needs the variable passed
+# to the grafana service in docker-compose, like GRAFANA_WEBHOOK_SECRET.
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: discord-direct
+    receivers:
+      - uid: discord-direct
+        type: discord
+        settings:
+          url: $DISCORD_FAILURE_WEBHOOK_URL
+        disableResolveMessage: false

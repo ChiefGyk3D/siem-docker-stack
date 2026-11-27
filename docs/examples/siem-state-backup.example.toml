@@ -1,0 +1,71 @@
+# Example config for scripts/backup-state.py and scripts/restore-state.py.
+# Copy to /etc/siem-state-backup.toml (mode 0640) and edit. Every value below
+# is a placeholder. This file holds PUBLIC recipients only; never put an age
+# identity (private key) here or anywhere in the repo.
+
+# Where encrypted archives are written (created 0700 if missing).
+destination_dir = "/var/backups/siem-state"
+
+# Public age recipients (age1... or ssh-ed25519 ... keys). At least one is
+# required; there is no unencrypted or passphrase mode. List two or more so a
+# single lost key does not lose the backups.
+age_recipients = [
+  "age1examplepublickeyexamplepublickeyexamplepublickeyexamplepub",
+]
+# Alternative or addition: a file of public recipients, one per line.
+# age_recipients_file = "/etc/siem-state-backup.recipients"
+
+# Optional second copy off the host: an rclone remote and path that you set up
+# with `rclone config` (for example a bucket on example.com storage).
+# rclone_remote = "offsite:siem-state-backups"
+
+# Keep this many newest archives (local and remote). Minimum 1.
+retention = 14
+
+# Containers (names from your compose file) and the n8n key file inside it.
+n8n_container = "n8n"
+n8n_key_file = "/home/node/.n8n/config"
+# Set true only if n8n takes its key from N8N_ENCRYPTION_KEY and has no config
+# file; you then must keep that key somewhere else yourself.
+# allow_missing_n8n_key = false
+
+grafana_container = "grafana"
+grafana_db_path = "/var/lib/grafana/grafana.db"
+
+# How to take a consistent Grafana database copy while it runs:
+#   host-sqlite       SQLite online backup on the host path below (stdlib, no
+#                     tool needed in the image). Recommended.
+#   container-sqlite3 runs `sqlite3 .backup` inside the container (needs the
+#                     sqlite3 CLI in the image; fails loudly if absent)
+#   stop-copy         stops Grafana, copies the file, starts it (brief downtime)
+#   auto              host-sqlite when grafana_data_host_dir is set, else
+#                     container-sqlite3
+grafana_db_method = "auto"
+# Host directory bind-mounted at /var/lib/grafana (holds grafana.db).
+grafana_data_host_dir = "/srv/grafana"
+
+# Restore only: docker cp gives no useful file owner, so restores install files
+# through a throwaway helper container that shares the volumes. Set an image you
+# already trust and the ids your containers run as (check with `docker exec
+# <container> id`); restore refuses to run without them. Files must be on a volume.
+# helper_image = "alpine"
+# grafana_uid = 472
+# grafana_gid = 0
+# grafana_db_mode = "0600"
+# n8n_uid = 1000
+# n8n_gid = 1000
+# n8n_key_mode = "0600"
+
+# Restore size ceilings in bytes (defaults shown). Raise them for a larger Grafana database.
+# max_member_bytes = 1073741824
+# max_total_bytes = 2147483648
+# max_archive_bytes = 2147483648
+
+# Which parts to back up and restore.
+components = ["n8n", "grafana"]
+
+# Private scratch space (0700). Defaults to the system temp dir.
+# temp_dir = "/var/lib/siem-state-backup/tmp"
+
+# docker or podman
+container_runtime = "docker"

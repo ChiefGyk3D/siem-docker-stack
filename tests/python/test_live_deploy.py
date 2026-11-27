@@ -22,6 +22,15 @@ CONTACT = REPO_ROOT / "docker" / "grafana" / "provisioning" / "alerting" / "cont
 FILES = sorted(p for p in LIVE.iterdir() if p.is_file())
 
 
+@pytest.fixture(autouse=True)
+def _umask_022():
+    """grafana-deploy.py refuses group-writable directories; keep temp dirs 755 whatever the user's umask."""
+    import os
+    old = os.umask(0o022)
+    yield
+    os.umask(old)
+
+
 @pytest.fixture(scope="module")
 def setup():
     return import_module_from_path("live_n8n_setup", LIVE / "n8n-setup-alert-router.py")
@@ -110,9 +119,12 @@ def test_build_credentials_shapes(setup):
     assert json.loads(p["data"]["json"]) == {"body": {"token": "tok", "user": "usr"}}
 
 
-def test_credential_id_map_covers_the_three_names(setup):
+def test_credential_id_map_covers_the_known_names(setup):
     ids = setup.credential_id_map()
-    assert set(ids) == {"grafana-webhook-auth", "pushover-api", setup.DISCORD_NAME}
+    assert set(ids) == {"grafana-webhook-auth", "pushover-api", setup.DISCORD_NAME, "matrix-bot-auth",
+                        "grafana-viewer-auth"}
+    assert ids["grafana-viewer-auth"] == setup.CRED_GRAFANA_VIEWER_ID
+    assert ids["matrix-bot-auth"] == setup.CRED_MATRIX_ID
     assert ids["grafana-webhook-auth"] == setup.CRED_HEADER_ID and ids["pushover-api"] == setup.CRED_PUSHOVER_ID
 
 
@@ -213,35 +225,14 @@ COMPOSE = (
 )
 
 
-def test_compose_edit_inserts_the_line_once_after_the_anchor(gdeploy):
-    new, note = gdeploy.compose_edit(COMPOSE)
-    assert "insert after line 5" in note
-    lines = new.splitlines()
-    assert lines[5] == "      - GRAFANA_WEBHOOK_SECRET" and lines[4].startswith("      - GF_SERVER_ROOT_URL=")
-    assert new.count("GRAFANA_WEBHOOK_SECRET") == 1
-    assert [ln for ln in lines if ln != "      - GRAFANA_WEBHOOK_SECRET"] == COMPOSE.splitlines()
 
 
-def test_compose_edit_is_idempotent(gdeploy):
-    new, _ = gdeploy.compose_edit(COMPOSE)
-    again, note = gdeploy.compose_edit(new)
-    assert again is None and note == "already present"
 
 
-def test_compose_edit_refuses_a_missing_anchor(gdeploy):
-    with pytest.raises(ValueError, match="found 0"):
-        gdeploy.compose_edit(COMPOSE.replace("GF_SERVER_ROOT_URL", "GF_OTHER"))
 
 
-def test_compose_edit_refuses_an_ambiguous_anchor(gdeploy):
-    with pytest.raises(ValueError, match="found 2"):
-        gdeploy.compose_edit(COMPOSE + "      - GF_SERVER_ROOT_URL=http://other\n")
 
 
-def test_compose_edit_ignores_a_similar_line_that_is_not_the_anchor(gdeploy):
-    text = COMPOSE.replace("      - GF_SERVER_ROOT_URL=", "      # - GF_SERVER_ROOT_URL=")
-    with pytest.raises(ValueError):
-        gdeploy.compose_edit(text)
 
 
 def test_datasources_yaml_content(gdeploy):
@@ -262,16 +253,16 @@ def test_datasources_yaml_url_override(gdeploy):
 
 def test_contact_point_url_substitution(gdeploy):
     text = CONTACT.read_text(encoding="utf-8")
-    out = gdeploy.contact_with_path(text, "grafana-alerts-abc123")
-    assert "http://n8n/webhook/grafana-alerts-abc123" in out
-    assert gdeploy.OLD_URL not in out.replace("grafana-alerts-abc123", "")
-    assert yaml.safe_load(out)["contactPoints"][0]["receivers"][0]["settings"]["url"].endswith("/grafana-alerts-abc123")
-    assert gdeploy.contact_with_path(text, "p", base="http://192.0.2.9/").count("http://192.0.2.9/webhook/p") == 1
+    out = gdeploy.contact_with_path(text, "grafana-alerts-abc12345")
+    assert "http://n8n/webhook/grafana-alerts-abc12345" in out
+    assert gdeploy.OLD_URL not in out.replace("grafana-alerts-abc12345", "")
+    assert yaml.safe_load(out)["contactPoints"][0]["receivers"][0]["settings"]["url"].endswith("/grafana-alerts-abc12345")
+    assert gdeploy.contact_with_path(text, "grafana-alerts-abc12345", base="http://192.0.2.9/").count("http://192.0.2.9/webhook/grafana-alerts-abc12345") == 1
 
 
 def test_contact_point_substitution_refuses_when_the_url_is_missing(gdeploy):
     with pytest.raises(ValueError, match="contact point URL"):
-        gdeploy.contact_with_path("url: http://elsewhere/hook\n", "grafana-alerts-abc123")
+        gdeploy.contact_with_path("url: http://elsewhere/hook\n", "grafana-alerts-abc12345")
 
 
 @pytest.mark.parametrize("path,ok", [("grafana-alerts-" + "a" * 10, True), ("grafana-alerts-shor", False),
@@ -281,6 +272,10 @@ def test_router_path_validation(gdeploy, path, ok):
 
 
 # --- command-line behavior ----------------------------------------------------------------
+
+STAGED = ("contact-points.yml", "update-alert-rules-unifi.yml", "update-alert-rules-pfsense.yml",
+          "heartbeat-alert-rule.yml", "notification-failure-alert-rule.yml")
+
 
 def _run(script, args, env):
     base = {"PATH": "/usr/bin:/bin"}
@@ -295,9 +290,10 @@ def _stage_dirs(tmp_path, compose_text=COMPOSE):
         d.mkdir()
     (siem / "docker-compose.yml").write_text(compose_text, encoding="utf-8")
     (cfg / "router-path").write_text("grafana-alerts-" + "z" * 20, encoding="utf-8")
-    for name in ("contact-points.yml", "update-alert-rules-unifi.yml", "update-alert-rules-pfsense.yml"):
+    for name in STAGED:
         src = REPO_ROOT / "docker" / "grafana" / "provisioning" / "alerting" / name
         shutil.copy(src, stage / name)
+        (stage / name).chmod(0o644)
     return {"SIEM_DIR": str(siem), "SIEM_STAGE_DIR": str(stage), "SIEM_CONFIG_DIR": str(cfg)}
 
 
@@ -305,19 +301,27 @@ def test_grafana_deploy_stage_prints_the_plan(tmp_path):
     env = _stage_dirs(tmp_path)
     r = _run("grafana-deploy.py", ["--stage"], env)
     assert r.returncode == 0, r.stderr
-    assert r.stdout.strip() == "staged files ok; router path length 35; compose: insert after line 5"
-    assert "GRAFANA_WEBHOOK_SECRET" not in (tmp_path / "siem" / "docker-compose.yml").read_text(encoding="utf-8"), \
-        "--stage must not change anything"
+    assert r.stdout.strip().splitlines()[0] == "staged files ok; router path length 35"
+    assert "INFLUX_URL in effect: http://influxdb:8086" in r.stdout
 
 
-def test_grafana_deploy_stage_refuses_bad_inputs(tmp_path):
-    env = _stage_dirs(tmp_path, COMPOSE.replace("GF_SERVER_ROOT_URL", "GF_OTHER"))
+def test_grafana_deploy_ships_the_heartbeat_rule_file(gdeploy):
+    assert "heartbeat-alert-rule.yml" in gdeploy.FILES
+    assert len(set(gdeploy.FILES)) == len(gdeploy.FILES)
+    # every file the deploy copies exists in the repository's alerting folder
+    for name in gdeploy.FILES:
+        assert (CONTACT.parent / name).is_file(), name
+
+
+def test_grafana_deploy_stage_requires_the_heartbeat_rule_file(tmp_path):
+    env = _stage_dirs(tmp_path)
+    (tmp_path / "stage" / "heartbeat-alert-rule.yml").unlink()
     r = _run("grafana-deploy.py", ["--stage"], env)
-    assert r.returncode != 0 and "expected exactly one GF_SERVER_ROOT_URL line, found 0" in r.stderr
-    env = _stage_dirs(tmp_path / "b" if (tmp_path / "b").mkdir() is None else tmp_path)
-    (tmp_path / "b" / "cfg" / "router-path").write_text("bad", encoding="utf-8")
-    r = _run("grafana-deploy.py", ["--stage"], env)
-    assert r.returncode != 0 and "router path file looks wrong" in r.stderr
+    assert r.returncode != 0 and "missing staged file: heartbeat-alert-rule.yml" in r.stderr
+
+
+
+
 
 
 def test_setup_check_reports_presence_without_values(tmp_path):
@@ -451,3 +455,494 @@ def test_cli_refuses_a_bad_error_workflow_id_before_touching_docker(tmp_path):
     r = _run("n8n-setup-alert-router.py", ["--workflow", str(ROUTER), "--error-workflow-id"],
              {"SIEM_CONFIG_DIR": str(tmp_path)})
     assert r.returncode != 0 and "needs an id" in r.stderr
+
+
+# --- issue #53: matrix credential and the weekly digest import ------------------------
+
+DIGEST = REPO_ROOT / "n8n" / "weekly-update-digest.json"
+
+
+def digest():
+    return json.loads(DIGEST.read_text(encoding="utf-8"))
+
+
+def test_build_matrix_credential_shape(setup):
+    cred = setup.build_matrix_credential("tok" + "9" * 10)
+    assert cred["name"] == "matrix-bot-auth" and cred["type"] == "httpCustomAuth" and cred["id"] == setup.CRED_MATRIX_ID
+    assert json.loads(cred["data"]["json"]) == {"headers": {"Authorization": "Bearer tok" + "9" * 10}}
+
+
+def test_build_credentials_without_matrix_is_unchanged(setup):
+    assert {c["name"] for c in setup.build_credentials("S" * 8, "t", "u")} == {"grafana-webhook-auth", "pushover-api"}
+
+
+def test_matrix_token_never_reaches_argv_or_output(setup, monkeypatch, capsys):  # GUARD
+    seen = {}
+
+    def fake(script, payload):
+        seen["script"], seen["payload"] = script, payload
+        return 0, ["Successfully imported 1 credential."]
+
+    monkeypatch.setattr(setup, "docker_in", fake)
+    monkeypatch.setenv("MATRIX_BOT_TOKEN", "MATRIXSECRET-0123456789")
+    assert setup.matrix_credentials() == 0
+    assert "MATRIXSECRET" not in seen["script"] and "MATRIXSECRET" in seen["payload"]
+    assert "MATRIXSECRET" not in capsys.readouterr().out
+    assert [c["name"] for c in json.loads(seen["payload"])] == ["matrix-bot-auth"]
+
+
+def test_matrix_credentials_need_the_token(setup, monkeypatch):
+    monkeypatch.delenv("MATRIX_BOT_TOKEN", raising=False)
+    with pytest.raises(SystemExit):
+        setup.matrix_credentials()
+
+
+def test_check_with_matrix_reports_presence_only(tmp_path):
+    r = _run("n8n-setup-alert-router.py", ["--check", "--with-matrix"],
+             {"GRAFANA_WEBHOOK_SECRET": "x" * 12, "PUSHOVER_API_KEY": "y" * 12, "PUSHOVER_USER_KEY": "z" * 12,
+              "MATRIX_BOT_TOKEN": "m" * 12})
+    assert r.returncode == 0 and "MATRIX_BOT_TOKEN: present" in r.stdout
+    assert "m" * 12 not in r.stdout + r.stderr
+
+
+def test_patch_digest_workflow_imports_inactive_with_mapped_credentials(setup):
+    out = setup.patch_digest_workflow(digest(), error_workflow_id="0123456789abcdef")
+    assert out["active"] is False and re.fullmatch(r"[0-9a-f]{16}", out["id"])
+    assert out["settings"]["errorWorkflow"] == "0123456789abcdef"
+    ids = setup.credential_id_map()
+    seen = {c["name"]: c["id"] for n in out["nodes"] for c in (n.get("credentials") or {}).values()}
+    assert {"matrix-bot-auth", setup.DISCORD_NAME} <= set(seen)
+    assert all(ids[name] == cid for name, cid in seen.items())
+    assert not any(v == "YOUR_CREDENTIAL_ID" for v in seen.values())
+
+
+def test_patch_digest_workflow_drops_the_placeholder_error_id_and_keeps_the_repo_file(setup):
+    before = DIGEST.read_text(encoding="utf-8")
+    out = setup.patch_digest_workflow(digest())
+    assert "errorWorkflow" not in out["settings"]
+    assert setup.patch_digest_workflow(digest(), reuse_id="0123456789abcdef")["id"] == "0123456789abcdef"
+    with pytest.raises(ValueError):
+        setup.patch_digest_workflow(digest(), reuse_id="nope")
+    assert DIGEST.read_text(encoding="utf-8") == before
+
+
+def test_cli_digest_flag_refuses_a_bad_id_before_touching_docker(tmp_path):
+    r = _run("n8n-setup-alert-router.py", ["--digest-workflow", str(DIGEST), "nothex"], {})
+    assert r.returncode != 0 and "16 hex" in r.stderr
+
+
+def test_runbook_documents_issue_53_n8n_changes():
+    text = " ".join((REPO_ROOT / "docs" / "live-deploy-runbook.md").read_text(encoding="utf-8").split())
+    for needle in ("matrix-bot-auth", "--with-matrix", "MATRIX_BOT_TOKEN", "--digest-workflow",
+                   "weekly-update-digest.json", "MATRIX_HOMESERVER", "MATRIX_ROOM_ID", "not secrets"):
+        assert needle in text, needle
+    assert "—" not in text
+
+
+# --- issue #202: grafana-viewer-auth credential for the digest collectors ----------------
+
+def test_build_grafana_viewer_credential_shape(setup):
+    cred = setup.build_grafana_viewer_credential("tok" + "7" * 10)
+    assert cred["name"] == "grafana-viewer-auth" and cred["type"] == "httpCustomAuth"
+    assert cred["id"] == setup.CRED_GRAFANA_VIEWER_ID
+    assert json.loads(cred["data"]["json"]) == {"headers": {"Authorization": "Bearer tok" + "7" * 10}}
+
+
+def test_grafana_viewer_token_never_reaches_argv_or_output(setup, monkeypatch, capsys):  # GUARD
+    seen = {}
+
+    def fake(script, payload):
+        seen["script"], seen["payload"] = script, payload
+        return 0, ["Successfully imported 1 credential."]
+
+    monkeypatch.setattr(setup, "docker_in", fake)
+    monkeypatch.setenv("GRAFANA_VIEWER_TOKEN", "VIEWERSECRET-0123456789")
+    assert setup.grafana_viewer_credentials() == setup.EXIT_DOMAIN_LOCK_UNVERIFIED
+    assert "VIEWERSECRET" not in seen["script"] and "VIEWERSECRET" in seen["payload"]
+    assert "VIEWERSECRET" not in capsys.readouterr().out
+    assert [c["name"] for c in json.loads(seen["payload"])] == ["grafana-viewer-auth"]
+
+
+def test_grafana_viewer_credentials_need_the_token(setup, monkeypatch):
+    monkeypatch.delenv("GRAFANA_VIEWER_TOKEN", raising=False)
+    with pytest.raises(SystemExit):
+        setup.grafana_viewer_credentials()
+
+
+def test_check_with_grafana_viewer_reports_presence_only():
+    base = {"GRAFANA_WEBHOOK_SECRET": "x" * 12, "PUSHOVER_API_KEY": "y" * 12, "PUSHOVER_USER_KEY": "z" * 12}
+    r = _run("n8n-setup-alert-router.py", ["--check", "--with-grafana-viewer"],
+             dict(base, GRAFANA_VIEWER_TOKEN="g" * 12))
+    assert r.returncode == 0 and "GRAFANA_VIEWER_TOKEN: present" in r.stdout
+    assert "g" * 12 not in r.stdout + r.stderr
+    r = _run("n8n-setup-alert-router.py", ["--check", "--with-grafana-viewer"], base)
+    assert r.returncode == 1 and "GRAFANA_VIEWER_TOKEN: MISSING" in r.stdout
+
+
+def test_check_with_both_flags_needs_both_tokens():
+    base = {"GRAFANA_WEBHOOK_SECRET": "x" * 12, "PUSHOVER_API_KEY": "y" * 12, "PUSHOVER_USER_KEY": "z" * 12,
+            "MATRIX_BOT_TOKEN": "m" * 12}
+    r = _run("n8n-setup-alert-router.py", ["--check", "--with-matrix", "--with-grafana-viewer"], base)
+    assert r.returncode == 1 and "MATRIX_BOT_TOKEN: present" in r.stdout and "GRAFANA_VIEWER_TOKEN: MISSING" in r.stdout
+
+
+def test_patch_digest_workflow_maps_the_viewer_credential_on_every_query_node(setup):
+    out = setup.patch_digest_workflow(digest())
+    viewer = [c for n in out["nodes"] for c in (n.get("credentials") or {}).values() if c["name"] == "grafana-viewer-auth"]
+    assert len(viewer) == 3 and all(c["id"] == setup.CRED_GRAFANA_VIEWER_ID for c in viewer)
+
+
+def test_runbook_documents_grafana_viewer_credential():
+    text = " ".join((REPO_ROOT / "docs" / "live-deploy-runbook.md").read_text(encoding="utf-8").split())
+    for needle in ("grafana-viewer-auth", "--with-grafana-viewer", "GRAFANA_VIEWER_TOKEN", "GRAFANA_BASE_URL"):
+        assert needle in text, needle
+    assert "—" not in text
+
+
+# --- issue #202 fix round 1: preflight before any change, id and token validation --------------
+
+ENV_ALL = {"GRAFANA_WEBHOOK_SECRET": "s" * 12, "PUSHOVER_API_KEY": "k" * 12, "PUSHOVER_USER_KEY": "u" * 12,
+           "MATRIX_BOT_TOKEN": "m" * 12, "GRAFANA_VIEWER_TOKEN": "g" * 12}
+FLAGS = ["--credentials", "--with-matrix", "--with-grafana-viewer"]
+
+
+def _env(monkeypatch, **over):
+    for k in ENV_ALL:
+        monkeypatch.delenv(k, raising=False)
+    for k, v in {**ENV_ALL, **over}.items():
+        if v is None:
+            monkeypatch.delenv(k, raising=False)
+        else:
+            monkeypatch.setenv(k, v)
+
+
+def _record_docker(setup, monkeypatch):
+    calls = []
+
+    def fake(script, payload):
+        calls.append((script, payload))
+        return 0, ["Successfully imported 1 credential."]
+
+    monkeypatch.setattr(setup, "docker_in", fake)
+    return calls
+
+
+def test_credentials_run_changes_nothing_when_a_later_value_is_missing(setup, monkeypatch):  # GUARD
+    calls = _record_docker(setup, monkeypatch)
+    for missing in ("GRAFANA_VIEWER_TOKEN", "MATRIX_BOT_TOKEN", "PUSHOVER_USER_KEY"):
+        _env(monkeypatch, **{missing: None})
+        with pytest.raises(SystemExit):
+            setup.main(FLAGS)
+        assert calls == [], missing + ": nothing may be imported before every value is checked"
+    _env(monkeypatch)
+    assert setup.main(FLAGS) == setup.EXIT_DOMAIN_LOCK_UNVERIFIED
+    assert len(calls) == 3, "the base credentials, then matrix, then the viewer"
+
+
+def test_credentials_run_changes_nothing_when_a_token_is_bad(setup, monkeypatch):  # GUARD
+    calls = _record_docker(setup, monkeypatch)
+    for bad in ("", "   ", "\n", "abc\ndef", "abc\r\ndef", "abc\tdef", "abc" + chr(27) + "def"):
+        _env(monkeypatch, GRAFANA_VIEWER_TOKEN=bad)
+        with pytest.raises(SystemExit):
+            setup.main(FLAGS)
+        _env(monkeypatch, MATRIX_BOT_TOKEN=bad)
+        with pytest.raises(SystemExit):
+            setup.main(FLAGS)
+    assert calls == []
+
+
+def test_viewer_and_matrix_tokens_lose_surrounding_whitespace_only(setup, monkeypatch):
+    calls = _record_docker(setup, monkeypatch)
+    _env(monkeypatch, GRAFANA_VIEWER_TOKEN="  tok-VIEW-1234 \n", MATRIX_BOT_TOKEN="\tsyt_matrix_1234  ")
+    assert setup.main(FLAGS) == setup.EXIT_DOMAIN_LOCK_UNVERIFIED
+    sent = {json.loads(p)[0]["name"]: json.loads(json.loads(p)[0]["data"]["json"]) for _s, p in calls[1:]}
+    assert sent["grafana-viewer-auth"] == {"headers": {"Authorization": "Bearer tok-VIEW-1234"}}
+    assert sent["matrix-bot-auth"] == {"headers": {"Authorization": "Bearer syt_matrix_1234"}}
+
+
+def test_viewer_credential_alone_rejects_empty_and_multiline_tokens(setup, monkeypatch):
+    calls = _record_docker(setup, monkeypatch)
+    for bad in ("", " \n ", "a\nb"):
+        monkeypatch.setenv("GRAFANA_VIEWER_TOKEN", bad)
+        with pytest.raises(SystemExit):
+            setup.grafana_viewer_credentials()
+    assert calls == []
+
+
+@pytest.mark.parametrize("bad", ["", "short", "has space 12345", "semi;colon1234", "x" * 33, "../../etc/pass", "id\nid123456"])
+def test_viewer_credential_id_must_pass_the_same_id_check(setup, monkeypatch, bad):  # GUARD
+    calls = _record_docker(setup, monkeypatch)
+    _env(monkeypatch)
+    monkeypatch.setattr(setup, "CRED_GRAFANA_VIEWER_ID", bad)
+    with pytest.raises(SystemExit):
+        setup.main(["--credentials", "--with-grafana-viewer"])
+    with pytest.raises(SystemExit):
+        setup.grafana_viewer_credentials()
+    assert calls == []
+
+
+def test_every_credential_id_is_checked_and_defaults_pass(setup, monkeypatch):
+    setup.check_credential_ids()
+    for attr in ("CRED_HEADER_ID", "CRED_PUSHOVER_ID", "CRED_MATRIX_ID", "CRED_DISCORD_ID"):
+        with monkeypatch.context() as m:
+            m.setattr(setup, attr, "bad id!")
+            with pytest.raises(SystemExit):
+                setup.check_credential_ids()
+
+
+@pytest.mark.parametrize("other", ["CRED_HEADER_ID", "CRED_PUSHOVER_ID", "CRED_MATRIX_ID", "CRED_DISCORD_ID"])
+def test_viewer_credential_id_equal_to_another_credential_is_refused(setup, monkeypatch, other):  # GUARD
+    calls = _record_docker(setup, monkeypatch)
+    _env(monkeypatch)
+    monkeypatch.setattr(setup, "CRED_GRAFANA_VIEWER_ID", getattr(setup, other))
+    with pytest.raises(SystemExit) as err:
+        setup.main(["--credentials", "--with-grafana-viewer"])
+    assert "own id" in str(err.value)
+    with pytest.raises(SystemExit):
+        setup.grafana_viewer_credentials()
+    assert calls == []
+
+
+# --- issue #202 fix round 2: no secret on any error path, private credential file, host reminder ---------
+
+CANARY = "CANARYTOKEN-9f3a7c51d2"
+IMPORTERS = [("credentials", "credentials import exit code:"),
+             ("matrix_credentials", "matrix credential import exit code:"),
+             ("grafana_viewer_credentials", "grafana viewer credential import exit code:")]
+
+
+def _canary_env(monkeypatch):
+    _env(monkeypatch, GRAFANA_WEBHOOK_SECRET=CANARY + "-w", PUSHOVER_API_KEY=CANARY + "-p",
+         PUSHOVER_USER_KEY=CANARY + "-u", MATRIX_BOT_TOKEN=CANARY + "-m", GRAFANA_VIEWER_TOKEN=CANARY + "-v")
+
+
+class _Proc:
+    def __init__(self, rc, out, err):
+        self.returncode, self.stdout, self.stderr = rc, out, err
+
+
+@pytest.mark.parametrize("fn,status_line", IMPORTERS)
+@pytest.mark.parametrize("rc", [0, 1, 127])
+def test_credential_import_never_prints_child_output(setup, monkeypatch, capsys, fn, status_line, rc):  # GUARD
+    """The container runner returns the payload on both streams (what a failing CLI could do): nothing of it is shown."""
+    _canary_env(monkeypatch)
+    echoed = []
+
+    def fake_engine_run(args, **kwargs):
+        echoed.append(kwargs["input"])
+        return _Proc(rc, kwargs["input"], kwargs["input"] + b"\nError: " + kwargs["input"])
+
+    monkeypatch.setattr(setup, "engine_run", fake_engine_run)
+    expected = setup.EXIT_DOMAIN_LOCK_UNVERIFIED if (fn == "grafana_viewer_credentials" and rc == 0) else rc
+    assert getattr(setup, fn)() == expected
+    seen = capsys.readouterr()
+    assert echoed and CANARY.encode() in echoed[0], "the fake really did see the token"
+    assert CANARY not in seen.out and CANARY not in seen.err
+    assert status_line in seen.out
+
+
+@pytest.mark.parametrize("fn,status_line", IMPORTERS)
+def test_credential_import_lines_from_a_runner_are_ignored(setup, monkeypatch, capsys, fn, status_line):  # GUARD
+    _canary_env(monkeypatch)
+    monkeypatch.setattr(setup, "docker_in", lambda script, payload: (1, ["Authorization: Bearer " + CANARY, payload]))
+    assert getattr(setup, fn)() == 1
+    seen = capsys.readouterr()
+    assert CANARY not in seen.out and CANARY not in seen.err and "Bearer" not in seen.out
+
+
+@pytest.mark.parametrize("fn,status_line", IMPORTERS)
+def test_credential_import_engine_errors_carry_no_secret(setup, monkeypatch, capsys, fn, status_line):  # GUARD
+    _canary_env(monkeypatch)
+
+    def boom(*a, **kw):
+        raise setup.container_engine.ContainerEngineError("container engine is not usable")
+
+    monkeypatch.setattr(setup.container_engine, "engine_run", boom)
+    with pytest.raises(SystemExit) as err:
+        getattr(setup, fn)()
+    seen = capsys.readouterr()
+    assert CANARY not in str(err.value) and CANARY not in seen.out and CANARY not in seen.err
+
+
+def test_every_credential_import_uses_the_private_script(setup, monkeypatch):
+    calls = _record_docker(setup, monkeypatch)
+    _canary_env(monkeypatch)
+    assert setup.main(FLAGS) == setup.EXIT_DOMAIN_LOCK_UNVERIFIED
+    assert len(calls) == 3 and all(script == setup.CRED_IMPORT_SCRIPT for script, _p in calls)
+    assert "/tmp/cred.json" not in setup.CRED_IMPORT_SCRIPT
+
+
+_STUB = """#!/bin/sh
+for a in "$@"; do case "$a" in --input=*) f=${a#--input=};; esac; done
+d=$(dirname "$f")
+{ echo "$f"; stat -c %a "$f"; stat -c %a "$d"; cat "$f"; } > "$REC"
+echo "CANARY-OUT"; echo "CANARY-ERR" >&2
+exit 3
+"""
+
+
+def _run_cred_script(script, tmp_path, payload, umask=0o000, use_shm=False, fs="ext4"):
+    """Run the credential script under sh with a stub n8n; returns (result, record lines, listing of the temp base)."""
+    import os
+    stub = tmp_path / "bin"
+    stub.mkdir(exist_ok=True)
+    (stub / "n8n").write_text(_STUB, encoding="utf-8")
+    (stub / "n8n").chmod(0o755)
+    (stub / "stat").write_text('#!/bin/sh\ncase "$1" in -f) echo "$FSTYPE";; *) exec /usr/bin/stat "$@";; esac\n', encoding="utf-8")
+    (stub / "stat").chmod(0o755)
+    base = tmp_path / "base"
+    base.mkdir(exist_ok=True)
+    assert 'base=/tmp;' in script and 'shm=/dev/shm;' in script
+    shm = tmp_path / "shm"
+    shm.mkdir(exist_ok=True)
+    local = script.replace('base=/tmp;', 'base=' + str(base) + ';').replace('shm=/dev/shm;', 'shm=' + str(shm if use_shm else tmp_path / "no-shm") + ';')
+    rec = tmp_path / "rec.txt"
+    env = {"PATH": str(stub) + ":" + os.environ["PATH"], "REC": str(rec), "FSTYPE": fs}
+    r = subprocess.run(["sh", "-c", local], input=payload.encode(), capture_output=True, env=env, timeout=30,
+                       preexec_fn=lambda: os.umask(umask))
+    lines = rec.read_text(encoding="utf-8").splitlines() if rec.exists() else []
+    if rec.exists():
+        rec.unlink()
+    return r, lines, sorted(p.name for d in (base, shm) for p in d.iterdir())
+
+
+def check_cred_script(script, tmp_path, use_shm=True, fs="tmpfs"):
+    names = set()
+    memory = use_shm and fs == "tmpfs"
+    for i in range(3):
+        r, lines, left = _run_cred_script(script, tmp_path, "PAYLOAD-" + str(i) + "-" + CANARY, use_shm=use_shm, fs=fs)
+        assert r.returncode == 3, "the n8n exit code must come back"
+        assert r.stderr == b"", "n8n output is discarded inside the container"
+        assert (r.stdout == b"") if memory else (r.stdout.decode().strip().startswith("warning: /dev/shm is not a memory-backed mount")), r.stdout
+        assert b"CANARY-OUT" not in r.stdout and b"CANARY-ERR" not in r.stdout
+        path, fmode, dmode, content = lines[0], lines[1], lines[2], "\n".join(lines[3:])
+        assert fmode == "600" and dmode == "700", (fmode, dmode)
+        assert content == "PAYLOAD-" + str(i) + "-" + CANARY
+        assert re.search(r"/n8n-cred\.[A-Za-z0-9]{10}/c\.json$", path), path
+        assert ("/shm/" in path) if memory else ("/base/" in path), "directory choice: " + path
+        assert left == [], "the file and its directory are removed afterwards: " + str(left)
+        names.add(path)
+    assert len(names) == 3, "the file name is unpredictable: a fresh random directory every run"
+
+
+def test_credential_script_creates_a_private_unpredictable_file_and_removes_it(setup, tmp_path):  # GUARD
+    check_cred_script(setup.CRED_IMPORT_SCRIPT, tmp_path)
+
+
+@pytest.mark.parametrize("use_shm,fs", [(True, "ext4"), (True, "overlay"), (True, ""), (False, "tmpfs")])
+def test_credential_dir_falls_back_to_tmp_with_a_warning_unless_shm_is_memory_backed(setup, tmp_path, use_shm, fs):  # GUARD
+    check_cred_script(setup.CRED_IMPORT_SCRIPT, tmp_path, use_shm=use_shm, fs=fs)
+
+
+def test_credential_dir_choice_is_memory_backed_only_for_tmpfs(setup, tmp_path):
+    """Negative case for the guard: a script that always picks the shm directory is caught on a non-tmpfs mount."""
+    always = setup.CRED_IMPORT_SCRIPT.replace('= tmpfs ]', '= tmpfs ] || true')
+    assert always != setup.CRED_IMPORT_SCRIPT
+    with pytest.raises(AssertionError):
+        check_cred_script(always, tmp_path, use_shm=True, fs="ext4")
+
+
+def test_import_prints_only_the_fixed_fallback_warning(setup, monkeypatch, capsys):
+    monkeypatch.setattr(setup, "docker_in", lambda script, payload: (0, [setup.WARN_NOT_TMPFS, "CANARYLEAK"]))
+    assert setup.import_credential_records([{"a": 1}]) == 0
+    out = capsys.readouterr().out
+    assert setup.WARN_NOT_TMPFS in out and "CANARYLEAK" not in out
+
+
+@pytest.mark.parametrize("old,new", [
+    ("umask 077; ", ""),                                             # file would be 0644 under a normal umask
+    ("trap 'rm -f \"$d/c.json\"; rmdir \"$d\"' EXIT HUP INT TERM; ", ""),   # nothing removes the plaintext
+    (">/dev/null 2>&1", ""),                                         # n8n output would reach the caller
+])
+def test_mutant_credential_script_weakened_is_caught(setup, tmp_path, old, new):
+    script = setup.CRED_IMPORT_SCRIPT
+    assert script.count(old) == 1
+    with pytest.raises(AssertionError):
+        check_cred_script(script.replace(old, new), tmp_path)
+
+
+def test_mutant_credential_script_with_a_fixed_name_is_caught(setup, tmp_path):
+    script = setup.CRED_IMPORT_SCRIPT
+    fixed = re.sub(r"d=\$\(mktemp -d [^)]*\) \|\| exit 70", "d=$base/n8n-cred.FIXED00000; mkdir -m 700 \"$d\" 2>/dev/null || true", script)
+    assert fixed != script
+    with pytest.raises(AssertionError):
+        check_cred_script(fixed, tmp_path)
+
+
+def test_viewer_import_prints_the_host_restriction_reminder_without_the_token(setup, monkeypatch, capsys):
+    _canary_env(monkeypatch)
+    _record_docker(setup, monkeypatch)
+    assert setup.grafana_viewer_credentials() == setup.EXIT_DOMAIN_LOCK_UNVERIFIED
+    out = capsys.readouterr().out
+    assert "REQUIRED NEXT STEP" in out and "Allowed HTTP Request Domains" in out and "grafana-viewer-auth" in out
+    assert "post-import check" in out and CANARY not in out
+
+
+def test_viewer_import_failure_does_not_claim_a_next_step(setup, monkeypatch, capsys):
+    _canary_env(monkeypatch)
+    monkeypatch.setattr(setup, "docker_in", lambda script, payload: (1, []))
+    assert setup.grafana_viewer_credentials() == 1
+    assert "REQUIRED NEXT STEP" not in capsys.readouterr().out
+
+
+def test_full_credentials_run_ends_with_the_reminder(setup, monkeypatch, capsys):
+    _canary_env(monkeypatch)
+    _record_docker(setup, monkeypatch)
+    assert setup.main(FLAGS) == setup.EXIT_DOMAIN_LOCK_UNVERIFIED
+    assert "sent to any https host that GRAFANA_BASE_URL names." in capsys.readouterr().out
+
+
+# --- issue #202 fix round 3: distinct exit code for "imported, domain lock not verified" ------------------
+
+def check_viewer_exit_code(setup, monkeypatch, capsys):
+    assert setup.EXIT_DOMAIN_LOCK_UNVERIFIED == 40
+    _canary_env(monkeypatch)
+    _record_docker(setup, monkeypatch)
+    for argv in (["--credentials", "--with-grafana-viewer"], FLAGS):
+        assert setup.main(argv) == 40
+    out = capsys.readouterr().out
+    assert "REQUIRED NEXT STEP" in out and "exit code 40: imported, domain lock not verified" in out and CANARY not in out
+    assert setup.main(["--credentials"]) == 0, "without the viewer the run is fully done"
+
+
+def test_viewer_success_never_exits_zero_and_uses_the_documented_code(setup, monkeypatch, capsys):  # GUARD
+    check_viewer_exit_code(setup, monkeypatch, capsys)
+
+
+@pytest.mark.parametrize("rc", [1, 2, 3, 40, 127])
+def test_viewer_import_failure_keeps_its_own_nonzero_code(setup, monkeypatch, capsys, rc):
+    _canary_env(monkeypatch)
+    monkeypatch.setattr(setup, "docker_in", lambda script, payload: (rc, []))
+    got = setup.grafana_viewer_credentials()
+    assert got == (1 if rc == 40 else rc) and got != setup.EXIT_DOMAIN_LOCK_UNVERIFIED and got != 0
+    assert "domain lock not verified" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("rc", [3, 40])
+def test_failed_import_code_never_equals_the_unverified_code_on_any_path(setup, monkeypatch, rc):
+    _canary_env(monkeypatch)
+    monkeypatch.setattr(setup, "engine_run", lambda args, **kw: _Proc(rc, b"", b""))
+    for argv in (["--credentials"], ["--credentials", "--with-grafana-viewer"]):
+        got = setup.main(argv)
+        assert got != setup.EXIT_DOMAIN_LOCK_UNVERIFIED and got != 0, (argv, got)
+
+
+def test_mutant_failure_mapping_removed_is_caught(setup, monkeypatch, capsys):
+    monkeypatch.setattr(setup, "failure_code", lambda rc: rc)
+    with pytest.raises(AssertionError):
+        test_viewer_import_failure_keeps_its_own_nonzero_code(setup, monkeypatch, capsys, 40)
+
+
+def test_mutant_viewer_success_returning_zero_is_caught(setup, monkeypatch, capsys):
+    monkeypatch.setattr(setup, "EXIT_DOMAIN_LOCK_UNVERIFIED", 0)
+    with pytest.raises(AssertionError):
+        check_viewer_exit_code(setup, monkeypatch, capsys)
+
+
+def test_runbook_explains_exit_code_3_and_the_accepted_residuals():
+    run = " ".join((REPO_ROOT / "docs" / "live-deploy-runbook.md").read_text(encoding="utf-8").split())
+    for needle in ("exit code 40", "imported, domain lock not verified", "/dev/shm"):
+        assert needle in run, needle
+    doc = " ".join((REPO_ROOT / "docs" / "update-digest.md").read_text(encoding="utf-8").split())
+    for needle in ("Accepted residuals", "owner must accept", "before the workflow is activated", "no response size limit"):
+        assert needle in doc, needle

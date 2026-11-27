@@ -1,6 +1,6 @@
-# Update alerting (pfSense and UniFi)
+# Update alerting (pfSense, UniFi and Twingate)
 
-Grafana alerts that keep nagging while a pfSense or UniFi update is pending.
+Grafana alerts that keep nagging while a pfSense, UniFi or Twingate Connector update is pending.
 Nothing here applies an update or changes a device. The alerts read data that
 is already collected, and they clear only when the data shows the update is
 gone.
@@ -32,10 +32,12 @@ you turn it on.
 | `docker/grafana/provisioning/alerting/update-alert-rules-unifi.yml` | UniFi rules: warning from 24h to 7 days pending, critical after 7 days |
 | `docker/grafana/provisioning/alerting/update-alert-rules-pfsense.yml` | pfSense rules and a collector health rule, shipped paused |
 | `docker/grafana/provisioning/alerting/contact-points.yml` | Webhook contact point pointing at the n8n router |
-| `docker/grafana/provisioning/alerting/update-notification-policy.yml.example` | Repeat intervals: 4h warning, 1h critical |
+| `docker/grafana/provisioning/alerting/update-notification-policy.yml.example` | Repeat intervals: 84h warning (twice a week), 24h critical |
 | `n8n/grafana-alert-router.json` | Router with header auth and the added Pushover nodes |
 | `docs/heartbeat.md` | The alert path heartbeat (dead-man's switch), its own rule, policy route and settings |
-| `scripts/pfsense-update-metric.sh` | Read-only metric source for the firewall (not deployed) |
+| `scripts/pfsense-update-metric.sh` | Read-only metric source for the firewall (deployed 2026-11-26) |
+| `docker/grafana/provisioning/alerting/update-alert-rules-twingate.yml` | Twingate Connector rules and a collector health rule, shipped paused |
+| `scripts/twingate-update-metric.py` | Read-only metric source for Twingate Connectors (not deployed) |
 | `tests/python/test_update_alerting.py` | Tests for all of the above (Node is required) |
 
 ### Rules
@@ -71,6 +73,41 @@ you turn it on.
   minus 160), so a short outage does not drop a critical back to a warning.
   pfSense rules keep the separate `for` durations.
 
+### Query errors
+
+Failure mode (found on a live stack): the UniFi rules once sat in an
+evaluation error state for about seven hours because every query failed, and
+nothing alerted. Grafana keeps two separate settings per rule: `noDataState`
+(the query worked and returned nothing) and `execErrState` (the query failed
+or timed out). Provisioning accepts `Error`, `Alerting` and `OK` for
+`execErrState` (Grafana file-provisioning docs, read 2026-11-19). With
+`OK` the failed evaluation reads as healthy, so a broken datasource looks the
+same as no pending update.
+
+Every update rule, in both files, sets `execErrState: Alerting`, so a failing
+query fires that rule's own alert with its own severity and routing. It is set
+explicitly even though Alerting is Grafana's default, so no edit can lean on
+a default. A test fails if any update rule has an `OK` or `Error` error state.
+The alternative, `Error`, was not used: it leaves the rule to raise a
+separate `DatasourceError` alert, which carries no `update_alert` or `phone`
+label and so would not use the update routes. Alerting directly instead of the
+default separate-alert behavior keeps one rule, one route and one place to look.
+The "UniFi poller data stale" rule remains the watchdog for a poller that is
+up but not writing.
+
+`noDataState` is unchanged: `OK` on the two UniFi pending rules (no data means
+no pending update) and `Alerting` everywhere else.
+
+A pending-rule alert caused by a query error shows the device label as empty,
+because no series came back. Check the rule's state history for the error text
+before assuming a device is behind on updates.
+
+The datasource address: the live UniFi datasource currently uses the InfluxDB
+container's own address instead of its service name, because another container
+advertises the same service name on the shared network. Replacing that with a
+stable alias is blocked on fixing the collision on the live box and is tracked
+in issue #61, not changed in this repository.
+
 ### UniFi data
 
 The UniFi poller (unpoller) writes InfluxDB database `unpoller`, one
@@ -88,22 +125,34 @@ docker exec influxdb influx -execute 'SHOW FIELD KEYS ON unpoller FROM usw'
 The UniFi Network application itself is not reported by the poller, so a
 pending Network application update does not raise an alert.
 
-### pfSense data (not deployed)
+### pfSense data
 
-The pfSense rules ship paused. Enable them (set `isPaused: false`) once the
-Telegraf input below is deployed and the metrics are arriving.
+The pfSense rules ship active (`isPaused: false`). The Telegraf exec input
+below was added on the firewall on 2026-11-26 and the script was verified on
+the live firewall in the healthy case. The pending-update parser fix is PR
+#217 (not yet merged when this was written). Pause a rule (`isPaused: true`)
+if the metrics stop arriving.
 
 Metric `pfsense_update_pending`: gauge, `value` 0 or 1, tags `kind`
 (`core`, `kernel`, `package`) and `security` (`true`, `false`). Metric
 `pfsense_update_check_success`: 1 when both checks ran, 0 when one failed.
 On success the script prints all six update series plus the health metric. On
 any failure (a missing or failing `pfSense-upgrade -c` or
-`pkg-static version -qRl '<'`, or an unexpected package name) it prints only
+`pkg-static version -qRl '<'`, or an unexpected package line) it prints only
 `pfsense_update_check_success value=0i` and exits non-zero, never zero-valued
 update metrics. Telegraf may drop the output of a command that exits
 non-zero; that is why the health rule also alerts on missing data. The
 `security` tag is a best-effort match on the word "security" in the
 `pfSense-upgrade -c` text.
+
+`pfSense-upgrade -c` exits 2 when an update is pending. Real output seen on a
+live firewall (2026-11-26) was two lines, `>>> Updating repositories
+metadata...done.` and `26.07.2 version of pfSense is available`, with exit 2.
+The script reads that as core pending (`core=1`, health 1). `>>> ...done.`
+progress lines are ignored. Everything else still fails closed: exit 2 without
+a recognized "version of pfSense is available" line, exit codes other than 0
+and 2, any other unknown line, error or warning wording, empty output, and
+healthy text mixed with update text.
 
 Telegraf exec input for the firewall:
 
@@ -118,13 +167,128 @@ Telegraf exec input for the firewall:
 Copy `scripts/pfsense-update-metric.sh` to that path by hand when you are
 ready. The script runs only those two read-only commands.
 
+### Twingate data (not deployed)
+
+The Twingate rules ship paused (`update-alert-rules-twingate.yml`). Enable
+them (set `isPaused: false`) once the collector below runs and the metrics
+arrive in the InfluxDB database `telegraf` (datasource `influxdb-twingate`).
+
+The Twingate Admin API is GraphQL and has no "update available" field. The
+Connector type has `version`, `state`, `lastHeartbeatAt` and `name`, so the
+collector compares each Connector version with the newest released version.
+`scripts/twingate-update-metric.py` (Python standard library only, read-only)
+sends one GraphQL query for the Connectors and one GET to the Docker Hub tags
+API for `twingate/connector`. Docker Hub was chosen over the Twingate
+Connector changelog page: it returns small, structured JSON with one version
+per tag, while the changelog is a 1 MB HTML page that would need scraping and
+breaks when the layout changes. A source that returns nothing is a failure.
+
+Metrics (integers, so the field type never changes):
+
+- `twingate_connector_behind`, tags `connector` and `managed_by`: how many
+  released versions are newer than the Connector (0 when current).
+- `twingate_connector_up`, tags `connector` and `managed_by`: 1 when the
+  state is `ALIVE`, otherwise 0.
+- `twingate_update_check_success`: 1 when the whole check ran, 0 when it
+  failed. On any failure (API error, GraphQL errors, no Connectors returned,
+  an unparsable version, a bad management config or an unreachable
+  latest-version source) the script prints only
+  `twingate_update_check_success value=0i` and exits non-zero. Telegraf may
+  drop the output of a command that exits non-zero, so the health rule also
+  alerts on missing data.
+
+Credentials come from the environment only, never from an argument or a file
+in this repo, and the script never prints them:
+
+| Variable | Meaning |
+|----------|---------|
+| `TWINGATE_API_KEY` | Admin API key (read-only is enough), from the secret manager (Doppler) |
+| `TWINGATE_NETWORK_URL` | `https://<network>.twingate.com`; any other host is refused so the key cannot be sent elsewhere |
+| `TWINGATE_CONNECTOR_MANAGED_BY_FILE` | optional path to the management mapping (below) |
+| `TWINGATE_CONNECTOR_MANAGED_BY` | optional inline JSON mapping, used only when no file is set |
+
+Telegraf exec input (the values are injected into Telegraf's environment from
+the secret manager; nothing is written into the file):
+
+```toml
+[[inputs.exec]]
+  commands = ["/usr/local/bin/twingate-update-metric.py"]
+  interval = "1h"
+  timeout = "60s"
+  data_format = "influx"
+```
+
+Copy `scripts/twingate-update-metric.py` to that path by hand when you are
+ready. The rules assume one run per hour.
+
+To act on a "behind" alert, follow
+[twingate-connector-update.md](twingate-connector-update.md).
+
+#### Collector deployment (issue #222)
+
+The collector that feeds these metrics runs hourly from `docs/systemd/twingate-collect.timer` as a chain of three
+sandboxed units (broker, check, write; runbook section 10). The check pipes
+`twingate-update-metric.py` into `scripts/live-deploy/twingate-influx-write.py`
+(one write to the database `telegraf`, Basic auth, 5 s timeout, no redirects, no
+retry, counts only in its output). The InfluxDB account is `twingate_wo` with
+`GRANT WRITE ON "telegraf"` only; its user name and password are stored in the
+secret manager config `prd_network` as `TWINGATE_INFLUX_USER` and
+`TWINGATE_INFLUX_PASSWORD`. The owner steps (account, install, dry run, first run,
+landing check, `twingate-collect.timer`) and the Rollback are in
+`docs/live-deploy-runbook.md`, section 10. For a host without Telegraf this replaces
+the exec input above; use one or the other, not both.
+
+The collector requires `TWINGATE_EXPECTED_CONNECTORS`, a JSON array of the Connector
+names (supplied by the owner in the secret manager config, never kept in the repo).
+Unset, empty, `[]` or malformed fails the check closed. An expected Connector that the
+API does not return is written as `twingate_connector_up` value 0 (so the "not ALIVE"
+rule fires) and the check fails; a returned Connector that is not on the list is counted
+in `twingate_unexpected_connector` without failing the check (the warning rule "Twingate unexpected Connector" alerts on it). Duplicate names or ids and
+a repeated page cursor also fail the check. The units start from an empty environment, and each stage receives only its own secrets as
+a credential file from a per-run generation that it checks against a manifest; the broker is a dynamic user and the secret manager's token is not readable by either stage (runbook section 10, including the minimum systemd version, 249).
+
+A cleanly stopped Connector is still listed by the Admin API, so
+`twingate_connector_up` becomes 0 (it does not go missing). A dead collector does not
+look green: all six rules use `noDataState: Alerting`, and "Twingate update check
+failing or stale" reads a 6 hour window, so no point for 6 hours (or a 0) alerts once
+the rules are unpaused. The rules stay paused until the landing check passes.
+
+#### How each Connector is managed (`managed_by`)
+
+Connectors are not all updated the same way, and the mix will change. The
+collector reads a small JSON object that maps a Connector name to one of
+three modes and writes it as the `managed_by` tag:
+
+| Mode | Meaning | Alerting |
+|------|---------|----------|
+| `docker` | a container updated by hand (default) | pages: warning after 7 days behind, critical after 14, `phone=true` |
+| `systemd` | a package or service updated by hand | same as `docker` |
+| `operator` | run by the Kubernetes Operator, which updates it by itself | never pages |
+
+A Connector name that the mapping does not list (an unlisted name) is
+`docker`, so a new Connector pages until you say otherwise. The mapping
+lives outside the repo, in the file named by
+`TWINGATE_CONNECTOR_MANAGED_BY_FILE` or in `TWINGATE_CONNECTOR_MANAGED_BY`;
+the shape is `{"<connector name>": "operator", "<other name>": "systemd"}`.
+A bad mapping (not JSON, a repeated name, an unknown mode, too large) fails
+the check closed.
+
+Connectors under the Kubernetes Operator auto-update, so a page for them would
+be noise. Their rule, "Twingate Connector (operator) behind over 14 days",
+is `severity=warning`, `phone=false`: it reaches Discord and Matrix and not
+the phone, and because the weekly digest lists every alert that fired, they
+show up there. Behind for 14 days means the Operator itself is stuck. The
+manual rules read only `managed_by` other than `operator`, so the two sets
+never overlap. The rules "Twingate Connector not ALIVE" and "Twingate update
+check failing or stale" apply to every mode. "Twingate unexpected Connector" (`severity=warning`, `phone=false`) fires when `twingate_unexpected_connector` is above 0 in every sample of the last 3 hours and there are at least two samples (the rule takes the minimum over the window), so a Connector that stays unexpected is noticed up to about 3 hours after it first appears, once the last zero sample ages out, and one that goes away again sooner is recorded but not alerted; both its no-data and error states alert, so a missing metric never looks like a clean inventory (a silent collector also trips the stale rule, which is the accepted duplicate).
+
 ### Label taxonomy
 
 | Label | What it controls |
 |-------|------------------|
-| `update_alert` | `true` marks an update-alerting rule: it matches the notification policy route with the 4h and 1h repeats, and its title belongs in `ALLOWED_ALERTNAMES` |
+| `update_alert` | `true` marks an update-alerting rule: it matches the notification policy route with the 84h and 24h repeats, and its title belongs in `ALLOWED_ALERTNAMES` |
 | `severity` | `warning` or `critical`: the repeat interval, and the Pushover priority (1, or 2 for an allowlisted name with an urgent label) |
-| `phone` | `true` is the only way an alert reaches Pushover; any other value or no label keeps it off the phone (Discord is unaffected) |
+| `phone` | `true` is the only way an alert reaches Pushover; any other value or no label keeps it off the phone (Discord is unaffected). The exact value per rule is in the table under "Update rule matrix" below; five rules are `phone=false`: the UniFi 24h warning, the pfSense 24h warning, the Twingate operator-managed rule, the Twingate unexpected Connector rule and the UniFi poller-stale watchdog |
 | `alert_group` | Grouping and display (`updates` for these rules); no routing effect |
 | `update_security` | `true` marks a security release: emergency priority for allowlisted names |
 
@@ -139,7 +303,29 @@ Grafana provisions the notification policy as one tree for the whole
 organization, so the file ships as `.example` and Grafana ignores it. Merge its
 `update_alert` route into your existing tree (Alerting, Notification
 policies), or copy it to `update-notification-policy.yml` if you have no
-tree yet. Repeat intervals: 4h for warning, 1h for critical.
+tree yet. Repeat intervals: 84h for warning, 24h for critical (owner decision, issue #53: a fresh critical page daily, not hourly). Owner decision (issue
+#199): update alerts for critical infrastructure reach the phone and repeat at
+least twice a week until the update is applied, so no repeat interval may be
+longer than 84h. This supersedes the earlier P2 and `phone=false` ruling (#152). Refinement (owner, 2026-11-26, "wait 7 days first"): a UniFi pending update does not page the phone until it has been pending 7 days, so auto-patching devices usually finish first. The UniFi 24h warning is `phone=false`; the UniFi 7-day critical rule stays `phone=true`. The pfSense 24h warning is also `phone=false` (P2, owner decision 2026-11-20, #152); the other pfSense rules are `phone=true`. Twingate (owner, 2026-11-26): critical infrastructure pages at least twice a week until updated, so the 7-day warning is `phone=true` (84h repeats), the 14-day critical pages daily, and only the operator-managed rule is `phone=false`.
+
+### Update rule matrix
+
+Every update rule as shipped in `docker/grafana/provisioning/alerting/update-alert-rules-*.yml`. The repeat interval comes from the notification policy by severity (84h for `warning`, 24h for `critical`), not from the rule. `tests/python/test_update_alerting.py` pins the `phone` column.
+
+| Rule uid | Severity | `for` | `phone` | Repeat |
+|----------|----------|-------|---------|--------|
+| `update-pfsense-pending-24h` | warning | 24h | false | 84h |
+| `update-pfsense-pending-7d` | critical | 168h | true | 24h |
+| `update-pfsense-security-pending` | critical | 10m | true | 24h |
+| `update-pfsense-check-failing` | critical | 10m | true | 24h |
+| `update-unifi-pending-24h` | warning | 0s (age in the query) | false | 84h |
+| `update-unifi-pending-7d` | critical | 0s (age in the query) | true | 24h |
+| `update-unifi-poller-stale` | warning | 5m | false | 84h |
+| `update-twingate-pending-7d` | warning | 0s (age in the query) | true | 84h |
+| `update-twingate-pending-14d` | critical | 0s (age in the query) | true | 24h |
+| `update-twingate-operator-behind` | warning | 0s (age in the query) | false | 84h |
+| `update-twingate-check-failing` | critical | 10m | true | 24h |
+| `update-twingate-connector-down` | critical | 15m | true | 24h |
 
 ## Webhook authentication
 
@@ -178,13 +364,33 @@ phone.
    2026-11-17).
 5. Rotate by changing the Doppler value and the n8n credential together.
 
+The expiry watch does not use this credential. It posts to its own endpoint,
+the `Expiry Watch Webhook` node (its own private path, file `expiry-path`), where the
+`Check Expiry Secret` Code node compares the header with the environment
+variable `EXPIRY_WATCH_ROUTER_SECRET` of the n8n container and denies with 403
+when it is unset, empty or different. The `Grafana Webhook` node and its
+credential are unchanged. See
+[expiry-watch.md](expiry-watch.md#the-router-credential).
+
 Two checks apply. Compose refuses to start Grafana when the value is unset or
 empty. `scripts/check-env.sh` (run it before `docker compose up`) also rejects
 whitespace-only, placeholder and short values. It measures the value the way
 Compose reads it from `.env`: an unquoted value ends at whitespace followed by
 `#` (so `x # long comment` is the one character `x`), matching quotes are
 removed, and a duplicate assignment, unmatched quote, backslash or unquoted
-`$` is rejected. Neither check can see what you typed into n8n: an n8n credential whose value is just `Bearer`
+`$` is rejected. Only the plain `NAME=value` line form is measured: a line
+with an `export` prefix, indentation, whitespace before the equals sign or a
+carriage return (a CRLF file; convert it to LF) is rejected, so is an
+assignment inside another variable's multi-line quoted value, and a duplicate
+counts in any of those forms. The value itself may use only letters, digits
+and `+ / = _ . , : @ % ^ -` (what `openssl rand -base64 32` produces), with no
+space after the `=`; any shell character (backtick, `$`, `<`, `>`, `;`, `&`,
+`|`, parentheses, quotes inside the value) is rejected. A file with a control
+byte (NUL, carriage return, escape), or with a multi-line or backslash-escaped
+quoted value anywhere, is rejected for this check, because parsers disagree on
+where the line is. The check refuses a symlinked `.env`, opens the file once and
+validates that one in-memory copy, so every check sees the same bytes. Trailing whitespace after an unquoted or quoted
+value is ignored, and a commented-out line is not an assignment. Neither check can see what you typed into n8n: an n8n credential whose value is just `Bearer`
 would accept an empty-secret call, so follow step 2 exactly and run the
 checklist below.
 
@@ -339,9 +545,15 @@ repeats for that tag. The cancel call runs only for tags with the `upd-`
 prefix and only for names in `ALLOWED_ALERTNAMES`.
 
 Acknowledging in the Pushover app stops that one message only. While the
-update is still pending, Grafana re-alerts at the policy repeat interval (4h
-warning, 1h critical) and a new emergency message starts. The alert itself
+update is still pending, Grafana re-alerts at the policy repeat interval (84h
+warning, 24h critical) and a new emergency message starts. The alert itself
 ends only when the update is applied.
+
+A critical update pages at emergency priority (Pushover priority 2), which
+itself repeats about every 5 minutes (`PUSHOVER_RETRY`, 300 seconds) for up to
+3 hours (`PUSHOVER_EXPIRE`, 10800 seconds) until you acknowledge it. Priority 1
+and 2 both bypass Pushover quiet hours. So the 24h policy repeat starts a fresh
+page each day, and each page keeps ringing until acknowledged or the 3 hours end.
 
 ### Residual risk (accepted)
 
@@ -437,7 +649,7 @@ you rely on the alerts.
 ## Tests
 
 ```
-python3 -m pytest tests/python/test_update_alerting.py -q
+python3 -m pytest tests/python/test_update_alerting.py tests/python/test_twingate_update_metric.py -q
 ```
 
 The tests need Node on the path (the Code node source is executed for

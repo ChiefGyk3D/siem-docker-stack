@@ -1,0 +1,42 @@
+# Notification policy route that also sends P2 alerts to Matrix (issue #152). SHIPPED AS AN EXAMPLE, INACTIVE.
+#
+# Grafana provisions the notification policy as ONE tree for the whole
+# organization: loading this file replaces whatever policy tree exists today.
+# That is why it ends in .example and Grafana ignores it. To use it, merge the
+# P2 route below into your tree (keep your other routes) AFTER the P1 routes
+# from email-notification-policy.yml.example and
+# matrix-notification-policy.yml.example, and ahead of the n8n routes.
+# It sends to the same relay contact point, matrix-p1, defined in
+# matrix-contact-point.yml.example (the relay and its variables are the same).
+#
+# A P2 is severity=warning with tier=P2 and phone=false (docs/alert-taxonomy.md),
+# today the two "update pending over 24 hours" rules. The route has
+# `continue: true`, so the alert still reaches n8n-grafana-router and Discord.
+# It matches phone=false only, so it can never match a P1 and never pages the
+# phone: the phone push is decided by the n8n router from phone=true alone.
+apiVersion: 1
+
+policies:
+  - orgId: 1
+    receiver: n8n-grafana-router
+    group_by: ["alertname", "grafana_folder"]
+    routes:
+      - receiver: matrix-p1
+        continue: true
+        object_matchers:
+          - ["severity", "=", "warning"]
+          - ["tier", "=", "P2"]
+          - ["phone", "=", "false"]
+        group_by: ["alertname", "name", "kind"]
+        group_wait: 30s
+        group_interval: 5m
+        repeat_interval: 4h
+      # Your existing routes follow, including the update_alert route that
+      # sends warnings to n8n-grafana-router with repeat_interval 4h.
+      - receiver: n8n-grafana-router
+        object_matchers:
+          - ["heartbeat", "=", "true"]
+        group_by: ["alertname"]
+        group_wait: 0s
+        group_interval: 1m
+        repeat_interval: 5m

@@ -166,8 +166,13 @@ Labels applied: `instance_name` (human-readable) and `gpu_role`
 After deploying exporters, reload Prometheus:
 
 ```bash
-curl -X POST -u "self:$PROMETHEUS_SELF_PASSWORD" http://localhost:9090/-/reload
+scripts/secure-curl.sh self -X POST http://localhost:9090/-/reload
 ```
+
+Run it from the repository root. It asks for the `self` password (the
+`PROMETHEUS_SELF_PASSWORD` value) without echo and hands it to curl on stdin,
+never as an argument, so it stays out of the process list, shell history and
+shell traces. It needs bash 4.2 or newer.
 
 Verify targets at `http://SIEM_HOST:9090/targets` (Prometheus asks for the `self` account and `PROMETHEUS_SELF_PASSWORD`).
 

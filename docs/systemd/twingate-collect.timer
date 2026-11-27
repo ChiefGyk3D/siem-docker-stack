@@ -1,0 +1,12 @@
+# Hourly Twingate collector run (issue #222). The alert rules assume one run per hour.
+[Unit]
+Description=Hourly Twingate Connector update collector
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=120
+Unit=twingate-collect.service
+
+[Install]
+WantedBy=timers.target

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -p
 # =============================================================================
 # render-prometheus-web-config.sh - Render the Prometheus basic-auth files
 # =============================================================================
@@ -29,7 +29,10 @@
 # or world write). Files end up owned by the container user (uid 65534), mode
 # 0400, secrets and tls directories 0500, so no other user can read them. That
 # needs root, so the script refuses to run otherwise. Run it on the deployed
-# copy (/opt/siem), from a root-owned copy of this script:
+# copy (/opt/siem), from a root-owned copy of this script, started by its path
+# (never as `bash script`: the privileged-mode shebang keeps BASH_ENV and exported
+# shell functions from running as root, an explicit interpreter bypasses it, so
+# root refuses to continue that way):
 # sudo /usr/local/libexec/siem/render-prometheus-web-config.sh /opt/siem
 #
 # Each password goes to htpasswd on stdin, never on a command line. Needs
@@ -47,17 +50,36 @@
 # After rendering: docker compose up -d prometheus prometheus-otlp grafana
 # =============================================================================
 
+set +x
+# SHELLOPTS and BASHOPTS are readonly in bash and are ignored in privileged mode.
+unset BASH_ENV ENV CDPATH GLOBIGNORE PS4
 set -euo pipefail
-
-# Real root runs with a fixed PATH, so nothing is resolved from the caller's PATH.
-if [ "$EUID" -eq 0 ]; then
-    PATH=/usr/sbin:/usr/bin:/sbin:/bin
-    export PATH
-fi
 
 die() { echo "render-prometheus-web-config: $*" >&2; exit 1; }
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Who runs this is asked of the kernel through the absolute id program, never read from EUID or UID
+# (bash imports both from the environment, so a caller could pick the branch). Only builtins run
+# before this line.
+RUN_UID="$(/usr/bin/id -u 2>/dev/null || /bin/id -u 2>/dev/null)" || RUN_UID=
+case "$RUN_UID" in '' | *[!0-9]*) die "cannot tell who is running (no numeric user number)" ;; esac
+RUN_UID=$((10#$RUN_UID))
+
+# Root run: fixed PATH. Non-root run: the caller's PATH is kept, by design (the tests put a stub
+# htpasswd on it and the owner's tools rely on it). Before this point only builtins and the absolute
+# id program run, so nothing is resolved from the caller's PATH while the user number is read.
+if [ "$RUN_UID" -eq 0 ]; then
+    PATH=/usr/sbin:/usr/bin:/sbin:/bin
+    export PATH
+    # as root the privileged shebang must be in force; `bash script` bypasses it
+    if ! [[ "$-" == *p* ]]; then
+        die "as root, run this script by its path (not as 'bash script'): the privileged shebang that keeps BASH_ENV and exported functions out is bypassed otherwise"
+    fi
+fi
+
+# Resolve every symlink first: the helper is the one next to the REAL script, never one next to a
+# link someone else placed.
+SELF="$(/usr/bin/readlink -f -- "${BASH_SOURCE[0]}")" || die "cannot resolve this script's real path"
+SCRIPT_DIR="$(/usr/bin/dirname -- "$SELF")"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TARGET_BASE="${1:-${REPO_DIR}/docker}"
 MAIN_DIR="${TARGET_BASE}/prometheus"
@@ -65,26 +87,66 @@ OTLP_DIR="${TARGET_BASE}/prometheus-otlp"
 
 # The uid the Prometheus container runs as. Root always uses 65534; the override
 # exists only so the test can run unprivileged as its own uid.
-if [ "$(id -u)" -eq 0 ]; then
+if [ "$RUN_UID" -eq 0 ]; then
     OWNER_UID=65534
 else
     OWNER_UID="${PROMETHEUS_FILE_UID:-65534}"
 fi
 
 # As root, run and source only code that no one else can edit: this script, the
-# library it sources and their directory must be root-owned and not writable by
-# group or others. Use a root-owned copy (docs/prometheus-otlp.md).
-if [ "$(id -u)" -eq 0 ]; then
-    for f in "$SCRIPT_DIR" "${SCRIPT_DIR}/lib-secrets.sh" "${SCRIPT_DIR}/$(basename "${BASH_SOURCE[0]}")"; do
-        [ "$(stat -c '%u' "$f")" -eq 0 ] && [ $((8#$(stat -c '%a' "$f") & 8#022)) -eq 0 ] ||
-            die "${f} is not root-owned (or is group or world writable); run a root-owned copy of the script and lib-secrets.sh (docs/prometheus-otlp.md)"
+# library it sources and every directory above them (through /) must be root-owned and not
+# writable by group or others. Use a root-owned copy (docs/prometheus-otlp.md).
+LIB_PATH="${SCRIPT_DIR}/lib-secrets.sh"
+lib_fail() { die "refusing to source ${LIB_PATH}: $1"; }
+if [ "$RUN_UID" -eq 0 ]; then
+    for P in "$SELF" "$LIB_PATH"; do
+        while :; do
+            [ "$(/usr/bin/stat -c %u -- "$P")" = 0 ] && [ $((8#$(/usr/bin/stat -c %a -- "$P") & 8#022)) -eq 0 ] ||
+                lib_fail "${P} (or a directory above it) is not root-owned or is group or world writable; run a root-owned copy of the script and lib-secrets.sh (docs/prometheus-otlp.md)"
+            [ "$P" = / ] && break
+            P="$(/usr/bin/dirname -- "$P")"
+        done
     done
 fi
-
+[ -f "$LIB_PATH" ] && [ ! -L "$LIB_PATH" ] || lib_fail "it is missing or is a link"
+# Open the helper once, check the OPEN file (-L: the descriptor link points at the file), and source
+# that same descriptor, so a rename or replacement of the path after this point changes nothing.
+exec 9<"$LIB_PATH" || lib_fail "it cannot be opened"
+LIB_OWNER="$(/usr/bin/stat -L -c %u -- /proc/self/fd/9)"
+LIB_MODE="$(/usr/bin/stat -L -c %a -- /proc/self/fd/9)"
+LIB_LINKS="$(/usr/bin/stat -L -c %h -- /proc/self/fd/9)"
+LIB_MASK=022  # group or world write on the opened file is never allowed, root or not: a peer could edit the open inode before it is sourced
+if [ ! -f /proc/self/fd/9 ] || { [ "$LIB_OWNER" != 0 ] && [ "$LIB_OWNER" != "$RUN_UID" ]; } ||
+    [ $((8#$LIB_MODE & 8#$LIB_MASK)) -ne 0 ] || [ "$LIB_LINKS" != 1 ]; then
+    lib_fail "it must be a regular file with one link, owned by root or by you, and not group or world writable (fix: chmod g-w,o-w ${LIB_PATH})"
+fi
+# The checks above protect against a new open for writing (mode), a replaced or swapped path (the
+# descriptor) and a planted ancestor. They cannot revoke a descriptor a peer already holds open for
+# writing on this inode, and nothing here can: this only NARROWS that window. The file is read twice
+# from the open inode (the second time through a fresh open of the same descriptor, from offset 0),
+# size, mtime and ctime (nanoseconds) and device:inode are compared before and after, the two reads
+# must match byte for byte, the byte count must equal the size, and the first copy is sourced, never
+# the live inode. Not detected: a write before the first read, or a write between the reads that is
+# put back before the second. The real protection is a root-owned release tree (docs/prometheus-otlp.md);
+# running from a group-shared checkout accepts that residual risk.
+# stat's %.9Y is GNU coreutils precision syntax (VERIFIED by running stat 9.7 here; INFERRED for the box).
+LIB_FMT='%s %.9Y %.9Z %d:%i'
+LIB_ST1="$(/usr/bin/stat -L -c "$LIB_FMT" -- /proc/self/fd/9)" || lib_fail "it cannot be examined"
+LIB_SNAP="$(/bin/cat <&9 && printf x)" || lib_fail "it cannot be read"
+LIB_SNAP2="$(/bin/cat < /proc/self/fd/9 && printf x)" || lib_fail "it cannot be read a second time"
+LIB_ST2="$(/usr/bin/stat -L -c "$LIB_FMT" -- /proc/self/fd/9)" || lib_fail "it cannot be examined"
+exec 9<&-
+LIB_SNAP="${LIB_SNAP%x}"
+LIB_SNAP2="${LIB_SNAP2%x}"
+{ [ "$LIB_ST1" = "$LIB_ST2" ] && [ "$LIB_SNAP" = "$LIB_SNAP2" ]; } || lib_fail "it changed while it was being read"
+LIB_SIZE="${LIB_ST1%% *}"
+LIB_LEN="$(LC_ALL=C; echo "${#LIB_SNAP}")"  # bytes, not characters
+{ [ "$LIB_SIZE" -gt 0 ] && [ "$LIB_LEN" = "$LIB_SIZE" ]; } ||
+    lib_fail "it is empty or its content length (${LIB_LEN} bytes) differs from its size (${LIB_SIZE} bytes)"
 # shellcheck source=scripts/lib-secrets.sh
-. "${SCRIPT_DIR}/lib-secrets.sh"
+source <(printf '%s' "$LIB_SNAP")
 
-if [ "$(id -u)" -ne 0 ] && [ "$(id -u)" -ne "$OWNER_UID" ]; then
+if [ "$RUN_UID" -ne 0 ] && [ "$RUN_UID" -ne "$OWNER_UID" ]; then
     die "run as root (sudo) so the files can be owned by uid ${OWNER_UID} with mode 0400; refusing to write a readable secret"
 fi
 
@@ -95,10 +157,10 @@ trusted_owner() { # <path> [managed]: root or the sudo-invoking account (or ours
     local u
     u="$(stat -c '%u' "$1")"
     [ "${2:-}" != managed ] || [ "$u" -ne "$OWNER_UID" ] || return 0
-    if [ "$(id -u)" -eq 0 ]; then
+    if [ "$RUN_UID" -eq 0 ]; then
         [ "$u" -eq 0 ] || { [ -n "${SUDO_UID:-}" ] && [ "$u" -eq "$SUDO_UID" ]; }
     else
-        [ "$u" -eq "$(id -u)" ]
+        [ "$u" -eq "$RUN_UID" ]
     fi
 }
 check_dir() { # <dir> [managed]
@@ -197,13 +259,13 @@ mkdir -p "${MAIN_DIR}/secrets" "${OTLP_DIR}/tls" "${MAIN_DIR}/otlp-ca"
 # the target tree, in /run (root-owned). The caller's runtime and temp directory
 # variables are ignored on purpose, and there is no fallback.
 # Only a genuinely unprivileged run (the tests) may choose another base.
-if [ "$EUID" -ne 0 ] && [ -n "${PROMETHEUS_STAGE_BASE:-}" ]; then
+if [ "$RUN_UID" -ne 0 ] && [ -n "${PROMETHEUS_STAGE_BASE:-}" ]; then
     STAGE_BASE="$PROMETHEUS_STAGE_BASE"
 else
     STAGE_BASE=/run
 fi
 STAGE_ROOT="$(TMPDIR=/nonexistent mktemp -d "${STAGE_BASE}/prom-render.XXXXXX")" || die "cannot create a private stage directory in ${STAGE_BASE}"
-[ "$(stat -c '%u' "$STAGE_ROOT")" -eq "$(id -u)" ] && [ "$(stat -c '%a' "$STAGE_ROOT")" = 700 ] ||
+[ "$(stat -c '%u' "$STAGE_ROOT")" -eq "$RUN_UID" ] && [ "$(stat -c '%a' "$STAGE_ROOT")" = 700 ] ||
     die "the stage directory ${STAGE_ROOT} is not private to this user"
 STAGE="${STAGE_ROOT}"
 trap 'rm -rf "$STAGE_ROOT"' EXIT
@@ -230,7 +292,7 @@ printf '%s' "$otlp_scrape_pw" > "${STAGE}/otlp-scrape-password"
 
 own() { # <paths...>: owner uid, no symlink following; a failure stops the script
     if ! chown -h "${OWNER_UID}:${OWNER_UID}" "$@" 2>/dev/null; then
-        [ "$(id -u)" -eq "$OWNER_UID" ] || die "could not change the owner of $* to uid ${OWNER_UID}"
+        [ "$RUN_UID" -eq "$OWNER_UID" ] || die "could not change the owner of $* to uid ${OWNER_UID}"
     fi
 }
 verify_owner() { # <mode> <paths...>: final owner and mode check after placement

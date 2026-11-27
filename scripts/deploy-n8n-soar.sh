@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 # =============================================================================
 # deploy-n8n-soar.sh — Deploy N8N SOAR workflows and Grafana alerting rules
 # =============================================================================
@@ -9,31 +9,143 @@
 # Or set the key in your environment / .env file.
 # The script reads N8N_API_KEY from the environment — change it in one place.
 # =============================================================================
+set +x
+# SHELLOPTS and BASHOPTS are readonly in bash and are ignored in privileged mode (the -p shebang).
+unset BASH_ENV ENV CDPATH GLOBIGNORE PS4
 set -euo pipefail
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; export PATH  # fixed PATH before any command runs
+
+# Root decision, privileged-mode check and the trusted script and helper tree come FIRST,
+# before anything is read, located or sourced.
+SCRIPT_BIN_DIR="$(/usr/bin/dirname -- "$(/usr/bin/readlink -f -- "$0")")"  # the real scripts directory, symlinks resolved
+SCRIPT_DIR="$(/usr/bin/dirname -- "$SCRIPT_BIN_DIR")"
+CE_LIB="${SCRIPT_BIN_DIR}/lib-container-engine.sh"
+ce_boot_fail() { echo "refusing to source ${CE_LIB}: $1" >&2; exit 1; }
+CE_UID="$(/usr/bin/id -u 2>/dev/null || /bin/id -u 2>/dev/null)" || CE_UID=
+case "$CE_UID" in '' | *[!0-9]*) ce_boot_fail "cannot tell who is running (no numeric user number)" ;; esac
+CE_UID=$((10#$CE_UID))  # asked of the kernel through id, never taken from an environment variable
+CE_STRICT=0
+[ "$CE_UID" != 0 ] || CE_STRICT=1
+if [ "$CE_STRICT" = 1 ] && ! [[ "$-" == *p* ]]; then  # as root the privileged shebang must be in force
+    ce_boot_fail "as root, run this script by its path (not as 'bash script'): the privileged shebang that keeps BASH_ENV and exported functions out is bypassed otherwise"
+fi
+if [ "$CE_STRICT" = 1 ]; then  # as root: the helper and every directory above it must be root-owned and not writable
+    CE_P="$CE_LIB"
+    while :; do
+        [ "$(/usr/bin/stat -c %u -- "$CE_P")" = 0 ] && [ $((8#$(/usr/bin/stat -c %a -- "$CE_P") & 8#022)) -eq 0 ] ||
+            ce_boot_fail "${CE_P} (or a directory above it) is not root-owned or is group or world writable"
+        [ "$CE_P" = / ] && break
+        CE_P="$(/usr/bin/dirname -- "$CE_P")"
+    done
+fi
+[ -f "$CE_LIB" ] && [ ! -L "$CE_LIB" ] || ce_boot_fail "it is missing or is a link"
+# Open the helper once, check the OPEN file (-L: the descriptor link points at the file), and source
+# that same descriptor, so a rename or replacement of the path after this point changes nothing.
+exec 9<"$CE_LIB" || ce_boot_fail "it cannot be opened"
+CE_OWNER="$(/usr/bin/stat -L -c %u -- /proc/self/fd/9)"
+CE_MODE="$(/usr/bin/stat -L -c %a -- /proc/self/fd/9)"
+CE_MASK=002  # world write is never allowed; group write too when running as root
+[ "$CE_STRICT" != 1 ] || CE_MASK=022
+if [ ! -f /proc/self/fd/9 ] || { [ "$CE_OWNER" != 0 ] && [ "$CE_OWNER" != "$CE_UID" ]; } ||
+    [ $((8#$CE_MODE & 8#$CE_MASK)) -ne 0 ]; then
+    ce_boot_fail "it must be a regular file owned by root or by you, not world writable (and not group writable when run as root)"
+fi
+# shellcheck source=scripts/lib-container-engine.sh
+source /proc/self/fd/9
+exec 9<&-
 
 # ---------------------------------------------------------------------------
 # Configuration — change these as needed
 # ---------------------------------------------------------------------------
 SIEM_SERVER="${1:-10.0.0.100}"
-N8N_IP="172.20.0.16"          # N8N on siem-net (use docker inspect to verify)
-N8N_PORT="80"
-N8N_BASE="http://${N8N_IP}:${N8N_PORT}"
+# N8N_BASE is resolved after the secret checks below: the container address on
+# the siem network is not fixed (scripts/n8n_address.py asks the container runtime;
+# set N8N_BASE yourself to skip the lookup).
 GRAFANA_URL="${GRAFANA_URL:-http://localhost:3000}"
 GRAFANA_USER="${GRAFANA_USER:-admin}"
 GRAFANA_PASS="${GRAFANA_PASS:-}"
 SSH_USER="${SIEM_USER:-$(whoami)}"
-SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 N8N_DIR="${SCRIPT_DIR}/n8n"
 
 # Secrets: no defaults. A missing, empty or placeholder value stops the script
 # before anything is sent. The messages name the variable, never its value.
+# The helper is opened once, the OPEN file and every directory above it are checked, and that same
+# descriptor is sourced (docs/container-engine.md). The check stays inline: a shared loader would
+# itself have to be sourced unchecked first.
+SL_LIB="${SCRIPT_BIN_DIR}/lib-secrets.sh"
+sl_fail() { echo "refusing to source ${SL_LIB}: $1" >&2; exit 1; }
+[ -f "$SL_LIB" ] && [ ! -L "$SL_LIB" ] || sl_fail "it is missing or is a link"
+exec 7<"$SL_LIB" || sl_fail "it cannot be opened"
+SL_OWNER="$(/usr/bin/stat -L -c %u -- /proc/self/fd/7)"
+SL_MODE="$(/usr/bin/stat -L -c %a -- /proc/self/fd/7)"
+SL_LINKS="$(/usr/bin/stat -L -c %h -- /proc/self/fd/7)"
+SL_MASK=022  # group or world write on the opened file is never allowed, root or not: a peer could edit the open inode before it is sourced
+if [ ! -f /proc/self/fd/7 ] || { [ "$SL_OWNER" != 0 ] && [ "$SL_OWNER" != "$CE_UID" ]; } ||
+    [ $((8#$SL_MODE & 8#$SL_MASK)) -ne 0 ] || [ "$SL_LINKS" != 1 ]; then
+    sl_fail "it must be a regular file with one link, owned by root or by you, and not group or world writable (fix: chmod g-w,o-w ${SL_LIB})"
+fi
+SL_P="$SCRIPT_BIN_DIR"
+while :; do
+    [ ! -L "$SL_P" ] || sl_fail "${SL_P} is a symlink"
+    SL_PO="$(/usr/bin/stat -c %u -- "$SL_P")"
+    SL_PM="$(/usr/bin/stat -c %a -- "$SL_P")"
+    if [ "$CE_STRICT" = 1 ]; then  # as root: root-owned and closed to group and others, all the way up
+        { [ "$SL_PO" = 0 ] && [ $((8#$SL_PM & 8#022)) -eq 0 ]; } ||
+            sl_fail "${SL_P} (or a directory above it) is not root-owned or is group or world writable"
+    else  # root or you; world write only on a sticky directory (/tmp)
+        { [ "$SL_PO" = 0 ] || [ "$SL_PO" = "$CE_UID" ]; } &&
+            { [ $((8#$SL_PM & 8#002)) -eq 0 ] || [ $((8#$SL_PM & 8#1000)) -ne 0 ]; } ||
+            sl_fail "${SL_P} (or a directory above it) is not owned by root or by you or is world writable"
+    fi
+    [ "$SL_P" = / ] && break
+    SL_P="$(/usr/bin/dirname -- "$SL_P")"
+done
+# The checks above protect against a new open for writing (mode), a replaced or swapped path (the
+# descriptor) and a planted ancestor. They cannot revoke a descriptor a peer already holds open for
+# writing on this inode, and nothing here can: this only NARROWS that window. The file is read twice
+# from the open inode (the second time through a fresh open of the same descriptor, from offset 0),
+# size, mtime and ctime (nanoseconds) and device:inode are compared before and after, the two reads
+# must match byte for byte, the byte count must equal the size, and the first copy is sourced, never
+# the live inode. Not detected: a write before the first read, or a write between the reads that is
+# put back before the second. The real protection is a root-owned release tree (docs/container-engine.md,
+# runbook step 0a); running from a group-shared checkout accepts that residual risk.
+# stat's %.9Y is GNU coreutils precision syntax (VERIFIED by running stat 9.7 here; INFERRED for the box).
+SL_FMT='%s %.9Y %.9Z %d:%i'
+SL_ST1="$(/usr/bin/stat -L -c "$SL_FMT" -- /proc/self/fd/7)" || sl_fail "it cannot be examined"
+SL_SNAP="$(/bin/cat <&7 && printf x)" || sl_fail "it cannot be read"
+SL_SNAP2="$(/bin/cat < /proc/self/fd/7 && printf x)" || sl_fail "it cannot be read a second time"
+SL_ST2="$(/usr/bin/stat -L -c "$SL_FMT" -- /proc/self/fd/7)" || sl_fail "it cannot be examined"
+exec 7<&-
+SL_SNAP="${SL_SNAP%x}"
+SL_SNAP2="${SL_SNAP2%x}"
+{ [ "$SL_ST1" = "$SL_ST2" ] && [ "$SL_SNAP" = "$SL_SNAP2" ]; } || sl_fail "it changed while it was being read"
+SL_SIZE="${SL_ST1%% *}"
+SL_LEN="$(LC_ALL=C; echo "${#SL_SNAP}")"  # bytes, not characters
+{ [ "$SL_SIZE" -gt 0 ] && [ "$SL_LEN" = "$SL_SIZE" ]; } ||
+    sl_fail "it is empty or its content length (${SL_LEN} bytes) differs from its size (${SL_SIZE} bytes)"
 # shellcheck source=scripts/lib-secrets.sh
-source "$(dirname "$0")/lib-secrets.sh"
+source <(printf '%s' "$SL_SNAP")
 require_secret N8N_API_KEY "${N8N_API_KEY:-}" || {
   echo "Usage: N8N_API_KEY=<your n8n API key> GRAFANA_PASS=<grafana admin password> $0 [siem-server-ip]" >&2
   exit 1
 }
 require_secret GRAFANA_PASS "$GRAFANA_PASS" || exit 1
+
+# The curl calls run on the SIEM server, so the lookup runs there too: the helper
+# is streamed over ssh to the remote python3 (nothing is copied or left behind).
+# The stream is container_engine.py (the shared CONTAINER_ENGINE setting and the
+# trusted-binary resolver) followed by n8n_address.py. Only the validated engine
+# name (docker or podman) is sent to the host.
+ce_init_name || exit 1
+if [[ -z "${N8N_BASE:-}" ]]; then
+  LOOKUP_SRC="$(cat "${SCRIPT_BIN_DIR}/container_engine.py" "${SCRIPT_BIN_DIR}/n8n_address.py")" || exit 1
+  N8N_BASE="$(ssh "${SSH_USER}@${SIEM_SERVER}" \
+    "CONTAINER_ENGINE=$(printf '%q' "$CE_NAME") N8N_CONTAINER=$(printf '%q' "${N8N_CONTAINER:-n8n}") SIEM_NETWORK=$(printf '%q' "${SIEM_NETWORK:-}") N8N_PORT=$(printf '%q' "${N8N_PORT:-80}") python3 -I -" \
+    <<< "$LOOKUP_SRC")" || {
+    echo "ERROR: could not resolve the n8n address on ${SIEM_SERVER}. Set N8N_BASE (for example http://192.0.2.10:80) to skip the lookup." >&2
+    exit 1
+  }
+fi
 
 # Grafana alert folder — create this in Grafana UI first, then copy the UID
 ALERT_FOLDER_UID="${ALERT_FOLDER_UID:-}"  # "SIEM Alerts"

@@ -1,0 +1,78 @@
+# =============================================================================
+# Prometheus Alert Rules - file_sd target liveness (issue #203)
+# =============================================================================
+# up == 0 for 5m over the file_sd scrape jobs, split by label taxonomy
+# (docs/update-alerting.md, "phone" label; details in docs/target-up-alerts.md):
+#
+#   Critical infrastructure (twingate-ztna, unifi-controller, node):
+#       severity=critical, phone=true  -> pages the phone
+#   Everything else (Computers, Cryptocurrency, AI, Security):
+#       severity=warning, no phone label -> Discord only, so a laptop that
+#       sleeps never pages
+#
+# A missing target file or an empty target list leaves NO `up` series, so
+# up == 0 stays silent. The critical jobs therefore also get an absent() rule.
+# Every alert selects its job explicitly (tests/python/test_prometheus_otlp.py
+# requires a job matcher). TargetDown in siem-health.yml covers the core
+# stack jobs; the jobs here do not overlap with it.
+#
+# Validate: promtool check rules docker/prometheus/rules/target-up.yml
+
+groups:
+  - name: target-up-critical
+    rules:
+      - alert: CriticalTargetDown
+        expr: up{job=~"twingate-ztna|unifi-controller|node"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          phone: "true"
+          source: target-up
+        annotations:
+          summary: "Critical target {{ $labels.job }} ({{ $labels.instance }}) is down"
+          description: "Prometheus could not scrape {{ $labels.job }} on {{ $labels.instance }} for 5 minutes. This is critical infrastructure and pages the phone."
+
+      - alert: TwingateTargetsAbsent
+        expr: absent(up{job="twingate-ztna"})
+        for: 10m
+        labels:
+          severity: critical
+          phone: "true"
+          source: target-up
+        annotations:
+          summary: "No twingate-ztna targets exist"
+          description: "The twingate-ztna job has no up series for 10 minutes: targets/twingate-ztna.json is missing, empty or unreadable, so a down connector would never alert."
+
+      - alert: UnifiTargetsAbsent
+        expr: absent(up{job="unifi-controller"})
+        for: 10m
+        labels:
+          severity: critical
+          phone: "true"
+          source: target-up
+        annotations:
+          summary: "No unifi-controller targets exist"
+          description: "The unifi-controller job has no up series for 10 minutes: targets/unifi-controller.json is missing, empty or unreadable, so a down controller would never alert."
+
+      - alert: SiemHostNodeTargetsAbsent
+        expr: absent(up{job="node"})
+        for: 10m
+        labels:
+          severity: critical
+          phone: "true"
+          source: target-up
+        annotations:
+          summary: "No node (SIEM host) targets exist"
+          description: "The node job has no up series for 10 minutes: targets/node.json is missing, empty or unreadable, so the SIEM host's own exporter could go down without an alert."
+
+  - name: target-up-warning
+    rules:
+      - alert: TargetGroupDown
+        expr: up{job=~"Computers|Cryptocurrency|AI|Security"} == 0
+        for: 5m
+        labels:
+          severity: warning
+          source: target-up
+        annotations:
+          summary: "Target {{ $labels.job }} ({{ $labels.instance }}) is down"
+          description: "Prometheus could not scrape {{ $labels.job }} on {{ $labels.instance }} for 5 minutes. Warning only (no phone label): these hosts may legitimately sleep or be off."

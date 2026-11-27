@@ -126,18 +126,19 @@ def test_every_node_is_reachable_only_through_the_authenticated_webhook():
     wf = _workflow()
     names = {n["name"] for n in wf["nodes"]}
     hooks = [n["name"] for n in wf["nodes"] if n["type"] == "n8n-nodes-base.webhook"]
-    assert len(hooks) == 1
+    assert hooks == ["Grafana Webhook", "Expiry Watch Webhook"], "two entry points: Grafana's and the expiry watch's"
     edges = _edges(wf)
     has_incoming = {t for ts in edges.values() for t in ts}
-    assert names - has_incoming == {hooks[0]}, "a node other than the webhook is an entry point"
-    assert _reachable(hooks[0], edges) == names, "unreachable node in the graph"
-    # nothing at all is reachable if the webhook is cut
-    assert _reachable(hooks[0], edges, blocked={hooks[0]}) == set()
-    # the Pushover HTTP nodes need the enable gate and the payload builder
+    assert names - has_incoming == set(hooks), "a node other than the webhooks is an entry point"
+    assert set().union(*(_reachable(h, edges) for h in hooks)) == names, "unreachable node in the graph"
+    # nothing at all is reachable if the webhooks are cut
+    assert _reachable(hooks[0], edges, blocked=set(hooks)) == set()
+    # the Pushover HTTP nodes need the enable gate and the payload builder, from either entry
     http = {n["name"] for n in _http_nodes()}
     assert http
-    assert not (http & _reachable(hooks[0], edges, blocked={"Pushover Enabled?"}))
-    assert not (http & _reachable(hooks[0], edges, blocked={_build_node()["name"]}))
+    for hook in hooks:
+        assert not (http & _reachable(hook, edges, blocked={"Pushover Enabled?"}))
+        assert not (http & _reachable(hook, edges, blocked={_build_node()["name"]}))
 
 
 def test_webhook_requires_header_auth_with_credential_reference():
@@ -151,7 +152,7 @@ def test_webhook_requires_header_auth_with_credential_reference():
 def test_pushover_secrets_come_from_a_credential_not_env_or_node_output():
     text = ROUTER.read_text(encoding="utf-8")
     # the only env access is the heartbeat sink setting, read in its own Code node (test_heartbeat.py)
-    assert set(re.findall(r"\$env\.(\w+)", text)) <= {"HEARTBEAT_PING_URL", "HEARTBEAT_KIND"}
+    assert set(re.findall(r"\$env\.(\w+)", text)) <= {"HEARTBEAT_PING_URL", "HEARTBEAT_KIND", "EXPIRY_WATCH_ROUTER_SECRET"}
     assert "$env" not in _build_node()["parameters"]["jsCode"], "the Pushover builder reads no env"
     assert "PUSHOVER_APP_TOKEN" not in text and "PUSHOVER_USER_KEY" not in text
     code = _build_node()["parameters"]["jsCode"]
@@ -457,11 +458,11 @@ def test_unifi_warning_is_bounded_by_the_critical_rule_with_no_overlap_or_gap():
         assert rule["noDataState"] == "OK" and rule["execErrState"] == "Alerting"
 
 
-def test_pfsense_rules_ship_paused_and_use_metric():
+def test_pfsense_rules_ship_active_and_use_metric():
     pf = [r for _, _, r in _rules() if r["uid"].startswith("update-pfsense")]
     assert len(pf) >= 4
     for r in pf:
-        assert r["isPaused"] is True, r["uid"]
+        assert r["isPaused"] is False, r["uid"]
         assert "pfsense_update" in json.dumps(r["data"])
     assert any(r["labels"].get("update_security") == "true"
                and r["labels"]["severity"] == "critical" for r in pf)
@@ -476,7 +477,7 @@ def test_pfsense_collector_health_rule():
     assert "pfsense_update_check_success" in json.dumps(r["data"])
     assert "36h" in json.dumps(r["data"]) or 129600 in [d["relativeTimeRange"]["from"] for d in r["data"]
                                                          if "relativeTimeRange" in d]
-    assert r["isPaused"] is True and r["noDataState"] == "Alerting"
+    assert r["isPaused"] is False and r["noDataState"] == "Alerting"
     cond = json.dumps([d["model"] for d in r["data"] if d["refId"] == "C"])
     assert '"lt"' in cond
 
@@ -493,7 +494,30 @@ def test_notification_policy_repeats():
     routes = root["routes"][0]["routes"]
     rep = {next(m for m in r["object_matchers"] if m[0] == "severity")[2]: r["repeat_interval"]
            for r in routes}
-    assert rep == {"warning": "4h", "critical": "1h"}
+    # owner decisions: warning twice a week (#199), critical a fresh page daily (#53)
+    assert rep == {"warning": "84h", "critical": "24h"}
+    # no update route may repeat less often than 84h
+    for sev, val in rep.items():
+        assert val.endswith("h") and int(val[:-1]) <= 84, sev
+
+
+def test_pending_update_rules_all_push_to_the_phone():
+    # #199: every pending rule pages, except the two 24h warnings. UniFi: owner decision
+    # 2026-11-26 ("wait 7 days first"), auto-patching devices usually finish first.
+    # pfSense 24h: P2 by owner decision 2026-11-20 (#152, already on master). The 7d
+    # critical and the pfSense security rule page.
+    pending = [r for _, _, r in _rules() if r["labels"]["alert_group"] == "updates"
+               and "poller" not in r["uid"]]
+    assert len(pending) >= 6
+    for r in pending:
+        # the operator-managed Twingate rule auto-updates and never pages (#200)
+        want = "false" if r["uid"] in {"update-unifi-pending-24h", "update-pfsense-pending-24h",
+                                       "update-twingate-operator-behind",
+                                       "update-twingate-unexpected-connector"} else "true"
+        assert r["labels"]["phone"] == want, r["uid"]
+    uids = {r["uid"] for r in pending}
+    assert {"update-unifi-pending-24h", "update-unifi-pending-7d"} <= uids
+    assert any(u.startswith("update-pfsense") for u in uids)
 
 
 def test_contact_point_is_webhook_to_router():
@@ -581,7 +605,7 @@ def test_up_to_date_and_exact_argv(tmp_path):
 
 
 def test_core_update_pending(tmp_path):
-    r, _ = _run(tmp_path, "Version 99.9 is available\n", "pfSense-99.9\n")
+    r, _ = _run(tmp_path, "Version 99.9 is available\n", "pfSense-99.9   <\n")
     m = _metrics(r.stdout)
     assert m[("core", "false")] == 1 and m[("core", "true")] == 0
     assert m[("kernel", "false")] == 0 and m[("package", "false")] == 0
@@ -589,14 +613,14 @@ def test_core_update_pending(tmp_path):
 
 def test_kernel_and_package_pending(tmp_path):
     r, _ = _run(tmp_path, "Your system is up to date",
-                "pfSense-kernel-pfSense-99.9\npfSense-pkg-Telegraf-1.2\n")
+                "pfSense-kernel-pfSense-99.9   <\npfSense-pkg-Telegraf-1.2   <\n")
     m = _metrics(r.stdout)
     assert m[("kernel", "false")] == 1 and m[("package", "false")] == 1
     assert m[("core", "false")] == 0
 
 
 def test_security_flag(tmp_path):
-    r, _ = _run(tmp_path, "Version 99.9 is available (security update)\n", "pfSense-99.9\n")
+    r, _ = _run(tmp_path, "Version 99.9 is available (security update)\n", "pfSense-99.9 <\n")
     m = _metrics(r.stdout)
     assert m[("core", "true")] == 1 and m[("core", "false")] == 0
 
@@ -612,6 +636,48 @@ def test_upgrade_check_failure_is_a_failure_not_healthy(tmp_path):
     _assert_failure(r)
 
 
+REAL_PENDING = (">>> Updating repositories metadata...done.\n"
+                "26.07.2 version of pfSense is available")
+
+
+def test_real_exit_2_pending_output_is_core_pending(tmp_path):
+    # Captured from a live firewall on 2026-11-26 (issue #206).
+    r, _ = _run(tmp_path, REAL_PENDING, "", upgrade_rc=2)
+    assert r.returncode == 0
+    m = _metrics(r.stdout)
+    assert m.pop("ok") == 1
+    assert m[("core", "false")] == 1 and m[("core", "true")] == 0
+    assert m[("kernel", "false")] == 0 and m[("package", "false")] == 0
+
+
+def test_exit_2_security_line_sets_security_true(tmp_path):
+    r, _ = _run(tmp_path, REAL_PENDING + " (security update)", "", upgrade_rc=2)
+    m = _metrics(r.stdout)
+    assert m[("core", "true")] == 1 and m[("core", "false")] == 0
+
+
+@pytest.mark.parametrize("out,rc", [
+    (REAL_PENDING, 1),
+    (REAL_PENDING, 3),
+    (REAL_PENDING, 127),
+    ("Your system is up to date", 2),
+    (">>> Updating repositories metadata...done.", 2),
+    ("", 2),
+    (">>> Updating repositories metadata...done.\nsomething odd happened\n26.07.2 version of pfSense is available", 2),
+    (">>> Updating repositories metadata...failed.\n26.07.2 version of pfSense is available", 2),
+    (">>> Fetching metadata\n26.07.2 version of pfSense is available", 2),
+    (">>> Updating repositories metadata...done.\nWarning: mirror slow\n26.07.2 version of pfSense is available", 2),
+    ("Your system is up to date\n26.07.2 version of pfSense is available", 2),
+    ("Your system is up to date\n26.07.2 version of pfSense is available", 0),
+    ("Error: repository unreachable\n26.07.2 version of pfSense is available", 2),
+    ("", 0),
+    (">>> Updating repositories metadata...done.", 0),
+])
+def test_exit_2_and_progress_changes_stay_fail_closed(tmp_path, out, rc):
+    r, _ = _run(tmp_path, out, "", upgrade_rc=rc)
+    _assert_failure(r)
+
+
 def test_pkg_static_failure_is_a_failure_not_healthy(tmp_path):
     r, _ = _run(tmp_path, "Your system is up to date", "", pkg_rc=1)
     _assert_failure(r)
@@ -624,13 +690,98 @@ def test_missing_tools_is_a_failure(tmp_path):
     _assert_failure(r)
 
 
-def test_glob_and_odd_names_are_not_expanded_and_fail_closed(tmp_path):
+REAL_PKG = """nginx-1.30.6_16,3                  <
+pfSense-26.07.1                    <
+pfSense-base-26.07.1               <
+pfSense-boot-26.07.1               <
+pfSense-default-config-26.07.1     <
+pfSense-kernel-pfSense-26.07.1     <
+pfSense-pkg-Nexus-26.07.1_3        <
+pfSense-pkg-System_Patches-2.3.6   <
+pfSense-repoc-20261117.174617      <
+pfSense-system-26.07.1             <
+php85-8.5.12                       <
+php85-bcmath-8.5.12                <
+php85-pdo_sqlite-8.5.12            <
+php85-pfSense-module-26.07.1       <
+"""
+
+
+def test_real_pkg_version_output_is_classified(tmp_path):
+    # Captured from a live firewall on 2026-11-26 (issue #215): name-version,
+    # padding, then "<".
+    r, _ = _run(tmp_path, "Your system is up to date", REAL_PKG)
+    assert r.returncode == 0
+    m = _metrics(r.stdout)
+    assert m.pop("ok") == 1
+    assert m[("core", "false")] == 1 and m[("kernel", "false")] == 1
+    assert m[("package", "false")] == 1 and m[("core", "true")] == 0
+
+
+@pytest.mark.parametrize("line,kind", [
+    ("nginx-1.30.6_16,3   <", "package"),
+    ("php85-8.5.12   <", "package"),
+    ("pfSense-pkg-Nexus-26.07.1_3   <", "package"),
+    ("pfSense-26.07.1   <", "core"),
+    ("pfSense-base-26.07.1   <", "core"),
+    ("pfSense-boot-26.07.1   <", "core"),
+    ("pfSense-default-config-26.07.1   <", "core"),
+    ("pfSense-system-26.07.1   <", "core"),
+    ("pfSense-repoc-20261117.174617   <", "core"),
+    ("pfSense-rc-26.07.1   <", "core"),
+    ("php85-pfSense-module-26.07.1   <", "core"),
+    ("pfSense-kernel-pfSense-26.07.1   <", "kernel"),
+    ("pfSense-kernel-pfSense-26.07.1\t<", "kernel"),
+])
+def test_pkg_classification(tmp_path, line, kind):
+    r, _ = _run(tmp_path, "Your system is up to date", line + "\n")
+    assert r.returncode == 0
+    m = _metrics(r.stdout)
+    got = {k for k in ("core", "kernel", "package") if m[(k, "false")] == 1}
+    assert got == {kind}
+
+
+@pytest.mark.parametrize("pkg_out", [
+    "pfSense-99.9\n",                       # old bare shape: no "<"
+    "pfSense-99.9   >\n",                   # wrong operator
+    "pfSense-99.9   <   extra\n",           # extra field
+    "pfSense-99.9   =\n",
+    "pfSense-99.9   <<\n",
+    "pfSense-99.9   <\r\n",                  # carriage return
+    "pfSense-99.9   <\nnginx\n",            # second line has one field
+    "pfSense-99.9   <\nx;touch y   <\n",    # newline injection of a metacharacter
+    "pfSense-99.9   <\n$(touch y)   <\n",
+    "pfSense;touch-1.0   <\n",
+    "pfSense-1.0`id`   <\n",
+    "pfSense-1.0|x   <\n",
+    "pfSense-1.0$HOME   <\n",              # no spaces: only the $ guard can catch it
+    "pfSense-$(id)-1.0   <\n",
+    "pfSense-1.0;id   <\n",
+    "pfSense-1.0`   <\n",                  # lone backtick, no spaces in name
+    "-pfSense-1.0   <\n",                  # leading hyphen (option-like)
+    "--version-1.0   <\n",
+    "-n-1.0   <\n",
+    "a-1" + "0" * 126 + "   <\n",           # 129 chars: over the cap
+    "*   <\n",
+    "pfSense-*   <\n",
+    "nginx   <\n",                          # no hyphen-digit version
+    "nginx-abc   <\n",
+    "pfSense-99.9 <   <\n",
+    "   <\n",
+])
+def test_pkg_malformed_lines_fail_closed(tmp_path, pkg_out):
     (tmp_path / "pfSense-99.9").write_text("x", encoding="utf-8")
-    r, _ = _run(tmp_path, "Your system is up to date", "*\n")
+    r, _ = _run(tmp_path, "Your system is up to date", pkg_out)
     _assert_failure(r)
-    r, _ = _run(tmp_path, "Your system is up to date", "pkg;touch x\n")
-    _assert_failure(r)
-    assert not (tmp_path / "x").exists()
+    assert not (tmp_path / "y").exists()
+
+
+def test_pkg_name_at_length_cap_passes(tmp_path):
+    name = "pfSense-1" + "0" * (128 - len("pfSense-1"))
+    assert len(name) == 128
+    r, _ = _run(tmp_path, "Your system is up to date", name + "   <\n")
+    assert r.returncode == 0
+    assert _metrics(r.stdout)[("core", "false")] == 1
 
 
 def test_docs_exist_and_cover_required_topics():
@@ -700,9 +851,10 @@ def _expr(value):
 
 
 def _run_code_node(node, item, ctx=None):
-    harness = (_ctx_js(ctx) + "const f=new Function('$input','$','$prevNode','$env',"
+    harness = (_ctx_js(ctx) + "const $getWorkflowStaticData=(t)=>({});"  # fresh, empty workflow static data per run
+               "const f=new Function('$input','$','$prevNode','$env','$getWorkflowStaticData',"
                + json.dumps(node["parameters"]["jsCode"]) + ");"
-               "const r=f({first:()=>({json:" + json.dumps(item) + "})},$,$prevNode,$env);"
+               "const r=f({first:()=>({json:" + json.dumps(item) + "})},$,$prevNode,$env,$getWorkflowStaticData);"
                "console.log(JSON.stringify(r.map(x=>x.json)));")
     r = subprocess.run([_node_bin(), "-"], input=harness, capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, "Code node threw: " + r.stderr[-300:]
@@ -753,7 +905,7 @@ def _eval_many(codes, item, ctx=None):
     return json.loads(r.stdout)
 
 
-def _run_graph(webhook_item, pushover_enabled=False, fail=(), wf=None, env=None):
+def _run_graph(webhook_item, pushover_enabled=False, fail=(), wf=None, env=None, start=None):
     """Walk the real graph from the webhook, the way n8n runs it (first match for a
     switch, continue-on-error outputs, a failed node without one stops the run).
 
@@ -762,6 +914,7 @@ def _run_graph(webhook_item, pushover_enabled=False, fail=(), wf=None, env=None)
     response (the HTTP status the webhook answered, as a string), body (what it sent),
     run ("success" or "error": how the run ended, which is what the error workflow
     sees) and error (the Stop and Error message, or the failing node's name).
+    start: the webhook node the call enters through (default: the first, the Grafana one).
     env: the environment variables the Code nodes see ($env), or "blocked".
     requests: one {node, url} per HTTP node that ran, with its URL expression evaluated.
 
@@ -770,7 +923,7 @@ def _run_graph(webhook_item, pushover_enabled=False, fail=(), wf=None, env=None)
     body, so Grafana would treat it as delivered."""
     wf = wf or _workflow()
     nodes = {n["name"]: n for n in wf["nodes"]}
-    hook = next(n["name"] for n in wf["nodes"] if n["type"] == "n8n-nodes-base.webhook")
+    hook = start or next(n["name"] for n in wf["nodes"] if n["type"] == "n8n-nodes-base.webhook")
     res = {"reached": [], "notified": set(), "failed": set(), "response": None, "body": None,
            "run": "success", "error": "", "requests": []}
 
@@ -1279,7 +1432,11 @@ def test_graph_malformed_notice_pushes_when_enabled():
 def test_every_update_rule_sets_the_phone_label_explicitly():
     seen = 0
     for _, _, rule in _rules():
-        want = "false" if rule["uid"] == "update-unifi-poller-stale" else "true"
+        # the poller-stale rule and the two 24h rules (P2, owner decision 2026-11-20, issue #152) stay off the phone;
+        # the UniFi 24h rule is also quiet by owner decision 2026-11-26 (7-day wait, issue #199)
+        p2 = {"update-unifi-poller-stale", "update-unifi-pending-24h", "update-pfsense-pending-24h",
+              "update-twingate-operator-behind", "update-twingate-unexpected-connector"}  # operator: digest only (#200); unexpected: warning, no phone (#222)
+        want = "false" if rule["uid"] in p2 else "true"
         assert rule["labels"].get("phone") == want, rule["uid"]
         seen += 1
     assert seen >= 7
@@ -1305,4 +1462,38 @@ def test_docs_have_the_label_taxonomy_and_health_notes():
         assert label in text, label
     flat = " ".join(text.split())
     assert "stay off the phone until they carry `phone=true`" in flat
+    assert "84h" in flat and "twice a week" in flat
+    assert "24h critical" in flat and "1h critical" not in flat  # issue #53
     assert "heartbeat" in flat.lower() and "not part of this change" in flat.lower()
+
+
+# --- issue #61: a failing query must alert, never read as OK ---
+
+def test_no_update_rule_treats_a_query_error_as_ok():
+    rules = _rules()
+    files = {fname for fname, _, _ in rules}
+    assert any("unifi" in f for f in files) and any("pfsense" in f for f in files)
+    assert len(rules) >= 7
+    for fname, _group, rule in rules:
+        # the key must be present: Grafana's default is Alerting, but the rule
+        # files state it so a later edit cannot lean on a default
+        assert "execErrState" in rule, rule["uid"]
+        assert rule["execErrState"] == "Alerting", (fname, rule["uid"], rule["execErrState"])
+        assert rule["execErrState"] not in {"OK", "Error"}, rule["uid"]
+
+
+@pytest.mark.parametrize("uid", sorted({r["uid"] for _, _, r in _rules()}))
+def test_each_update_rule_alerts_on_query_error(uid):
+    rule = {r["uid"]: r for _, _, r in _rules()}[uid]
+    assert rule["execErrState"] == "Alerting"
+    # NoData is a separate decision: only the two UniFi pending rules treat it as OK
+    expect = "OK" if uid in PENDING_UNIFI else "Alerting"
+    assert rule["noDataState"] == expect
+
+
+def test_docs_describe_the_query_error_failure_mode():
+    flat = " ".join((REPO_ROOT / "docs" / "update-alerting.md").read_text().split())
+    assert "### Query errors" in flat
+    assert "`execErrState: Alerting`" in flat
+    assert "DatasourceError" in flat
+    assert "instead of the default" in flat

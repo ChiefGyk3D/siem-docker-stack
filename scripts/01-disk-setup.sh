@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -p
 # =============================================================================
 # 01-disk-setup.sh — Format & mount NVMe (Hot) and SATA (Warm) disks
 # =============================================================================
@@ -10,9 +10,29 @@
 # Run `lsblk` to identify your disks.
 #
 # WARNING: This script WIPES the target disks. All existing data will be lost.
+#
+# Start it by its path (sudo scripts/01-disk-setup.sh), never as `bash script`: the
+# privileged-mode shebang keeps BASH_ENV and exported shell functions from running
+# as root, and an explicit interpreter bypasses it, so root refuses to continue that way.
 # =============================================================================
 
+set +x
+# SHELLOPTS and BASHOPTS are readonly in bash and are ignored in privileged mode.
+unset BASH_ENV ENV CDPATH GLOBIGNORE PS4
 set -euo pipefail
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin; export PATH  # fixed PATH before any command runs
+
+# Who runs this is asked of the kernel through the absolute id program, never read from EUID or UID
+# (bash imports both from the environment, so a caller could pick the branch).
+RUN_UID="$(/usr/bin/id -u 2>/dev/null || /bin/id -u 2>/dev/null)" || RUN_UID=
+case "$RUN_UID" in '' | *[!0-9]*) echo "ERROR: cannot tell who is running (no numeric user number)" >&2; exit 1 ;; esac
+RUN_UID=$((10#$RUN_UID))
+if [ "$RUN_UID" -eq 0 ] && ! [[ "$-" == *p* ]]; then
+    # `bash script` bypasses the privileged shebang that keeps BASH_ENV and exported functions out
+    echo "ERROR: as root, run this script by its path (sudo scripts/01-disk-setup.sh), not as 'bash script'" >&2
+    exit 1
+fi
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -24,7 +44,7 @@ echo -e "${YELLOW}║  SIEM Server — Disk Setup                ║${NC}"
 echo -e "${YELLOW}╚══════════════════════════════════════════╝${NC}"
 echo ""
 
-if [ "$EUID" -ne 0 ]; then
+if [ "$RUN_UID" -ne 0 ]; then
     echo -e "${RED}ERROR: Must run as root (sudo)${NC}"
     exit 1
 fi

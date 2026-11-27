@@ -1,0 +1,124 @@
+# Credential and key expiry watch: example config (issue #76).
+# Copy to expiry-watch.toml, edit, then:
+#   python3 scripts/expiry_watch.py --config expiry-watch.toml --dry-run
+# Relative paths in this file are relative to the folder this file is in.
+# Nothing secret goes in this file: the router secret comes from an environment variable.
+
+[watch]
+# Notify once when an item gets this many days from expiry (one notice per value).
+thresholds_days = [30, 14, 7]
+# At or below this many days left, send one notice per day. 0 turns the daily notices off.
+daily_below_days = 7
+# Where the watch remembers what it already told you (JSON, created with mode 0600).
+state_file = "expiry-watch-state.json"
+# One notice when an item that an earlier run listed is gone now and the config does not say
+# so (see "Items that disappear" in docs/expiry-watch.md). An item must be missing from this
+# many successful runs in a row. false turns the notice off for every provider.
+disappeared_after_runs = 1
+notify_disappeared = true
+# One time budget for every delivery of a run (router, Matrix, email), at most 3600. When it is
+# gone the rest of the notices are not tried and stay due for the next run (exit code 1).
+delivery_budget_seconds = 300
+
+[router]
+# The n8n alert router webhook (see docs/update-alerting.md). https only, except localhost.
+url = "https://n8n.example.com/webhook/expiry-watch-alerts-REPLACE_WITH_PRIVATE_PATH"
+# The NAME of the environment variable that holds the router bearer secret (the value of
+# the router's header credential, without the word Bearer). Never put the secret here.
+token_env = "EXPIRY_WATCH_ROUTER_TOKEN"
+timeout_seconds = 10
+
+# Channels per notice. Stages are every threshold above, "daily", "expired" and "disappeared".
+# Known channels: pushover, discord, matrix, email, webhook.
+#   discord  the router always posts a firing alert to Discord
+#   pushover adds the phone=true label, which the router needs to page your phone
+#   webhook  post to the router and let its own rules decide
+#   matrix   the script sends it to the room in [matrix] itself (needs the [matrix] table)
+#   email    the script sends it by SMTP as set in [email] (needs the [email] table)
+# A notice routed only to matrix and/or email does not touch the router, so it does not go to
+# Discord: that is how to keep a message off the router's fixed Discord post.
+# A stage left out of this table uses ["discord"].
+[routes]
+"30" = ["discord"]
+"14" = ["discord"]
+"7" = ["discord", "pushover"]
+daily = ["discord", "pushover"]
+expired = ["discord", "pushover"]
+disappeared = ["discord", "pushover"]
+
+# Direct Matrix delivery. Only used when a route above lists "matrix". The access token comes
+# from the environment variable named here (never put the token in this file). The room id is
+# the internal id (!abc:example.com), not an alias. https only, except localhost.
+[matrix]
+homeserver = "https://matrix.example.com"
+room_id = "!abcdefghijklmnop:example.com"
+token_env = "EXPIRY_WATCH_MATRIX_TOKEN"
+timeout_seconds = 10        # one overall deadline per message, at most 60
+
+# Direct email delivery. Only used when a route above lists "email". The server certificate
+# and name are verified. starttls (default, port 587) must be offered by the server or nothing
+# is sent; tls is implicit TLS (port 465). A login is optional and is read from the two
+# environment variables named here, and is only ever sent over an encrypted connection.
+[email]
+host = "smtp.example.com"
+port = 587
+security = "starttls"       # starttls | tls | plaintext (plaintext also needs allow_plaintext = true)
+from = "expiry-watch@example.com"
+to = ["ops@example.com"]    # up to 4 plain addresses
+username_env = "EXPIRY_WATCH_SMTP_USER"
+password_env = "EXPIRY_WATCH_SMTP_PASSWORD"
+# Optional settings, with their defaults:
+# timeout_seconds = 20      # one overall deadline per message, at most 60
+# helo_name = "localhost"   # what the script announces itself as (not this machine's name)
+# ca_file = "internal-ca.pem"   # trust ONLY this CA, no public CA (relative to this file)
+
+# Providers: add as many as you need.
+[[providers]]
+type = "registry"
+path = "expiry-watch-registry.example.toml"
+
+[[providers]]
+type = "tls"
+host = "www.example.com"
+port = 443
+owner = "web-team@example.com"
+runbook = "https://wiki.example.com/runbooks/renew-tls"
+# Optional settings, with their defaults:
+# name = "tls:www.example.com:443"
+# kind = "tls-cert"
+# timeout_seconds = 10      # connect and handshake, at most 60
+# verify = true             # false only for internal or self-signed certificates
+# ca_file = "internal-ca.pem"
+# server_name = "www.example.com"
+
+# Grafana service account tokens. The token below is a READ-ONLY token (permission
+# serviceaccounts:read, scope serviceaccounts:id:*), named by an environment variable.
+# A token with no expiry date is skipped. Add the service account ids to watch.
+[[providers]]
+type = "grafana_sa_tokens"
+url = "https://grafana.example.com"
+service_account_ids = [2, 5]
+token_env = "EXPIRY_WATCH_GRAFANA_TOKEN"
+owner = "monitoring@example.com"
+runbook = "https://wiki.example.com/runbooks/rotate-grafana-token"
+# Optional settings, with their defaults:
+# kind = "grafana-sa-token"
+# timeout_seconds = 10            # one overall deadline per request, at most 60
+# report_non_expiring = false     # print how many tokens have no expiry date and were skipped
+# notify_disappeared = true       # per provider override of [watch].notify_disappeared
+# acknowledge_removed = []        # item names whose removal is expected (see docs/expiry-watch.md)
+
+# Secret manager service tokens of one config (one provider per project and config).
+# The vendor deletes an expired token, so a token that vanishes between runs is reported
+# once by the "disappeared" notice.
+[[providers]]
+type = "doppler_tokens"
+project = "example-app"
+config = "prd"
+token_env = "EXPIRY_WATCH_DOPPLER_TOKEN"
+owner = "platform@example.com"
+runbook = "https://wiki.example.com/runbooks/rotate-service-token"
+# api_url = "https://api.doppler.com"
+# kind = "service-token"
+# timeout_seconds = 10
+# report_non_expiring = false

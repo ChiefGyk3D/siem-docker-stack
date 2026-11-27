@@ -94,7 +94,7 @@ from anywhere that is not root-owned:
 
 ```bash
 sudo install -d -o root -g root -m 0755 /usr/local/libexec/siem
-sudo install -o root -g root -m 0755 scripts/render-prometheus-web-config.sh scripts/prometheus-otlp-firewall.sh scripts/lib-secrets.sh /usr/local/libexec/siem/
+sudo install -o root -g root -m 0755 scripts/render-prometheus-web-config.sh scripts/prometheus-otlp-firewall.sh scripts/lib-secrets.sh scripts/lib-container-engine.sh /usr/local/libexec/siem/
 sudo /usr/local/libexec/siem/render-prometheus-web-config.sh /opt/siem
 ```
 
@@ -123,8 +123,10 @@ owned by the container user (65534), mode 0400, directory 0500, so no other
 user can read them. It refuses to run unprivileged rather than leave a readable
 secret. The sender and Grafana passwords are never written by the script.
 The SIEM Prometheus now asks for a password too: use
-`curl -u "self:$PROMETHEUS_SELF_PASSWORD" ...` for API queries and for
-`POST /-/reload`.
+the `self` account for API queries and for `POST /-/reload`, passing the
+credentials to curl through `scripts/secure-curl.sh` as shown in
+[Verify](#verify) so the password never appears in the process list or shell
+history.
 
 Rotate an account by changing its value in `.env`, re-running the script and
 restarting the affected containers.
@@ -198,6 +200,40 @@ to approved senders are not matched, and cannot be dropped, by the chain. Sender
 with a prefix length of 0 (which would allow everyone) are refused, and if the
 current rules cannot be read the script stops without changing anything.
 
+Root must start the script by its path (as in the commands above), never as
+`bash prometheus-otlp-firewall.sh`. The script's `#!/bin/bash -p` line puts Bash in
+privileged mode, which ignores `BASH_ENV` and `ENV` and does not import exported
+shell functions; an explicit interpreter bypasses that line, and a script cannot
+undo code that `BASH_ENV` already ran, so as root the script refuses to continue
+when it was not started in privileged mode. It also clears `BASH_ENV`, `ENV`,
+`CDPATH`, `GLOBIGNORE` and `PS4` (privileged mode already ignores `SHELLOPTS` and
+`BASHOPTS`), turns tracing off, and
+sets a fixed `PATH` before it decides whether it is root.
+
+The render script follows the same rules for the privileged shebang and the root
+decision, with one difference for `PATH`: as root it fixes `PATH`; a non-root run keeps
+the caller's `PATH`, by design. As root it also refuses a helper (`lib-secrets.sh`) or
+any directory above it that is not root-owned and closed, and sources the helper
+only through one checked open descriptor.
+
+The address arguments are checked before anything is changed, and a refusal names
+the problem and changes nothing. The bind address must be one plain IPv4 interface
+address: the script refuses an empty value, `0.0.0.0`, any IPv6 form including
+IPv4-mapped addresses (`::ffff:a.b.c.d`), this-network (`0.x`), loopback,
+multicast, reserved and broadcast addresses, a prefix length, a name, and any
+text with whitespace, a newline, shell characters or a leading dash. Senders get
+the same treatment and repeated senders produce one rule. The published address
+reported by `docker port` must be one IPv4 line and nothing else: any IPv6
+mapping (`[::]:port`, `[::1]:port`, a global address) or other output is refused
+even next to a valid IPv4 line, because the IPv4 rule would not guard it. That one
+address must be loopback (the receiver before you widen the
+bind) or the bind address itself; the script refuses a wildcard publish (every
+address) or any other address the rule would not guard. Rules are always passed
+to `iptables` as argument lists, never as shell strings. If a live
+`DOCKER-USER` rule that mentions `PROM-OTLP-A` or `PROM-OTLP-B` has an
+unexpected shape, or jumps to both chains, the script refuses without changing
+anything (`remove` first, then apply again).
+
 I could not exercise the netfilter behavior itself in this change (it needs the
 real host). It is checked when you apply it: the [Verify](#verify) step requires
 an approved sender to succeed (replies must get through) and an unapproved host
@@ -240,8 +276,12 @@ here is applied by merging; run each step on the SIEM host on purpose.
 
 ## Verify
 
-All four checks must pass. Read the passwords from your shell or a secrets file,
-never type them into shared history.
+All four checks must pass. The commands below use `scripts/secure-curl.sh
+USER curl-args...`, which asks for the password without echo and hands it to
+curl on stdin, never as an argument, so it stays out of the process list,
+shell history and shell traces. It needs bash 4.2 or newer. Start it by its path;
+on the sender, copy the one file there first. It asks for the password on each
+call.
 
 1. From an **approved** sender, with the sender password (expect `200`):
 
@@ -249,7 +289,7 @@ never type them into shared history.
 # From the sender: use the receiver's address and port as configured there.
 : "${OTLP_PORT:?set OTLP_PORT to the receiver's published port (docker port prometheus-otlp, on the SIEM host)}"
 now=$(date +%s)000000000
-curl -sS -o /dev/null -w '%{http_code}\n' -X POST -u "sender:${PROMETHEUS_OTLP_SENDER_PASSWORD}" \
+scripts/secure-curl.sh sender -sS -o /dev/null -w '%{http_code}\n' -X POST \
   -H 'Content-Type: application/json' \
   --cacert server.crt "https://SIEM_HOST:${OTLP_PORT}/api/v1/otlp/v1/metrics" \
   -d '{"resourceMetrics":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"otlp-smoke-test"}}]},"scopeMetrics":[{"metrics":[{"name":"otlp_smoke_test","gauge":{"dataPoints":[{"timeUnixNano":"'"$now"'","asDouble":1}]}}]}]}]}'
@@ -266,7 +306,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' -X POST -H 'Content-Type: application/
    is refused, even with the correct password):
 
 ```bash
-curl -sS --max-time 5 -o /dev/null -w '%{http_code}\n' -X POST -u "sender:${PROMETHEUS_OTLP_SENDER_PASSWORD}" \
+scripts/secure-curl.sh sender -sS --max-time 5 -o /dev/null -w '%{http_code}\n' -X POST \
   -H 'Content-Type: application/json' -d '{}' \
   --cacert server.crt "https://SIEM_HOST:${OTLP_PORT}/api/v1/otlp/v1/metrics"
 ```
@@ -280,9 +320,9 @@ effect: stop and fix it before leaving the receiver on.
 ```bash
 OTLP_PUB=$(sudo docker port prometheus-otlp 9090/tcp | grep -E '^[0-9.]+:[0-9]+$')   # exactly one IPv4 line
 OTLP_ADDR=${OTLP_PUB%:*}; OTLP_PORT=${OTLP_PUB##*:}
-curl -sS -u "sender:${PROMETHEUS_OTLP_SENDER_PASSWORD}" --cacert /opt/siem/prometheus-otlp/tls/server.crt --resolve SIEM_HOST:${OTLP_PORT}:${OTLP_ADDR} "https://SIEM_HOST:${OTLP_PORT}/api/v1/query?query=otlp_smoke_test" | grep -c otlp-smoke-test
-curl -sS -o /dev/null -w '%{http_code}\n' -X POST -u "sender:${PROMETHEUS_OTLP_SENDER_PASSWORD}" --cacert /opt/siem/prometheus-otlp/tls/server.crt --resolve SIEM_HOST:${OTLP_PORT}:${OTLP_ADDR} https://SIEM_HOST:${OTLP_PORT}/-/reload   # expect 403 or 404, not 200
-curl -sS -u "scrape:${PROMETHEUS_OTLP_SCRAPE_PASSWORD}" --cacert /opt/siem/prometheus-otlp/tls/server.crt --resolve SIEM_HOST:${OTLP_PORT}:${OTLP_ADDR} https://SIEM_HOST:${OTLP_PORT}/api/v1/status/config | grep -o 'out_of_order_time_window: [0-9a-z]*'
+scripts/secure-curl.sh sender -sS --cacert /opt/siem/prometheus-otlp/tls/server.crt --resolve SIEM_HOST:${OTLP_PORT}:${OTLP_ADDR} "https://SIEM_HOST:${OTLP_PORT}/api/v1/query?query=otlp_smoke_test" | grep -c otlp-smoke-test
+scripts/secure-curl.sh sender -sS -o /dev/null -w '%{http_code}\n' -X POST --cacert /opt/siem/prometheus-otlp/tls/server.crt --resolve SIEM_HOST:${OTLP_PORT}:${OTLP_ADDR} https://SIEM_HOST:${OTLP_PORT}/-/reload   # expect 403 or 404, not 200
+scripts/secure-curl.sh scrape -sS --cacert /opt/siem/prometheus-otlp/tls/server.crt --resolve SIEM_HOST:${OTLP_PORT}:${OTLP_ADDR} https://SIEM_HOST:${OTLP_PORT}/api/v1/status/config | grep -o 'out_of_order_time_window: [0-9a-z]*'
 ```
 
 Also confirm the `prometheus` and `prometheus-otlp` targets are up on the SIEM

@@ -43,9 +43,9 @@ def test_webhook_answers_through_a_response_node_not_at_once():
     assert hook["parameters"]["responseMode"] == "responseNode"
     assert hook["parameters"]["authentication"] == "headerAuth"
     responds = [n for n in _workflow()["nodes"] if n["type"] == "n8n-nodes-base.respondToWebhook"]
-    assert sorted(n["name"] for n in responds) == ["Respond Error", "Respond OK"]
+    assert sorted(n["name"] for n in responds) == ["Respond Error", "Respond OK", "Respond Unauthorized"]
     by_code = {n["parameters"]["options"]["responseCode"]: n["parameters"] for n in responds}
-    assert set(by_code) == {200, 502}
+    assert set(by_code) == {200, 403, 502}
     for params in by_code.values():
         assert params["respondWith"] == "json"
         assert not list(_expressions(params)), "the response body is static: it never echoes the alert"
