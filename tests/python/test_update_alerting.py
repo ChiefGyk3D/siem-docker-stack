@@ -33,6 +33,7 @@ GOOD_FP = "abcdef0123456789"
 
 
 PENDING_UNIFI = ("update-unifi-pending-24h", "update-unifi-pending-7d")
+PENDING_SYNOLOGY = ("update-synology-pending-24h", "update-synology-pending-7d")  # #257: stale rule owns no data
 
 
 def _workflow():
@@ -397,7 +398,7 @@ def test_rule_schema():
         assert rule["labels"]["severity"] in {"warning", "critical"}, rule["title"]
         assert rule["labels"]["update_alert"] == "true", rule["title"]
         assert rule["for"], rule["title"]
-        if rule["uid"] in PENDING_UNIFI:
+        if rule["uid"] in PENDING_UNIFI + PENDING_SYNOLOGY:
             # no data legitimately means no pending update; a failing query must alert
             assert rule["noDataState"] == "OK", rule["title"]
             assert rule["execErrState"] == "Alerting", rule["title"]
@@ -1491,8 +1492,8 @@ def test_no_update_rule_treats_a_query_error_as_ok():
 def test_each_update_rule_alerts_on_query_error(uid):
     rule = {r["uid"]: r for _, _, r in _rules()}[uid]
     assert rule["execErrState"] == "Alerting"
-    # NoData is a separate decision: only the two UniFi pending rules treat it as OK
-    expect = "OK" if uid in PENDING_UNIFI else "Alerting"
+    # NoData is a separate decision: only the UniFi and Synology pending rules treat it as OK (#257)
+    expect = "OK" if uid in PENDING_UNIFI + PENDING_SYNOLOGY else "Alerting"
     assert rule["noDataState"] == expect
 
 

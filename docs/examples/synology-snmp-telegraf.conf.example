@@ -4,7 +4,8 @@
 # it into an existing telegraf.d instead, every other [[outputs.influxdb]] there
 # must carry namedrop = ["synology_dsm"], or this metric lands in that database too.
 #
-# Every credential comes from the process environment through ${NAME}; nothing
+# Every credential comes from the process environment through ${NAME:?NAME is required},
+# the form that stops startup when the variable is unset or empty; nothing
 # is written into this file. Variable names (set them in your secret manager):
 #   SYNOLOGY_SNMP_AGENT          NAS address (host or IP, no scheme, no port)
 #   SYNOLOGY_SNMP_USER           the dedicated read-only SNMPv3 user
@@ -25,20 +26,23 @@
 
 [[inputs.snmp]]
   name = "synology_dsm"
-  agents = ["udp://${SYNOLOGY_SNMP_AGENT}:161"]
+  agents = ["udp://${SYNOLOGY_SNMP_AGENT:?SYNOLOGY_SNMP_AGENT is required}:161"]
   version = 3
   interval = "1h"
   timeout = "20s"
   retries = 2
 
-  sec_name = "${SYNOLOGY_SNMP_USER}"
+  sec_name = "${SYNOLOGY_SNMP_USER:?SYNOLOGY_SNMP_USER is required}"
   sec_level = "authPriv"
-  # SHA and AES are the strongest pair this example assumes DSM offers. Confirm
-  # the choices on your NAS (screenshot step in the doc) and keep both ends equal.
+  # SHA (SHA-1) and AES (AES-128) are the compatibility pair, assumed because DSM
+  # offers them; a stronger SHA-2 and AES-192/256 pair is better if the NAS lists
+  # one. Choose the strongest pair both ends support during the live check in the
+  # doc (screenshot step) and keep both ends equal. Telegraf names: SHA224, SHA256,
+  # SHA384, SHA512; AES192, AES256 (INFERRED from the Telegraf snmp README, not re-read).
   auth_protocol = "SHA"
-  auth_password = "${SYNOLOGY_SNMP_AUTH_PASSWORD}"
+  auth_password = "${SYNOLOGY_SNMP_AUTH_PASSWORD:?SYNOLOGY_SNMP_AUTH_PASSWORD is required}"
   priv_protocol = "AES"
-  priv_password = "${SYNOLOGY_SNMP_PRIV_PASSWORD}"
+  priv_password = "${SYNOLOGY_SNMP_PRIV_PASSWORD:?SYNOLOGY_SNMP_PRIV_PASSWORD is required}"
 
   [inputs.snmp.tags]
     nas = "nas-example"   # placeholder label: replace with your own short NAS name
@@ -52,8 +56,8 @@
     oid = ".1.3.6.1.4.1.6574.1.5.4.0"
 
 [[outputs.influxdb]]
-  urls = ["${SYNOLOGY_INFLUX_URL}"]
+  urls = ["${SYNOLOGY_INFLUX_URL:?SYNOLOGY_INFLUX_URL is required}"]
   database = "telegraf"
-  username = "${SYNOLOGY_INFLUX_USER}"
-  password = "${SYNOLOGY_INFLUX_PASSWORD}"
+  username = "${SYNOLOGY_INFLUX_USER:?SYNOLOGY_INFLUX_USER is required}"
+  password = "${SYNOLOGY_INFLUX_PASSWORD:?SYNOLOGY_INFLUX_PASSWORD is required}"
   namepass = ["synology_dsm"]

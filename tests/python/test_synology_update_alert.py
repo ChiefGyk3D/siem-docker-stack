@@ -5,7 +5,9 @@ Collection is loose (fixed file list that must exist); the assertions are strict
 cases prove the secret guard and the exclusive-range check bite.
 """
 import json
+import os
 import re
+import subprocess
 import tomllib
 
 import pytest
@@ -25,7 +27,7 @@ SECRET_NAMES = ["SYNOLOGY_SNMP_AGENT", "SYNOLOGY_SNMP_USER", "SYNOLOGY_SNMP_AUTH
                 "SYNOLOGY_SNMP_PRIV_PASSWORD", "SYNOLOGY_INFLUX_URL", "SYNOLOGY_INFLUX_USER",
                 "SYNOLOGY_INFLUX_PASSWORD"]
 SENSITIVE_KEY = re.compile(r"(password|passphrase|sec_name|username|secret|token|community)", re.I)
-ENV_REF = re.compile(r"^\$\{[A-Z][A-Z0-9_]*\}$")
+ENV_REF = re.compile(r"^\$\{[A-Z][A-Z0-9_]*:\?[A-Z][A-Z0-9_]* is required\}$")
 
 
 def _conf():
@@ -64,8 +66,9 @@ def test_conf_parses_and_polls_snmpv3_authpriv_hourly():
     (snmp,) = _conf()["inputs"]["snmp"]
     assert snmp["version"] == 3 and snmp["sec_level"] == "authPriv"
     assert snmp["interval"] == "1h"
-    assert snmp["agents"] == ["udp://${SYNOLOGY_SNMP_AGENT}:161"]
-    assert snmp["auth_protocol"] and snmp["priv_protocol"]
+    assert snmp["agents"] == ["udp://${SYNOLOGY_SNMP_AGENT:?SYNOLOGY_SNMP_AGENT is required}:161"]
+    # exact pair; SHA/AES is the documented compatibility residual (SYN-07), a weaker one must fail
+    assert (snmp["auth_protocol"], snmp["priv_protocol"]) == ("SHA", "AES")
     fields = {f["name"]: f["oid"] for f in snmp["field"]}
     assert fields == {"dsm_version": OID_VERSION, "upgrade_available": OID_UPGRADE}
     assert snmp["name"] == "synology_dsm"
@@ -77,24 +80,27 @@ def test_conf_has_no_literal_secret_only_environment_references():
     assert literal_secrets(conf) == []
     text = CONF.read_text(encoding="utf-8")
     for name in SECRET_NAMES:
-        assert "${" + name + "}" in text, name
+        assert "${" + name + ":?" + name + " is required}" in text, name
+    assert not re.search(r"\$\{[A-Z_]+\}", text), "a bare ${VAR} does not fail closed on unset or empty"
     (out,) = conf["outputs"]["influxdb"]
     assert out["database"] == "telegraf" and out["namepass"] == ["synology_dsm"]
-    assert out["urls"] == ["${SYNOLOGY_INFLUX_URL}"]
+    assert out["urls"] == ["${SYNOLOGY_INFLUX_URL:?SYNOLOGY_INFLUX_URL is required}"]
 
 
 @pytest.mark.parametrize("bad", [
     {"inputs": {"snmp": [{"auth_password": "hunter2hunter2"}]}},
     {"inputs": {"snmp": [{"sec_name": "monitor"}]}},
     {"outputs": {"influxdb": [{"password": "x${A}"}]}},
+    {"outputs": {"influxdb": [{"password": "${SYNOLOGY_INFLUX_PASSWORD}"}]}},  # bare form: not fail closed
     {"inputs": {"snmp": [{"community": "public"}]}},
 ])
 def test_secret_guard_bites(bad):
     assert literal_secrets(bad) != []
 
 
-def test_secret_guard_accepts_env_reference():
-    assert literal_secrets({"a": [{"password": "${SYNOLOGY_INFLUX_PASSWORD}"}]}) == []
+def test_secret_guard_accepts_required_env_reference():
+    ref = "${SYNOLOGY_INFLUX_PASSWORD:?SYNOLOGY_INFLUX_PASSWORD is required}"
+    assert literal_secrets({"a": [{"password": ref}]}) == []
 
 
 # --- Grafana rules ---------------------------------------------------------
@@ -106,7 +112,11 @@ def test_rules_are_the_four_expected_and_all_paused():
     assert group["folder"] == "Update Alerts"
     for uid, r in rules.items():
         assert r["isPaused"] is True, uid
-        assert r["execErrState"] == "Alerting" and r["noDataState"] == "Alerting", uid
+        assert r["execErrState"] == "Alerting", uid
+        # SYN-01: a dead poller must not page as "pending over 7 days"; the stale rule (phone false)
+        # owns no data. Same as the UniFi pending rules (noDataState OK).
+        want_nodata = "OK" if uid.startswith("update-synology-pending") else "Alerting"
+        assert r["noDataState"] == want_nodata, uid
         assert r["labels"]["source"] == "synology" and r["labels"]["update_alert"] == "true", uid
         assert r["labels"]["alert_group"] == "updates", uid
         assert any(d["datasourceUid"] == "influxdb-twingate" for d in r["data"]), uid
@@ -168,8 +178,15 @@ def test_check_failing_rule_fires_on_enum_3_or_4_only_and_persists():
     _, rules = _rules()
     r = rules["update-synology-check-failing"]
     expr = _data(r, "C")["model"]["expression"]
-    assert expr == "$B == 3 || $B == 4"
+    # SYN-05: any fresh value outside {1, 2} (3, 4, 5, or anything unexpected) is a failed check
+    assert expr == "$B != 1 && $B != 2"
     assert r["for"] == "6h"
+
+
+def test_check_failing_truth_table():
+    expr = _data(_rules()[1]["update-synology-check-failing"], "C")["model"]["expression"]
+    fires = lambda b: eval(expr.replace("$B", str(b)).replace("&&", "and").replace("||", "or"))  # fixed repo expression, ints only
+    assert [b for b in range(0, 8) if fires(b)] == [0, 3, 4, 5, 6, 7]
 
 
 def test_data_stale_rule_watches_the_three_hour_window_for_the_hourly_poll():
@@ -203,7 +220,85 @@ def test_doc_covers_scope_limits_secrets_and_the_live_check():
         assert needle in text, needle
 
 
-def test_doc_never_puts_a_passphrase_on_a_command_line():
+def test_doc_never_puts_a_passphrase_on_a_command_line():  # the -u/-A/-X scan covers every block
     text = DOC.read_text(encoding="utf-8")
     assert not re.search(r"\s-[AXaxu]\s+\S", text.replace("-v3", "")), "no -A/-X/-u option with a value"
     assert "SNMPCONFPATH" in text
+
+
+# --- Doc commands (SYN-02, SYN-04) -------------------------------------------
+
+def _block(marker):
+    text = DOC.read_text(encoding="utf-8")
+    for m in re.finditer(r"```\n(.*?)```", text, re.S):
+        if m.group(1).startswith("# " + marker):
+            return m.group(1)
+    raise AssertionError("no doc block " + marker)
+
+
+def _run(script, env, **kw):
+    return subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, timeout=30, **kw)
+
+
+@pytest.mark.parametrize("user,password,ok", [
+    ("synology_wo", "pw-Ok_1.2@3", True),
+    ('syn"x', "pw-Ok_1.2@3", False),
+    ("synology_wo", "pw'x", False),
+    ("synology_wo", "pw\\x", False),
+    ("", "pw-Ok_1.2@3", False),
+    ("synology_wo", "", False),
+    ("a b", "pw-Ok_1.2@3", False),
+])
+def test_influx_names_are_validated_before_any_query_is_built(user, password, ok):
+    env = {"PATH": os.environ["PATH"], "SYNOLOGY_INFLUX_USER": user, "SYNOLOGY_INFLUX_PASSWORD": password}
+    r = _run(_block("validate-influx-names"), env)
+    assert (r.returncode == 0) is ok, r.stderr
+
+
+def test_influx_commands_pass_the_user_name_into_the_container_and_stay_in_one_script():
+    text = _block("create-influx-account")
+    assert "set -eu" in text and "validate-influx-names" not in text
+    assert "docker exec -e SYNOLOGY_INFLUX_USER" in text and "SHOW GRANTS FOR" in text
+    assert "-password" not in text
+
+
+def _snmp_env(tmp_path, fake_body):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "snmpget").write_text("#!/bin/bash\n" + fake_body)
+    (bindir / "snmpget").chmod(0o700)
+    run = tmp_path / "run"
+    run.mkdir(mode=0o700)
+    env = {"PATH": f"{bindir}:{os.environ['PATH']}", "XDG_RUNTIME_DIR": str(run),
+           "SYNOLOGY_SNMP_AGENT": "nas.example.invalid", "SYNOLOGY_SNMP_USER": "monitor",
+           "SYNOLOGY_SNMP_AUTH_PASSWORD": "authpass-123", "SYNOLOGY_SNMP_PRIV_PASSWORD": "privpass-456"}
+    return env, run
+
+
+def test_snmpget_script_removes_the_passphrase_file_on_success_failure_and_signal(tmp_path):
+    script = _block("snmpget-confirm")
+    probe = 'grep -q authpass-123 "$SNMPCONFPATH/snmp.conf" || exit 9\n'
+    cases = {"ok": probe + "exit 0\n", "fail": probe + "exit 3\n",
+             "term": probe + "kill -TERM $PPID; sleep 5\n", "int": probe + "kill -INT $PPID; sleep 5\n"}
+    for name, body in cases.items():
+        case_dir = tmp_path / name
+        case_dir.mkdir()
+        env, run = _snmp_env(case_dir, body)
+        r = _run(script, env)
+        assert list(run.iterdir()) == [], f"{name}: passphrase file left behind"
+        assert "authpass-123" not in r.stdout + r.stderr and "privpass-456" not in r.stdout + r.stderr
+        assert (r.returncode == 0) is (name == "ok"), (name, r.returncode, r.stderr)
+
+
+def test_snmpget_script_refuses_to_run_without_a_passphrase(tmp_path):
+    env, run = _snmp_env(tmp_path, "exit 0\n")
+    del env["SYNOLOGY_SNMP_PRIV_PASSWORD"]
+    r = _run(_block("snmpget-confirm"), env)
+    assert r.returncode != 0 and list(run.iterdir()) == []
+
+
+def test_doc_states_bucket_semantics_and_the_value_five_rule():
+    text = " ".join(DOC.read_text(encoding="utf-8").split())
+    assert "hourly buckets" in text and "about 6 days 16 hours" in text
+    assert "3, 4, 5" in text
+    assert "SHA-2" in text

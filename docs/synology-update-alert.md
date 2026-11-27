@@ -28,9 +28,12 @@ NAS (SNMPv3 read-only user) <-- Telegraf snmp input, hourly
 |------|------------|--------|--------|
 | Synology DSM update pending over 24h | value 1 for 24 to 159 hourly buckets in 7 days | warning, P2, phone false | 84h |
 | Synology DSM update pending over 7 days | value 1 for 160 or more hourly buckets | critical, P1, phone true | 24h |
-| Synology update data stale | no point in `synology_dsm` for 3 hours (the poller stopped); no data also alerts | warning, P2, phone false | 84h |
-| Synology DSM update check failing | value 3 or 4 for 6 hours (the NAS cannot check) | warning, P2, phone false | 84h |
+| Synology update data stale | no point in `synology_dsm` for 3 hours (the poller stopped); no data also alerts, and this rule is the only no-data alert | warning, P2, phone false | 84h |
+| Synology DSM update check failing | any value other than 1 or 2 (3, 4, 5 or unexpected) for 6 hours (the NAS cannot be read as current) | warning, P2, phone false | 84h |
 
+  The warning and critical bands count hourly buckets in a rolling 7 days, so the
+  titles are approximate: 24 buckets is about 24 hours and 160 buckets is about
+  6 days 16 hours (a deliberate tolerance of about 8 hours of missed polls per week).
   The warning and critical bands share the number 160, the same exclusive-range
   pattern as the UniFi rules, so they never both fire. Repeats come from the
   `update_alert` route of `update-notification-policy.yml.example`. The 24h warning
@@ -77,27 +80,51 @@ Nothing below is done by the repository. Do them in order, and do not unpause th
    only read, SHA authentication and AES privacy to match the example, and
    passphrases of at least 8 characters.
 2. Create the InfluxDB write account (same pattern as `twingate_wo`, runbook
-   section 10). Set the two names in your shell from the secret manager first,
-   then run:
+   section 10). Run these in a shell where `SYNOLOGY_INFLUX_USER` and
+   `SYNOLOGY_INFLUX_PASSWORD` are already exported from the secret manager. First
+   the name check (the user goes into a quoted InfluxQL identifier and the password
+   into a quoted literal, so only a narrow character set is accepted; it stops
+   at the first problem):
 
 ```
+# validate-influx-names
+set -eu
+case "${SYNOLOGY_INFLUX_USER:-}" in ''|*[!A-Za-z0-9_]*) echo "SYNOLOGY_INFLUX_USER must be letters, digits and _ only" >&2; exit 1;; esac
+case "${SYNOLOGY_INFLUX_PASSWORD:-}" in ''|*[!A-Za-z0-9_.@%+=-]*) echo "SYNOLOGY_INFLUX_PASSWORD must be letters, digits and _ . @ % + = - only" >&2; exit 1;; esac
+echo "names ok"
+```
+
+   Then the account. The user name is passed into the container with
+   `docker exec -e` (no value on the command line) so the verification sees it:
+
+```
+# create-influx-account
+set -eu
 siem-run bash -c 'docker exec -i influxdb sh -c '\''INFLUX_USERNAME="$INFLUXDB_ADMIN_USER" INFLUX_PASSWORD="$INFLUXDB_ADMIN_PASSWORD" influx'\'' > /dev/null <<EOSQL
 CREATE USER "$SYNOLOGY_INFLUX_USER" WITH PASSWORD '\''$SYNOLOGY_INFLUX_PASSWORD'\''
 GRANT WRITE ON "telegraf" TO "$SYNOLOGY_INFLUX_USER"
 EOSQL'
-docker exec influxdb sh -c 'INFLUX_USERNAME="$INFLUXDB_ADMIN_USER" INFLUX_PASSWORD="$INFLUXDB_ADMIN_PASSWORD" influx -execute "SHOW GRANTS FOR $SYNOLOGY_INFLUX_USER"'
+docker exec -e SYNOLOGY_INFLUX_USER influxdb sh -c 'INFLUX_USERNAME="$INFLUXDB_ADMIN_USER" INFLUX_PASSWORD="$INFLUXDB_ADMIN_PASSWORD" influx -execute "SHOW GRANTS FOR \"$SYNOLOGY_INFLUX_USER\""'
 ```
 
    Check: the last command lists `telegraf WRITE` and no other database.
 3. Confirm the OIDs with one live read (before any Telegraf or rule change). The
    passphrases go into a private temporary net-snmp config file built by the shell
-   from the environment, so they never appear in a process argument. Run it in a
-   shell where the four `SYNOLOGY_SNMP_*` names are already exported:
+   from the environment, so they never appear in a process argument. One script
+   does it: it stops at the first error and deletes the file on success, failure,
+   Ctrl-C and termination. Run it in a shell where the four `SYNOLOGY_SNMP_*` names are
+   already exported:
 
 ```
-d=$(mktemp -d) && chmod 700 "$d" && (umask 077; printf 'defVersion 3\ndefSecurityLevel authPriv\ndefSecurityName %s\ndefAuthType SHA\ndefPrivType AES\ndefAuthPassphrase %s\ndefPrivPassphrase %s\n' "$SYNOLOGY_SNMP_USER" "$SYNOLOGY_SNMP_AUTH_PASSWORD" "$SYNOLOGY_SNMP_PRIV_PASSWORD" > "$d/snmp.conf")
-SNMPCONFPATH="$d" snmpget -v3 "udp:$SYNOLOGY_SNMP_AGENT:161" .1.3.6.1.4.1.6574.1.5.3.0 .1.3.6.1.4.1.6574.1.5.4.0; echo "snmpget exit=$?"
-rm -f "$d/snmp.conf" && rmdir "$d"
+# snmpget-confirm
+set -eu
+: "${SYNOLOGY_SNMP_AGENT:?required}" "${SYNOLOGY_SNMP_USER:?required}" "${SYNOLOGY_SNMP_AUTH_PASSWORD:?required}" "${SYNOLOGY_SNMP_PRIV_PASSWORD:?required}"
+umask 077
+dir=$(mktemp -d "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/snmpconf.XXXXXX")
+trap 'rm -f -- "$dir/snmp.conf"; rmdir -- "$dir"' EXIT
+trap 'exit 130' HUP INT TERM
+printf 'defVersion 3\ndefSecurityLevel authPriv\ndefSecurityName %s\ndefAuthType SHA\ndefPrivType AES\ndefAuthPassphrase %s\ndefPrivPassphrase %s\n' "$SYNOLOGY_SNMP_USER" "$SYNOLOGY_SNMP_AUTH_PASSWORD" "$SYNOLOGY_SNMP_PRIV_PASSWORD" > "$dir/snmp.conf"
+SNMPCONFPATH="$dir" snmpget -v3 "udp:$SYNOLOGY_SNMP_AGENT:161" .1.3.6.1.4.1.6574.1.5.3.0 .1.3.6.1.4.1.6574.1.5.4.0
 ```
 
    Expected: two lines, a string for the DSM version and an INTEGER for
@@ -136,5 +163,7 @@ manual, not re-read), and the exact DSM screens.
 - The 7-day bucket count does not reset when a value of 2 appears (see the
   rule file header): an update that follows an applied one within 7 days can
   escalate early.
-- Value 5 (others) raises no alert of its own.
+- Value 5 (others) and any unexpected value count as a failed check (the check-failing rule).
+- The pending rules treat no data as OK (UniFi pattern); the stale rule owns a dead poller. A failing query still raises the pending rule's own alert (a critical pages), as for UniFi.
+- SHA and AES are the compatibility pair. During the live check pick the strongest pair DSM lists (SHA-2 with AES-192 or AES-256 if offered) and set both ends and `defAuthType` and `defPrivType` to match.
 - Alert names are on the router allow-list; a rename must change both places.

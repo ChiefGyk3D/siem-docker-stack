@@ -17,6 +17,8 @@
 # Escalation is exclusive and has no `for` clock (same pattern as the UniFi
 # rules): query P counts the hourly buckets in the last 7 days that held a
 # pending point (value 1). Warning: 24 to 159 buckets. Critical: 160 or more.
+# These are bucket counts, not exact elapsed time: 24 buckets is about 24 hours
+# and 160 is about 6 days 16 hours (the titles say "over 24h" and "over 7 days").
 # The 160 is the same number in both rules, so they cannot overlap or leave a
 # gap, and it leaves about 8 hours of tolerance per week for missed polls. Both
 # also need pending now (B == 1, the last value in 3 hours, which is three polls).
@@ -24,8 +26,11 @@
 # new update that follows an applied one within 7 days can reach the critical
 # band early; the rules clear as soon as the value is no longer 1.
 #
-# Missing data or a failing query (noDataState and execErrState Alerting) raises
-# an alert: a broken check must not look healthy. Repeat intervals come from the
+# No data on the two pending rules is OK, as for the UniFi pending rules: a dead
+# poller must not page as "pending over 7 days". The rule "Synology update data
+# stale" (phone false, no data alerts) owns that case. A failing query
+# (execErrState Alerting) still raises the rule's own alert, as for UniFi; a test
+# requires it on every update rule. Repeat intervals come from the
 # notification policy (update-notification-policy.yml.example, update_alert route:
 # 84h warning, 24h critical). Labels follow the UniFi and pfSense 24h update rules
 # (owner decisions #152 and 2026-11-26): the 24h warning is chat only (phone false),
@@ -74,7 +79,7 @@ groups:
             datasourceUid: __expr__
             relativeTimeRange: {from: 0, to: 0}
             model: {refId: C, type: math, expression: "$B == 1 && $Pc >= 24 && $Pc < 160"}
-        noDataState: Alerting
+        noDataState: OK
         execErrState: Alerting
         for: 0s
         isPaused: true
@@ -125,7 +130,7 @@ groups:
             datasourceUid: __expr__
             relativeTimeRange: {from: 0, to: 0}
             model: {refId: C, type: math, expression: "$B == 1 && $Pc >= 160"}
-        noDataState: Alerting
+        noDataState: OK
         execErrState: Alerting
         for: 0s
         isPaused: true
@@ -198,14 +203,14 @@ groups:
           - refId: C
             datasourceUid: __expr__
             relativeTimeRange: {from: 0, to: 0}
-            model: {refId: C, type: math, expression: "$B == 3 || $B == 4"}
+            model: {refId: C, type: math, expression: "$B != 1 && $B != 2"}
         noDataState: Alerting
         execErrState: Alerting
         for: 6h
         isPaused: true
         annotations:
-          summary: "Synology NAS {{ $labels.nas }} reports its update check as connecting or disconnected for 6 hours"
-          description: "upgradeAvailable has been 3 (connecting) or 4 (disconnected) for 6 hours, so the NAS cannot check for updates. A pending update would not show. Check the NAS update settings and its internet access."
+          summary: "Synology NAS {{ $labels.nas }} has reported an indeterminate update state for 6 hours"
+          description: "upgradeAvailable has been something other than 1 (available) or 2 (unavailable) for 6 hours: 3 connecting, 4 disconnected, 5 others, or an unexpected value. The NAS cannot be read as up to date. A pending update would not show. Check the NAS update settings and its internet access."
         labels:
           severity: "warning"
           tier: "P2"
