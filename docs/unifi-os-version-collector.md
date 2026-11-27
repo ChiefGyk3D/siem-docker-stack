@@ -35,8 +35,15 @@ fails or reports `unknown` in time:
   `network_version="unknown"` and a fixed reason on stderr, never any status text. The accepted
   limit: a legitimately longer status output (the unifi block past the first 1 MiB or 20000 lines)
   also gives `unknown`; the real output is a few KB, and bounded work wins over completeness here.
-  The JSON must be well formed in the parts the walker reads (no leading, doubled or trailing comma,
-  valid string escapes). Nothing else in that output is parsed, stored or printed.
+  The 8192-byte line check runs after the shell has read the line, so what really bounds a single
+  line's cost is the 1 MiB read cap (the line is already inside that bounded buffer); the line check
+  only keeps the later per-line work small. The whole Status object must be well formed JSON as the
+  walker reads it: matching `{}` and `[]`, a colon after every name, a value after every colon, no
+  leading, doubled or trailing comma, valid string escapes, no control character in a string, numbers
+  and `true`/`false`/`null` as values, and any of the four JSON whitespace characters between tokens.
+  Member names are never decoded: if **any top-level member name contains an escape** (a backslash),
+  the object is not trusted and the result is `unknown` with a fixed reason, so an escaped spelling of
+  `version` can never hide a duplicate. Nothing else in that output is parsed, stored or printed.
 
 plus `id`, `date`, `head`, `tr`, `timeout` and `env`. No sudo, no network, no write to disk.
 

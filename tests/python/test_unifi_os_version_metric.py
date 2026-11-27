@@ -338,26 +338,42 @@ HOSTILE_JSON = {
 
 
 @pytest.mark.parametrize("name", sorted(HOSTILE_JSON))
-def test_hostile_status_json_is_bounded_in_time_and_unknown(env, name):
+def test_hostile_status_json_is_bounded_in_work_and_unknown(env, name):
+    # deterministic: the proof is the fixed reason (a size bound fired before any parsing), not wall
+    # time; the wall limit is only a generous backstop against a hang
     env.sfix.write_text(status_with(HOSTILE_JSON[name]), encoding="utf-8")
     start = time.time()
-    r = env.run(timeout=60)
-    assert time.time() - start < 10
+    r = env.run(timeout=120)
+    assert time.time() - start < 100
     net_unknown(r)
+    assert "Network version unknown" in etext(r)
+    assert " over " in etext(r)
 
 
-def test_status_line_of_over_8k_anywhere_is_unknown_and_fast(env):
+def test_status_line_of_over_8k_anywhere_is_unknown_with_a_fixed_reason(env):
     env.sfix.write_text("x" * 3000000 + "\n" + status_with('{"version":"10.6.109"}'), encoding="utf-8")
-    start = time.time()
-    r = env.run(timeout=60)
-    assert time.time() - start < 10
+    # the 3 MB line is cut at the 1 MiB read bound first (it then has no end of line and no marker), so
+    # the result is unknown either way; the reason text is asserted by the 1 MB case above
+    r = env.run(timeout=120)
     net_unknown(r)
 
 
-def test_normal_status_still_parses_and_is_quick(env):
-    start = time.time()
-    assert_ok(env.run())
-    assert time.time() - start < 10
+def test_normal_status_still_parses_with_no_bound_reason(env):
+    r = env.run()
+    assert_ok(r)
+    assert etext(r) == ""
+
+
+def test_whole_run_bound_constants_and_wrapper_are_the_documented_ones():
+    src = SCRIPT.read_text(encoding="utf-8")
+    assert re.search(r"^cmd_timeout=20$", src, re.M) and re.search(r"^reader_slack=10$", src, re.M)
+    assert '"$timeout_bin" -k 5 "$cmd_timeout"' in src
+    assert '"$timeout_bin" -k 2 "$((cmd_timeout + reader_slack))"' in src
+    doc = DOC.read_text(encoding="utf-8")
+    assert "timeout --kill-after=30s 2m" in doc and "20 + 10 seconds" in doc
+    # worst case per command: 20 + 5 kill grace (command) or 20 + 10 + 2 (reader); two commands run
+    # one after the other, so the run is under 2 * 32 + 5 seconds, inside the 2 minute cron wrapper
+    assert 2 * (20 + 10 + 2) + 5 < 120
 
 
 @pytest.mark.parametrize("js", ['{,"version":"10.6.109"}', '{"version":"10.6.109",}', '{"a":1,,"version":"10.6.109"}',
@@ -372,6 +388,67 @@ def test_valid_escapes_are_accepted(env):
     js = '{"note":"a\\"b\\\\c\\/d\\n\\t\\u00e9\\uABCD","a":[1,2,{"b":null}],"version":"10.6.109"}'
     env.sfix.write_text(status_with(js), encoding="utf-8")
     assert_ok(env.run())
+
+
+@pytest.mark.parametrize("js", [
+    '{"version":"10.6.109","ver\\u0073ion":"1.2.3"}',   # escaped spelling of version beside the real one
+    '{"ver\\u0073ion":"10.6.109"}',                      # an escaped name alone is not trusted
+    '{"a\\nb":1,"version":"10.6.109"}',                  # any escape in a top-level name
+    '{"version":"10.6.109","\\u0076ersion":"1.2.3"}',
+])
+def test_escaped_top_level_member_name_is_not_trusted(env, js):
+    env.sfix.write_text(status_with(js), encoding="utf-8")
+    r = env.run()
+    net_unknown(r)
+    assert "member name contains an escape" in etext(r)
+
+
+def test_escapes_in_nested_names_and_values_are_still_fine(env):
+    js = '{"m":{"x\\ny":1,"ver\\u0073ion":"9.9.9"},"note":"a\\u0041","version":"10.6.109"}'
+    env.sfix.write_text(status_with(js), encoding="utf-8")
+    assert_ok(env.run())
+
+
+@pytest.mark.parametrize("js", [
+    '{"a":[},"version":"10.6.109"}', '{"a":{],"version":"10.6.109"}', '{"a":garbage,"version":"10.6.109"}',
+    '{"a" 1,"version":"10.6.109"}', '{"a":,"version":"10.6.109"}', '{1:2,"version":"10.6.109"}',
+    '{"version":"10.6.109"}]', '{"a":[1]],"version":"10.6.109"}', '{"a":[1}],"version":"10.6.109"}',
+    '{"a":"x\x00y","version":"10.6.109"}', '{"a":"x\x01y","version":"10.6.109"}',
+    '{"a":1;2,"version":"10.6.109"}', '{"a":\'x\',"version":"10.6.109"}',
+])
+def test_structurally_malformed_json_is_unknown(env, js):
+    env.sfix.write_bytes(status_with(js).encode("utf-8"))
+    net_unknown(env.run())
+
+
+@pytest.mark.parametrize("js", [
+    '{"version":"10.6.109"}\r', '{\r"version"\t:\r"10.6.109"\t}', '{ "a" : [ 1 , -2.5e+10 , true , false , null , {} , [] ] , "version" : "10.6.109" }',
+    '\t{"version":"10.6.109"} \t\r',
+])
+def test_all_json_whitespace_and_valid_scalars_are_accepted(env, js):
+    env.sfix.write_bytes(status_with(js).encode("utf-8"))
+    assert_ok(env.run())
+
+
+def test_mutant_key_escape_guard_bites(env):
+    env.sfix.write_text(status_with('{"version":"10.6.109","ver\\u0073ion":"1.2.3"}'), encoding="utf-8")
+    net_unknown(env.run())
+    m = mutant(env, "net-key-escape", ":")
+    assert 'network_version="10.6.109"' in text(env.run(script=m))
+
+
+def test_mutant_bracket_type_guard_bites(env):
+    env.sfix.write_text(status_with('{"a":[},"version":"10.6.109"}'), encoding="utf-8")
+    net_unknown(env.run())
+    m = mutant(env, "net-bracket-type", "*) ;;")
+    assert 'network_version="10.6.109"' in text(env.run(script=m))
+
+
+def test_mutant_token_charset_guard_bites(env):
+    env.sfix.write_text(status_with('{"a":garbage,"version":"10.6.109"}'), encoding="utf-8")
+    net_unknown(env.run())
+    m = mutant(env, "net-token", '*) lit="" ;;')
+    assert 'network_version="10.6.109"' in text(env.run(script=m))
 
 
 def test_empty_object_is_unknown(env):
@@ -447,24 +524,26 @@ def test_ordinary_user_runs(env):
     assert_ok(env.run(script=s))
 
 
-SURVIVOR = "#!/bin/sh\nsetsid sh -c 'sleep 14' </dev/null &\nsleep 300\n"
+SURVIVOR = "#!/bin/sh\nsetsid sh -c 'sleep 25' </dev/null &\nsleep 300\n"
 
 
 def test_detached_survivor_cannot_hold_the_run_open(env):
+    # the survivor lives 25 s; the clean run ends at about cmd_timeout + reader_slack (3 s). The wall
+    # limit is a generous backstop; the mutant test below proves the reader bound is what ends the run
     env.uos.write_text(SURVIVOR, encoding="utf-8")
     s = env.build("slack.sh", rewrites={"cmd_timeout": "1", "reader_slack": "2"})
     start = time.time()
     r = env.run(script=s)
-    assert time.time() - start < 9
+    assert time.time() - start < 20
     assert_failed_clean(r)
 
 
 def test_detached_survivor_in_status_only_gives_unknown_in_time(env):
-    env.write_fake(status_cmd="setsid sh -c 'sleep 14' </dev/null & sleep 300")
+    env.write_fake(status_cmd="setsid sh -c 'sleep 25' </dev/null & sleep 300")
     s = env.build("slack2.sh", rewrites={"cmd_timeout": "1", "reader_slack": "2"})
     start = time.time()
     r = env.run(script=s)
-    assert time.time() - start < 9
+    assert time.time() - start < 20
     net_unknown(r)
 
 
@@ -640,10 +719,12 @@ def test_mutant_net_version_count_guard_bites(env):
 
 
 def test_mutant_net_depth_guard_bites(env):
-    env.sfix.write_text(status_with('{"meta":{"a":1,"version":"1.2.3"}}'), encoding="utf-8")
-    net_unknown(env.run())
+    # without the depth scoping, the member-position rules would apply inside nested objects and
+    # reject (or mis-read) a perfectly valid nested value
+    env.sfix.write_text(status_with('{"meta":{"a":1,"b":[1,2]},"version":"10.6.109"}'), encoding="utf-8")
+    assert_ok(env.run())
     m = mutant(env, "net-depth", "top=1")
-    assert 'network_version="1.2.3"' in text(env.run(script=m))
+    assert 'network_version="10.6.109"' not in text(env.run(script=m))
 
 
 def test_mutant_root_guard_bites(env):
@@ -659,7 +740,7 @@ def test_mutant_reader_bound_guard_bites(env):
     m = env.build("rb.sh", marks={"reader-bound": '"$head_bin" -c "$1"'}, rewrites=rw)
     start = time.time()
     env.run(script=m)
-    assert time.time() - start >= 12
+    assert time.time() - start >= 22
 
 
 def test_mutant_net_block_scope_guard_bites(env):
@@ -710,7 +791,7 @@ def test_mutant_status_bound_guard_bites(env):
     env.sfix.write_text(pad_then_unifi_block(), encoding="utf-8")
     net_unknown(env.run())
     m = mutant(env, "status-bound",
-               "} | bounded_read 100000000 |\"$tr_bin\" '\\000' '?' | net_version) || net_ver=unknown")
+               "} | bounded_read 100000000 | \"$tr_bin\" '\\000' '\\001' | net_version) || net_ver=unknown")
     assert 'network_version="10.6.109"' in text(env.run(script=m))
 
 

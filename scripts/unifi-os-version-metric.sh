@@ -53,7 +53,8 @@ reader_slack=10
 nl='
 '
 tab=$(printf '\t')
-ws=" $tab"
+cr=$(printf '\r')
+ws=" $tab$cr"
 finished=0
 
 fail() {
@@ -196,6 +197,16 @@ net_version() {
 # otherwise prints unknown. Brackets nested inside values and string contents (with backslash escapes)
 # are tracked, so a version key in a nested object or inside a string is never taken. Any text outside
 # the one object, or an unexpected token in a member position, gives unknown.
+valid_lit() {
+    case "$1" in
+        true | false | null) return 0 ;;
+        -[0-9]* | [0-9]*) ;;
+        *) return 1 ;;
+    esac
+    case "$1" in *[!0-9.eE+-]*) return 1 ;; esac
+    return 0
+}
+
 top_version() {
     js=$1
     depth=0
@@ -208,6 +219,8 @@ top_version() {
     nv=0
     ver=""
     done_obj=0
+    stack=""
+    lit=""
     while [ -n "$js" ]; do
         rest_js=${js#?}
         c=${js%"$rest_js"}
@@ -237,6 +250,8 @@ top_version() {
                         if [ "$top" -eq 1 ]; then
                             case "$st" in
                                 K)
+                                    # member names are never decoded: a name with any escape is not trusted
+                                    case "$cur" in *"\\"*) net_cap "a top-level member name contains an escape"; return 0 ;; esac # MUTATE:net-key-escape
                                     st=c
                                     pv=0
                                     [ "$cur" != version ] || pv=1
@@ -248,17 +263,28 @@ top_version() {
                             esac
                         fi
                         ;;
+                    [[:cntrl:]]) echo unknown; return 0 ;;
                     *) cur="$cur$c" ;;
                 esac
             fi
             continue
         fi
+        # A run of token characters outside strings (a number, true, false, null) is checked as a whole
+        # when it ends.
         case "$c" in
-            " " | "$tab") continue ;;
+            [0-9A-Za-z+.-]) lit="$lit$c" ;;
+            *) if [ -n "$lit" ]; then valid_lit "$lit" || { echo unknown; return 0; }; lit=""; fi ;; # MUTATE:net-token
+        esac
+        case "$c" in
+            " " | "$tab" | "$cr")
+                if [ "$st" = s ]; then st=o; fi
+                continue
+                ;;
         esac
         if [ "$done_obj" -eq 1 ]; then echo unknown; return 0; fi
         if [ "$depth" -eq 0 ]; then
             if [ "$c" != "{" ]; then echo unknown; return 0; fi
+            stack="{"
             depth=1
             st=k
             continue
@@ -282,30 +308,50 @@ top_version() {
                 v)
                     case "$c" in
                         '"') instr=1; cur=""; st=V; continue ;;
-                        "," | "}") echo unknown; return 0 ;;
+                        "," | "}" | ":") echo unknown; return 0 ;;
+                        "{" | "[") st=o ;;
+                        *) st=s ;;
                     esac
                     # a value that is not a string: a version member holding one is not accepted
                     if [ "$pv" -eq 1 ]; then nv=$((nv + 1)); ver=""; pv=0; fi
-                    st=o
                     ;;
                 o)
+                    # a value is complete: only a comma or the closing brace may follow
                     case "$c" in
                         ",") st=m; continue ;; # MUTATE:net-comma
+                        "}") ;;
+                        *) echo unknown; return 0 ;;
+                    esac
+                    ;;
+                s)
+                    # inside a number, true, false or null
+                    case "$c" in
+                        ",") st=m; continue ;;
+                        "}" | [0-9A-Za-z+.-]) ;;
+                        *) echo unknown; return 0 ;;
                     esac
                     ;;
             esac
         fi
         case "$c" in
-            "{" | "[") depth=$((depth + 1)) ;;
+            "{" | "[")
+                stack="$stack$c"
+                depth=${#stack}
+                ;;
             "}" | "]")
-                depth=$((depth - 1))
-                if [ "$depth" -lt 0 ]; then echo unknown; return 0; fi
-                if [ "$depth" -eq 0 ]; then
-                    if [ "$c" != "}" ]; then echo unknown; return 0; fi
-                    done_obj=1
-                fi
+                if [ -z "$stack" ]; then echo unknown; return 0; fi
+                open=${stack#"${stack%?}"}
+                stack=${stack%?}
+                depth=${#stack}
+                case "$c$open" in
+                    "}{" | "][") ;;
+                    *) echo unknown; return 0 ;; # MUTATE:net-bracket-type
+                esac
+                if [ "$depth" -eq 0 ]; then done_obj=1; fi
                 ;;
             '"') instr=1; cur="" ;;
+            [0-9A-Za-z+.-] | ":" | ",") ;;
+            *) echo unknown; return 0 ;;
         esac
     done
     if [ "$done_obj" -ne 1 ] || [ "$instr" -ne 0 ] || [ "$depth" -ne 0 ]; then echo unknown; return 0; fi
@@ -317,7 +363,7 @@ top_version() {
 net_ver=$({
     run_uos status
     printf '\nUOS_RC=%s\n' "$?"
-} | bounded_read 1048577 | "$tr_bin" '\000' '?' | net_version) || net_ver=unknown # MUTATE:status-bound
+} | bounded_read 1048577 | "$tr_bin" '\000' '\001' | net_version) || net_ver=unknown # MUTATE:status-bound
 [ -n "$net_ver" ] || net_ver=unknown
 
 # ---------------------------------------------------------------- output
