@@ -530,6 +530,9 @@ emit_all() {
 }
 # a failed capture exits non-zero before anything is printed, so a partial payload never reaches stdout
 if ! payload=$(emit_all); then exit 1; fi # MUTATE:capture-check
+# From here the payload is the only terminal output: ignore termination signals so none can land
+# between the write and the finished flag and add a contradictory failure line after a complete payload.
+trap '' HUP INT TERM # MUTATE:signal-block
 if ! printf '%s\n' "$payload"; then exit 1; fi # MUTATE:output-check
 finished=1
 exit 0

@@ -973,6 +973,11 @@ def test_emit_failure_after_a_prefix_exits_nonzero_without_the_prefix(env):
     assert "host_update_pending" not in r.stdout
 
 
+def test_signal_after_the_payload_write_adds_no_second_status_line(env):
+    r = env.run(script=env.build("postterm.sh", edit=inject_post_write_term))
+    assert guard_single_terminal_line(r, env), (r.returncode, r.stdout)
+
+
 def test_state_file_lost_emits_no_age_and_state_ok_zero(env):
     (env.state_dir / "first-seen").unlink()
     env.set_apt(apt_out([inst("foo", "1", "2", DEB_UPD)]))
@@ -1360,6 +1365,22 @@ def inject_emit_failure(text):
     return text.replace('\n}\n# a failed capture', '\n    return 1\n}\n# a failed capture', 1)
 
 
+def inject_post_write_term(text):
+    # a termination signal lands right after the payload write, before the finished flag is set
+    old = "\nfinished=1\n"
+    assert text.count(old) == 1
+    return text.replace(old, "\nkill -TERM $$\nfinished=1\n", 1)
+
+
+def sc_post_write_term(env):
+    return {"edit": inject_post_write_term}
+
+
+def guard_single_terminal_line(r, env):
+    return (r.returncode == 0 and r.stdout.count("host_update_check_success") == 1
+            and re.search(r"host_update_check_success,[^ ]* value=1i\n\Z", r.stdout) is not None)
+
+
 def sc_emit_fails(env):
     return {"edit": inject_emit_failure}
 
@@ -1525,6 +1546,7 @@ MUTANTS = {
     "state-uint": (':', sc_leading_zero_state, guard_state_untrusted),
     "state-future": (':', sc_future_state, guard_state_untrusted),
     "output-check": ('printf \'%s\\n\' "$payload"', sc_output_full, guard_nonzero_exit),
+    "signal-block": (':', sc_post_write_term, guard_single_terminal_line),
     "capture-check": ('payload=$(emit_all)', sc_emit_fails, guard_failed),
     "state-lost": (':', sc_state_lost, guard_state_untrusted),
     "state-dir-mode": (':', sc_dir_mode, guard_state_untrusted),

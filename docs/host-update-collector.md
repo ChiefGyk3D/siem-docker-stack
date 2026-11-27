@@ -159,7 +159,9 @@ It must be an absolute path. Rules:
 The metrics are built in full and written in one step, only after every value is known; if building them fails, nothing is printed and the script exits non-zero. If that write fails (a
 full disk, a closed pipe), the script exits non-zero and does not exit 0 with a partial set; gate
 every health conclusion on a fresh `host_update_check_success == 1`, because a killed process or a
-closed output can still leave no data at all.
+closed output can still leave no data at all. Termination signals (HUP, INT, TERM) are ignored
+once the write begins, so a signal can never append a failure line after a complete payload; exactly one
+terminal status line is printed.
 
 Alert rule suggestions: page on `host_update_check_success == 0` or missing data; on
 `host_update_state_ok == 0`; on `host_update_oldest_pending_age_seconds > 604800` (7 days); on
