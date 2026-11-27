@@ -90,14 +90,21 @@ the n8n container without that volume loses all of them:
 | The imported error handler workflow | Workflow (Error Trigger) | `n8n-setup-alert-router.py --error-workflow` |
 | The private webhook path | Value in the workflow and in the Grafana contact point | A new one is generated on first import and saved to `router-path` in the config directory |
 | Credential `matrix-bot-auth` (optional, for the weekly digest) | Custom Auth with an `Authorization: Bearer <token>` header | `MATRIX_BOT_TOKEN=... n8n-setup-alert-router.py --credentials --with-matrix` |
+| Credential `grafana-viewer-auth` (optional, for the digest collectors) | Custom Auth with an `Authorization: Bearer <Grafana Viewer service account token>` header | `GRAFANA_VIEWER_TOKEN=... n8n-setup-alert-router.py --credentials --with-grafana-viewer` |
 | The imported weekly update digest workflow (optional) | Workflow, imported inactive | `n8n-setup-alert-router.py --digest-workflow n8n/weekly-update-digest.json` |
 | The Discord webhook credential | Existing credential, used by the router's Discord nodes | Not recreated here: it is part of the original n8n setup |
 
 Details that were learned live:
 
 - Credentials import takes plain data and n8n encrypts it. The script sends it
-  over stdin to `n8n import:credentials` inside the container, so no file with
-  a value stays on the host.
+  over stdin to the container, so no file with a value stays on the host. Inside
+  the container the n8n command line needs a file (its documented form is
+  `--input=<file>`; no stdin form is documented, n8n docs "CLI commands", read
+  2026-11-26), so the script writes it into a private directory made by
+  `mktemp -d` (mode 700, random name) with `umask 077` (file mode 600 from
+  creation) and removes both in a shell `trap` on exit or signal. The n8n output
+  is discarded in the container and never printed: the script reports only the
+  exit code, so no error path can show a token.
 - Workflow import needs an `id`. The script makes a fresh 16-hex id, or reuses
   the one you pass as the second argument so a re-run overwrites the earlier
   import (import overwrites by id).
@@ -113,6 +120,44 @@ Details that were learned live:
   token comes from the secret manager through `siem-run` as the environment value
   `MATRIX_BOT_TOKEN`, goes to n8n over stdin like the other secrets, and is never
   on argv and never printed. Add `MATRIX_BOT_TOKEN` to the names `siem-run` injects.
+- The Grafana Viewer credential is created only with `--with-grafana-viewer` (together with
+  `--credentials`, combinable with `--with-matrix`; `--check --with-grafana-viewer` reports
+  `GRAFANA_VIEWER_TOKEN`). The token is a Grafana service account token with the Viewer role, comes
+  through `siem-run` as `GRAFANA_VIEWER_TOKEN`, goes to n8n over stdin and is never on argv or
+  printed. `GRAFANA_BASE_URL` is not a secret: a pass-through line (name only) in the n8n container
+  environment, like `MATRIX_HOMESERVER`; it must be `https` (plain `http` only for loopback).
+  Every needed value and every credential id (8 to 32 letters or digits, all different) is checked
+  before n8n is changed, so a bad value leaves nothing half done. The token loses surrounding
+  whitespace; an empty or multi-line token stops the run. After the import, set the credential's
+  **Allowed HTTP Request Domains** to the Grafana host only (see docs/update-digest.md). This step
+  is required: an import file cannot lock the credential to a host, so until it is done the Viewer
+  token goes to whatever `https` host `GRAFANA_BASE_URL` names. The script prints a reminder after a
+  successful import and cannot check the setting itself.
+
+  **Exit codes of the viewer flow.** After a successful import the command exits with **exit code 40**
+  (imported, domain lock not verified), never 0, so automation cannot treat the step as fully done.
+  Handle it as "done except for the manual lock": do the post-import check below, then record the
+  owner's acceptance of the residuals in docs/update-digest.md (Accepted residuals) before activating
+  the workflow. A failed import keeps the importer's own nonzero code, except that a child code of 40 is reported as 1, so 40 means only "imported, domain lock not verified" and 1 and every other nonzero code mean the import failed (40 is outside the codes the script and the container engine use: 1, 2, 70, 125 to 127). A run
+  without `--with-grafana-viewer` still exits 0 on success.
+
+  The credential file for each import is created under `/dev/shm` when it is a memory-backed mount
+  (checked with `stat -f -c %T`, must print `tmpfs`), so a SIGKILL during the import leaves nothing in
+  the container's writable layer. Otherwise it uses `/tmp` and the script prints a warning; in that
+  case a SIGKILL leaves the file (mode 600 in a mode 700 directory) until the container is recreated.
+
+  **Grafana Viewer credential: post-import check.** Do this before activating the digest workflow:
+  1. In the n8n editor open `grafana-viewer-auth` and confirm **Allowed HTTP Request Domains** is
+     set to Specific Domains with only the Grafana host (no wildcard, no other host).
+  2. In the n8n container confirm the base URL names that same host (value is not a secret; print
+     only that line): `docker exec n8n printenv GRAFANA_BASE_URL`.
+  3. Run the three query nodes once by hand (Execute step). All three must answer HTTP 200.
+  4. Negative check, only with a scratch credential that has the same domain setting but a dummy
+     token (never the real Viewer token) and a scratch copy of the workflow: point its base URL at a
+     host you control that is not on the list; n8n must refuse the request. If the request arrives,
+     the restriction is not in effect: stop and fix the credential before going on.
+  Not verified: whether the domain restriction applies to a Custom Auth credential, and whether n8n
+  reports the refusal as an error (check 4 shows both on your install).
 - `--digest-workflow n8n/weekly-update-digest.json [ID] [--error-workflow-id HANDLER_ID]`
   imports the weekly digest inactive and maps its Discord and `matrix-bot-auth`
   credential ids. Import the error handler first and pass its id, as for the
