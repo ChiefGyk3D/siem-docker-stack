@@ -739,8 +739,10 @@ Round 5 choices and their reasons:
   it succeeded, failed, timed out or was killed). It holds `collector.json` and `writer.json`, each
   repeating the run id, and `manifest.json` (written last) with the run id and the SHA-256 of both
   files. The broker's `ExecStartPost=+` (root, fixed arguments) validates it (exactly one
-  generation, no symlink followed, digests and ids agree), copies it to the root-owned
-  `/run/twingate-collect/<run id>/` and points the symlink `/run/twingate-collect/current` at it.
+  generation, no symlink followed for the files inside it, digests and ids agree, the id exactly 32
+  lowercase hex characters), copies it to the root-owned
+  `/run/twingate-collect/<run id>/` and points the symlink `/run/twingate-collect/current` at it. A run id that already exists there is refused and the existing
+  generation is left untouched.
   Only root can write there. Each stage receives the manifest and its own file as credentials and
   refuses to start when the manifest is missing, the file does not match its digest, or the ids
   differ, so a stale file can never be replayed even if a stage is started by hand.

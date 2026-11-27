@@ -507,11 +507,11 @@ def run_fetch(env):
                           stdin=subprocess.DEVNULL, timeout=30)
 
 
-RUN_ID = re.compile(r"^[0-9a-f]{32}$")
+RUN_ID = re.compile(r"[0-9a-f]{32}")
 
 
 def generations(d):
-    return sorted(x for x in d.iterdir() if RUN_ID.match(x.name))
+    return sorted(x for x in d.iterdir() if RUN_ID.fullmatch(x.name))
 
 
 def test_fetch_writes_one_generation_with_a_manifest_and_never_the_service_token(tmp_path):
@@ -525,7 +525,7 @@ def test_fetch_writes_one_generation_with_a_manifest_and_never_the_service_token
     assert set(col["secrets"]) == {"TWINGATE_API_KEY", "TWINGATE_NETWORK_URL", "TWINGATE_EXPECTED_CONNECTORS"}
     assert set(wri["secrets"]) == {"TWINGATE_INFLUX_USER", "TWINGATE_INFLUX_PASSWORD"}
     manifest = json.loads((gen / "manifest.json").read_text())
-    assert manifest["run_id"] == gen.name == col["run_id"] == wri["run_id"] and RUN_ID.match(manifest["run_id"])
+    assert manifest["run_id"] == gen.name == col["run_id"] == wri["run_id"] and RUN_ID.fullmatch(manifest["run_id"])
     assert manifest["files"] == {n: hashlib.sha256((gen / n).read_bytes()).hexdigest() for n in ("collector.json", "writer.json")}
     for f in gen.iterdir():
         text = f.read_text()
@@ -653,6 +653,14 @@ def test_writer_stage_gets_the_check_output_on_stdin_and_only_the_influx_login(s
     assert saw["stdin"] == GOOD and "TWINGATE_API_KEY" not in saw["env"] and "TWINGATE_NETWORK_URL" not in saw["env"]
     assert saw["env"]["INFLUX_URL"] == "http://127.0.0.1:8086" and TOKEN not in json.dumps(saw)
     assert PASSWORD not in json.dumps(saw["argv"])
+
+
+def test_stage_refuses_a_run_id_with_a_trailing_newline(stage_tree):
+    # R5-2: the id is exactly 32 lowercase hex characters, nothing after it
+    root, script, cred = stage_tree
+    make_generation(cred, RID_A + "\n", {"collector.json": COL_SECRETS})
+    p = run_stage(script, "collector", cred)
+    assert p.returncode != 0 and not (root / "collector-saw.json").exists()
 
 
 def test_generation_replay_is_refused_at_every_stage(stage_tree):
@@ -785,6 +793,46 @@ def test_publish_refuses_a_mismatched_tampered_missing_or_ambiguous_generation_a
     (src.parent / "empty").mkdir()
     assert run_gen("publish", "--src", str(src.parent / "empty"), "--dest", str(dest)).returncode != 0
     assert not generations(dest) and not (dest / "current").exists()
+
+
+def rewrite_generation(gdir, new_name, secrets_for_writer):
+    """Return a broker generation renamed to new_name whose files and manifest agree with that name."""
+    target = gdir.parent / new_name
+    gdir.rename(target)
+    files = {n: json.dumps({"run_id": new_name, "secrets": secrets_for_writer}).encode()
+             for n in ("collector.json", "writer.json")}
+    for n, raw in files.items():
+        (target / n).write_bytes(raw)
+    (target / "manifest.json").write_text(json.dumps(
+        {"version": 1, "run_id": new_name, "files": {n: hashlib.sha256(r).hexdigest() for n, r in files.items()}}))
+    return target
+
+
+def test_publish_colliding_with_an_existing_generation_refuses_and_leaves_it_intact(gen_dirs):
+    # R5-1: a repeated run id must never delete the generation that is already published and claimed
+    src, dest = gen_dirs
+    g = broker_generation(src)
+    assert run_gen("publish", "--src", str(src), "--dest", str(dest)).returncode == 0
+    assert run_gen("claim", "--dest", str(dest)).returncode == 0
+    before = {n: (dest / g.name / n).read_bytes() for n in ("collector.json", "writer.json", "manifest.json")}
+    shutil.rmtree(src)
+    src.mkdir()
+    g2 = broker_generation(tmp := src.parent / "b-collide")
+    rewrite_generation(g2, g.name, {"TWINGATE_INFLUX_PASSWORD": "different"})
+    assert run_gen("publish", "--src", str(tmp), "--dest", str(dest)).returncode != 0
+    assert {n: (dest / g.name / n).read_bytes() for n in before} == before          # original survives untouched
+    assert os.readlink(dest / "current") == g.name and (dest / "claim").read_text() == g.name
+    assert run_gen("cleanup", "--dest", str(dest)).returncode == 0                  # claim still names a real one
+    assert not (dest / g.name).exists()
+
+
+def test_a_run_id_with_a_trailing_newline_is_not_a_generation(gen_dirs):
+    # R5-2: `$` would accept "<32 hex>\n"; the id must be exactly 32 lowercase hex characters
+    src, dest = gen_dirs
+    g = broker_generation(src)
+    rewrite_generation(g, g.name + "\n", {"TWINGATE_INFLUX_PASSWORD": "x"})
+    assert run_gen("publish", "--src", str(src), "--dest", str(dest)).returncode != 0
+    assert not list(dest.iterdir())                  # nothing published, no pointer, no temp file
 
 
 def test_publish_does_not_follow_a_symlink_planted_in_the_generation(gen_dirs, tmp_path):

@@ -26,7 +26,7 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 PYTHON = "/usr/bin/python3"
 MAX_BYTES = 65536
-RUN_ID = re.compile(r"^[0-9a-f]{32}$")
+RUN_ID = re.compile(r"[0-9a-f]{32}")   # always used with fullmatch
 HEADER = "# twingate-run "
 STAGES = {
     "collector": {
@@ -66,7 +66,7 @@ def load_generation(cred, stage):
     if not isinstance(manifest, dict) or not isinstance(manifest.get("files"), dict):
         raise ValueError("manifest")
     run_id = manifest.get("run_id")
-    if not isinstance(run_id, str) or not RUN_ID.match(run_id):
+    if not isinstance(run_id, str) or not RUN_ID.fullmatch(run_id):
         raise ValueError("run id")
     raw = read_credential(cred, "env")
     want = manifest["files"].get(stage["file"])

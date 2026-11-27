@@ -18,7 +18,7 @@ import secrets
 import shutil
 import sys
 
-RUN_ID = re.compile(r"^[0-9a-f]{32}$")
+RUN_ID = re.compile(r"[0-9a-f]{32}")   # always used with fullmatch
 STAGE_NAMES = {
     "collector.json": ("TWINGATE_API_KEY", "TWINGATE_NETWORK_URL", "TWINGATE_CONNECTOR_MANAGED_BY_FILE",
                        "TWINGATE_CONNECTOR_MANAGED_BY", "TWINGATE_EXPECTED_CONNECTORS"),
@@ -37,7 +37,7 @@ def write_private(directory, name, data):
 
 def remove_generations(directory):
     for entry in os.listdir(directory):
-        if RUN_ID.match(entry):
+        if RUN_ID.fullmatch(entry):
             path = os.path.join(directory, entry)
             if os.path.islink(path):
                 os.unlink(path)

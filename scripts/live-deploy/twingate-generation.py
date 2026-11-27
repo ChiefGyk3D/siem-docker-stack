@@ -4,7 +4,7 @@
 Run only from `+` (privileged) unit commands, with fixed arguments:
 
   publish --src DIR --dest DIR   validate the one generation the broker wrote under DIR and copy
-                                 it to the root-owned DEST/<run id>/ (no symlink followed), then
+                                 it to the root-owned DEST/<run id>/ (no symlink followed for the files inside it), then
                                  point DEST/current at it and remove every older generation
   claim   --dest DIR             the writer records which generation it is about to consume
   cleanup --dest DIR             remove exactly the claimed generation, never any other
@@ -25,7 +25,7 @@ import re
 import shutil
 import sys
 
-RUN_ID = re.compile(r"^[0-9a-f]{32}$")
+RUN_ID = re.compile(r"[0-9a-f]{32}")   # always used with fullmatch: `$` would accept a trailing newline
 MAX_BYTES = 65536
 FILES = ("collector.json", "writer.json")
 
@@ -56,7 +56,7 @@ def read_bounded(directory, name):
 
 
 def generations(directory):
-    return sorted(e for e in os.listdir(directory) if RUN_ID.match(e))
+    return sorted(e for e in os.listdir(directory) if RUN_ID.fullmatch(e))
 
 
 def claimed(dest):
@@ -64,7 +64,7 @@ def claimed(dest):
         raw = read_bounded(dest, "claim").decode("ascii").strip()
     except (OSError, ValueError):
         return None
-    return raw if RUN_ID.match(raw) else None
+    return raw if RUN_ID.fullmatch(raw) else None
 
 
 def remove_generation(dest, run_id):
@@ -86,7 +86,7 @@ def atomic_private(path, raw):
 
 def publish(src, dest):
     secure_dest(dest)
-    found = [e for e in os.listdir(src) if RUN_ID.match(e)]
+    found = [e for e in os.listdir(src) if RUN_ID.fullmatch(e)]
     if len(found) != 1:
         raise ValueError("expected exactly one generation")
     run_id = found[0]
@@ -109,8 +109,8 @@ def publish(src, dest):
             raise ValueError("file belongs to another run")
         contents[name] = raw
     target = os.path.join(dest, run_id)
+    os.mkdir(target, 0o700)      # an existing generation of this id is a collision: refuse, touch nothing
     try:
-        os.mkdir(target, 0o700)
         for name in FILES:
             atomic_private(os.path.join(target, name), contents[name])
         atomic_private(os.path.join(target, "manifest.json"), manifest_raw)
@@ -131,7 +131,7 @@ def publish(src, dest):
 def claim(dest):
     secure_dest(dest)
     run_id = os.readlink(os.path.join(dest, "current"))
-    if not RUN_ID.match(run_id) or not os.path.isdir(os.path.join(dest, run_id)):
+    if not RUN_ID.fullmatch(run_id) or not os.path.isdir(os.path.join(dest, run_id)):
         raise ValueError("no current generation")
     atomic_private(os.path.join(dest, "claim"), run_id.encode("ascii"))
 
