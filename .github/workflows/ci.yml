@@ -30,7 +30,7 @@ jobs:
       shfmt-continue-on-error: true
       # The old ci.yml's non-shell checks, kept as the test, in its own order:
       # compose, promtool, amtool, logstash, Wazuh XML and rule ids, pytest.
-      test-install-command: python3 -m pip install --user pytest requests pyyaml
+      test-install-command: python3 -m pip install --user pytest requests pyyaml pytest-xdist==3.8.0
       test-command: |
         # The root-hardening tests run the firewall script as uid 0 inside `unshare -r`.
         # Ubuntu 24.04 restricts unprivileged user namespaces with AppArmor, so lift that on
@@ -119,7 +119,7 @@ jobs:
         sys.exit(bad)
         PY
         python3 scripts/check-wazuh-rule-ids.py wazuh
-        python3 -m pytest tests/python -q
+        python3 -m pytest tests/python -q -n auto --durations=25
       # x86_64 only: the test pulls Docker Hub images (logstash-oss-with-opensearch-output-plugin
       # is not published for arm64). No distros: the checks are about this stack's configs, not an OS.
       runners: '["ubuntu-24.04"]'

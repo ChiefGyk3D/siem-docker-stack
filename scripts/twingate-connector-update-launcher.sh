@@ -41,7 +41,12 @@ if [ -z "$WHY" ]; then
     # and POSIX sh cannot ask for a non-blocking open); the file is never written.
     # The test only keeps the open from creating a missing file, and a read-only
     # file system (or a file root cannot write) is refused here for the same reason.
-    if [ -e "$UPDATER" ] && [ -w "$UPDATER" ] && [ ! -d "$UPDATER" ]; then exec 4<>"$UPDATER"; else WHY="the updater is missing, not writable by root (the open needs it), or not a regular file"; fi
+    # In a POSIX shell a failed redirection on exec ends the shell at once, with the
+    # shell's own text. "command exec" (a builtin, it never searches PATH) returns the
+    # failure instead, so it becomes the same one-line refusal as every other check.
+    if [ -e "$UPDATER" ] && [ -w "$UPDATER" ] && [ ! -d "$UPDATER" ]; then
+        if ! { command exec 4<>"$UPDATER"; } 2>/dev/null; then WHY="the updater could not be opened"; fi
+    else WHY="the updater is missing, not writable by root (the open needs it), or not a regular file"; fi
     if [ -z "$WHY" ] && { [ ! -f /dev/fd/4 ] || [ -L "$UPDATER" ]; }; then WHY="the updater is not a regular file (or is a symbolic link)"; fi
 fi
 if [ -z "$WHY" ]; then
