@@ -326,6 +326,102 @@ def test_oversized_status_json_is_unknown(env):
     net_unknown(env.run())
 
 
+# the parse is bounded in size (the walker never sees more than the cap) and so in time
+HOSTILE_JSON = {
+    "pad-just-over-cap": '{"pad":"' + "x" * 3000 + '","version":"10.6.109"}',
+    "pad-8k": '{"pad":"' + "x" * 8150 + '","version":"10.6.109"}',
+    "deep-in-cap": '{"a":' + "[" * 1500 + "]" * 1500 + ',"version":"10.6.109"}',
+    "deep-huge": '{"a":' + "[" * 200000 + "]" * 200000 + ',"version":"10.6.109"}',
+    "opens-only": "{" + '"a":{' * 3000,
+    "one-mebibyte": '{"pad":"' + "x" * 1000000 + '","version":"10.6.109"}',
+}
+
+
+@pytest.mark.parametrize("name", sorted(HOSTILE_JSON))
+def test_hostile_status_json_is_bounded_in_time_and_unknown(env, name):
+    env.sfix.write_text(status_with(HOSTILE_JSON[name]), encoding="utf-8")
+    start = time.time()
+    r = env.run(timeout=60)
+    assert time.time() - start < 10
+    net_unknown(r)
+
+
+def test_status_line_of_over_8k_anywhere_is_unknown_and_fast(env):
+    env.sfix.write_text("x" * 3000000 + "\n" + status_with('{"version":"10.6.109"}'), encoding="utf-8")
+    start = time.time()
+    r = env.run(timeout=60)
+    assert time.time() - start < 10
+    net_unknown(r)
+
+
+def test_normal_status_still_parses_and_is_quick(env):
+    start = time.time()
+    assert_ok(env.run())
+    assert time.time() - start < 10
+
+
+@pytest.mark.parametrize("js", ['{,"version":"10.6.109"}', '{"version":"10.6.109",}', '{"a":1,,"version":"10.6.109"}',
+                                '{"version":"10.6.109",,}', '{"note":"bad\\q","version":"10.6.109"}',
+                                '{"note":"bad\\u12G4","version":"10.6.109"}', '{"note":"bad\\u12","version":"10.6.109"}'])
+def test_malformed_json_grammar_is_unknown(env, js):
+    env.sfix.write_text(status_with(js), encoding="utf-8")
+    net_unknown(env.run())
+
+
+def test_valid_escapes_are_accepted(env):
+    js = '{"note":"a\\"b\\\\c\\/d\\n\\t\\u00e9\\uABCD","a":[1,2,{"b":null}],"version":"10.6.109"}'
+    env.sfix.write_text(status_with(js), encoding="utf-8")
+    assert_ok(env.run())
+
+
+def test_empty_object_is_unknown(env):
+    env.sfix.write_text(status_with("{}"), encoding="utf-8")
+    net_unknown(env.run())
+
+
+def test_mutant_json_cap_guard_bites(env):
+    env.sfix.write_text(status_with(HOSTILE_JSON["pad-just-over-cap"]), encoding="utf-8")
+    net_unknown(env.run())
+    m = mutant(env, "net-json-cap", ":")
+    assert 'network_version="10.6.109"' in text(env.run(script=m, timeout=120))
+
+
+def test_mutant_line_cap_guard_bites(env):
+    env.sfix.write_text(status_with('{"version":"10.6.109"}', "y" * 9000 + "\n"), encoding="utf-8")
+    net_unknown(env.run())
+    m = mutant(env, "net-line-cap", ":")
+    assert 'network_version="10.6.109"' in text(env.run(script=m))
+
+
+def test_mutant_comma_guard_bites(env):
+    env.sfix.write_text(status_with('{"version":"10.6.109",}'), encoding="utf-8")
+    net_unknown(env.run())
+    m = mutant(env, "net-comma", '",") st=k; continue ;;')
+    assert 'network_version="10.6.109"' in text(env.run(script=m))
+
+
+def test_mutant_escape_guard_bites(env):
+    env.sfix.write_text(status_with('{"note":"bad\\q","version":"10.6.109"}'), encoding="utf-8")
+    net_unknown(env.run())
+    m = mutant(env, "net-escape", "*) ;;")
+    assert 'network_version="10.6.109"' in text(env.run(script=m))
+
+
+def test_doc_cron_line_does_not_deliver_an_empty_line(env):
+    body = doc_cron_command()
+    deliver = env.bin / "deliver2"
+    got = env.tmp / "delivered2.txt"
+    deliver.write_text(f"#!/bin/sh\ncat >> {shlex.quote(str(got))}\n", encoding="utf-8")
+    deliver.chmod(0o755)
+    empty = env.bin / "collector-empty"
+    empty.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    empty.chmod(0o755)
+    cmd = body.replace("/opt/siem/scripts/unifi-os-version-metric.sh", str(empty))
+    cmd = cmd.replace("/opt/siem/deliver-metrics", str(deliver))
+    r = subprocess.run(["/bin/sh", "-c", cmd], capture_output=True, timeout=30)
+    assert r.returncode != 0 and not got.exists()
+
+
 # ------------------------------------------------------------------ root is refused; no detached survivor holds the run
 def fake_id(env, out, name="id"):
     p = env.bin / name

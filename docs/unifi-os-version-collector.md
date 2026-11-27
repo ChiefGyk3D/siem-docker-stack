@@ -28,8 +28,15 @@ fails or reports `unknown` in time:
   accepted: digits and dots, starting and ending with a digit, no empty component, at most 32
   characters. Output is cut at 128 bytes while it is read. Anything else fails the run.
 - `uosserver status` is read **only** for the top-level `version` member of the JSON object on the
-  Status line of the `unifi.service` block (the Network app version, for example `10.6.109`). Output is cut at 1 MiB and 20000 lines.
-  Nothing else in that output is parsed, stored or printed.
+  Status line of the `unifi.service` block (the Network app version, for example `10.6.109`). Work is bounded in size and time: output is
+  cut at 1 MiB and 20000 lines, a single line over 8192 bytes and a Status JSON over 2048 bytes are
+  not parsed (the shell walks the JSON one character at a time, so time grows with the square of its
+  size; a real Status object is a few hundred bytes). Hitting any of these bounds gives
+  `network_version="unknown"` and a fixed reason on stderr, never any status text. The accepted
+  limit: a legitimately longer status output (the unifi block past the first 1 MiB or 20000 lines)
+  also gives `unknown`; the real output is a few KB, and bounded work wins over completeness here.
+  The JSON must be well formed in the parts the walker reads (no leading, doubled or trailing comma,
+  valid string escapes). Nothing else in that output is parsed, stored or printed.
 
 plus `id`, `date`, `head`, `tr`, `timeout` and `env`. No sudo, no network, no write to disk.
 
@@ -115,12 +122,12 @@ paste the raw status output anywhere public.
 
 A weekly job is enough (versions change rarely). Run `crontab -e` as your ordinary user and add this
 one line, with the same kind of bound as the host collector (the delivery command is a placeholder).
-It captures the collector's line first and delivers only when the collector succeeded, so a failed
-collection is a failed cron run (visible in cron's mail or log) and nothing partial is delivered; a
-plain pipe would hide the collector's exit code, because `sh` reports only the last command of a pipe:
+It captures the collector's line first and delivers only when the collector succeeded and printed something
+(an empty line is never delivered), so a failed collection is a failed cron run (visible in cron's
+mail or log) and nothing partial is delivered; a plain pipe would hide the collector's exit code, because `sh` reports only the last command of a pipe:
 
 ```
-17 6 * * 1 HOST_LABEL=pi-example timeout --kill-after=30s 2m sh -c 'l=$(/opt/siem/scripts/unifi-os-version-metric.sh) && echo "$l" | /opt/siem/deliver-metrics'
+17 6 * * 1 HOST_LABEL=pi-example timeout --kill-after=30s 2m sh -c 'l=$(/opt/siem/scripts/unifi-os-version-metric.sh) && [ -n "$l" ] && echo "$l" | /opt/siem/deliver-metrics'
 ```
 
 ## Delivery is not decided

@@ -138,6 +138,12 @@ valid_ver "$os_ver" || fail "uosserver version is not a strict version string"
 # (or the second, after a bullet) ending in .service. Exactly one Status line in the unifi block(s)
 # and, in that line's JSON object, exactly one TOP-LEVEL member named version holding a strict version
 # string (see top_version); anything else is "unknown". Prints one word.
+# A bound was hit: a fixed reason on stderr (never any status text) and an unknown Network version.
+net_cap() {
+    echo "unifi-os-version-metric: $1; Network version unknown" >&2
+    echo unknown
+}
+
 net_version() {
     in_block=0
     n_status=0
@@ -146,10 +152,8 @@ net_version() {
     last=""
     while IFS= read -r line; do
         n_lines=$((n_lines + 1))
-        if [ "$n_lines" -gt 20000 ]; then
-            echo unknown
-            return 0
-        fi
+        if [ "$n_lines" -gt 20000 ]; then net_cap "status output has too many lines"; return 0; fi
+        if [ "${#line}" -gt 8192 ]; then net_cap "a status line is over 8192 bytes"; return 0; fi # MUTATE:net-line-cap
         last=$line
         t=${line#"${line%%[!"$ws"]*}"}
         w1=${t%%["$ws"]*}
@@ -181,7 +185,9 @@ net_version() {
     if [ "$n_status" -ne 1 ]; then echo unknown; return 0; fi # MUTATE:net-status-count
     rest=${status_line#"Status:"}
     rest=${rest#"${rest%%[!"$ws"]*}"}
-    if [ "${#rest}" -gt 8192 ]; then echo unknown; return 0; fi
+    # Hard cap on what the walker is fed: the shell walks one character at a time, so its time grows
+    # with the square of the size. A real Status object is a few hundred bytes.
+    if [ "${#rest}" -gt 2048 ]; then net_cap "status JSON is over 2048 bytes"; return 0; fi # MUTATE:net-json-cap
     top_version "$rest"
 }
 
@@ -195,6 +201,7 @@ top_version() {
     depth=0
     instr=0
     esc=0
+    uhex=0
     cur=""
     st=k
     pv=0
@@ -208,8 +215,19 @@ top_version() {
         top=0
         [ "$depth" -eq 1 ] && top=1 # MUTATE:net-depth
         if [ "$instr" -eq 1 ]; then
-            if [ "$esc" -eq 1 ]; then
+            if [ "$uhex" -gt 0 ]; then
+                # four hex digits after \u
+                case "$c" in
+                    [0-9A-Fa-f]) uhex=$((uhex - 1)); cur="$cur$c" ;;
+                    *) echo unknown; return 0 ;;
+                esac
+            elif [ "$esc" -eq 1 ]; then
                 esc=0
+                case "$c" in
+                    '"' | "\\" | "/" | b | f | n | r | t) ;;
+                    u) uhex=4 ;;
+                    *) echo unknown; return 0 ;; # MUTATE:net-escape
+                esac
                 cur="$cur$c"
             else
                 case "$c" in
@@ -247,11 +265,12 @@ top_version() {
         fi
         if [ "$top" -eq 1 ]; then
             case "$st" in
-                k)
+                k | m)
+                    # k: right after the opening brace (a key or the closing brace);
+                    # m: right after a comma (a key only, so no leading, doubled or trailing comma)
                     case "$c" in
                         '"') instr=1; cur=""; st=K; continue ;;
-                        ",") continue ;;
-                        "}") ;;
+                        "}") [ "$st" = k ] || { echo unknown; return 0; } ;;
                         *) echo unknown; return 0 ;;
                     esac
                     ;;
@@ -271,7 +290,7 @@ top_version() {
                     ;;
                 o)
                     case "$c" in
-                        ",") st=k; continue ;;
+                        ",") st=m; continue ;; # MUTATE:net-comma
                     esac
                     ;;
             esac
