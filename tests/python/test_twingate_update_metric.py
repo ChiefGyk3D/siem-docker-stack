@@ -67,7 +67,20 @@ class Fakes:
 def run(gql_pages, tag_pages, env=None, extra_env=None):
     f = Fakes(gql_pages, tag_pages)
     e = dict(ENV if env is None else env)
-    e.update(extra_env or {})
+    extra = dict(extra_env or {})
+    if "TWINGATE_EXPECTED_CONNECTORS" not in extra and env is None:
+        # the expected inventory is required: default to every well-named connector in the pages
+        names = []
+        for p in gql_pages:
+            try:
+                names += [e["node"]["name"] for e in p["data"]["connectors"]["edges"]]
+            except (TypeError, KeyError):
+                pass
+        names = [n for n in names if isinstance(n, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,64}", n)]
+        extra["TWINGATE_EXPECTED_CONNECTORS"] = json.dumps(list(dict.fromkeys(names)) or ["anchor"])
+    e.update(extra)
+    for k in [k for k, v in e.items() if v is None]:
+        del e[k]
     out, err = io.StringIO(), io.StringIO()
     rc = tm.main(e, post=f.post, get=f.get, stdout=out, stderr=err)
     return rc, out.getvalue(), err.getvalue(), f
@@ -93,6 +106,7 @@ def test_up_to_date_connector():
     assert lines(out) == [
         "twingate_connector_behind,connector=tg-a,managed_by=docker value=0i",
         "twingate_connector_up,connector=tg-a,managed_by=docker value=1i",
+        "twingate_unexpected_connector value=0i",
         "twingate_update_check_success value=1i",
     ]
 
@@ -236,20 +250,21 @@ def test_redirects_are_refused_by_the_real_transport():
     "a b", "a=b", 'a"b', "line\nbreak", "tab\there", "a\\b", "🙂", "x" * 500, "", "   ",
 ])
 def test_malicious_names_cannot_inject_line_protocol(name):
-    rc, out, _, _ = run([conn_page([node(name, "1.96.0")])], [LATEST])
+    rc, out, _, _ = run([conn_page([node("anchor", "1.96.0"), node(name, "1.96.0")])], [LATEST])
     assert rc == 0
     ls = lines(out)
-    assert len(ls) == 3, ls
-    for ln in ls[:2]:
+    assert len(ls) == 6, ls
+    assert ls[4] == "twingate_unexpected_connector value=1i"
+    for ln in ls[2:4]:
         assert re.fullmatch(r"twingate_connector_(behind|up),connector=[A-Za-z0-9._-]{1,64},managed_by=(docker|systemd|operator) value=\di", ln), ln
-    assert ls[2] == "twingate_update_check_success value=1i"
+    assert ls[5] == "twingate_update_check_success value=1i"
 
 
 def test_names_that_sanitize_to_the_same_tag_stay_distinct():
-    rc, out, _, _ = run([conn_page([node("a b", "1.96.0"), node("a,b", "1.89.0")])], [LATEST])
+    rc, out, _, _ = run([conn_page([node("anchor", "1.96.0"), node("a b", "1.96.0"), node("a,b", "1.89.0")])], [LATEST])
     assert rc == 0
     tagset = [m.group(1) for m in re.finditer(r"twingate_connector_up,connector=(\S+?),", out)]
-    assert len(tagset) == 2 and len(set(tagset)) == 2
+    assert len(tagset) == 3 and len(set(tagset)) == 3
 
 
 def test_oversized_or_hostile_state_is_just_down():
@@ -338,9 +353,9 @@ def test_file_wins_over_inline_when_both_are_set(tmp_path):
 
 
 def test_mapping_matches_the_raw_name_not_the_sanitized_one():
-    rc, out, _, _ = run([conn_page([node("my connector", "1.89.0")])], [LATEST],
+    rc, out, _, _ = run([conn_page([node("anchor", "1.96.0"), node("my connector", "1.89.0")])], [LATEST],
                         extra_env={"TWINGATE_CONNECTOR_MANAGED_BY": json.dumps({"my connector": "operator"})})
-    assert rc == 0 and managed(out) == {"my_connector": "operator"}
+    assert rc == 0 and managed(out) == {"anchor": "docker", "my_connector": "operator"}
 
 
 @pytest.mark.parametrize("cfg", [
@@ -388,7 +403,7 @@ def test_rules_ship_paused_with_alerting_error_states():
     rs = rules()
     assert set(rs) == {"update-twingate-pending-7d", "update-twingate-pending-14d",
                        "update-twingate-operator-behind", "update-twingate-check-failing",
-                       "update-twingate-connector-down"}
+                       "update-twingate-connector-down", "update-twingate-unexpected-connector"}
     for uid, r in rs.items():
         assert r["isPaused"] is True, uid
         assert r["noDataState"] == "Alerting" and r["execErrState"] == "Alerting", uid
@@ -458,7 +473,7 @@ def test_every_rule_title_is_in_the_router_allowlist():
     js = next(n["parameters"]["jsCode"] for n in wf["nodes"] if "ALLOWED_ALERTNAMES" in n.get("parameters", {}).get("jsCode", ""))
     listed = set(re.findall(r"'([^']*)'", re.search(r"const ALLOWED_ALERTNAMES = \[(.*?)\];", js, re.S).group(1)))
     titles = {r["title"] for r in rules().values()}
-    assert len(titles) == 5 and titles <= listed
+    assert len(titles) == 6 and titles <= listed
 
 
 def test_docs_cover_twingate_collector_and_management_modes():
@@ -474,3 +489,117 @@ def test_docs_cover_twingate_collector_and_management_modes():
     assert "unlisted" in flat.lower() or "not listed" in flat.lower()
     # placeholders only: no real key shape or network name
     assert not re.search(r"\b[A-Za-z0-9_-]{40,}\b", text.split("### Twingate data")[1].split("### Label taxonomy")[0])
+
+
+# --- review round 1 hardening --------------------------------------------------
+
+@pytest.mark.parametrize("info", [None, {}, {"endCursor": "x"}, {"hasNextPage": "false"}, {"hasNextPage": None}, []])
+def test_missing_or_malformed_page_info_fails_closed(info):
+    page = conn_page([node("only-one", "1.96.0")])
+    if info is None:
+        del page["data"]["connectors"]["pageInfo"]
+    else:
+        page["data"]["connectors"]["pageInfo"] = info
+    rc, out, _, _ = run([page], [LATEST])
+    assert_failed_closed(rc, out)
+
+
+def test_truncated_release_pagination_fails_closed():
+    endless = [tags_page("1.95.0", nxt="still-more")] * 50
+    rc, out, _, f = run([conn_page([node("a", "1.95.0")])], endless)
+    assert_failed_closed(rc, out)
+    assert len(f.get_calls) == tm.MAX_TAG_PAGES
+
+
+def test_release_pagination_ending_on_the_last_allowed_page_is_accepted():
+    pages = [tags_page("1.95.0", nxt="more")] * (tm.MAX_TAG_PAGES - 1) + [tags_page("1.96.0")]
+    rc, out, _, _ = run([conn_page([node("a", "1.95.0")])], pages)
+    assert rc == 0
+
+
+def up_lines(out):
+    return [ln for ln in lines(out) if ln.startswith("twingate_connector_up")]
+
+
+def test_an_expected_connector_missing_from_the_inventory_fails_closed_and_reads_as_down():
+    two = {"TWINGATE_EXPECTED_CONNECTORS": '["a", "b"]'}
+    rc, out, _, _ = run([conn_page([node("a", "1.96.0")])], [LATEST], extra_env=two)
+    assert rc != 0
+    # no healthy per-connector data; the missing name is written as down so the "not ALIVE" rule fires
+    assert lines(out) == ["twingate_connector_up,connector=b,managed_by=docker value=0i",
+                          "twingate_update_check_success value=0i"]
+    rc, out, _, _ = run([conn_page([node("a", "1.96.0"), node("b", "1.96.0")])], [LATEST], extra_env=two)
+    assert rc == 0 and "twingate_update_check_success value=1i" in lines(out)
+
+
+def test_a_missing_expected_connector_keeps_its_management_mode_and_compares_case_insensitively():
+    cfg = {"TWINGATE_EXPECTED_CONNECTORS": '["a", "Bee"]',
+           "TWINGATE_CONNECTOR_MANAGED_BY": json.dumps({"Bee": "operator"})}
+    rc, out, _, _ = run([conn_page([node("a", "1.96.0")])], [LATEST], extra_env=cfg)
+    assert rc != 0 and "connector=Bee,managed_by=operator value=0i" in out
+    rc, out, _, _ = run([conn_page([node("A", "1.96.0"), node("bee", "1.96.0")])], [LATEST], extra_env=cfg)
+    assert rc == 0
+
+
+@pytest.mark.parametrize("bad", [None, "", "   ", "[]", " [ ] ", "not json", '{"a": 1}', "[1]", '[""]', '["a","a"]',
+                                 '["a","A"]', '["a b"]', '["a,b"]', '["a=b"]', '["a\\nb"]', '["x' + "y" * 70 + '"]',
+                                 "null", '"a"', '[["a"]]'])
+def test_expected_inventory_is_required_and_strict(bad):
+    rc, out, _, f = run([conn_page([node("a", "1.96.0")])], [LATEST], extra_env={"TWINGATE_EXPECTED_CONNECTORS": bad})
+    assert_failed_closed(rc, out)
+    assert not f.gql_calls
+
+
+def test_unlisted_connectors_are_counted_not_failed():
+    rc, out, _, _ = run([conn_page([node("a", "1.96.0"), node("new-one", "1.96.0"), node("new-two", "1.96.0")])],
+                        [LATEST], extra_env={"TWINGATE_EXPECTED_CONNECTORS": '["a"]'})
+    assert rc == 0
+    assert "twingate_unexpected_connector value=2i" in lines(out)
+    assert "twingate_update_check_success value=1i" in lines(out)
+    assert len(up_lines(out)) == 3
+
+
+# --- review round 2 hardening: inventory integrity -----------------------------
+
+def test_duplicate_connector_names_fail_closed_across_pages_and_within_a_page():
+    p1 = conn_page([node("a", "1.96.0")], True, "c1")
+    p2 = conn_page([node("a", "1.96.0")], False)
+    rc, out, _, _ = run([p1, p2], [LATEST])
+    assert_failed_closed(rc, out)
+    rc, out, _, _ = run([conn_page([node("a", "1.96.0"), node("a", "1.96.0")])], [LATEST])
+    assert_failed_closed(rc, out)
+    rc, out, _, _ = run([conn_page([node("a", "1.96.0"), node("A", "1.96.0")])], [LATEST],
+                        extra_env={"TWINGATE_EXPECTED_CONNECTORS": '["a"]'})
+    assert_failed_closed(rc, out)
+
+
+def test_duplicate_connector_ids_fail_closed():
+    one, two = dict(node("a", "1.96.0"), id="id-1"), dict(node("b", "1.96.0"), id="id-1")
+    rc, out, _, _ = run([conn_page([one, two])], [LATEST])
+    assert_failed_closed(rc, out)
+    two["id"] = "id-2"
+    rc, out, _, _ = run([conn_page([one, two])], [LATEST])
+    assert rc == 0
+
+
+def test_a_repeated_cursor_fails_closed():
+    p1 = conn_page([node("a", "1.96.0")], True, "same")
+    p2 = conn_page([node("b", "1.96.0")], True, "same")
+    p3 = conn_page([node("c", "1.96.0")], False)
+    rc, out, _, _ = run([p1, p2, p3], [LATEST], extra_env={"TWINGATE_EXPECTED_CONNECTORS": '["a","b","c"]'})
+    assert_failed_closed(rc, out)
+
+
+def test_a_page_that_adds_nothing_while_more_pages_are_promised_fails_closed():
+    p1 = conn_page([node("a", "1.96.0")], True, "c1")
+    p2 = conn_page([], True, "c2")
+    p3 = conn_page([node("b", "1.96.0")], False)
+    rc, out, _, _ = run([p1, p2, p3], [LATEST], extra_env={"TWINGATE_EXPECTED_CONNECTORS": '["a","b"]'})
+    assert_failed_closed(rc, out)
+
+
+def test_a_repeated_final_page_is_not_accepted():
+    p1 = conn_page([node("a", "1.96.0")], True, "c1")
+    p2 = conn_page([node("a", "1.96.0")], False)
+    rc, out, _, _ = run([p1, p2], [LATEST], extra_env={"TWINGATE_EXPECTED_CONNECTORS": '["a"]'})
+    assert_failed_closed(rc, out)
