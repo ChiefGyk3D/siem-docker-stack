@@ -18,15 +18,20 @@ writer.json and manifest.json (run id plus SHA-256 of both files). The stage uni
 the fixed path DEST/current, a symlink only root can change; every stage re-checks the manifest, so
 a switch of `current` between steps can only make a stage refuse to run, never mix two runs.
 """
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import sys
+import time
 
 RUN_ID = re.compile(r"[0-9a-f]{32}")   # always used with fullmatch: `$` would accept a trailing newline
 MAX_BYTES = 65536
+LOCK_WAIT = 30.0   # seconds to wait for another invocation before failing closed
 FILES = ("collector.json", "writer.json")
 
 
@@ -46,6 +51,31 @@ def secure_dest(dest):
         raise ValueError("dest is not a private directory of this user")
 
 
+@contextlib.contextmanager
+def locked(dest):
+    """Check DEST, then hold an exclusive advisory lock on the directory itself until the block ends.
+
+    Every mutation (publish, claim, cleanup, purge) runs inside it, so two invocations never
+    interleave. The directory is opened without following a symlink; the wait is bounded and a
+    timeout is an error (fail closed), never a mutation without the lock.
+    """
+    secure_dest(dest)
+    fd = os.open(dest, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        deadline = time.monotonic() + LOCK_WAIT
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise OSError("destination is locked by another invocation")
+                time.sleep(0.05)
+        yield
+    finally:
+        os.close(fd)
+
+
 def read_bounded(directory, name):
     fd = os.open(os.path.join(directory, name), os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(fd, "rb") as fh:
@@ -61,9 +91,11 @@ def generations(directory):
 
 def claimed(dest):
     try:
-        raw = read_bounded(dest, "claim").decode("ascii").strip()
+        raw = read_bounded(dest, "claim").decode("ascii")
     except (OSError, ValueError):
         return None
+    if raw.endswith("\n"):          # exactly the id, or the id and one newline: nothing else is stripped
+        raw = raw[:-1]
     return raw if RUN_ID.fullmatch(raw) else None
 
 
@@ -85,7 +117,11 @@ def atomic_private(path, raw):
 
 
 def publish(src, dest):
-    secure_dest(dest)
+    with locked(dest):
+        publish_locked(src, dest)
+
+
+def publish_locked(src, dest):
     found = [e for e in os.listdir(src) if RUN_ID.fullmatch(e)]
     if len(found) != 1:
         raise ValueError("expected exactly one generation")
@@ -114,11 +150,14 @@ def publish(src, dest):
         for name in FILES:
             atomic_private(os.path.join(target, name), contents[name])
         atomic_private(os.path.join(target, "manifest.json"), manifest_raw)
-        link = os.path.join(dest, "current.tmp")
-        if os.path.lexists(link):
-            os.unlink(link)
-        os.symlink(run_id, link)
-        os.replace(link, os.path.join(dest, "current"))
+        link = os.path.join(dest, "current." + secrets.token_hex(8) + ".tmp")     # never shared between invocations
+        try:
+            os.symlink(run_id, link)
+            os.replace(link, os.path.join(dest, "current"))
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(link)
+            raise
     except BaseException:
         shutil.rmtree(target, ignore_errors=True)
         raise
@@ -129,7 +168,11 @@ def publish(src, dest):
 
 
 def claim(dest):
-    secure_dest(dest)
+    with locked(dest):
+        claim_locked(dest)
+
+
+def claim_locked(dest):
     run_id = os.readlink(os.path.join(dest, "current"))
     if not RUN_ID.fullmatch(run_id) or not os.path.isdir(os.path.join(dest, run_id)):
         raise ValueError("no current generation")
@@ -137,7 +180,11 @@ def claim(dest):
 
 
 def cleanup(dest):
-    secure_dest(dest)
+    with locked(dest):
+        cleanup_locked(dest)
+
+
+def cleanup_locked(dest):
     run_id = claimed(dest)
     if run_id:
         remove_generation(dest, run_id)
@@ -150,7 +197,11 @@ def cleanup(dest):
 def purge(dest, if_failed):
     if if_failed and os.environ.get("SERVICE_RESULT") == "success":
         return
-    secure_dest(dest)
+    with locked(dest):
+        purge_locked(dest)
+
+
+def purge_locked(dest):
     keep = claimed(dest)
     for old in generations(dest):
         if old != keep:
