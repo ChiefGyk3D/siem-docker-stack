@@ -18,17 +18,27 @@ check for updates in the UniFi OS Server UI; a person does the check.
 ## What it runs
 
 Only these, each with `env -i PATH=/usr/bin:/bin LC_ALL=C`, no stdin, no stderr and a hard time
-limit of 20 seconds (`timeout -k 5`, which also kills a child that holds the pipe):
+limit of 20 seconds (`timeout -k 5`, which kills the command's process group). The reader of each
+command's output also has a limit (20 + 10 seconds), so a descendant that detached from the process
+group and still holds the pipe cannot keep the collector, or its cron run, waiting; such a
+survivor is left running (nothing here can kill a process that escaped its group) and the run
+fails or reports `unknown` in time:
 
 - `uosserver version` prints one line, the version (for example `5.1.42`). Only a strict string is
   accepted: digits and dots, starting and ending with a digit, no empty component, at most 32
   characters. Output is cut at 128 bytes while it is read. Anything else fails the run.
-- `uosserver status` is read **only** for the `version` field of the Status line of the `unifi.service`
-  block (the Network app version, for example `10.6.109`). Output is cut at 1 MiB and 20000 lines.
+- `uosserver status` is read **only** for the top-level `version` member of the JSON object on the
+  Status line of the `unifi.service` block (the Network app version, for example `10.6.109`). Output is cut at 1 MiB and 20000 lines.
   Nothing else in that output is parsed, stored or printed.
 
-plus `date`, `head`, `tr`, `timeout` and `env`. No sudo, no network, no write to disk. It runs as the
-owner's user or as root, whichever the `uosserver` CLI needs on the Pi. All paths are absolute
+plus `id`, `date`, `head`, `tr`, `timeout` and `env`. No sudo, no network, no write to disk.
+
+**It refuses to run as root (uid 0)**, with a fixed reason and exit 1. Why: it runs the vendor CLI by a
+fixed path, and the script cannot vouch for who may write that binary or its directories, so root must
+not execute it on trust. The alternative, checking ownership and mode of the binary and of every parent
+directory, would still leave the vendor install layout as the trust anchor. Refusing root is the
+simpler control and fits the verified case: `uosserver version` and `uosserver status` were run by an
+ordinary user without sudo. Run it as that ordinary user, never as root. All paths are absolute
 constants at the top of the script; there are no test hooks (the tests rewrite those constant lines in
 a scratch copy).
 
@@ -52,8 +62,9 @@ unifi_os_version,host=pi-example os_version="5.1.42",network_version="10.6.109",
 - `result="ok"`: both versions were read.
 - `result="network_unknown"` with `network_version="unknown"`: the OS version was read but the
   Network app version was not. This is **not an error** and the exit code is 0. It is the answer when
-  there is no `unifi.service` block, not exactly one `Status:` line in it, not exactly one quoted
-  `"version"` field in that line, a value that is not digits and dots, the status command failed or
+  there is no `unifi.service` block, not exactly one `Status:` line in it, not exactly one top-level
+  `version` member in that line's JSON object (a `version` in a nested object, an array or a string
+  value is never taken), a value that is not digits and dots, the status command failed or
   timed out, or its output was too large. The Network version is never guessed.
 
 ## Failure
@@ -77,16 +88,18 @@ later change on the digest branch (see `docs/update-digest.md`); this change doc
 
 ## Install (owner steps, root-owned paths)
 
-Not installed anywhere yet. Nothing here touches the Pi until you run it. Check the `uosserver` path
-first, because the constant at the top of the script is `/usr/local/bin/uosserver` and has not been
-confirmed on the Pi:
+Not installed anywhere yet. Nothing here touches the Pi until you run it. The script and its directory
+are root-owned (nobody who runs it can change it); the collector itself runs as your ordinary user.
+Check the `uosserver` path first, as that user, because the constant at the top of the script is
+`/usr/local/bin/uosserver` and has not been confirmed on the Pi:
 
 ```sh
 command -v uosserver
 ```
 
 If it prints another path, change the `uos_bin=` line of the installed copy (the one place the path
-lives). Then install, dry run first (as the user that can run `uosserver status`):
+lives; edit it after the install step, with `sudo`). Then install and dry run first, as your ordinary
+user (the `sudo` is only for the root-owned copy, never for running the collector):
 
 ```sh
 sudo install -d -m 0755 -o root -g root /opt/siem/scripts
@@ -94,16 +107,20 @@ sudo install -m 0755 -o root -g root scripts/unifi-os-version-metric.sh /opt/sie
 HOST_LABEL=pi-example /opt/siem/scripts/unifi-os-version-metric.sh; echo "exit=$?"
 ```
 
-Expected: one line starting `unifi_os_version,host=pi-example os_version="5.1.42"` and `exit=0`. If the
+Run as root it prints `refusing to run as root` on stderr and `exit=1`, which is correct. Expected as
+your ordinary user: one line starting `unifi_os_version,host=pi-example os_version="5.1.42"` and `exit=0`. If the
 Network version shows `unknown`, the `unifi.service` block of your `uosserver status` is shaped
 differently from what the parser expects: that is safe (it is never guessed) but needs a look; do not
 paste the raw status output anywhere public.
 
-A weekly timer is enough (versions change rarely). Cron form, one line, with the same kind of bound
-as the host collector (the delivery command is a placeholder):
+A weekly job is enough (versions change rarely). Run `crontab -e` as your ordinary user and add this
+one line, with the same kind of bound as the host collector (the delivery command is a placeholder).
+It captures the collector's line first and delivers only when the collector succeeded, so a failed
+collection is a failed cron run (visible in cron's mail or log) and nothing partial is delivered; a
+plain pipe would hide the collector's exit code, because `sh` reports only the last command of a pipe:
 
 ```
-17 6 * * 1 HOST_LABEL=pi-example timeout --kill-after=30s 2m sh -c '/opt/siem/scripts/unifi-os-version-metric.sh | /opt/siem/deliver-metrics'
+17 6 * * 1 HOST_LABEL=pi-example timeout --kill-after=30s 2m sh -c 'l=$(/opt/siem/scripts/unifi-os-version-metric.sh) && echo "$l" | /opt/siem/deliver-metrics'
 ```
 
 ## Delivery is not decided

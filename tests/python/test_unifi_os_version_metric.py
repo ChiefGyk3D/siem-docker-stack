@@ -82,6 +82,10 @@ class Env:
         self.src.write_text("0\n")
         self.uos = self.bin / "uosserver"
         self.write_fake()
+        # the collector refuses uid 0, so the tests never depend on who runs them
+        self.id_user = self.bin / "id-user"
+        self.id_user.write_text("#!/bin/sh\necho 1000\n", encoding="utf-8")
+        self.id_user.chmod(0o755)
         # generous command limit: a loaded CI worker must not time the fake out. Only the tests that
         # prove the time bound use env.fast (1 second).
         self.script = self.build("script.sh")
@@ -97,7 +101,7 @@ class Env:
 
     def build(self, name, marks=None, rewrites=None):
         """Scratch copy of the shipped script: constants rewritten, optional one-line mutations."""
-        rw = {"uos_bin": str(self.uos), "cmd_timeout": "30"}
+        rw = {"uos_bin": str(self.uos), "cmd_timeout": "30", "id_bin": str(self.id_user)}
         rw.update(rewrites or {})
         lines = SCRIPT.read_text(encoding="utf-8").splitlines(keepends=True)
         for var, value in rw.items():
@@ -277,9 +281,95 @@ def test_network_version_missing_is_unknown_not_error(env):
     net_unknown(env.run())
 
 
-def test_two_version_fields_are_not_guessed(env):
-    env.sfix.write_text(status_with('{"version":"10.6.109","other":{"version":"1.2.3"}}'), encoding="utf-8")
+def test_two_top_level_version_fields_are_not_guessed(env):
+    env.sfix.write_text(status_with('{"version":"10.6.109","other":1,"version":"1.2.3"}'), encoding="utf-8")
     net_unknown(env.run())
+
+
+def test_nested_only_version_is_not_the_network_version(env):
+    env.sfix.write_text(status_with('{"metadata":{"version":"1.2.3"}}'), encoding="utf-8")
+    net_unknown(env.run())
+
+
+def test_nested_member_list_with_version_is_not_the_network_version(env):
+    env.sfix.write_text(status_with('{"meta":{"a":1,"version":"1.2.3"}}'), encoding="utf-8")
+    net_unknown(env.run())
+
+
+def test_nested_version_before_the_real_top_level_one_is_ignored(env):
+    env.sfix.write_text(status_with('{"meta":{"version":"1.2.3"},"list":[{"version":"2.2.2"}],'
+                                    '"version":"10.6.109"}'), encoding="utf-8")
+    assert_ok(env.run())
+
+
+def test_version_text_inside_a_string_value_is_ignored(env):
+    js = '{"note":"x \\"version\\":\\"1.1.1\\" y","version":"10.6.109"}'
+    env.sfix.write_text(status_with(js), encoding="utf-8")
+    assert_ok(env.run())
+
+
+def test_version_text_only_inside_a_string_value_is_unknown(env):
+    env.sfix.write_text(status_with('{"note":"\\"version\\":\\"1.1.1\\""}'), encoding="utf-8")
+    net_unknown(env.run())
+
+
+@pytest.mark.parametrize("js", ['{"version":"10.6.109"} trailing', '{"version":"10.6.109"', '"version":"10.6.109"',
+                                '{"version":"10.6.109"}}', '[{"version":"10.6.109"}]', '{"a":1 "version":"10.6.109"}',
+                                '{"version":{"x":"10.6.109"}}', '{"version":["10.6.109"]}'])
+def test_malformed_status_json_is_unknown(env, js):
+    env.sfix.write_text(status_with(js), encoding="utf-8")
+    net_unknown(env.run())
+
+
+def test_oversized_status_json_is_unknown(env):
+    env.sfix.write_text(status_with('{"pad":"' + "x" * 9000 + '","version":"10.6.109"}'), encoding="utf-8")
+    net_unknown(env.run())
+
+
+# ------------------------------------------------------------------ root is refused; no detached survivor holds the run
+def fake_id(env, out, name="id"):
+    p = env.bin / name
+    p.write_text(f"#!/bin/sh\necho {out}\n", encoding="utf-8")
+    p.chmod(0o755)
+    return p
+
+
+def test_root_is_refused(env):
+    s = env.build("root.sh", rewrites={"id_bin": str(fake_id(env, "0", "id0"))})
+    assert_failed_clean(env.run(script=s))
+    assert "root" in etext(env.run(script=s))
+
+
+@pytest.mark.parametrize("out", ["", "abc", "-1", "01", "1000 0"])
+def test_unreadable_user_id_fails(env, out):
+    s = env.build("badid.sh", rewrites={"id_bin": str(fake_id(env, f"'{out}'", "idx"))})
+    assert_failed_clean(env.run(script=s))
+
+
+def test_ordinary_user_runs(env):
+    s = env.build("user.sh", rewrites={"id_bin": str(fake_id(env, "1000", "id1"))})
+    assert_ok(env.run(script=s))
+
+
+SURVIVOR = "#!/bin/sh\nsetsid sh -c 'sleep 14' </dev/null &\nsleep 300\n"
+
+
+def test_detached_survivor_cannot_hold_the_run_open(env):
+    env.uos.write_text(SURVIVOR, encoding="utf-8")
+    s = env.build("slack.sh", rewrites={"cmd_timeout": "1", "reader_slack": "2"})
+    start = time.time()
+    r = env.run(script=s)
+    assert time.time() - start < 9
+    assert_failed_clean(r)
+
+
+def test_detached_survivor_in_status_only_gives_unknown_in_time(env):
+    env.write_fake(status_cmd="setsid sh -c 'sleep 14' </dev/null & sleep 300")
+    s = env.build("slack2.sh", rewrites={"cmd_timeout": "1", "reader_slack": "2"})
+    start = time.time()
+    r = env.run(script=s)
+    assert time.time() - start < 9
+    net_unknown(r)
 
 
 def test_two_status_lines_in_unifi_block_are_not_guessed(env):
@@ -378,6 +468,47 @@ def test_docs_wording_and_scope():
     assert "unifi-os-version-metric.sh" in doc
 
 
+def doc_cron_command():
+    doc = DOC.read_text(encoding="utf-8")
+    m = re.search(r"^\S+ \S+ \S+ \S+ \S+ HOST_LABEL=\S+ timeout --kill-after=30s 2m sh -c '(.+)'$", doc, re.M)
+    assert m, "the cron line is missing from the doc"
+    return m.group(1)
+
+
+def test_doc_cron_line_does_not_mask_a_collector_failure(env):
+    body = doc_cron_command()
+    assert "set -o pipefail" not in body and not re.search(r"metric\.sh\s*\|", body)
+    deliver = env.bin / "deliver"
+    got = env.tmp / "delivered.txt"
+    deliver.write_text(f"#!/bin/sh\ncat >> {shlex.quote(str(got))}\n", encoding="utf-8")
+    deliver.chmod(0o755)
+    bad = env.bin / "collector-bad"
+    bad.write_text("#!/bin/sh\necho partial\nexit 1\n", encoding="utf-8")
+    bad.chmod(0o755)
+    good = env.bin / "collector-good"
+    good.write_text("#!/bin/sh\necho line-ok\n", encoding="utf-8")
+    good.chmod(0o755)
+
+    def run_with(collector):
+        cmd = body.replace("/opt/siem/scripts/unifi-os-version-metric.sh", str(collector))
+        cmd = cmd.replace("/opt/siem/deliver-metrics", str(deliver))
+        assert str(collector) in cmd and str(deliver) in cmd
+        return subprocess.run(["/bin/sh", "-c", cmd], capture_output=True, timeout=30)
+
+    r = run_with(bad)
+    assert r.returncode != 0 and not got.exists()
+    r = run_with(good)
+    assert r.returncode == 0 and got.read_text() == "line-ok\n"
+
+
+def test_doc_says_root_is_refused_and_gives_unprivileged_install():
+    doc = DOC.read_text(encoding="utf-8")
+    assert "refuses to run as root" in doc
+    assert "never as root" in doc or "ordinary user" in doc
+    assert "crontab" in doc and "sudo install -m 0755" in doc
+    assert "as the owner's user or as root" not in doc
+
+
 # ------------------------------------------------------------------ clean-mutant revert proofs
 def mutant(env, marker, replacement, name="mut.sh", rewrites=None):
     return env.build(name, marks={marker: replacement}, rewrites=rewrites)
@@ -406,10 +537,33 @@ def test_mutant_net_status_count_guard_bites(env):
 
 
 def test_mutant_net_version_count_guard_bites(env):
-    env.sfix.write_text(status_with('{"version":"10.6.109","x":{"version":"1.2.3"}}'), encoding="utf-8")
+    env.sfix.write_text(status_with('{"version":"10.6.109","x":1,"version":"1.2.3"}'), encoding="utf-8")
     net_unknown(env.run())
     m = mutant(env, "net-version-count", ":")
     assert 'network_version="unknown"' not in text(env.run(script=m))
+
+
+def test_mutant_net_depth_guard_bites(env):
+    env.sfix.write_text(status_with('{"meta":{"a":1,"version":"1.2.3"}}'), encoding="utf-8")
+    net_unknown(env.run())
+    m = mutant(env, "net-depth", "top=1")
+    assert 'network_version="1.2.3"' in text(env.run(script=m))
+
+
+def test_mutant_root_guard_bites(env):
+    s = env.build("root.sh", rewrites={"id_bin": str(fake_id(env, "0", "id0"))})
+    assert env.run(script=s).returncode != 0
+    m = env.build("rootmut.sh", marks={"root": ":"}, rewrites={"id_bin": str(fake_id(env, "0", "id0"))})
+    assert env.run(script=m).returncode == 0
+
+
+def test_mutant_reader_bound_guard_bites(env):
+    env.uos.write_text(SURVIVOR, encoding="utf-8")
+    rw = {"cmd_timeout": "1", "reader_slack": "2"}
+    m = env.build("rb.sh", marks={"reader-bound": '"$head_bin" -c "$1"'}, rewrites=rw)
+    start = time.time()
+    env.run(script=m)
+    assert time.time() - start >= 12
 
 
 def test_mutant_net_block_scope_guard_bites(env):
@@ -460,7 +614,7 @@ def test_mutant_status_bound_guard_bites(env):
     env.sfix.write_text(pad_then_unifi_block(), encoding="utf-8")
     net_unknown(env.run())
     m = mutant(env, "status-bound",
-               "} | \"$head_bin\" -c 100000000 | \"$tr_bin\" '\\000' '?' | net_version) || net_ver=unknown")
+               "} | bounded_read 100000000 |\"$tr_bin\" '\\000' '?' | net_version) || net_ver=unknown")
     assert 'network_version="10.6.109"' in text(env.run(script=m))
 
 
