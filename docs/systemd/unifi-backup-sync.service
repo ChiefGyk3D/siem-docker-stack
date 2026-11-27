@@ -1,0 +1,50 @@
+# Copies the UniFi OS auto-backups of the Pi to the NAS (issue #228).
+# Install: /etc/systemd/system/unifi-backup-sync.service (see docs/unifi-pi-backup.md).
+# NOT verified on a real Pi or real systemd; the hardening below is written from the man pages.
+# Run `systemd-analyze security unifi-backup-sync.service` and a --dry-run before enabling the timer.
+[Unit]
+Description=Copy UniFi OS auto-backups to the NAS and report backup health
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Runs as root: it mounts the share and reads a root-only credentials file.
+EnvironmentFile=/etc/unifi-backup-sync/unifi-backup-sync.env
+ExecStart=/usr/local/bin/unifi-backup-sync.sh
+# Metric lines go to the journal until a delivery route is chosen (docs/unifi-pi-backup.md).
+StandardOutput=journal
+StandardError=journal
+StateDirectory=unifi-backup-sync
+StateDirectoryMode=0700
+UMask=0077
+TimeoutStartSec=30min
+TimeoutStopSec=30s
+KillMode=control-group
+SendSIGKILL=yes
+
+# Hardening. The network is NOT isolated (no PrivateNetwork, no network namespace): the CIFS mount
+# needs it. The mount is made inside the unit's own mount namespace and disappears with it.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+# systemd creates /run/mount lazily; the minus sign ignores it when it does not exist.
+ReadWritePaths=-/run/mount
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service @mount
+# Mounting needs CAP_SYS_ADMIN. The source folder is owned by a container uid, so root also
+# needs to read through it (CAP_DAC_READ_SEARCH, CAP_DAC_OVERRIDE) and to set times (CAP_FOWNER).
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE CAP_FOWNER

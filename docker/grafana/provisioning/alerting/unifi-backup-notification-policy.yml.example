@@ -1,0 +1,32 @@
+# Notification policy for the UniFi backup alerts (issue #228). SHIPPED AS AN EXAMPLE.
+#
+# Grafana provisions the notification policy as ONE tree for the whole organization: loading
+# this file replaces whatever policy tree exists today. That is why it ends in .example and
+# Grafana ignores it. Merge the `alert_group = backup` route below into your existing tree (keep
+# your other routes).
+#
+# Repeat intervals (owner decision 2026-11-27): a stale backup re-alerts every 84h (twice a
+# week) as a warning and every 24h (daily) as critical, for as long as the alert keeps firing.
+# The rules are matched on alert_group=backup; no new label is introduced.
+apiVersion: 1
+
+policies:
+  - orgId: 1
+    receiver: n8n-grafana-router
+    group_by: ["alertname", "grafana_folder"]
+    routes:
+      - receiver: n8n-grafana-router
+        object_matchers:
+          - ["alert_group", "=", "backup"]
+        group_by: ["alertname", "where"]
+        group_wait: 30s
+        group_interval: 5m
+        routes:
+          - receiver: n8n-grafana-router
+            object_matchers:
+              - ["severity", "=", "warning"]
+            repeat_interval: 84h
+          - receiver: n8n-grafana-router
+            object_matchers:
+              - ["severity", "=", "critical"]
+            repeat_interval: 24h
