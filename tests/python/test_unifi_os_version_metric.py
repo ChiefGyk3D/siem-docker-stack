@@ -25,6 +25,17 @@ SCRATCH_ROOT = REPO_ROOT / ".test-scratch"
 
 CANARY = "CANARY-RAW-STATUS-LINE-7731"
 
+# The verified real Status value from the Pi: the whole inner JSON object is wrapped in one extra pair
+# of double quotes by the systemd status display.
+REAL_STATUS_VALUE = (
+    '"{"version":"10.6.109","isConfigured":true,"info":{"timestamp":1794948609006,"startedAt":1794948496582,'
+    '"udmConnected":false,"isReadyForSetup":true,"udmProvisionCompleted":false,'
+    '"cloudApplicationEventEndpoint":"/v2/api/cloud/application/event"},"handledRequirements":{},'
+    '"controllerStatus":"READY","fabric":{"configLastUpdated":1794948609095},"abridged":true}"'
+)
+MONGO_STATUS_VALUE = '"{"state":"running","version":"7.0.14"}"'
+OTHER_STATUS_VALUE = '"{"version":"9.9.9"}"'
+
 STATUS_OK = f"""CONTAINER ID  IMAGE            COMMAND  STATUS
 abc123def456  uosserver:5.1.42 /init    Up 3 days {CANARY}
 
@@ -36,13 +47,13 @@ Host service status:
 Container service status:
 ● mongodb.service - MongoDB
      Loaded: loaded (/lib/systemd/system/mongodb.service; enabled)
-     Status: {{"state":"running","version":"7.0.14"}}
+     Status: {MONGO_STATUS_VALUE}
 ● unifi.service - UniFi Network
      Loaded: loaded (/lib/systemd/system/unifi.service; enabled)
      Active: active (running)
-     Status: {{"version":"10.6.109","state":"running","uptime":12}}
+     Status: {REAL_STATUS_VALUE}
 ● other.service - Other
-     Status: {{"version":"9.9.9"}}
+     Status: {OTHER_STATUS_VALUE}
 """
 
 
@@ -450,6 +461,9 @@ def test_detached_survivor_in_status_only_gives_unknown_in_time(env):
     '{ "version" : "10.6.109", "x":1}', '{\t"version"\t:\t"10.6.109"}',
     # nothing after the first member is read: junk there is not validated (documented)
     '{"version":"10.6.109","note":"bad\\q",,]]garbage',
+    # the verified real display: one optional outer double quote right before the brace
+    REAL_STATUS_VALUE, '"{"version":"10.6.109"}"', '  "{  "version":"10.6.109","a":1}"',
+    REAL_STATUS_VALUE[1:-1],  # the same real line without the outer quotes
 ])
 def test_version_first_member_is_accepted(env, js):
     env.sfix.write_text(status_with(js), encoding="utf-8")
@@ -464,7 +478,9 @@ def test_version_first_member_is_accepted(env, js):
     '{"ver\\u0073ion":"10.6.109"}',                         # an escaped name
     '{"version":"10.6.\\u0031"}',                           # an escape in the value
     '{"version":"10.6.x"}', '{"version":""}', '{"version":10.6}', '{"version":["10.6.109"]}',
-    'x{"version":"10.6.109"}', '"{"version":"10.6.109"}', '[{"version":"10.6.109"}]', '"version":"10.6.109"}',
+    'x{"version":"10.6.109"}', '""{"version":"10.6.109"}"', '"x{"version":"10.6.109"}"', '" {"version":"10.6.109"}"',
+    '"[{"version":"10.6.109"}]"', '"""{"version":"10.6.109"}',
+    '[{"version":"10.6.109"}]', '"version":"10.6.109"}',
     '{"version":"10.6.109" ,"a":1}',                       # not directly followed by a comma or brace
     '{"version":"10.6.109"x}', '{"version":"10.6.109"',    # not followed by a comma or brace
     '{"version" "10.6.109"}', '{"version":"10.6.109', '{', '{}', '', '   ',
@@ -480,6 +496,21 @@ def test_two_matches_are_unknown_two_status_lines(env):
     env.sfix.write_text(status_with('{"version":"10.6.109"}', '     Status: {"version":"10.6.109"}\n'),
                         encoding="utf-8")
     net_unknown(env.run())
+
+
+def test_the_real_pi_line_is_the_happy_path_and_reads_only_the_first_member(env):
+    r = env.run()
+    assert_ok(r)  # STATUS_OK carries REAL_STATUS_VALUE for unifi.service
+    assert CANARY not in text(r) and "isConfigured" not in text(r) and "READY" not in text(r)
+
+
+def test_mutant_outer_quote_rule_bites(env):
+    # on the old code (no outer quote allowed) the real line gives unknown; with the rule, the version
+    env.sfix.write_text(status_with(REAL_STATUS_VALUE), encoding="utf-8")
+    assert_ok(env.run())
+    m = mutant(env, "net-outer-quote", "'\"{'*) ;;")
+    r = env.run(script=m)
+    net_unknown(r)
 
 
 def test_mutant_brace_rule_bites(env):

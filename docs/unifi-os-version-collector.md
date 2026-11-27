@@ -29,10 +29,13 @@ fails or reports `unknown` in time:
   characters. Output is cut at 128 bytes while it is read. Anything else fails the run.
 - `uosserver status` is read **only** for the `version` of the Status line of the `unifi.service`
   block (the Network app version, for example `10.6.109`). The collector is **not a JSON parser**. It
-  trusts exactly one shape: after `Status:` comes an opening brace, optional spaces, then the
-  **first member**, named `version` with a plain string value that passes the strict version check
-  above, directly followed by a comma or the closing brace. For example
-  `Status: {"version":"10.6.109",...}`. Anything else (the version is not the first member, a nested
+  trusts exactly one shape: after `Status:` comes one optional outer double quote, an opening brace,
+  optional spaces, then the **first member**, named `version` with a plain string value that passes
+  the strict version check above, directly followed by a comma or the closing brace. The outer quote
+  is the verified real display: the systemd status output wraps the whole object in one extra pair of
+  double quotes, so the real line is `Status: "{"version":"10.6.109","isConfigured":true,...}"`; the
+  same line without the outer quotes is accepted too. Anything else (a second outer quote, an outer
+  quote not directly before the brace, a space between the quote and the brace) (the version is not the first member, a nested
   `version`, an escaped name, an escape in the value, extra text before the brace, a value that is not
   a string, a missing delimiter) gives `network_version="unknown"` and a fixed reason on stderr.
   **Everything after that first member is not read and not validated**: the rest of the object may be
@@ -151,12 +154,13 @@ in the secret manager and never in argv.
 
 Verified: `uosserver version` prints one line with the version, and the Network version sits in the
 `version` field of a JSON object on the Status line of the `unifi.service` block of `uosserver status`
-(read-only paste from the live Pi by the owner, 2026-11-27). All parsing, every fail-closed path, every
+(read-only paste from the live Pi by the owner, 2026-11-27); that paste is the primary test fixture,
+including the one outer pair of double quotes around the object and `version` as the first member. All parsing, every fail-closed path, every
 bound and a clean-mutant revert proof per guard are in `tests/python/test_unifi_os_version_metric.py`,
 with fake binaries.
 
-Not verified in this repo: that `version` is the first member of that object on every vendor release
-(the rule was chosen to match the real output; if the order differs the dry run shows
+Not verified: that `version` stays the first member on every future vendor release (the rule matches
+the real output seen on 2026-11-27; if the order or the quoting changes the dry run shows
 `network_version="unknown"`, never a wrong value). Also not verified: the exact layout of the
 `uosserver status` blocks. The parser treats a block header as
 the first word of a line (the second after a bullet) ending in `.service`, which is an assumption;

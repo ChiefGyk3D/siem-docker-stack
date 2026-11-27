@@ -185,13 +185,19 @@ net_version() {
         return 0
     fi
     if [ "$n_status" -ne 1 ]; then echo unknown; return 0; fi # MUTATE:net-status-count
-    # The Network version is trusted ONLY when the Status value starts with an opening brace and its
+    # The Network version is trusted ONLY when the Status value starts with an opening brace (after one
+    # optional outer double quote, which the systemd status display adds around the object) and its
     # FIRST member is "version" with a plain string value that passes the strict version check, directly
     # followed by a comma or the closing brace. Nothing after that point is read or validated, and any
     # other shape (version not first, an escaped name, a nested version, extra text before the brace)
     # is unknown. The value is for display only: no decision depends on it.
     rest=${status_line#"Status:"}
     rest=${rest#"${rest%%[!"$ws"]*}"}
+    # The real display wraps the whole object in ONE extra pair of double quotes (systemd status
+    # output), so one optional quote is accepted, but only directly before the brace.
+    case "$rest" in
+        '"{'*) rest=${rest#'"'} ;; # MUTATE:net-outer-quote
+    esac
     case "$rest" in
         "{"*) rest=${rest#"{"} ;;
         *) net_cap "the Status value does not start with an opening brace"; return 0 ;; # MUTATE:net-brace
