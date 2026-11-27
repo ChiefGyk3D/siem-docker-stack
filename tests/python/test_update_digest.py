@@ -2052,96 +2052,77 @@ def _named(wf, name, label, label2=None):
     return _collect(wf, name, a)
 
 
-E_ACUTE = chr(0xE9)
-E_COMBINING = "e" + chr(0x301)
-CYR_A = chr(0x430)
-GREEK_ALPHA = chr(0x3B1)
+def _u(*cps):
+    return "".join(chr(c) for c in cps)
 
 
-def check_identities(wf):
-    for name in REAL:
-        assert _named(wf, name, "caf" + E_ACUTE)["status"] == "ok", name
-        # canonically equivalent spellings are one identity: two frames collide and fail
-        j = _named(wf, name, "caf" + E_ACUTE, "caf" + E_COMBINING)
-        assert j["status"] == "failed" and "duplicate" in j["reason"], name
-        j = _named(wf, name, "caf" + E_COMBINING)
-        assert j["status"] == "ok" and j["pending"][0]["name"].startswith("caf" + E_ACUTE), name
-        for bad in ("a" + CYR_A, CYR_A + "b", "x" + GREEK_ALPHA, "bad@name", "bad" + chr(0x202E) + "name",
-                    "bad" + chr(0), " pad", "pad ", "a*b", "a" + chr(10) + "b", "a" + chr(0x200B) + "b"):
-            j = _named(wf, name, bad)
-            assert j["status"] == "failed" and j["pending"] == [], (name, bad)
-        assert _named(wf, name, CYR_A * 3 + "-1")["status"] == "ok", name   # one script is fine
-        # every letter must be Latin, Cyrillic or Greek, whatever else is present
-        for bad in (chr(0x6F22) + chr(0x639), chr(0x6F22), "a" + chr(0x6F22), chr(0x301),
-                    "a" + chr(0x639), "A1" + chr(0x5D0)):
-            j = _named(wf, name, bad)
-            assert j["status"] == "failed" and j["pending"] == [], (name, bad)
-        # full-width forms fold to ASCII (NFKC), so they join the plain spelling and collide with it
-        j = _named(wf, name, chr(0xFF21) + "p", "Ap")
-        assert j["status"] == "failed" and "duplicate" in j["reason"], name
-        assert _named(wf, name, chr(0xFF21) + "p")["pending"][0]["name"] == "Ap", name
-        # no link-like or room-alias-like punctuation; ASCII digits only
-        for bad in ("https://evil.test/#room:server", "a/b", "a:b", "#room", "a#b", "a+b", chr(0x661) + "a", "(a"):
-            j = _named(wf, name, bad)
-            assert j["status"] == "failed" and j["pending"] == [], (name, bad)
-        assert _named(wf, name, "ap-1.example (office)")["status"] == "ok", name
-
-
-def test_identities_are_nfkc_allowlisted_and_not_mixed_script():
-    check_identities(_wf())
-
-
-# R4-1: invisible characters must not make two names look identical
-INVISIBLE_IDENTITIES = [
-    "ap️",            # letter + variation selector
-    "ap͏",            # letter + combining grapheme joiner
-    "ap᠋",            # letter + Mongolian free variation selector
-    "ap\U000E0100",        # letter + variation selector supplement
-    "ap⁠",            # word joiner
-    "ap­",            # soft hyphen
-    "apㅤ",            # Hangul filler
-    "1́",             # combining acute directly after a digit (also first character)
-    "ap1́",           # combining acute after a digit inside a name
-    "ap (́",          # combining acute after punctuation
-    "ap ́b",          # combining acute after a space
+ASCII_BAD_IDENTITIES = [
+    "caf" + _u(0xE9),                       # precomposed accented Latin
+    "cafe" + _u(0x301),                     # letter + combining accent (NFKC composes it)
+    "ap" + _u(0x430),                       # Cyrillic look-alike of a
+    _u(0x430) + "p",                        # Cyrillic first
+    "x" + _u(0x3B1),                        # Greek alpha
+    "a" + _u(0x20DD),                       # enclosing mark
+    "a" + _u(0x305) * 118,                  # 118 stacked marks
+    "a" + _u(0x10780),                      # supplementary-plane letter
+    "a" + _u(0x1D165),                      # supplementary-plane mark
+    _u(0x6F22),                             # Han
+    "ap" + _u(0xFE0F), "ap" + _u(0x34F), "ap" + _u(0x200B), "ap" + _u(0x2060), "ap" + _u(0xAD),
+    "ap" + _u(0x3164), "ap" + _u(0xE0100),
+    "1" + _u(0x301), "ap (" + _u(0x301),
+    "bad@name", "bad" + _u(0x202E) + "name", "bad" + chr(0), " pad", "pad ", "a*b", "a" + chr(10) + "b",
+    "https://evil.test/#room:server", "a/b", "a:b", "#room", "a#b", "a+b", _u(0x661) + "a", "(a",
+    _u(0x24D0, 0x20DD), _u(0xA0) + "pad", "ap" + _u(0x2603),
 ]
 
 
-@pytest.mark.parametrize("name", list(REAL))
-@pytest.mark.parametrize("bad", INVISIBLE_IDENTITIES, ids=lambda s: "+".join("U%04X" % ord(c) for c in s))
-def test_invisible_and_misplaced_marks_are_rejected(name, bad):
-    j = _named(_wf(), name, bad)
-    assert j["status"] == "failed" and j["pending"] == [], (name, bad)
-    # the plain spelling beside the invisible one must not become two pending identities
-    j = _named(_wf(), name, "ap", bad)
-    assert j["status"] == "failed" and j["pending"] == [], (name, bad)
+def check_ascii_identities(wf):
+    for name in REAL:
+        for good in ("caf", "ap-1.example.com (office)", "AP_1 x.y", "9lives", "a(b)", "a" * 120):
+            j = _named(wf, name, good)
+            assert j["status"] == "ok" and j["pending"][0]["name"] == good, (name, good)
+        assert _named(wf, name, "a" * 121)["status"] == "failed", name
+        for bad in ASCII_BAD_IDENTITIES:
+            j = _named(wf, name, bad)
+            assert j["status"] == "failed" and j["pending"] == [], (name, bad)
+            assert "identity" in j["reason"], (name, bad)
+            assert not any(ord(c) > 127 for c in j["reason"]) and "evil" not in j["reason"], (name, bad)
+            # a rejected spelling next to its plain twin never yields two pending identities
+            j = _named(wf, name, "ap", bad)
+            assert j["status"] == "failed" and j["pending"] == [], (name, bad)
+        # full-width forms fold to ASCII (NFKC), so they join the plain spelling and collide with it
+        j = _named(wf, name, _u(0xFF21) + "p", "Ap")
+        assert j["status"] == "failed" and "duplicate" in j["reason"], name
+        assert _named(wf, name, _u(0xFF21) + "p")["pending"][0]["name"] == "Ap", name
+
+
+def test_identities_are_nfkc_then_ascii_only():
+    check_ascii_identities(_wf())
 
 
 @pytest.mark.parametrize("name", list(REAL))
-def test_legitimate_accented_names_are_still_accepted(name):
-    wf = _wf()
-    for good in ("café", "café", "ap1-café (office)", "буквӑ",
-                 "αβ́"):
-        j = _named(wf, name, good)
-        assert j["status"] == "ok" and len(j["pending"]) == 1, (name, good)
+def test_non_ascii_identity_is_rejected_per_collector(name):
+    for bad in ("caf" + _u(0xE9), "a" + _u(0x20DD), "a" + _u(0x305) * 118, "a" + _u(0x10780), _u(0x430) + "p"):
+        j = _named(_wf(), name, bad)
+        assert j["status"] == "failed" and j["pending"] == [], (name, bad)
 
 
-def test_decomposed_name_joins_history_written_precomposed():
-    j = _unifi(_wf(), [("caf" + E_COMBINING, 60000, False)], ever=[("caf" + E_ACUTE, 3)])
-    assert j["status"] == "ok" and j["applied"] == [{"name": "caf" + E_ACUTE, "from": "upgrade pending", "to": "up to date"}]
+def test_fullwidth_name_joins_history_written_plain():
+    j = _unifi(_wf(), [(_u(0xFF41) + "p", 60000, False)], ever=[("ap", 3)])
+    assert j["status"] == "ok" and j["applied"] == [{"name": "ap", "from": "upgrade pending", "to": "up to date"}]
 
 
 @pytest.mark.parametrize("name", list(REAL))
 @pytest.mark.parametrize("old,new", [
     ("v.normalize('NFKC')", "v"),
-    ("return family.size > 1 ? null : n;", "return n;"),
-    ("if (!/^[\\p{L}0-9][\\p{L}\\p{M}0-9 ._()-]*$/u.test(n)) return null;", ""),
-    ("if (i < 0) return null;", ""),
+    ("if (!/^[A-Za-z0-9][A-Za-z0-9 ._()-]*$/.test(n)) return null;", ""),
+    ("n.length > NAME_MAX", "false"),
+    ("n !== n.trim()", "false"),
 ])
 def test_mutant_identity_check_removed_is_caught(name, old, new):
     wf = _mutate(name, old, new)
     with pytest.raises(AssertionError):
-        check_identities(wf)
+        check_ascii_identities(wf)
 
 
 def test_accepted_names_reach_the_digest_without_link_or_mention_characters():

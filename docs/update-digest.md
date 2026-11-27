@@ -141,20 +141,24 @@ shown as `(invalid)`), and so does a second frame with the same identity in one 
 frames, or two kinds that print the same name), so a series can never be both applied and pending.
 Each source's check query returns exactly one series.
 
-Identities are normalized before anything else: Unicode NFKC (so full-width look-alikes become plain
-letters and canonically equivalent spellings join), then a conservative allowlist (letters, ASCII
-digits, combining marks, space and `. _ ( ) -`; it must start with a letter or digit and have no
-trailing space). Combining marks are accepted only directly after a letter (never after a digit, space
-or punctuation, and never first), and any invisible Default_Ignorable_Code_Point character (variation
-selectors, the combining grapheme joiner, joiners, fillers and the like) is refused, so two names
-cannot look identical while being different. Every letter must be Latin, Cyrillic or Greek and one name uses only one of the
-three; any other script (Han, Arabic and so on) fails the source. There is no slash, colon, hash, plus
-or at sign, so a name cannot read as a URL scheme, a Matrix room alias or a mention. A bare host name
-such as `ap-1.example.com` is still accepted and a chat client may turn it into a plain link; it can
-carry no scheme or path. A name that fails any of this fails the source. Because the normalized form is used for the length check, the duplicate check and the join of
-current and history data, two spellings of the same name collide (a failed source) and a decomposed
-name still joins history written precomposed. Look-alikes from different scripts that are each a
-single-script name (an all-Cyrillic name that reads like a Latin one) are not detected.
+Identities are ASCII only. Each name is first normalized with Unicode NFKC (so full-width forms fold to
+plain ASCII and join the plain spelling), then it must match a strict allowlist: ASCII letters `a-z` and
+`A-Z`, ASCII digits, space and `. _ ( ) -`; it must start with a letter or digit, have no leading or
+trailing space and be at most 120 characters. Every other character fails the source with a fixed
+error message that never echoes the name: every non-ASCII letter (accented Latin, Cyrillic, Greek, Han
+and so on), every combining or enclosing mark, every invisible character and every symbol. There is no
+slash, colon, hash, plus or at sign, so a name cannot read as a URL scheme, a Matrix room alias or a
+mention. A bare host name such as `ap-1.example.com` is still accepted and a chat client may turn it
+into a plain link; it can carry no scheme or path. To fix a rejected name, rename the device (or
+connector) to ASCII; the digest does not transliterate. The normalized form is used for the length
+check, the duplicate check and the join of current and history data, so a full-width spelling collides
+with the plain one (a failed source) and joins history written plain.
+
+Accepted residual: ASCII has same-script look-alikes, for example a lowercase `l` and a capital `I`, or
+`0` and `O`, which can be hard to tell apart in some fonts. Two such names are two distinct
+identities; the digest does not compare confusable skeletons. Rejecting every non-ASCII character
+removes the mark, script-mixing and invisible-character problems, but this one remains, so the digest
+does not claim that two different identities can never look alike.
 
 Frame-level errors fail the source, wherever Grafana puts them: an `error`, `errorSource`, `message`,
 `errors` or `notices` key on the result, the frame, its schema or its data fails the source (the only
