@@ -100,7 +100,7 @@ sudo /usr/local/sbin/twingate-connector-update --yes --force <connector-name>  #
 Needs `docker` and `jq` on the host. Every run, `--dry-run` and `--help`
 included, goes through the launcher and needs root; any other user is refused
 with a clear message. The launcher runs every program it needs (`id`, `dirname`, `find`, `ls`,
-`getfacl`, `head`, `wc`, `od`, `tr`, `env`, `sh`) by a fixed absolute path under
+`getfacl`, `head`, `tee`, `wc`, `od`, `tr`, `env`, `sh`) by a fixed absolute path under
 `/usr/bin` (the real location on Debian 13 and Ubuntu 24.04, where `/bin` is a
 link to it), never through `PATH`. `PATH` for the updater is fixed
 to the system directories

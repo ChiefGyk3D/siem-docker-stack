@@ -2372,6 +2372,9 @@ def test_the_shipped_launcher_names_every_command_by_a_fixed_absolute_path():
     # the constants are the only way a command is run: no bare name at a command position
     code = [l for l in text.splitlines() if l.strip() and not l.lstrip().startswith("#")]
     body = "\n".join(l for l in code if not re.match(r"[A-Z]+=/usr/bin/", l))
+    # the one allowed use of the `command` builtin (checked exactly by
+    # test_the_launcher_uses_command_only_to_open_the_updater) is taken out first
+    body = body.replace('{ command exec 4<>"$UPDATER"; } 2>/dev/null', '{ exec 4<>"$UPDATER"; } 2>/dev/null')
     assert not re.search(r"(^|[|;&(`]|\$\(|\{)\s*(" + "|".join(CMD_CONSTANTS.values()) + r"|cat|dd|command|sleep|grep|sed)\s", body, re.M), body
 
 
@@ -2627,6 +2630,32 @@ def test_the_same_swap_blocks_a_launcher_that_opens_read_only(env):
         _run_launcher(env, swap, timeout=4)
 
 
+def test_an_updater_path_that_cannot_be_opened_is_a_one_line_refusal_with_the_refusal_code(env):
+    # A socket passes the exists/writable/not-a-directory tests but the open fails.
+    # The shell must not end silently or with its own raw error text.
+    import socket
+    env.script.unlink()
+    s = socket.socket(socket.AF_UNIX)
+    try:
+        s.bind(str(env.script))
+        r = _run_launcher(env, env.launcher, timeout=20)
+    finally:
+        s.close()
+    assert r.returncode == 2, (r.returncode, r.stderr)
+    assert r.stderr == "refused: the updater could not be opened\n", repr(r.stderr)
+    assert r.stdout == ""
+    assert env.log() == []
+
+
+def test_the_launcher_uses_command_only_to_open_the_updater():
+    # `command` is a shell builtin that does not search PATH when it runs a special
+    # builtin; it is allowed in this one place only (the open on descriptor 4).
+    code = [l for l in LAUNCHER.read_text().splitlines() if not l.lstrip().startswith("#")]
+    uses = [l for l in code if re.search(r"\bcommand\b", l)]
+    assert len(uses) == 1, uses  # loose collection: the one use is found
+    assert re.search(r'\{ command exec 4<>"\$UPDATER"; \} 2>/dev/null', uses[0]), uses
+
+
 def _device_copy(env, text):
     copy = env.root / "launcher-device.sh"
     assert f'UPDATER="{env.script}"' in text
@@ -2777,6 +2806,12 @@ def test_a_mount_point_whose_name_has_an_escaped_character_is_found(env, arm, na
 
 @pytest.mark.parametrize("arm,name", ESCAPED, ids=[a for a, _ in ESCAPED])
 def test_each_mountinfo_escape_arm_is_needed(env, arm, name):
-    _mount_setup(env, arm, name, mutate_arm=True)
+    rd = _mount_setup(env, arm, name, mutate_arm=True)
     r = env.run("--yes", NAME)
+    # Without this decoding the escaped mount point is not seen, so the run goes on and
+    # succeeds. An unrelated failure (non-zero exit, a refusal, a kept file) must not
+    # satisfy this test, so the exact success outcome is asserted, not only an absent message.
+    assert r.returncode == 0, (r.returncode, r.stderr)
+    assert "refused" not in r.stderr, r.stderr
     assert "is a mount point" not in r.stderr
+    assert not (rd / "docker-config" / "keep").exists()
