@@ -753,7 +753,8 @@ Round 5 choices and their reasons:
   starts (`ExecStartPre=+ purge`) and again when it fails (`ExecStopPost=+ purge --if-failed`). The
   writer records the generation it will consume (`claim`) and afterwards removes exactly that one
   (`cleanup`); a late cleanup therefore cannot delete a newer run's generation, and a new publish
-  never removes a generation that is claimed. A generation is also left behind if the check unit
+  never removes a generation that is claimed. Every change to the destination holds an exclusive
+  lock on it (bounded wait, then an error), so two invocations never interleave. A generation is also left behind if the check unit
   cannot be started at all (systemd start limit, for example): it stays root-only in a mode 700
   tmpfs directory until the next run purges it or the host reboots.
 - No overlap. `twingate-collect.service` is ordered `After=` the check and the writer, and each of
