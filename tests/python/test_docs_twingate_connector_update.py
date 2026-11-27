@@ -113,3 +113,15 @@ def test_script_doc_describes_the_descriptor_checks_the_byte_count_and_inherited
     assert "closes descriptors 4 to 9" in t and "any descriptor above 9" in t
     assert "a read-only mount is refused" in t
     assert "octal escapes" in t
+
+
+def test_script_doc_lists_every_fixed_command_of_the_launcher():
+    launcher = (REPO_ROOT / "scripts" / "twingate-connector-update-launcher.sh").read_text()
+    names = re.findall(r"^[A-Z]+=/usr/bin/([a-z]+)$", launcher, re.M)
+    assert len(names) >= 12, names  # loose collection: something was found
+    t = " ".join(SCRIPT_DOC.read_text().split())
+    start = t.index("The launcher runs every program it needs (")
+    inventory = t[start:t.index(") by a fixed absolute path", start)]
+    listed = re.findall(r"`([a-z]+)`", inventory)
+    assert sorted(listed) == sorted(names), (listed, names)
+
