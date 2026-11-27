@@ -1,7 +1,11 @@
-# pfSense configuration backup: encrypt on the firewall, NAS first, S3 second (design note, revision 2)
+# pfSense configuration backup: encrypt on the firewall, NAS first, S3 second (design note, revision 3)
 
-Status: design for review, nothing deployed. Issue #236, epic #62. Revision 2
-answers the round 1 adversarial review of PR #242 (four High, seven Medium).
+Status: design for review, nothing deployed. Issue #236, epic #62. Revision 3
+answers the adversarial review rounds 1 to 3 of PR #242 (round 1: four High,
+seven Medium; round 2: six Medium, one Low; round 3: six Medium, one Low).
+Revision 3 removes machinery instead of patching it: no pending state, no
+carry-over records, no inner encrypted record, no keyed change marker, no
+receipt chain by previous-receipt hash.
 Owner decisions are marked **DECIDED**; what is undecided is marked **OPEN**;
 what only the owner may accept is marked **OWNER DECISION**. All hostnames and
 addresses are placeholders: `fw.example.internal` is the firewall,
@@ -15,7 +19,7 @@ never written as fact: it is an **OPEN** question with the exact question
 (section 10) and the design below it holds for each plausible answer (a
 decision table). The list of every INFERRED claim is in section 9.
 
-## 0. Review findings map (round 1, PR #242)
+## 0. Review findings map (rounds 1 to 3, PR #242)
 
 | Id | Sev | Fixed in | How, in one line |
 |----|-----|----------|------------------|
@@ -23,7 +27,7 @@ decision table). The list of every INFERRED claim is in section 9.
 | R1-02 | High | 1.3, 2.2, 6 | Recipient pinned in a root-owned file on the firewall; its fingerprint is recorded outside NAS control; restore drill and monitor reject any other recipient. |
 | R1-03 | High | 4 | Monitor trusts only a firewall-signed receipt (verification key held by the monitor) and independent S3 state; NAS mtime is liveness only. |
 | R1-04 | High | 5.2, 7.3, 10 (Q8, Q9) | Object Lock mode, retention, mechanism, bypass denial and a negative test specified; provider and mode confirmation are **OPEN**, irreversible mode is an **OWNER DECISION**. |
-| R1-05 | Med | 3, 4.2 | Signed, chained receipts (sequence, hashes, recipient fingerprint, previous-receipt hash); monitor keeps its own head. |
+| R1-05 | Med | 3, 4.2 | Signed receipts (epoch, sequence, hashes, recipient fingerprint); the monitor keeps its own head and its own hash of every accepted receipt, so a rollback, a repeat or a fork is visible. (The earlier previous-receipt hash chain was removed in revision 3; see R3-02.) |
 | R1-06 | Med | 4.4, 7.3 (S5) | A separate monitor-only S3 identity (list and read on the prefix); the NAS never computes S3 state for the monitor. |
 | R1-07 | Med | 2.3, 7.2 (N7) | Firewall host key pinned in an admin-owned `known_hosts` on the NAS, strict checking, fail closed; the receipt signature is a second check. |
 | R1-08 | Med | 2.1, 2.4, 7.1, 8.1 | Absolute-path root-owned wrapper, `restrict` plus forced command, exact no-argument sudo rule, negative tests; the mechanism facts stay **OPEN** until proven on the appliance. |
@@ -31,13 +35,20 @@ decision table). The list of every INFERRED claim is in section 9.
 | R1-10 | Med | 3, 4.3, 6 | Semantic checks on the firewall, signed size and count facts, monitor bounds and change-rate alerts, three distinct validity levels. |
 | R1-11 | Med | 5.1, 7.2 (N2, N8) | Create-only ingest identity, no automated pruning on the NAS, immutable snapshots required; unavailable snapshots are an **OWNER DECISION**. |
 | Tests | n/a | 8 | Required negative tests: SSH key abuse, wrong recipient, forged monitor input, lock bypass. |
-| R2-01 | Med | 2.2 steps 0, 4, 5; 8.5 (C1 to C3) | Exclusive non-blocking lock; reserve `seq` and persist the exact receipt hash atomically before emitting; `pending` flag and carry-over records after an interrupted emission. |
-| R2-02 | Med | 4.2, 4.3 | Every pull uploads its own ciphertext; no dedupe, so check 5 has no exception; change detection by `change_marker`. Tests U1, U2. |
+| R2-01 | Med | 2.2 steps 0, 4, 5; 8.5 (C1 to C7) | Exclusive non-blocking lock; `seq` persisted durably before emission; an interrupted emission simply consumes the `seq` (no pending state). Superseded in part by R3-01 to R3-03. |
+| R2-02 | Med | 4.2, 4.3 | Every pull uploads its own ciphertext; no dedupe, so check 5 has no exception; change detection by comparing `plain_sha256` in consecutive signed receipts. Tests U1, U2. |
 | R2-03 | Med | 2.2 steps 1 to 3; 8.5 (P1 to P4) | One snapshot from one descriptor for validate, hash and encrypt; no persistent-disk plaintext (memory-backed scratch, or stop); trap cleanup; post-encrypt re-read guard. |
 | R2-04 | Med | 4.2 (canonical encoding and signing); 8.5 (G1 to G7) | Fixed-order text receipt, signed raw bytes, one configured algorithm, strict parse after verify. **Gate:** not approved until Q7 closes with the exact commands. |
 | R2-05 | Med | 4.2 (Time), 4.3, 4.4; 8.5 (K1 to K4) | Freshness from the earlier of `fw_time` and the monitor's own first-seen time; future `fw_time` is receipt-invalid and critical. |
 | R2-06 | Med | 7.6; 12; 8.5 (X1) | `wc -c` proof removed; stateless self-test script plus the first real pull as the production ingest with pinned host key. |
-| R2-07 | Low | 1.2, 1.4, 4.2; D-R8 | Receipt metadata described honestly and minimized (bands, keyed change marker, inner encrypted record); remaining exposure is an **OWNER DECISION**. |
+| R2-07 | Low | 1.2, 1.4, 4.2; D-R8 | Receipt metadata described honestly; revision 3 states plainly that exact revision and counts are visible in the signed receipt; accepting that is an **OWNER DECISION** (D-R8). |
+| R3-01 | Med | 2.2 steps 0, 4, 5; 8.5 (C6, C7) | Hard wall-clock limit on the whole wrapper run and on emission, kill only that session, lock released on every exit; the stalled-reader test. The NAS can always withhold pulls; the monitor sees that (1.2). |
+| R3-02 | Med | 2.2 steps 4, 5; 4.3 | Pending flag and carry-over protocol deleted. An interrupted emission consumes its `seq`; the monitor warns on a gap and goes critical on a repeat or decrease inside an epoch. |
+| R3-03 | Med | 2.2 step 4; 8.5 (C3 to C5) | `seq` is persisted with fsync of the file, atomic rename and fsync of the directory before emission; reboot test; unrecoverable state refuses to run until the owner bumps the epoch. |
+| R3-04 | Med | 4.2 (framing and signed fields); 8.5 (F1 to F8) | Exact stream framing with bounds; every signed field named; inner record deleted; behavior on truncation, concatenation and substitution defined. |
+| R3-05 | Med | 2.2 step 1; 8.5 (P5 to P7) | Hard byte limit while copying from the descriptor; scratch capacity checked first; oversized and exhaustion tests. |
+| R3-06 | Med | 3, 4.2; D-R8 | Exact revision and counts are in the signed receipt, so section 3 and 4 agree; the visible metadata is an **OWNER DECISION**. |
+| R3-07 | Low | 0, 12 | Map covers rounds 1 to 3; build step 3 requires explicit approval of D-R1 through D-R8. |
 | Commands | n/a | 7.6 | Command 1 no longer prints raw log lines; readability is tested as the real user; tool checks added. |
 
 Round 1 also asked for these to be stated. Detection can lag the goal: with a
@@ -116,8 +127,8 @@ treat the whole file as a secret of the highest class.
 
 | Actor | Gains under this design | Residual |
 |-------|-------------------------|----------|
-| Thief of a NAS disk or of the bucket | The configuration is ciphertext only. Receipt metadata is visible (R2-07): pull timing, ciphertext size, coarse size and count bands, epoch and sequence, and whether the configuration changed between pulls (a keyed change marker, not a hash anyone can recompute). Exact counts, revision and the plaintext hash are in an encrypted inner record. | Metadata exposure is **OWNER DECISION** D-R8; otherwise none beyond the cipher |
-| Attacker who controls the NAS (root, or the `svc-pfpull` account) | Can use the pull key to fetch the current ciphertext. Cannot read it: no private key exists on the NAS and the recipient is pinned on the firewall, not the NAS. Can delete or roll back NAS copies (section 5.1), withhold uploads, replay old receipts. Cannot forge a receipt, cannot make the monitor believe a fresh backup exists. | Availability of the NAS copy only; S3 holds the locked copy. |
+| Thief of a NAS disk or of the bucket | The configuration is ciphertext only. The signed receipt is readable in the clear (R3-06): pull timing, epoch, sequence, exact revision number, exact counts, plaintext size, tool versions and the plaintext SHA-256. They cannot read the configuration. The plaintext hash would let someone who already holds a guessed full configuration confirm it; the file holds keys and pre-shared secrets, so a correct guess is infeasible (INFERRED). | Metadata exposure is **OWNER DECISION** D-R8; otherwise none beyond the cipher |
+| Attacker who controls the NAS (root, or the `svc-pfpull` account) | Can use the pull key to fetch the current ciphertext. Cannot read it: no private key exists on the NAS and the recipient is pinned on the firewall, not the NAS. Can delete or roll back NAS copies (section 5.1), withhold uploads, replay old receipts, refuse to pull at all, or hold a stream open (the wrapper's run and write deadlines bound that to one run, 2.2 step 0). Cannot forge a receipt, cannot make the monitor believe a fresh backup exists. | Availability of new backups: the NAS can always stop them by not pulling, and the monitor then goes stale and critical (4.5). S3 holds the locked copy of everything already uploaded. |
 | Attacker on the management LAN | Reaches the firewall SSH port; the key is bound to the NAS source address and one command | Source address pinning depends on what sshd observes (section 2.4) |
 | Attacker who controls the firewall (root) | Can encrypt or sign anything, so can poison future backups, and can read the config anyway | **OWNER DECISION** D-R1: accepted by nature (the firewall is the data source); bounded by retention of older versions, semantic and change-rate alerts (4.3) and the restore drill |
 | Attacker who controls the monitor host | Can silence alerts | Out of scope of this note; the monitor host is a trust anchor (verification key, expected recipient fingerprint) |
@@ -155,9 +166,9 @@ the wire between the firewall and the NAS other than inside the ciphertext
 | Property | Risk | Control |
 |----------|------|---------|
 | C in transit | Sniffing | SSH only, over the management network. P-REMOTE (VERIFIED) warns the wget and curl pull methods run over HTTPS with certificate checking disabled; non-encrypting techniques should use a non-WAN link or a VPN. The payload is also ciphertext before it enters SSH. |
-| C at rest, NAS and S3 | Stolen disk, NAS compromise, bucket exposure | Ciphertext only for the configuration, produced on the firewall (2.2); receipt metadata is limited as in 1.2 and 4.2. Block public access, TLS-only bucket policy, default server-side encryption as a second layer (INFERRED, check at build). |
+| C at rest, NAS and S3 | Stolen disk, NAS compromise, bucket exposure | Ciphertext only for the configuration, produced on the firewall (2.2); the signed receipt is readable in the clear as stated in 1.2 and 4.2 (D-R8). Block public access, TLS-only bucket policy, default server-side encryption as a second layer (INFERRED, check at build). |
 | C on the firewall | Pull key abuse | `restrict` plus forced command to a no-argument root-owned wrapper (2.1), no NAS or S3 credential on the firewall. |
-| I | Tampered, truncated, poisoned or rolled back backup | Signed chained receipts, semantic checks, monitor-side state and S3 object lock (sections 3, 4, 5). |
+| I | Tampered, truncated, poisoned or rolled back backup | Signed receipts, semantic checks, monitor-side state and S3 object lock (sections 3, 4, 5). |
 | I | History deleted | S3 versioning, Object Lock with retention, writer cannot delete or change retention; NAS history is a convenience copy (5.1). |
 | A | Firewall dead | NAS copy and S3 copy; the firewall also keeps its own history (P-RESTORE VERIFIED: the previous 30 configurations by default), which is not disaster recovery (P-BACKUP VERIFIED). |
 | A | NAS dead or rolled back | S3 copy, independently checked by the monitor. |
@@ -197,45 +208,62 @@ sent: S-SSHD (VERIFIED) says the user-supplied command is ignored when
 `command=` is set and is only exposed in `SSH_ORIGINAL_COMMAND`; the wrapper
 never reads it. The wrapper does, in order and failing closed on any error:
 
-0. **Single writer (R2-01).** Takes an exclusive, non-blocking lock first
-   (lock file in the root-owned state directory). If it cannot, it exits
-   non-zero at once without reading anything, so two concurrent pulls can never
-   both reserve the same `seq`. The lock must be released by the operating
-   system when the process dies, so a crash cannot wedge the job (INFERRED for
-   the chosen lock tool, **OPEN** Q16).
-1. **One snapshot (R2-03).** Reads `/cf/conf/config.xml` exactly once, from one
-   open file descriptor (as root through the exact sudo rule of F6 when
-   needed, 2.4), into a snapshot. Validation, hashing, counting and encryption
-   all use that snapshot and nothing else. Plaintext never touches persistent
-   disk: the snapshot lives in process memory or, if the implementation needs
-   a file, in a mode 0600 file under a root-only directory on a memory-backed
-   filesystem (availability **OPEN**, Q16; if none exists the design stops and
-   returns to the owner, it does not fall back to disk), removed by a trap on
-   every exit path including failure. As a consistency guard the wrapper
-   re-reads the live file after encrypting and compares its hash with the
-   snapshot's hash; on a difference it retries once, then fails closed.
+0. **Single writer, with bounds (R2-01, R3-01).** Takes an exclusive,
+   non-blocking lock first (lock file in the root-owned state directory). If it
+   cannot, it exits non-zero at once without reading anything, so two
+   concurrent pulls can never both take the same `seq`. The whole wrapper run
+   is under a hard wall-clock limit, and the emission step (step 5) has its own
+   shorter write deadline, so a client that accepts the connection and never
+   reads cannot hold the lock. The limit is enforced by a timeout tool or an
+   alarm (the tool is **OPEN**, Q17; the values are set in the implementation
+   from a measured normal run). On expiry only this session's own process is
+   killed, by its PID (never by pattern matching), the lock is released on
+   every exit path (the operating system releases it when the process dies:
+   INFERRED for the chosen lock tool, Q16), and the run is logged as failed.
+1. **One snapshot with a hard byte limit (R2-03, R3-05).** Before reading,
+   the wrapper checks that the scratch filesystem has at least twice
+   `max_config_bytes` free (plaintext plus ciphertext), and stops otherwise.
+   `max_config_bytes` is a fixed constant set from the real file size with a
+   wide margin when the wrapper is installed (the size comes from command 7).
+   It then reads `/cf/conf/config.xml` exactly once, from one open file
+   descriptor (as root through the exact sudo rule of F6 when needed, 2.4), and
+   copies at most `max_config_bytes + 1` bytes: if the extra byte arrives the
+   file is oversized and the run fails closed before anything else. The copy is
+   the snapshot. Validation, hashing, counting and encryption all use that
+   snapshot and nothing else. Plaintext never touches persistent disk: the
+   snapshot lives in process memory or, if the implementation needs a file, in
+   a mode 0600 file under a root-only directory on a memory-backed filesystem
+   (availability **OPEN**, Q16; if none exists the design stops and returns to
+   the owner, it does not fall back to disk), removed by a trap on every exit
+   path including failure. As a consistency guard the wrapper re-reads the
+   live file after encrypting, with the same byte limit, and compares its hash
+   with the snapshot's hash; on a difference it retries once, then fails
+   closed.
 2. Semantic checks (R1-10, section 3) on the snapshot. On failure: prints
-   nothing on stdout, an error line on stderr, exits non-zero, state unchanged.
+   nothing on stdout, an error line on stderr, exits non-zero, state unchanged
+   (no `seq` is consumed by any failure up to this point).
 3. Encrypts the snapshot to the pinned recipient from the root-owned file.
    The ciphertext is held in the same kind of memory-backed, root-only,
-   trap-cleaned buffer until its hash is known; it is not emitted before the
-   receipt is signed.
-4. **Reserve, then emit (R2-01).** Builds the receipt (4.2) with the next
-   `seq` and the hash of the previous receipt, signs it, and persists to the
-   state directory, atomically (write a new file, flush, rename over the old
-   one): the new `seq`, the exact receipt hash, and a `pending` flag. Only
-   then writes the stream (a fixed-length header line with the receipt length,
-   the receipt, then the ciphertext; exact framing fixed in the
-   implementation PR).
-5. Clears `pending` only if every byte was written without error. If the
-   client disconnected or a write failed, `pending` stays set and the receipt
-   is kept (receipts only, no plaintext, in the root-only state directory).
-   The next run begins its stream with every pending receipt as carry-over
-   records, followed by its own receipt and ciphertext, so the chain the
-   monitor sees is unbroken and the lost emission is visible as a warning (the
-   ciphertext of an interrupted emission is not retained; the new run covers
-   the current state). A write error being observable when the client
-   disconnects is INFERRED and is test C2.
+   trap-cleaned buffer, limited to `max_config_bytes` plus a fixed encryption
+   overhead, until its hash is known; it is not emitted before the receipt is
+   signed.
+4. **Take the `seq`, durably, then sign (R3-02, R3-03).** `seq` is a
+   monotonic counter inside the current `epoch`. The wrapper writes the new
+   `seq` and `epoch` to a new state file, fsyncs that file, renames it over the
+   old one, and fsyncs the directory, all before anything is emitted. Only then
+   does it build the receipt (4.2) with that `seq`, sign it, and go on to step
+   5. There is no pending state and no carry-over: if the emission is
+   interrupted, that `seq` is simply consumed and never reused. If the state
+   cannot be read or fails its own integrity check, the wrapper refuses to run
+   and exits non-zero until the owner runs the authenticated console procedure
+   that sets a higher `epoch` and tells the monitor (a rebuild uses the same
+   procedure). Whether fsync and directory fsync are honored on the firewall's
+   filesystem is INFERRED (Q16); test C4 proves it by reboot.
+5. Emits the stream in the exact framing of 4.2, under the write deadline of
+   step 0. If the client disconnects, or a write fails or times out, the
+   wrapper stops and exits non-zero; nothing is retained. That a write error is
+   visible to the wrapper when the client disconnects is INFERRED (test C2). The
+   monitor sees the consumed `seq` as a gap (4.3, 4.5).
 
 **Tool choice (lead decision, security lean, least unsupported change):**
 `openssl cms -encrypt` with an explicit cipher (`-aes256`) to a recipient
@@ -394,33 +422,76 @@ never proof of a valid backup.** Proof comes from two sources the NAS cannot
 forge: a receipt signed by a key the NAS cannot use, and independent S3 state
 read with an identity the NAS does not hold.
 
-### 4.2 The signed receipt
+### 4.2 The signed receipt and the stream
 
 Produced by the wrapper on the firewall, one per pull, signed with a dedicated
 firewall signing key (private half in a root-only file on the firewall; no
-other copy). Fields:
+other copy).
 
-Clear fields (readable by anyone holding the receipt, R2-07): `receipt_version`,
-`epoch` (set by the owner at install and after a rebuild), `seq` (monotonic
-within an epoch), `fw_time` (firewall clock, UTC), `cipher_sha256`,
-`cipher_size`, `recipient_fingerprint`, `size_band` and `count_bands`
-(coarse bands, not exact values, enough for the L2 and change-rate rules),
-`change_marker` (a keyed hash of the plaintext, using a key that exists only
-on the firewall; the monitor only compares it with the previous receipt's, it
-cannot recompute it, and it cannot confirm a guessed configuration),
-`prev_receipt_sha256` (hash of the previous receipt in this chain).
+**Signed fields (R3-04, R3-06).** The receipt is the ASCII text below; every
+field is covered by the signature because the signature covers the whole
+receipt bytes:
 
-Inner fields (R2-07): `plain_sha256`, exact `plain_size`, exact counts,
-`config_revision` (Q14) and `tool_versions` are placed in a second record
-encrypted to the same recipient and referenced from the signed receipt by its
-hash. Only the owner, who holds the restore key, reads them (restore drill
-steps 2 to 4). The monitor never needs them.
+| Field | Meaning |
+|-------|---------|
+| `receipt_version` | Format version, one value accepted |
+| `epoch` | Set by the owner at install and after a rebuild or state loss |
+| `seq` | Monotonic within an epoch, consumed even when an emission fails |
+| `fw_time` | Firewall clock, UTC |
+| `config_revision` | Exact configuration revision number (name **OPEN**, Q14) |
+| `plain_sha256`, `plain_size` | SHA-256 and exact size of the plaintext configuration |
+| `count_interfaces`, `count_rules`, `count_users` | Exact counts (the exact list is fixed in the implementation from the real file, structure only) |
+| `size_band`, `count_bands` | Coarse bands derived from the exact values, for dashboards and alert labels only |
+| `cipher_sha256`, `cipher_size` | SHA-256 and exact size of the ciphertext in this stream |
+| `recipient_fingerprint` | Fingerprint of the pinned recipient certificate |
+| `tool_versions` | Versions of the encryption and signing tools |
 
-Metadata that remains visible to a thief of the NAS disk or the bucket, stated
-honestly: the existence and timing of each pull, the ciphertext size (which
-approximates the configuration size), the coarse bands, the epoch and `seq`,
-and whether the configuration changed between pulls. This is **OWNER DECISION**
-D-R8 (accept it, or coarsen further at the cost of weaker monitor rules).
+What a thief of the NAS disk or the bucket can read from the signed receipts:
+pull timing, epoch and sequence, the exact revision number, the exact counts,
+the plaintext size and tool versions, and the plaintext SHA-256. They cannot
+read the configuration. The plaintext SHA-256 lets someone who already holds a
+guessed full configuration confirm it; the file contains keys and pre-shared
+secrets, so a correct guess is infeasible (INFERRED). Accepting this exposure
+is **OWNER DECISION** D-R8. Change detection is the monitor comparing
+`plain_sha256` of consecutive verified receipts.
+
+There is no receipt chain by previous-receipt hash (removed in revision 3, R3-02).
+Rollback, repeat and fork detection rest on the monitor's own state: for every
+accepted receipt it records `epoch`, `seq` and the SHA-256 of the receipt
+bytes. A lower `seq`, or the same `seq` with a different hash, inside an epoch
+is critical. Authenticity rests on the signature; locking rests on S3.
+
+**Stream framing (R3-04).** The wrapper writes exactly one stream, in this
+order, and nothing else on stdout:
+
+1. A header line of at most 64 bytes, ASCII, ending in LF:
+   `PFBK1 R=<receipt_len> S=<sig_len>`, where both lengths are decimal.
+   `receipt_len` may not exceed 4096 and `sig_len` may not exceed 1024.
+2. Exactly `receipt_len` bytes: the receipt.
+3. Exactly `sig_len` bytes: the detached signature over exactly those receipt
+   bytes.
+4. The ciphertext, to the end of the stream. Its length must equal the
+   `cipher_size` in the receipt, and may not exceed `max_config_bytes` plus
+   the fixed encryption overhead.
+
+The NAS script splits the stream by the header lengths and stores three
+objects per pull, named from the epoch and sequence it reads (the names are not
+trusted): receipt, signature, ciphertext. The monitor identifies and verifies
+objects by content, not by name. Failure behavior, all fail closed and
+critical unless stated:
+
+- Truncation: a stream that ends before `receipt_len + sig_len` bytes after the
+  header gives no verifiable receipt; a ciphertext shorter than `cipher_size`
+  fails the size and SHA-256 check.
+- Concatenation or trailing bytes: a second stream appended to the first, or
+  any extra bytes, makes the ciphertext longer than the signed `cipher_size` and
+  fails the check; a header with lengths over the bounds is rejected before any
+  parse.
+- Substitution: a different ciphertext fails `cipher_sha256`; a receipt from
+  another pull fails against the ciphertext it is paired with and against the
+  monitor's recorded `epoch`, `seq` and hash; a receipt with a changed byte
+  fails the signature.
+- A missing receipt, signature or ciphertext object in S3 is `s3_state_ok` 0.
 
 **Canonical encoding and signing (R2-04).**
 
@@ -429,8 +500,8 @@ D-R8 (accept it, or coarsen further at the cost of weaker monitor rules).
   small character set (letters, digits, `.`, `_`, `-`, `:`), no leading or
   trailing space, a final LF.
 - The signed bytes are exactly the receipt bytes as emitted, nothing
-  re-serialized. The signature is a separate detached record, in a fixed
-  binary or text encoding fixed in the implementation PR.
+  re-serialized. The signature is a separate detached record in a fixed
+  encoding fixed in the implementation PR.
 - The monitor first verifies the signature over the raw received bytes with
   the one algorithm and key it is configured with (the algorithm is never read
   from the receipt or the signature record), and only then parses those same
@@ -443,8 +514,11 @@ D-R8 (accept it, or coarsen further at the cost of weaker monitor rules).
   the monitor. **Gate: this section is not approved until Q7 is closed** with
   the exact signing and verification commands from the OpenSSL manual of the
   installed version, and those commands are the ones the tests in 8.5 run.
-- Tests G1 to G7 in 8.5 prove field reordering, duplicates, algorithm
-  substitution and a signature over different bytes are all rejected.
+- Tests G1 to G7 and F1 to F8 in 8.5 prove field reordering, duplicates,
+  algorithm substitution, a signature over different bytes, and every framing
+  failure above are rejected.
+
+**Trust anchors and state.**
 
 - The verification (public) key is held by the monitor, in a root-owned
   config on `mon.example.internal`, and by the owner offline. It is installed
@@ -454,20 +528,20 @@ D-R8 (accept it, or coarsen further at the cost of weaker monitor rules).
   must not share administrators, credentials or a compromise domain with the
   NAS (a requirement, test X2); otherwise the independence claimed in 4.1 does
   not hold. Signing tool and key type follow the 2.2 table (**OPEN**, Q1, Q7).
-- The monitor keeps its own state (last accepted `epoch`, `seq`,
-  `prev_receipt_sha256`, `recipient_fingerprint`) on the monitoring host, not
-  on the NAS. A NAS rollback to an older receipt set is then visible: the head
-  the NAS shows is behind the monitor's head (test M4).
+- The monitor keeps its own state (accepted `epoch`, `seq`, receipt hash and
+  `seen_time` for each accepted receipt, and the expected
+  `recipient_fingerprint`) on the monitoring host, not on the NAS. A NAS
+  rollback to an older receipt set is then visible: the head the NAS shows is
+  behind the monitor's head (test M4).
 - Every receipt is stored on the NAS and uploaded to S3 under the same lock as
-  the ciphertext. The S3 receipts are the independent chain.
-- **Every pull stores and uploads its receipt and its own ciphertext (R2-02).**
-  Unchanged configurations are not deduplicated: encryption is randomized
-  (INFERRED), so each pull has a new ciphertext, and the receipt's
-  `cipher_sha256` describes exactly that object. This keeps check 5 uniform
-  with no exception that could mask a missing upload. Cost: a few hundred
-  kilobytes a day, under a gigabyte a year, cents (INFERRED, cost gate in 7).
-  "Did the configuration change" comes from `change_marker`, not from skipping
-  an upload.
+  the ciphertext. The S3 objects are the independent record.
+- **Every pull stores and uploads its receipt, signature and its own
+  ciphertext (R2-02).** Unchanged configurations are not deduplicated:
+  encryption is randomized (INFERRED), so each pull has a new ciphertext, and
+  the receipt's `cipher_sha256` describes exactly that object. This keeps the
+  ciphertext check uniform with no exception that could mask a missing upload.
+  Cost: a few hundred kilobytes a day, under a gigabyte a year, cents
+  (INFERRED, cost gate in 7).
 - **Time (R2-05).** `fw_time` is corroborating metadata, not the clock the
   freshness alert trusts. The monitor records, in its own state, the time of
   its own clock when it first verified each receipt (`seen_time`). A receipt
@@ -482,38 +556,42 @@ D-R8 (accept it, or coarsen further at the cost of weaker monitor rules).
 
 ### 4.3 What the monitor checks, from outside the NAS
 
-Per run, on `mon.example.internal`, with the receipts and the newest ciphertext
-read from S3 using the monitor-only identity (S5), never from the NAS:
+Per run, on `mon.example.internal`, with the receipts, signatures and the newest
+ciphertext read from S3 using the monitor-only identity (S5), never from the
+NAS:
 
-1. Receipt signature verifies under the monitor's key.
+1. Framing and the receipt signature verify under the monitor's key (4.2).
 2. `recipient_fingerprint` equals the expected fingerprint held by the monitor.
-3. `epoch` and `seq` are not lower than the monitor's state; a gap or a
-   repeated `seq` with a different hash is a warning or critical (4.5).
-4. `prev_receipt_sha256` chains to the previous accepted receipt.
-5. The ciphertext object for that receipt in S3 (every receipt has its own,
-   R2-02) has size and SHA-256 equal to the receipt's. Carry-over receipts
-   from an interrupted emission (2.2 step 5) have no ciphertext and are
-   counted as a warning, not as a missing upload.
-6. The object has an Object Lock retain-until date in the future and the
+3. Inside an epoch, `seq` is above the last accepted one. A missing number
+   (a gap, which is what an interrupted emission leaves) is a warning; a
+   repeated `seq` with a different receipt hash, or a lower `seq`, is
+   critical. A lower `epoch` is critical; a higher `epoch` is accepted only
+   after the owner has told the monitor (4.5).
+4. The ciphertext object for that receipt in S3 has size and SHA-256 equal to
+   the receipt's `cipher_size` and `cipher_sha256`.
+5. The object has an Object Lock retain-until date in the future and the
    expected mode (S1); anything else is critical.
-7. Bands within bounds, no shrink beyond the change-rate rule; the
-   `change_marker` is compared with the previous receipt's.
-8. Freshness age from the earlier of `fw_time` and the monitor's own
+6. Exact counts, size and revision within bounds and above the floors; no
+   shrink beyond the change-rate rule; `config_revision` not lower than the
+   previous accepted receipt's; `plain_sha256` compared with the previous
+   receipt's for change detection.
+7. Freshness age from the earlier of `fw_time` and the monitor's own
    `seen_time` (4.2, R2-05), and a `fw_time` too far in the future is
    receipt-invalid.
 
-The monitor reads only ciphertext and receipts, never plaintext, so it needs no
-decryption key. It checks content equality, not that the ciphertext decrypts:
-only the drill (6) proves decryption. That is stated as a limit, not a gap.
+The monitor reads only ciphertext, receipts and signatures, never plaintext, so
+it needs no decryption key. It checks content equality, not that the
+ciphertext decrypts: only the drill (6) proves decryption. That is stated as a
+limit, not a gap.
 
 ### 4.4 Metrics
 
 | Metric (InfluxDB measurement, tag `dest`) | Meaning |
 |---|---|
 | `pfsense_backup_last_receipt_age_seconds` | Age of the newest verified receipt: the monitor's now minus the earlier of the signed `fw_time` and the monitor's own first-seen time (4.2). **This is the freshness signal**; NAS mtime is not used for alerting. |
-| `pfsense_backup_receipt_verify_ok` | 1 when checks 1 to 5 above pass for the newest receipt, else 0, with reason as a field. |
+| `pfsense_backup_receipt_verify_ok` | 1 when checks 1 to 4 and 6 of 4.3 pass for the newest receipt, else 0, with reason as a field. |
 | `pfsense_backup_s3_state_ok` (`dest=s3`) | S3 has the receipt and the matching ciphertext (when one was due) with a valid lock. Replaces `s3_behind_count` computed from the NAS (R1-06). |
-| `pfsense_backup_seq_gap_count` | Missing or repeated sequence numbers since the last accepted state. |
+| `pfsense_backup_seq_gap_count` | Missing sequence numbers inside an epoch since the last accepted state (interrupted or lost emissions). Repeats and decreases are `receipt_verify_ok` 0, not a gap. |
 | `pfsense_backup_nas_liveness_age_seconds` (`dest=nas`) | Age of the NAS status file mtime. Informational only. |
 | `pfsense_backup_check_success` | The check itself ran (1) or failed (0). |
 
@@ -528,10 +606,11 @@ thresholds in section 6 are a proposal.
 |---|---|---|---|
 | Backup stale | `last_receipt_age` over 2 days | warning | One missed run is tolerated. |
 | Backup stale | `last_receipt_age` over 3 days | critical | Two periods plus a day. |
-| Receipt invalid | `receipt_verify_ok` is 0 (bad signature, wrong recipient, chain break, hash mismatch, rollback) | critical | An invalid or forged receipt is worse than a stale one. |
+| Receipt invalid | `receipt_verify_ok` is 0 (bad signature or framing, wrong recipient, hash mismatch, repeated or lower `seq`, lower epoch, future `fw_time`, rollback) | critical | An invalid or forged receipt is worse than a stale one. |
+| New epoch | A higher `epoch` than the monitor knows, before the owner confirmed it | critical | A rebuild or state loss is an owner action; an unannounced one is not trusted. The owner confirms by the authenticated procedure of 2.2 step 4 on the monitor. |
 | S3 state | `s3_state_ok` is 0 for more than 1 day | warning | |
 | S3 state | `s3_state_ok` is 0 for more than 3 days, or any lock check failing | critical | Same two-period shape. |
-| Sequence | `seq_gap_count` over 0 | warning | |
+| Sequence | `seq_gap_count` over 0 | warning | A consumed `seq` from an interrupted emission is a gap; the next good pull restores freshness, so a gap is for the owner to look at, not a page. |
 | Change rate | size or counts drop beyond the rule | warning | A legitimate cleanup can trigger it. |
 | Check failing | `check_success` is 0, or no data for 36 hours | critical | A silent monitor must alert (`noDataState` and `execErrState` set to Alerting). |
 
@@ -657,9 +736,8 @@ contain it. Quarterly, matching `docs/backup-restore.md`:
    the "expected recipient" check, test W2). Confirm the ciphertext SHA-256
    equals the receipt's.
 3. Fetch the restore key from the secret manager on the workstation (no copy
-   on the NAS). Decrypt the ciphertext and the inner record (4.2). Confirm the
-   plaintext SHA-256 equals the inner record's, and that the inner record's
-   hash is the one the signed receipt references.
+   on the NAS). Decrypt the ciphertext. Confirm the plaintext SHA-256 and
+   size equal the signed receipt's.
 4. L1 and L2 checks again on the result (`xmllint --noout`, root `pfsense`,
    the counts). Print only counts and versions, never content.
 5. L3: restore into a spare or virtual pfSense of the same major version,
@@ -704,10 +782,9 @@ Auto Config Backup is free (P-ACB VERIFIED).
 | F8 | Wrapper script, root-owned, mode not writable by others, in a location that survives upgrades (**OPEN**, Q3) | Validate, encrypt, sign | No arguments; ignores `SSH_ORIGINAL_COMMAND`; fails closed | LEAD supplies, OWNER installs after inspection |
 | F9 | Recipient pin file (public key or certificate) | R1-02 | Root-owned, readable by the wrapper, not writable by `backup-ro`; fingerprint recorded offline | OWNER |
 | F10 | Receipt signing key pair; private half on the firewall only | R1-03 | Root-only, mode 0600; public half to the monitor and the owner's offline record; regenerated after any rebuild | OWNER generates on the firewall, public half copied out |
-| F11 | State directory: sequence, epoch, previous-receipt hash, pending receipts, lock file | Monotonic receipts, single writer, atomic reserve (2.2) | Root-owned, outside `config.xml`, written only by rename of a new file; epoch set by the owner | OWNER |
+| F11 | State directory: sequence, epoch, lock file | Monotonic `seq`, single writer (2.2 steps 0 and 4) | Root-owned, outside `config.xml`; the state file is replaced only by fsync, rename and directory fsync; epoch changed only by the owner's console procedure | OWNER |
 | F12 | Stateless self-test script `<selftest-path>` | R2-06 | Root-owned; no lock, no state writes, no signing; not reachable through the key | LEAD supplies, OWNER installs after inspection |
-| F13 | Change-marker key | R2-07 | Root-only, firewall only, never copied out; regenerated with the signing key after a rebuild | OWNER |
-| F14 | Memory-backed root-only scratch directory for the snapshot and ciphertext buffer | R2-03 | Mode 0700, root; availability **OPEN** (Q16); cleaned by trap | OWNER, after the check |
+| F13 | Memory-backed root-only scratch directory for the snapshot and ciphertext buffer | R2-03, R3-05 | Mode 0700, root; capacity at least twice `max_config_bytes`, checked before each run; availability **OPEN** (Q16); cleaned by trap | OWNER, after the check |
 
 ### 7.2 NAS (nas.example.internal)
 
@@ -912,14 +989,14 @@ home directory path is INFERRED; if the file is not there, the owner reports
 where it is, and then T1 to T7 from the NAS are the real proof either way.
 
 **The old `ssh ... | wc -c` proof command is removed (R2-06):** it ran the
-real, stateful wrapper, advanced its sequence and chain, and threw the output
+real, stateful wrapper, advanced its sequence, and threw the output
 away, leaving a gap, and it skipped the pinned `known_hosts` and strict
 options. Replaced by two things:
 
 1. A stateless self-test on the firewall console, a separate root-owned script
    `<selftest-path>` that shares the wrapper's validation and encryption code
-   but never takes the lock, never reads or writes the sequence, chain or
-   pending state and never signs a receipt. It is not reachable through the
+   but never takes the lock, never reads or writes the sequence or epoch state
+   and never signs a receipt. It is not reachable through the
    key (the forced command is the wrapper only, and the wrapper takes no
    mode argument). It prints counts and versions only:
    ```
@@ -937,8 +1014,8 @@ options. Replaced by two things:
    sh -c '<nas-ingest-script>'
    ```
    Expected: exit 0, then the monitor reports `receipt_verify_ok` 1 and
-   `s3_state_ok` 1 for the new `seq`. A failed first pull leaves a visible
-   `pending` or no receipt, never a silent gap.
+   `s3_state_ok` 1 for the new `seq`. A failed first pull leaves either no receipt or
+   a consumed `seq` that the monitor reports as a gap, never a silent one.
 
 What I read earlier about the box, interpreted (all labeled):
 
@@ -1018,22 +1095,30 @@ production bucket.
 | L6 | The same attempts after the retention end on the throwaway bucket | Succeed, proving the test would have detected a missing lock |
 | L7 | A delete marker placed by the writer or an admin on the throwaway bucket | The locked version is still readable and listed; the monitor flags the marker (markers are not protected, S-AWS-OL VERIFIED) |
 
-### 8.5 Round 2 additions (R2-01 to R2-07)
+### 8.5 Round 2 and 3 additions (R2-01 to R2-07, R3-01 to R3-07)
 
 Same rules as above: each runs on a test firewall first, each needs a revert
-proof (the test fails with the control removed).
+proof (the test fails with the control removed). Tests for the deleted pending,
+carry-over, inner-record and change-marker machinery are removed with it.
 
 | # | Test | Expected |
 |---|------|----------|
-| C1 | Two concurrent pulls | One gets the stream; the other exits non-zero at once; no duplicate `seq`; no fork in the chain |
-| C2 | Client disconnects mid-stream (kill the NAS side after the header) | `pending` stays set; the next run carries the pending receipt over; the monitor shows a warning, not a break |
-| C3 | Kill the wrapper (hard) while it holds the lock, then pull again | Lock is released by the OS; the next run works; state is either the old or the new atomic file, never half-written |
-| U1 | Pull twice with an unchanged configuration | Two receipts, two ciphertext objects in S3, both verify (check 5 passes); `change_marker` equal |
-| U2 | Unchanged day with the upload withheld on the NAS | Check 5 fails for that receipt; `s3_state_ok` 0 (no exception exists to mask it) |
+| C1 | Two concurrent pulls | One gets the stream; the other exits non-zero at once; no duplicate `seq` |
+| C2 | Client disconnects mid-stream (kill the NAS side after the header) | The wrapper exits non-zero; the `seq` is consumed and never reused; the next pull works; the monitor shows a gap warning, not a critical |
+| C3 | Kill the wrapper (hard) while it holds the lock, then pull again | Lock is released by the OS; the next run works; the state file is either the old or the new one, never half-written |
+| C4 | Take a `seq`, then hard-reboot or cut power before and after emission (lab firewall) | After reboot the persisted `seq` is the consumed one, never lower; no reuse (file fsync, rename and directory fsync proven) |
+| C5 | Corrupt or delete the state file | The wrapper refuses to run, exit non-zero; it runs again only after the owner's console procedure sets a higher epoch; the monitor stays critical on an unannounced higher epoch until confirmed |
+| C6 | Client accepts the connection and never reads (stalled reader) | The write deadline or the run limit ends the wrapper; the lock is released; the next pull works; the consumed `seq` shows as a gap; nothing else on the firewall is touched |
+| C7 | Expiry kills only the wrapper's own session | Other processes (including a second, unrelated ssh session) keep running; no kill by pattern |
+| U1 | Pull twice with an unchanged configuration | Two receipts, two ciphertext objects in S3, both verify; `plain_sha256` equal and the monitor reports "unchanged" |
+| U2 | Unchanged day with the upload withheld on the NAS | The ciphertext check fails for that receipt; `s3_state_ok` 0 (no exception exists to mask it) |
 | P1 | Replace or modify `config.xml` between the wrapper's read and its encryption | Snapshot used throughout; the post-encrypt re-read differs, one retry, then fail closed; no receipt describes mixed revisions |
 | P2 | Kill the wrapper at each step; list persistent disk and scratch directory | No plaintext on persistent disk; scratch empty after the trap (or after the next run's start cleanup) |
-| P3 | Run with no memory-backed scratch available | Stops, exit non-zero, no disk fallback |
+| P3 | Run with no memory-backed scratch available | Stops, exit non-zero, no disk fallback, no `seq` consumed |
 | P4 | Ciphertext buffer cleanup after an emission error | Buffer removed; no ciphertext emitted before the receipt was signed |
+| P5 | `config.xml` of exactly `max_config_bytes` | Accepted |
+| P6 | `config.xml` of `max_config_bytes + 1`, and a sparse or endless source | Fails closed after reading at most `max_config_bytes + 1` bytes; no memory or scratch growth beyond the limit; no `seq` consumed |
+| P7 | Scratch filesystem smaller than twice `max_config_bytes`, and scratch filled during the run | The pre-check stops the run, or the run fails closed on a write error; no partial stream; no plaintext left |
 | G1 | Receipt with fields reordered | Rejected |
 | G2 | Receipt with a duplicated field, an unknown field, or a missing field | Rejected |
 | G3 | Receipt with extra whitespace, a different line ending, or trailing bytes | Rejected (signature or strict parse) |
@@ -1041,13 +1126,24 @@ proof (the test fails with the control removed).
 | G5 | Signature made over different bytes than those presented | Rejected |
 | G6 | Wrong `receipt_version` | Rejected |
 | G7 | Verification run with the exact commands recorded when Q7 closed, on a known-good and a known-bad receipt | Good verifies, bad fails |
+| F1 | Stream cut inside the header line, and a header with no LF within 64 bytes | No receipt; critical |
+| F2 | Stream cut inside the receipt or inside the signature | No verifiable receipt; critical |
+| F3 | Ciphertext cut short | `cipher_size` and `cipher_sha256` mismatch; critical |
+| F4 | Two streams concatenated, and extra trailing bytes after the ciphertext | Ciphertext longer than the signed `cipher_size`; critical |
+| F5 | Header with `receipt_len` over 4096 or `sig_len` over 1024, or a non-decimal length | Rejected before any parse |
+| F6 | Ciphertext replaced by another valid ciphertext | `cipher_sha256` mismatch; critical |
+| F7 | Receipt replaced by another pull's valid receipt (same ciphertext) | Mismatch with the ciphertext, and a repeated or lower `seq` with a different hash; critical |
+| F8 | Receipt, signature or ciphertext object missing in S3 | `s3_state_ok` 0 |
+| S1 | A gap in `seq` inside an epoch | Warning only |
+| S2 | The same `seq` twice with different receipt hashes | `receipt_verify_ok` 0, critical |
+| S3 | A lower `seq`, or a lower `config_revision` than the previous accepted receipt | `receipt_verify_ok` 0 for the first (critical); warning for the second |
 | K1 | Receipt whose `fw_time` is far in the future | `receipt_verify_ok` 0, critical; the freshness age is not reset by it |
 | K2 | Firewall clock jumps forward, then returns, with real pulls continuing | Alerts fire for the future receipts; freshness never looks newer than the monitor saw |
 | K3 | Old receipt uploaded late (withheld then released) | Age uses the earlier of `fw_time` and first-seen time, so it still reads old |
 | K4 | `fw_time` goes backwards while `seq` rises | Warning |
 | X1 | Run `<selftest-path>`, compare state directory before and after | Byte-identical; no receipt signed; no lock taken |
 | X2 | List the credentials and administrators of the monitor host and the NAS | No shared administrator, credential or session path |
-| Y1 | Review the receipt of a real pull for clear fields | Only the clear fields in 4.2; no exact count, revision, plaintext hash or version string |
+| Y1 | Review the receipt of a real pull | Exactly the signed fields in 4.2, in order; nothing else (no secret, no host name, no address) |
 
 ## 9. INFERRED claims in this note (check before relying on them)
 
@@ -1061,7 +1157,7 @@ proof (the test fails with the control removed).
 8. ACB stores its device key and encryption password inside `config.xml`; the server side offers no custom freshness hook.
 9. DSM offers create-only ACLs for one account, Task Scheduler with a user script, immutable snapshots on this model, and can run `ssh`, a hash tool and an S3 client.
 10. The OpenSSL version on the owner's firewall supports `cms -encrypt -aes256` as documented for 3.0 and later (FreeBSD base and Plus 25.11 are VERIFIED; the owner's CE or Plus version is not stated); `openssl x509 -fingerprint -sha256` prints the certificate fingerprint; the fingerprint is compared over a second channel; the signing flags exist in the installed version.
-11. Encrypting the same plaintext twice gives different ciphertext (randomized encryption), so every pull uploads its own ciphertext and change detection uses the keyed `change_marker`.
+11. Encrypting the same plaintext twice gives different ciphertext (randomized encryption), so every pull uploads its own ciphertext and change detection compares `plain_sha256` in consecutive signed receipts.
 12. A wrapper, key and state files placed outside `config.xml` survive a firmware upgrade in the chosen location.
 13. The firewall host key file is `/etc/ssh/ssh_host_ed25519_key.pub`.
 14. The chosen provider behaves as AWS S3 does for Object Lock (VERIFIED for AWS and, from a tool extract, for B2; not cross-checked for Wasabi, whose creation-time-only rule conflicts); no AWS price was found; S3 cost is cents per month for a few hundred kilobytes; the B2 and Wasabi prices carry no effective date.
@@ -1076,11 +1172,13 @@ proof (the test fails with the control removed).
 23. The GUI-written Authorized Keys file keeps option prefixes (nothing documented; forum posts suggest keys are written from `config.xml`); the pull user's shell is not documented.
 24. `age` runs on pfSense as a static binary or port package; it has no fingerprint feature (pin the full recipient string); GPG pins by full fingerprint.
 25. The mode and owner of `/cf/conf/config.xml` (a forum post reports world-readable on 2.4.2).
-26. The lock tool used by the wrapper releases its lock when the process dies, and a write error is visible to the wrapper when the client disconnects (tests C2, C3).
+26. The lock tool used by the wrapper releases its lock when the process dies, a write error is visible to the wrapper when the client disconnects, and file fsync, rename and directory fsync make the `seq` durable across power loss on the firewall's filesystem (tests C2 to C4, C6).
 27. A memory-backed filesystem exists on the firewall for a root-only scratch directory.
 28. The installed OpenSSL supports Ed25519 signing (else ECDSA P-256, else RSA 3072 or more).
 29. Daily upload of every ciphertext stays under a gigabyte a year and costs cents.
-30. A keyed hash of the plaintext cannot be used by a bucket thief to confirm a guessed configuration, and bands are coarse enough to hide exact counts.
+30. A thief who holds the signed `plain_sha256` cannot confirm a guessed configuration, because the file holds keys and pre-shared secrets that make a correct guess infeasible.
+31. A timeout tool or an alarm is available on the firewall and can kill one session's process by PID (Q17).
+32. A measured normal wrapper run is short enough that a fixed run limit and write deadline never trip in normal use, and `max_config_bytes` can be set from the real file size with a wide margin.
 
 ## 10. OPEN questions and their status after research (2026-11-27)
 
@@ -1098,7 +1196,8 @@ must answer; the table below it keeps the exact question):
 | Q6 | CLOSED for age: `age1...` recipients, identity file to decrypt, no fingerprint feature (S-AGE README; pinning by comparing the full string is INFERRED). GPG pinning by full fingerprint INFERRED. |
 | Q7 | Encrypt side CLOSED (S-OSSL-CMS, OpenSSL 3.0 page). Signing flags STILL OPEN. |
 | Q8 | CLOSED for AWS, B2, Wasabi and R2 as in 5.2. STILL OPEN: AWS price, the effective dates of the B2 and Wasabi prices, the Wasabi conflict. |
-| Q16 | STILL OPEN: which lock tool and which memory-backed scratch filesystem exist on the firewall and how they behave on process death (R2-01, R2-03). Lab read-only check: `sh -c 'which lockf flock'` and `sh -c 'mount | grep -c tmpfs'` (a count only). |
+| Q16 | STILL OPEN: which lock tool and which memory-backed scratch filesystem exist on the firewall and how they behave on process death, and whether fsync of a file and of its directory is honored (R2-01, R2-03, R3-03). Lab read-only check: `sh -c 'which lockf flock'` and `sh -c 'mount | grep -c tmpfs'` (a count only). |
+| Q17 | STILL OPEN: which tool bounds the wrapper's wall-clock time and each write on the firewall (a timeout command or an alarm), and how it kills only one session's process (R3-01). Lab read-only check: `sh -c 'which timeout'`. |
 | Q9 to Q15 | STILL OPEN (monitor permission names, ssh_config option names, DSM, Doppler, the observed source address, the revision field name, ACB log content). |
 
 The exact questions:
@@ -1134,8 +1233,8 @@ these is answered from memory.
 | D-R4 | S3 provider and its cost gate (cents per month; a Compliance lock is a commitment; Wasabi has a 90-day minimum) | AWS S3, Backblaze B2, Wasabi (new bucket needed), R2 is out (no Object Lock) | AWS S3 or Backblaze B2: both allow the lock on an existing bucket |
 | D-R5 | Mode and duration: Compliance, 90 days default retention, 365 days lifecycle (irreversible for the retention length) | Compliance 90 days, longer, or Governance with the bypass permission denied | Compliance 90 days. Governance is weaker: a key holding the bypass capability can delete locked versions (S-AWS-OL, S-B2-OL VERIFIED), so a stolen admin key defeats it |
 | D-R6 | Secret manager layout | Dedicated project, or per-role configs in the decided `homelab` dev config | Dedicated project; the decided dev-first rule still holds either way |
-| D-R8 | Accept the receipt metadata that stays visible to a disk or bucket thief (pull timing, ciphertext size, coarse bands, epoch and sequence, change or no change) | Accept, or coarsen further (weaker monitor rules) | Accept; the configuration itself stays ciphertext |
 | D-R7 | Whether the restore private key also lives in the secret manager or only offline plus the owner's workstation | Both (current text), or offline only | Both, in an owner-only config |
+| D-R8 | Accept that a thief of the NAS disk or the bucket can read, in the signed receipts, the pull timing, epoch and sequence, the exact configuration revision, the exact interface, rule and user counts, the plaintext size, tool versions and the plaintext SHA-256 (not the configuration; the hash lets a holder of a guessed full config confirm it, and a correct guess is infeasible, INFERRED) | Accept, or take the metadata out of the receipt at the cost of weaker monitor rules (the earlier inner-record design was removed because it added attack surface and left the monitor unable to see exact counts) | Accept; the configuration itself stays ciphertext |
 
 ## 12. Build order and who does what
 
@@ -1143,9 +1242,9 @@ these is answered from memory.
 |------|-----|------------|
 | 1. Run the 7.6 commands, send output | OWNER | none |
 | 2. Fill the OPEN answers (section 10) into this note; round 2 review | LEAD | 1 |
-| 3. Approve this note, thresholds, the access list and D-R1 to D-R7 in one answer | OWNER | 2 |
+| 3. Approve this note, thresholds, the access list, and explicitly each of D-R1 through D-R8 (all eight, by id; nothing is built until each is answered) | OWNER | 2 |
 | 4. Draft wrapper, NAS script, receipt verifier, checker script, Grafana rules and the section 8 tests (repo PRs, tools in `homelab-backup-tools`) | LEAD via implementer | 3 |
-| 5. Create F1 to F11, N1 to N8, S1 to S6, D0 to D6 | OWNER (LEAD supplies each full command or exact text) | 3 |
+| 5. Create F1 to F13, N1 to N8, S1 to S6, D0 to D6 | OWNER (LEAD supplies each full command or exact text) | 3 |
 | 6. Run section 8 tests on a test pair, then the live pair; throwaway bucket for L1 to L7; stateless self-test on the firewall (7.6); first real pull as the production ingest, verified by the monitor; first drill | OWNER runs on live hosts, LEAD verifies the output | 4, 5 |
 | 7. Unpause the rules once metrics arrive | LEAD with OK | 6 |
 | 8. Optional: ACB as a third copy | OWNER | 1 |
