@@ -3,8 +3,9 @@
 Copies the UniFi OS auto-backups of the Pi to a NAS share, keeps a real 90 day history there,
 and reports how fresh the backups are so Grafana can alert. Tracked in issue #228 (epic #62).
 
-Nothing here is deployed by this repo, and **nothing in this change was verified on a real Pi, a
-real NAS or real systemd**. The tests run the script against fake `mount`, `umount`, `mountpoint`, `stat`, `df`,
+Nothing here is deployed by this repo. **The script, its tests and the systemd units were not run on a
+real Pi, a real NAS or real systemd.** Only the two-step mount sequence (below) was run by hand on a
+real Pi. The tests run the script against fake `mount`, `umount`, `mountpoint`, `stat`, `df`,
 `id`, `date` and `sha256sum` binaries, a wrapper around `perl`, and a fake mountinfo file. See "Not verified" at the end.
 
 ## What it does
@@ -114,7 +115,8 @@ the script runs as root, so it does not trust paths between a check and a use.
   `rw` (or `ro` for `--dry-run`), `nosuid`, `nodev`, `noexec` and no `nosymfollow`. Step 2 runs
   `/usr/bin/mount -o remount,bind,nosymfollow <mount point>`. Step 3 reads `/proc/self/mountinfo`
   and requires `rw`/`ro` as asked plus `nosymfollow`, `nosuid`, `nodev` and `noexec` on the mount
-  point. If the remount fails or any option is missing, the script unmounts the share and fails
+  point. The mode must be listed exactly once, as a whole `ro` or `rw` token, and must be the one
+  asked for: a listing with both, with neither or with the other one is refused. If the remount fails or any option is missing, the script unmounts the share and fails
   with code 3 before anything is written to it. `nosymfollow` is a VFS flag applied to the mount
   point (`mount(8)`, util-linux 2.41.5, read 2026-11-27: "Do not follow symlinks when resolving
   paths").

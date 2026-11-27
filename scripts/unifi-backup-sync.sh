@@ -627,7 +627,22 @@ else
     "$mount_bin" -o remount,bind,nosymfollow "$NAS_MOUNT_POINT" || fail 3 "could not make the mount refuse symlinks (bind remount failed)"
     read_mount_opts || fail 3 "cannot read the mount table"
     [ -n "$mount_opts" ] || fail 3 "the new mount is not in the mount table"
-    for om_want in "$mode" nosymfollow nosuid nodev noexec; do
+    # The mode must be listed exactly once, as a whole token, and be the one that was asked for:
+    # a listing with both ro and rw, or with neither, or with the other one, is not accepted.
+    om_modes=0
+    om_seen=""
+    for om_m in ro rw; do
+        case ",$mount_opts," in
+            *",$om_m,"*)
+                om_modes=$((om_modes + 1))
+                om_seen=$om_m
+                ;;
+        esac
+    done
+    if [ "$om_modes" -ne 1 ] || [ "$om_seen" != "$mode" ]; then
+        fail 3 "the mount is missing the required option $mode (exactly one of ro or rw must be listed, and it must be the requested one); refusing"
+    fi
+    for om_want in nosymfollow nosuid nodev noexec; do
         case ",$mount_opts," in
             *",$om_want,"*) ;;
             *) fail 3 "the mount is missing the required option $om_want after the remount; refusing" ;;

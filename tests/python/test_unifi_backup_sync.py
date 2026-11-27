@@ -88,9 +88,12 @@ class Env:
             '    [ "${FAKE_REMOUNT_FLIP_RO:-0}" = 1 ] && new=$(echo "$new" | sed "s/^rw/ro/")\n'
             '    echo "$new" > "%s"; gen ;;\n'
             '  *nosymfollow*) echo "cifs: Unknown parameter nosymfollow" >&2; exit 32 ;;\n'
-            '  *) kept=""; IFS=,; for t in $o; do\n'
-            '       case "$t" in ro|rw|nosuid|nodev|noexec) kept="${kept:+$kept,}$t" ;; esac\n'
+            '  *) kept=""; mode=""; IFS=,; for t in $o; do\n'
+            '       case "$t" in ro|rw) mode=$t ;; nosuid|nodev|noexec) kept="$kept,$t" ;; esac\n'
             '     done; unset IFS\n'
+            '     # like the kernel: one mode token, the last one asked for wins\n'
+            '     kept="$mode$kept"\n'
+            '     [ -n "${FAKE_MOUNT_LISTING:-}" ] && kept=$FAKE_MOUNT_LISTING\n'
             '     echo "$kept" > "%s"; gen; : > "$FAKE_MARKER" ;;\n'
             'esac\n') % (mp, opts_file, mi, opts_file, opts_file, opts_file))
         _fake(self.bin / "umount", 'echo "umount $*" >> "$FAKE_LOG"\n'
@@ -695,8 +698,11 @@ def test_first_mount_asks_for_the_mode_and_every_hardening_flag(env, mode_args, 
     for flag in ("nosuid", "nodev", "noexec"):
         assert flag in opts, flag
     assert "nosymfollow" not in opts
+    other = "ro" if mode == "rw" else "rw"
+    assert other not in opts
     info = env.mountinfo.read_text(encoding="utf-8")
     assert ("%s,nosuid,nodev,noexec,nosymfollow" % mode) in info
+    assert not re.search(r"[ ,]%s[ ,]" % other, info.splitlines()[1])
 
 
 @pytest.mark.parametrize("dropped,old,new", [
@@ -718,6 +724,42 @@ def test_script_that_stops_asking_for_a_flag_fails_closed(dropped, old, new):
         assert _metrics(r.stdout)["unifi_backup_sync_result_code"] == 3
         assert "missing the required option" in r.stderr
         assert not e.nas.exists()
+        _assert_unmounted_clean(e)
+
+
+@pytest.mark.parametrize("args,listing", [
+    ((), "ro,rw,nosuid,nodev,noexec"),        # both modes listed
+    ((), "nosuid,nodev,noexec"),              # no mode listed
+    ((), "ro,nosuid,nodev,noexec"),           # the other mode than the one asked for
+    (("--dry-run",), "rw,nosuid,nodev,noexec"),   # a dry run that came up read-write
+    (("--dry-run",), "ro,rw,nosuid,nodev,noexec"),
+    (("--dry-run",), "nosuid,nodev,noexec"),
+])
+def test_read_back_needs_exactly_the_requested_mode(env, args, listing):
+    _populate(env)
+    r = env.run(*args, FAKE_MOUNT_LISTING=listing)
+    assert r.returncode == 1
+    if args:  # a dry run prints no metrics, not even on a failure
+        assert r.stdout == ""
+    else:
+        assert _metrics(r.stdout)["unifi_backup_sync_result_code"] == 3
+    assert "exactly one of ro or rw" in r.stderr
+    assert not env.nas.exists() and env.nas_files() == []
+    _assert_unmounted_clean(env)
+
+
+def test_a_dry_run_request_for_both_modes_is_read_write_like_the_kernel_and_refused():
+    SCRATCH_ROOT.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=SCRATCH_ROOT) as d:
+        def edit(text):
+            old = '-o "$mode,credentials='
+            assert text.count(old) == 1
+            return text.replace(old, '-o "$mode,rw,credentials=')
+        e = _env_with(Path(d), edit)
+        _populate(e)
+        r = e.run("--dry-run")
+        assert r.returncode == 1
+        assert r.stdout == "" and "exactly one of ro or rw" in r.stderr
         _assert_unmounted_clean(e)
 
 
