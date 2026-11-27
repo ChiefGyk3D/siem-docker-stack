@@ -144,7 +144,10 @@ Each source's check query returns exactly one series.
 Identities are normalized before anything else: Unicode NFKC (so full-width look-alikes become plain
 letters and canonically equivalent spellings join), then a conservative allowlist (letters, ASCII
 digits, combining marks, space and `. _ ( ) -`; it must start with a letter or digit and have no
-trailing space). Every letter must be Latin, Cyrillic or Greek and one name uses only one of the
+trailing space). Combining marks are accepted only directly after a letter (never after a digit, space
+or punctuation, and never first), and any invisible Default_Ignorable_Code_Point character (variation
+selectors, the combining grapheme joiner, joiners, fillers and the like) is refused, so two names
+cannot look identical while being different. Every letter must be Latin, Cyrillic or Greek and one name uses only one of the
 three; any other script (Han, Arabic and so on) fails the source. There is no slash, colon, hash, plus
 or at sign, so a name cannot read as a URL scheme, a Matrix room alias or a mention. A bare host name
 such as `ap-1.example.com` is still accepted and a chat client may turn it into a plain link; it can

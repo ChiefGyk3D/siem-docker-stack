@@ -2087,8 +2087,43 @@ def check_identities(wf):
         assert _named(wf, name, "ap-1.example (office)")["status"] == "ok", name
 
 
-def test_identities_are_nfc_allowlisted_and_not_mixed_script():
+def test_identities_are_nfkc_allowlisted_and_not_mixed_script():
     check_identities(_wf())
+
+
+# R4-1: invisible characters must not make two names look identical
+INVISIBLE_IDENTITIES = [
+    "ap️",            # letter + variation selector
+    "ap͏",            # letter + combining grapheme joiner
+    "ap᠋",            # letter + Mongolian free variation selector
+    "ap\U000E0100",        # letter + variation selector supplement
+    "ap⁠",            # word joiner
+    "ap­",            # soft hyphen
+    "apㅤ",            # Hangul filler
+    "1́",             # combining acute directly after a digit (also first character)
+    "ap1́",           # combining acute after a digit inside a name
+    "ap (́",          # combining acute after punctuation
+    "ap ́b",          # combining acute after a space
+]
+
+
+@pytest.mark.parametrize("name", list(REAL))
+@pytest.mark.parametrize("bad", INVISIBLE_IDENTITIES, ids=lambda s: "+".join("U%04X" % ord(c) for c in s))
+def test_invisible_and_misplaced_marks_are_rejected(name, bad):
+    j = _named(_wf(), name, bad)
+    assert j["status"] == "failed" and j["pending"] == [], (name, bad)
+    # the plain spelling beside the invisible one must not become two pending identities
+    j = _named(_wf(), name, "ap", bad)
+    assert j["status"] == "failed" and j["pending"] == [], (name, bad)
+
+
+@pytest.mark.parametrize("name", list(REAL))
+def test_legitimate_accented_names_are_still_accepted(name):
+    wf = _wf()
+    for good in ("café", "café", "ap1-café (office)", "буквӑ",
+                 "αβ́"):
+        j = _named(wf, name, good)
+        assert j["status"] == "ok" and len(j["pending"]) == 1, (name, good)
 
 
 def test_decomposed_name_joins_history_written_precomposed():
