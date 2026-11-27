@@ -18,7 +18,7 @@ real NAS or real systemd**. The tests run the script against fake `mount`, `umou
    a success.
 3. Mounts the NAS share read-write for the run only, then bind-remounts it with `nosymfollow` and
    checks the mount table (or uses an already mounted path, see
-   `NAS_USE_EXISTING_MOUNT`). It unmounts on every exit path, including errors and a signal.
+   `NAS_USE_EXISTING_MOUNT`). It unmounts on every exit path it can catch: errors and the catchable signals HUP, INT and TERM. SIGKILL cannot run the cleanup; then the unit's private mount namespace should drop the mount when the service ends (not verified on the Pi).
 4. Stages each source file (see "Links and races"), checks size and SHA-256, and then:
    - if a file of that name already exists on the NAS, its content is hashed and must equal the
      staged copy. Same bytes: nothing to do. Anything else (a different size, or the same size with

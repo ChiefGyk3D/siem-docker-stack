@@ -88,7 +88,10 @@ class Env:
             '    [ "${FAKE_REMOUNT_FLIP_RO:-0}" = 1 ] && new=$(echo "$new" | sed "s/^rw/ro/")\n'
             '    echo "$new" > "%s"; gen ;;\n'
             '  *nosymfollow*) echo "cifs: Unknown parameter nosymfollow" >&2; exit 32 ;;\n'
-            '  *) m=${o%%%%,*}; echo "$m,nosuid,nodev,noexec" > "%s"; gen; : > "$FAKE_MARKER" ;;\n'
+            '  *) kept=""; IFS=,; for t in $o; do\n'
+            '       case "$t" in ro|rw|nosuid|nodev|noexec) kept="${kept:+$kept,}$t" ;; esac\n'
+            '     done; unset IFS\n'
+            '     echo "$kept" > "%s"; gen; : > "$FAKE_MARKER" ;;\n'
             'esac\n') % (mp, opts_file, mi, opts_file, opts_file, opts_file))
         _fake(self.bin / "umount", 'echo "umount $*" >> "$FAKE_LOG"\n'
               '[ "${FAKE_UMOUNT_FAIL:-0}" = 1 ] && exit 1\nrm -f "$FAKE_MARKER"\n')
@@ -674,6 +677,48 @@ def test_remount_that_drops_nosuid_fails_closed(env):
 
 def test_remount_that_flips_read_write_fails_closed(env):
     _remount_failure_is_closed(env, FAKE_REMOUNT_FLIP_RO="1")
+
+
+# --- mount options come only from what the script asks for (Daybreak on PR 250, DBR-228-01) ---------
+
+def _env_with(tmp_root, edit):
+    return Env(tmp_root, mutate=edit)
+
+
+@pytest.mark.parametrize("mode_args,mode", [((), "rw"), (("--dry-run",), "ro")])
+def test_first_mount_asks_for_the_mode_and_every_hardening_flag(env, mode_args, mode):
+    _populate(env)
+    env.run(*mode_args)
+    first = [c for c in env.calls() if c.startswith("mount ") and "remount" not in c][0]
+    opts = first.split(" -o ")[1].split(" ")[0].split(",")
+    assert opts[0] == mode
+    for flag in ("nosuid", "nodev", "noexec"):
+        assert flag in opts, flag
+    assert "nosymfollow" not in opts
+    info = env.mountinfo.read_text(encoding="utf-8")
+    assert ("%s,nosuid,nodev,noexec,nosymfollow" % mode) in info
+
+
+@pytest.mark.parametrize("dropped,old,new", [
+    ("nosuid", ",nosuid,nodev,noexec\"", ",nodev,noexec\""),
+    ("nodev", ",nosuid,nodev,noexec\"", ",nosuid,noexec\""),
+    ("noexec", ",nosuid,nodev,noexec\"", ",nosuid,nodev\""),
+    ("mode", '-o "$mode,credentials=', '-o "credentials='),
+])
+def test_script_that_stops_asking_for_a_flag_fails_closed(dropped, old, new):
+    SCRATCH_ROOT.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=SCRATCH_ROOT) as d:
+        def edit(text):
+            assert text.count(old) == 1, dropped
+            return text.replace(old, new)
+        e = _env_with(Path(d), edit)
+        _populate(e)
+        r = e.run()
+        assert r.returncode == 1, r.stderr
+        assert _metrics(r.stdout)["unifi_backup_sync_result_code"] == 3
+        assert "missing the required option" in r.stderr
+        assert not e.nas.exists()
+        _assert_unmounted_clean(e)
 
 
 # --- Daybreak round 1 findings (PR 240) -----------------------------------------------------------
