@@ -30,7 +30,10 @@ Delivery claims:
   `Build Pushover Payload` (`phone = str(l.phone, 10) === 'true'`,
   `enabled: PUSHOVER_ENABLED === true && phone`), then `Pushover Enabled?`.
 - Pushover priority: for a firing alert, 2 (emergency, repeats) when the alert
-  name is in `ALLOWED_ALERTNAMES` and (`severity=critical` or
+  name is in `ALLOWED_ALERTNAMES`, the alert carries that rule's identity (its
+  uid in the `__alert_rule_uid__` label or the `generatorURL` path
+  `/alerting/grafana/<uid>/view`, plus the `source` and `update_alert=true`
+  labels listed in `ALLOWED_RULES`; #261), and (`severity=critical` or
   `update_security=true`); 1 when it is urgent or `severity=warning` but not
   allowlisted; 0 otherwise. Resolved alerts are priority 0 and cancel repeats by
   tag. Verified: node `Build Pushover Payload`. Consequence (inferred): a new P1
@@ -106,8 +109,9 @@ The router never reads `tier`, `digest`, `source`, `alert_group` or
 2. Add all required labels (`severity`, `tier`, `phone`, `alert_group`), every
    value a quoted string. Updates rules also need `source` and
    `update_alert: "true"`.
-3. P1: add the rule title to `ALLOWED_ALERTNAMES` in the router if it should
-   page at emergency priority, and keep it equal to the rule title.
+3. P1: add the rule title to `ALLOWED_ALERTNAMES` and its uid and `source` to
+   `ALLOWED_RULES` in the router if it should page at emergency priority, and
+   keep both equal to the provisioned rule (a test enforces it).
 4. P3: add `digest: "true"`. Remember the digest is not built; until then a P3
    alert posts to Discord when it fires.
 5. Set `noDataState` and `execErrState` on purpose and write the reason in a

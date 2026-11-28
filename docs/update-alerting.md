@@ -409,9 +409,10 @@ widens what workflow authors can read, so this repo avoids it):
 | `PUSHOVER_EXPIRE` | 10800 | Seconds before repeats stop (maximum 10800) |
 | `ALLOWED_DASHBOARD_ORIGIN` | empty | Only an https link on exactly this origin is forwarded; empty drops every link |
 | `ALLOWED_ALERTNAMES` | the provisioned update alert titles | Only these names can page at emergency priority or cancel repeats |
+| `ALLOWED_RULES` | the provisioned rule uid and `source` per title | A listed title only counts when the alert also carries that rule uid (label `__alert_rule_uid__` or the `generatorURL` path `/alerting/grafana/<uid>/view`), that `source` and `update_alert=true`. Anything else is unknown: priority 1 at most, no repeat tag, no cancel (#261) |
 
-Keep `ALLOWED_ALERTNAMES` equal to the rule titles in
-`update-alert-rules-*.yml`; a test enforces this.
+Keep `ALLOWED_ALERTNAMES` and `ALLOWED_RULES` equal to the rule titles, uids and
+`source` labels in `update-alert-rules-*.yml`; a test enforces this.
 
 Priority mapping:
 
@@ -562,9 +563,11 @@ This is an accepted residual risk, and the owner's call, not something the
 workflow fixes. The webhook secret is a shared secret. Anyone who holds it,
 and can reach the webhook, can send an alert with any allowlisted title, pick
 emergency priority, and cancel the repeats for a tag they can compute from a
-title and fingerprint. The allowlist (`ALLOWED_ALERTNAMES`) only limits
-which names get emergency priority; it does not prove which Grafana rule
-sent the call, and it is not provenance. The cancel call and the emergency
+title and fingerprint. Since #261 the allowlist also binds each title to its
+rule uid, so another Grafana rule that merely reuses a title cannot reach
+emergency priority. The uid is read from the payload the caller sends, so
+someone holding the secret can still forge it; this is a guard against
+mislabeled or reused titles, not provenance. The cancel call and the emergency
 page are only reachable by an authenticated Grafana caller (one that
 presents the secret), because the webhook rejects everything else. This repo
 does not keep a store of previously paged fingerprints.
