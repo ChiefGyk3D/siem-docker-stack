@@ -58,7 +58,7 @@ router compares).
 | `tier` | yes | `P1`, `P2`, `P3`, `none` | Nothing yet (inferred: the future digest and routing by tier). Must agree with `severity` and `phone` |
 | `phone` | yes | `true`, `false` | Router phone gate (`Build Pushover Payload`); heartbeat contract (`Build Heartbeat Ping`); email route |
 | `alert_group` | yes | `updates`, `heartbeat`, `alert-path`, `infrastructure`, `backup` | Display only (inferred: nothing reads it). Extend the set here and in the test when a new area appears. `infrastructure` (issue #224): host down and disk full; it may carry `phone=true` only as P1 `critical`, and never an update label. `backup` (issue #228): stale or failed backup alerts; needs `source`, never an update label, and its P2 warning may page (below) |
-| `source` | when `alert_group` is `updates` or `backup` | `unifi`, `pfsense`, `twingate`, `synology` (the set `SOURCES` in `tests/python/test_alert_taxonomy.py` is the authority; add a value there and here together) | Display only. This is the service owner or area; the data source or device family the rule watches |
+| `source` | when `alert_group` is `updates` or `backup` | `unifi`, `pfsense`, `twingate`, `synology`, `host` (the set `SOURCES` in `tests/python/test_alert_taxonomy.py` is the authority; add a value there and here together) | Display only. This is the service owner or area; the data source or device family the rule watches |
 | `digest` | P3 only | `true` | Nothing yet (future digest) |
 | `update_alert` | when `alert_group=updates` | `true` | Policy route `update-notification-policy.yml.example` |
 | `update_security` | optional, needs `update_alert` | `true` | Router: makes a firing alert urgent (`Build Pushover Payload`) |

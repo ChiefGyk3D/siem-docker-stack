@@ -1,0 +1,103 @@
+# Host (Debian-family) update collector alerts: stale apt package lists (issue #233).
+# Provisioned PAUSED (isPaused: true).
+#
+# The collector scripts/host-update-metric.sh counts pending updates from the host's own apt
+# lists and never refreshes them, so stale lists would read "nothing pending". It reports
+# host_update_lists_age_seconds (the older of the apt update stamp and the oldest security
+# list) and FAILS CLOSED past its maximum age (default 3 days): it then prints only
+# host_update_check_success value=0i and no age. Hence two rules: the age warning at 2 days
+# (before the hard failure) and the failing-or-missing check rule, which is what a list older
+# than 3 days, a missing stamp or missing lists look like in the data.
+#
+# These rules stay paused until the collector runs on a host (hourly, docs/host-update-collector.md)
+# and its output reaches InfluxDB. How the lines reach InfluxDB is not decided in this repo
+# yet (UNVERIFIED); these rules assume a Telegraf exec input with data_format = "influx" writing
+# to the Telegraf database (datasource influxdb-twingate, as the Synology rules do), where each line
+# becomes a measurement named like the metric with the field `value` and the tags `host` and `tier`.
+# To enable: set isPaused to false and restart Grafana, or unpause in the UI (a UI change is
+# overwritten by the file on the next provisioning run).
+#
+# Missing data and a failing query alert (noDataState and execErrState Alerting): a host that
+# stopped reporting must not look healthy. Both rules are quiet (P2 warning, phone false), as
+# the other pending-update health rules; repeat intervals come from the notification policy.
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: Update pending - Host
+    folder: Update Alerts
+    interval: 15m
+    rules:
+      - uid: update-host-lists-stale
+        title: "Host apt package lists stale"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 21600, to: 0}
+            datasourceUid: influxdb-twingate
+            model:
+              refId: A
+              datasource: {type: influxdb, uid: influxdb-twingate}
+              rawQuery: true
+              resultFormat: time_series
+              query: >-
+                SELECT last("value") FROM "host_update_lists_age_seconds" WHERE time > now() - 6h GROUP BY "host"
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: B, type: reduce, expression: A, reducer: last, settings: {mode: dropNN}}
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: C, type: threshold, expression: B, conditions: [{evaluator: {type: gt, params: [172800]}}]}
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 10m
+        isPaused: true
+        annotations:
+          summary: "The apt package lists of host {{ $labels.host }} are over 2 days old"
+          description: "The pending update count of this host is read from lists that are no longer fresh, so it may be too low. Check that apt-daily.timer is running and that apt-get update succeeds on the host. The collector fails closed at 3 days."
+        labels:
+          severity: "warning"
+          tier: "P2"
+          source: "host"
+          alert_group: "updates"
+          update_alert: "true"
+          phone: "false"
+
+      - uid: update-host-check-failing
+        title: "Host update check failing or stale"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: {from: 21600, to: 0}
+            datasourceUid: influxdb-twingate
+            model:
+              refId: A
+              datasource: {type: influxdb, uid: influxdb-twingate}
+              rawQuery: true
+              resultFormat: time_series
+              query: >-
+                SELECT last("value") FROM "host_update_check_success" WHERE time > now() - 6h GROUP BY "host"
+          - refId: B
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: B, type: reduce, expression: A, reducer: last, settings: {mode: dropNN}}
+          - refId: C
+            datasourceUid: __expr__
+            relativeTimeRange: {from: 0, to: 0}
+            model: {refId: C, type: threshold, expression: B, conditions: [{evaluator: {type: lt, params: [1]}}]}
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 10m
+        isPaused: true
+        annotations:
+          summary: "The update check of host {{ $labels.host }} is failing, or no result has arrived for 6 hours"
+          description: "The metric host_update_check_success is 0 or missing. A common cause is apt package lists or the apt update stamp that are missing or older than the collector maximum (3 days by default), so the host cannot be trusted to report no updates. Check apt-daily.timer and scripts/host-update-metric.sh on the host."
+        labels:
+          severity: "warning"
+          tier: "P2"
+          source: "host"
+          alert_group: "updates"
+          update_alert: "true"
+          phone: "false"
