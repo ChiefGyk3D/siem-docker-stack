@@ -22,7 +22,7 @@ SEVERITIES = {"critical", "warning", "info"}
 TIERS = {"P1", "P2", "P3", "none"}
 BOOL = {"true", "false"}
 ALERT_GROUPS = {"updates", "heartbeat", "alert-path", "infrastructure", "backup"}
-SOURCES = {"unifi", "pfsense", "twingate", "synology"}
+SOURCES = {"unifi", "pfsense", "twingate", "synology", "host"}
 # Every label a rule may carry. A label outside this set is a defect: nothing
 # reads it, so it is either a typo or an unrecorded routing key.
 ALLOWED_LABELS = {

@@ -103,6 +103,13 @@ configuration; a list left behind by a removed security source keeps failing unt
 (or `apt-get clean` of the lists) removes it. Keep the host's `apt-daily` refresh enabled.
 This covers issue #233.
 
+**Alert.** `docker/grafana/provisioning/alerting/update-alert-rules-host.yml` ships two rules, both
+paused until the collector's output reaches InfluxDB (how it gets there is not decided yet): "Host
+apt package lists stale" fires when `host_update_lists_age_seconds` is over 172800 (2 days, the
+warning before the 3-day hard failure), and "Host update check failing or stale" fires on
+`host_update_check_success` of 0 or no data for 6 hours, which is what a list older than the maximum
+or a missing stamp look like (the failing run prints no age). Both are P2, phone off.
+
 **Hosts without the stamp.** The age check needs the stamp, so a healthy host that has periodic
 updates disabled (`APT::Periodic::Update-Package-Lists "0"`) and never wrote the stamp **fails
 closed**. Enable the stamp with a file such as `/etc/apt/apt.conf.d/20auto-upgrades` containing
