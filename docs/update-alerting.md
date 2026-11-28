@@ -566,9 +566,9 @@ emergency priority, and cancel the repeats for a tag they can compute from a
 title and fingerprint. Since #261 the allowlist also binds each title to its
 rule uid, so another Grafana rule that merely reuses a title cannot reach
 emergency priority. The uid is read from the payload the caller sends, so
-someone holding the secret can still forge it. The allowlist still does not
-prove which Grafana rule sent the call, and it is not provenance; the uid
-only stops mislabeled or reused titles. The cancel call and the emergency
+someone holding the secret can still forge it. The allowlist does not prove which Grafana
+rule sent the call, and it is not provenance; the uid only stops mislabeled or
+reused titles. The cancel call and the emergency
 page are only reachable by an authenticated Grafana caller (one that
 presents the secret), because the webhook rejects everything else. This repo
 does not keep a store of previously paged fingerprints.
