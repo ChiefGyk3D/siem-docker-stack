@@ -1172,8 +1172,9 @@ def test_prune_protects_the_fallback_newest_when_the_epoch_is_unusable(env):
     assert _ages(r) == (200 * DAY, 200 * DAY)
 
 
-def test_leading_zero_epoch_is_not_trusted(env):
-    env.add_source("autobackup_9.0.114_20261109_0300_0%d.unf" % (NOW - DAY), age_days=3)
+@pytest.mark.parametrize("epoch", ["0123456789", "0001799913600"])  # 10 and 13 digits, leading zero
+def test_leading_zero_epoch_is_not_trusted(env, epoch):
+    env.add_source("autobackup_9.0.114_20261109_0300_%s.unf" % epoch, age_days=3)
     r = env.run()
     assert r.returncode == 0, r.stderr
     assert _ages(r) == (3 * DAY, 3 * DAY)
