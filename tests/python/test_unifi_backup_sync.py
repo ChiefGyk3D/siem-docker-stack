@@ -33,10 +33,15 @@ NOW = 1_800_000_000
 DAY = 86400
 SECRET = "-".join(["canary", "zq" * 4, "end"])  # built at run time, so no secret-shaped literal is in the file
 GOOD_NAMES = (
-    "autobackup_9.0.114_20261109_0300_1793000000.unf",
-    "autobackup_9.0.114_20261116_0300_1793604800.unf",
-    "autobackup_9.0.114_20261123_0300_1794209600.unf",
+    "autobackup_9.0.114_20261109_0300_1798790400.unf",  # epoch = NOW - 14 days
+    "autobackup_9.0.114_20261116_0300_1799395200.unf",  # epoch = NOW - 7 days
+    "autobackup_9.0.114_20261123_0300_1800000000.unf",  # epoch = NOW
 )
+
+
+def name_at(age_seconds, epoch_scale=1):
+    """A valid autobackup name whose embedded epoch says the backup is age_seconds old at NOW."""
+    return "autobackup_9.0.114_20261109_0300_%d.unf" % ((NOW - age_seconds) * epoch_scale)
 
 REAL = {
     "mv_bin": "/usr/bin/mv", "rm_bin": "/usr/bin/rm", "env_bin": "/usr/bin/env",
@@ -132,6 +137,10 @@ class Env:
             '/usr/bin/sha256sum "$@"; rc=$?\n'
             '[ -n "${FAKE_SHA_FAIL_FROM:-}" ] && [ "$n" -ge "$FAKE_SHA_FAIL_FROM" ] && exit 1\n'
             'exit $rc\n') % (root / "sha.count", root / "sha.count"))
+        _fake(self.bin / "ls", '[ -n "${FAKE_LS_FAIL:-}" ] && exit 2\n'
+              'if [ -n "${FAKE_LS_MARK:-}" ]; then echo "drwx------$FAKE_LS_MARK 2 root root 4096 Jan 1 00:00 $3"; exit 0; fi\n'
+              'if [ -n "${FAKE_LS_ACL:-}" ]; then echo "drwx------+ 2 root root 4096 Jan 1 00:00 $3"; exit 0; fi\n'
+              'exec /usr/bin/ls "$@"\n')
         _fake(self.bin / "df", 'if [ -n "${FAKE_DF_AVAIL:-}" ]; then\n'
               '  echo "Filesystem 1024-blocks Used Available Capacity Mounted on"\n'
               '  echo "fake 100 1 $FAKE_DF_AVAIL 1% /"\n'
@@ -143,7 +152,7 @@ class Env:
             "id_bin": str(self.bin / "id"), "date_bin": str(self.bin / "date"),
             "perl_bin": str(self.bin / "perl"), "sha256_bin": str(self.bin / "sha256sum"),
             "mountinfo_file": str(root / "mountinfo"),
-            "df_bin": str(self.bin / "df"), "mount_bin": str(self.bin / "mount"),
+            "df_bin": str(self.bin / "df"), "ls_bin": str(self.bin / "ls"), "mount_bin": str(self.bin / "mount"),
             "umount_bin": str(self.bin / "umount"), "mountpoint_bin": str(self.bin / "mountpoint"),
             "root_uid": str(me),
         })
@@ -279,12 +288,78 @@ def test_second_run_copies_only_new_files(env):
 
 
 def test_ages_are_measured_from_file_times(env):
-    env.add_source(GOOD_NAMES[0], age_days=9)
-    env.add_source(GOOD_NAMES[1], age_days=20)
+    env.add_source(name_at(9 * DAY), age_days=9)
+    env.add_source(name_at(20 * DAY), age_days=20)
     r = env.run()
     m = _metrics(r.stdout)
     assert m["unifi_backup_newest_age_seconds,where=local"] == 9 * DAY
     assert m["unifi_backup_newest_age_seconds,where=nas"] == 9 * DAY
+
+
+def _ages(r):
+    m = _metrics(r.stdout)
+    return (m["unifi_backup_newest_age_seconds,where=local"],
+            m["unifi_backup_newest_age_seconds,where=nas"])
+
+
+def test_nas_age_does_not_depend_on_a_nas_clock_that_runs_ahead(env):
+    # Issue 251: the NAS stamps its files 30 s ahead of the Pi, so the file-time age was -30.
+    name = name_at(9 * DAY)
+    src = env.add_source(name, age_days=9)
+    env.nas.mkdir()
+    (env.nas / name).write_bytes(src.read_bytes())
+    os.utime(env.nas / name, (NOW + 30, NOW + 30))  # what the skewed NAS reports for its copy
+    r = env.run()
+    assert r.returncode == 0, r.stderr
+    assert (env.nas / name).stat().st_mtime == NOW + 30, "the copy was rewritten; the test proves nothing"
+    assert _ages(r) == (9 * DAY, 9 * DAY)
+
+
+@pytest.mark.parametrize("epoch_ahead,mtime_ahead", [(0, 30), (20, 20), (299, 299), (0, 299)])
+def test_age_is_never_negative(env, epoch_ahead, mtime_ahead):
+    name = "autobackup_9.0.114_20261109_0300_%d.unf" % (NOW + epoch_ahead)
+    src = env.add_source(name)
+    os.utime(src, (NOW + mtime_ahead, NOW + mtime_ahead))
+    env.nas.mkdir()
+    (env.nas / name).write_bytes(src.read_bytes())
+    os.utime(env.nas / name, (NOW + mtime_ahead, NOW + mtime_ahead))
+    r = env.run()
+    assert r.returncode == 0, r.stderr
+    assert _ages(r) == (0, 0)
+
+
+def test_age_from_a_millisecond_epoch(env):
+    env.add_source(name_at(3 * DAY, 1000), age_days=1)  # file time disagrees on purpose
+    r = env.run()
+    assert r.returncode == 0, r.stderr
+    assert _ages(r) == (3 * DAY, 3 * DAY)
+
+
+def test_unparseable_epoch_falls_back_to_the_clamped_file_time_with_a_note(env):
+    # a one-digit epoch is a valid name but not a time; 12 digits is neither seconds nor milliseconds
+    odd = env.add_source("autobackup_9.0.114_20261109_0300_1.unf", age_days=4)
+    env.add_source("autobackup_9.0.114_20261108_0300_179999999999.unf", age_days=6)
+    r = env.run()
+    assert r.returncode == 0, r.stderr
+    assert _ages(r) == (4 * DAY, 4 * DAY)
+    assert "age taken from the file time" in r.stderr and odd.name in r.stderr
+    # a file time ahead of the Pi clock is clamped at zero, never negative
+    os.utime(odd, (NOW + 30, NOW + 30))
+    for f in env.src.glob("*179999999999*"):
+        f.unlink()
+    for f in env.nas.iterdir():
+        f.unlink()
+    r = env.run()
+    assert r.returncode == 0, r.stderr
+    assert _ages(r) == (0, 0)
+
+
+def test_epoch_far_in_the_future_is_not_trusted(env):
+    env.add_source("autobackup_9.0.114_20261109_0300_%d.unf" % (NOW + 10 * DAY), age_days=2)
+    r = env.run()
+    assert r.returncode == 0, r.stderr
+    assert _ages(r) == (2 * DAY, 2 * DAY)
+    assert "age taken from the file time" in r.stderr
 
 
 # --- refusals ----------------------------------------------------------------------------------
@@ -477,10 +552,11 @@ def test_prune_removes_only_old_exact_pattern_files(env):
 
 
 def test_prune_never_removes_the_newest_copy(env):
-    env.add_source(GOOD_NAMES[0], age_days=400)  # every backup is older than the retention
+    old = name_at(400 * DAY)
+    env.add_source(old, age_days=400)  # every backup is older than the retention
     r = env.run()
     assert r.returncode == 0, r.stderr
-    assert env.nas_files() == [GOOD_NAMES[0]]
+    assert env.nas_files() == [old]
     assert _metrics(r.stdout)["unifi_backup_newest_age_seconds,where=nas"] == 400 * DAY
 
 
@@ -964,6 +1040,42 @@ def test_prune_candidate_replaced_before_the_unlink_is_kept(env):
     assert (env.nas / old).read_bytes() == b"new backup"
 
 
+def test_accepted_residual_prune_replacement_after_the_last_check_is_deleted_and_bounded(env):
+    # R3-2 (issue 249), residual (2): a writer puts a newer file under the candidate's name after the
+    # helper's final lstat and before the unlink. Linux has no unlink by inode, so it is deleted.
+    # The bound: only that one name is lost, nothing else is touched, and the next run copies it.
+    _populate(env)
+    env.nas.mkdir()
+    old = "autobackup_8.0.1_20250101_0300_1735700000.unf"
+    bystander = "autobackup_8.0.1_20260101_0300_1767225600.unf"
+    (env.nas / old).write_bytes(b"old")
+    os.utime(env.nas / old, (NOW - 400 * DAY,) * 2)
+    (env.nas / bystander).write_bytes(b"keep")
+    os.utime(env.nas / bystander, (NOW - 60 * DAY,) * 2)
+    env.set_hook("after-prune-check", 'unlink($pre . $name); open(my $x, ">", $pre . $name); print $x "new backup"; close $x;')
+    r = env.run()
+    assert r.returncode == 0, r.stderr  # the helper cannot see the swap: this is the accepted gap
+    assert not (env.nas / old).exists()  # the replacement was deleted
+    assert (env.nas / bystander).read_bytes() == b"keep"
+    assert set(GOOD_NAMES) <= set(env.nas_files())
+    assert sorted(env.nas_files()) == sorted([bystander, *GOOD_NAMES])
+
+
+def test_accepted_residual_final_name_created_after_the_absence_check_is_overwritten(env):
+    # R3-2 (issue 249), residual (3): a target created after the final-name absence check and before
+    # the rename is replaced by the verified copy: no data of the Pi is lost, the file is the source.
+    _populate(env)
+    fired = env.root / "hook-fired"
+    env.set_hook("before-rename", 'open(my $x, ">", $pre . $name); print $x "concurrent target"; close $x;'
+                 ' open(my $m, ">", "%s"); close $m;' % fired)
+    r = env.run()
+    assert r.returncode == 0, r.stderr
+    assert fired.exists(), "the hook did not run; the test proves nothing"
+    for n in GOOD_NAMES:
+        assert (env.nas / n).read_bytes() == (env.src / n).read_bytes()
+    assert not any(p.name.startswith(".partial-") for p in env.nas.iterdir())
+
+
 def test_helper_runs_with_a_cleared_environment(env):
     _populate(env)
     lib = env.root / "perllib"
@@ -1020,6 +1132,83 @@ def test_destination_writable_by_others_is_refused(env):
     _assert_unmounted_clean(env)
 
 
+def test_destination_with_an_extended_acl_is_refused(env):
+    # R3-1 (issue 249): mode 0700 does not show a POSIX ACL; ls marks it with a "+".
+    _populate(env)
+    env.nas.mkdir()
+    env.nas.chmod(0o700)
+    r = env.run(FAKE_LS_ACL="1")
+    assert r.returncode == 1
+    assert _metrics(r.stdout)["unifi_backup_sync_result_code"] == 3
+    assert "extended access ACL" in r.stderr
+    assert not any(p.is_file() for p in env.nas.iterdir())
+    _assert_unmounted_clean(env)
+
+
+def test_prune_protects_the_newest_by_epoch_even_when_its_file_time_is_old(env):
+    # R1-1 (PR 262): newest by epoch has an mtime beyond retention; an older-by-epoch backup has the
+    # newest mtime. One definition of newest: the epoch. The prune must keep the newest-by-epoch copy.
+    newest = name_at(1 * DAY)
+    older = name_at(30 * DAY)
+    env.add_source(newest, age_days=200)   # file time beyond the 90 day retention
+    env.add_source(older, age_days=0)      # newest file time
+    env.nas.mkdir()
+    for n, d in ((newest, 200), (older, 0)):
+        (env.nas / n).write_bytes((env.src / n).read_bytes())
+        os.utime(env.nas / n, (NOW - d * DAY,) * 2)
+    r = env.run(RETENTION_DAYS="90")
+    assert r.returncode == 0, r.stderr
+    assert newest in env.nas_files()
+    assert "removed %s" % newest not in r.stderr
+    assert _ages(r) == (1 * DAY, 1 * DAY)
+
+
+def test_prune_protects_the_fallback_newest_when_the_epoch_is_unusable(env):
+    odd = "autobackup_9.0.114_20261109_0300_1.unf"
+    env.add_source(odd, age_days=200)
+    r = env.run(RETENTION_DAYS="90")
+    assert r.returncode == 0, r.stderr
+    assert env.nas_files() == [odd]
+    assert _ages(r) == (200 * DAY, 200 * DAY)
+
+
+@pytest.mark.parametrize("epoch", ["0123456789", "0001799913600"])  # 10 and 13 digits, leading zero
+def test_leading_zero_epoch_is_not_trusted(env, epoch):
+    env.add_source("autobackup_9.0.114_20261109_0300_%s.unf" % epoch, age_days=3)
+    r = env.run()
+    assert r.returncode == 0, r.stderr
+    assert _ages(r) == (3 * DAY, 3 * DAY)
+    assert "age taken from the file time" in r.stderr
+
+
+def test_ls_failure_refuses_the_destination(env):
+    _populate(env)
+    env.nas.mkdir()
+    env.nas.chmod(0o700)
+    r = env.run(FAKE_LS_FAIL="1")
+    assert r.returncode == 1
+    assert _metrics(r.stdout)["unifi_backup_sync_result_code"] == 3
+    assert "cannot list the destination" in r.stderr
+    assert not any(p.is_file() for p in env.nas.iterdir())
+
+
+@pytest.mark.parametrize("marker", [".", "@"])
+def test_other_ls_markers_are_accepted(env, marker):
+    _populate(env)
+    env.nas.mkdir()
+    env.nas.chmod(0o700)
+    r = env.run(FAKE_LS_MARK=marker)
+    assert r.returncode == 0, r.stderr
+
+
+def test_destination_without_an_acl_is_accepted(env):
+    _populate(env)
+    env.nas.mkdir()
+    env.nas.chmod(0o700)
+    r = env.run()
+    assert r.returncode == 0, r.stderr
+
+
 # --- credentials and dry run ----------------------------------------------------------------------
 
 @pytest.mark.parametrize("extra", [{}, {"FAKE_MOUNT_FAIL": "1"}, {"FAKE_CP_FAIL": "1"},
@@ -1068,7 +1257,7 @@ def test_script_has_no_delete_mirroring_or_eval():
 
 def test_script_uses_absolute_command_paths_only():
     code = _code()
-    for name in ("id", "date", "stat", "env", "perl", "df", "mv", "rm", "mkdir", "sha256sum", "mount",
+    for name in ("id", "date", "stat", "env", "perl", "df", "ls", "mv", "rm", "mkdir", "sha256sum", "mount",
                  "umount", "mountpoint"):
         assert not re.search(r"(?m)(^\s*|[;&|(]\s*|\$\()%s\s" % name, code), name
 
