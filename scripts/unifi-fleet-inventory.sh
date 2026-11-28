@@ -25,6 +25,9 @@
 # A device that changed firmware inside the 7-day window has two series: the newest sample wins
 # and the older versions are listed in a note line under the table.
 set -euo pipefail
+# Never trace this script: a trace line would print the token. This also undoes bash -x and an
+# inherited SHELLOPTS=xtrace before anything secret is read.
+set +x
 
 STALE_SECONDS=7200   # same freshness limit as the update digest (2 hours)
 MAX_DEVICES=200      # the queries ask for 201 series so a truncated answer reads as too many
@@ -45,8 +48,28 @@ esac
 BASE="${GRAFANA_BASE_URL-}"
 [ -n "$BASE" ] || die "GRAFANA_BASE_URL is not set; set it to your Grafana address (http(s)://host[:port])"
 BASE="${BASE%/}"
-printf '%s' "$BASE" | grep -Eq '^https?://[A-Za-z0-9._-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$' \
-    || die "GRAFANA_BASE_URL is not a plain http(s)://host[:port][/path] address"
+URL_RE='^(https?)://(\[::1\]|[A-Za-z0-9._-]+)(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$'
+[[ "$BASE" =~ $URL_RE ]] || die "GRAFANA_BASE_URL is not a plain http(s)://host[:port][/path] address"
+URL_SCHEME="${BASH_REMATCH[1]}"
+URL_HOST="${BASH_REMATCH[2]}"
+
+# The address named here receives the Viewer token, so it must be trusted configuration. https is
+# always accepted. Plain http is accepted for loopback, or for any other host only when
+# UNIFI_INVENTORY_ALLOW_HTTP=1 is set on purpose (a private network you trust).
+is_loopback() {
+    local oct
+    case "$1" in
+        localhost | '[::1]') return 0 ;;
+        127.*.*.*)
+            [[ "$1" =~ ^127(\.[0-9]{1,3}){3}$ ]] || return 1
+            for oct in ${1//./ }; do [ "$((10#$oct))" -le 255 ] || return 1; done
+            return 0 ;;
+    esac
+    return 1
+}
+if [ "$URL_SCHEME" = http ] && ! is_loopback "$URL_HOST" && [ "${UNIFI_INVENTORY_ALLOW_HTTP-}" != 1 ]; then
+    die "GRAFANA_BASE_URL is plain http to a non-loopback host, which would send the token unencrypted; use https, or set UNIFI_INVENTORY_ALLOW_HTTP=1 if you trust that network"
+fi
 
 TOK=$(doppler secrets get GRAFANA_VIEWER_TOKEN --plain --project homelab --config prd_network 2> /dev/null) \
     || die "could not read the token from the secret manager"
@@ -137,7 +160,9 @@ parsed=$(printf '%s' "$body" | jq -c --argjson now "$NOW" --argjson max "$MAX_DE
       | {name: .schema.fields[1].labels.name, model: $l.model, version: $l.version,
          t:(if ($ix | length) > 0 then $t[$ix[-1]] else null end),
          v: (if ($ix | length) > 0 then $v[$ix[-1]] else null end)}
-      | if (.t != null and (.t | type) != "number") then error("a sample time is not a number") else . end
+      | if (.t != null and (.t | type) != "number") then error("a sample time is not a number")
+        elif (.t != null and (.t < 0 or .t > 253402300799000)) then error("a sample time is out of range")
+        else . end
     else error("a result frame is malformed") end;
   def frames($ref):
     .results[$ref] as $r
@@ -171,7 +196,7 @@ parsed=$(printf '%s' "$body" | jq -c --argjson now "$NOW" --argjson max "$MAX_DE
   end' 2>&1) || die "could not read the Grafana answer: $(printf '%s' "$parsed" | head -c 300 | tr -d '[:cntrl:]')"
 
 # Pass 2: format. The only place untrusted text is printed; it is stripped here.
-printf '%s' "$parsed" | jq -r --argjson now "$NOW" --argjson stale "$STALE_SECONDS" '
+formatted=$(printf '%s' "$parsed" | jq -r --argjson now "$NOW" --argjson stale "$STALE_SECONDS" '
   def clean: tostring | gsub("[\\x{0}-\\x{1f}\\x{7f}-\\x{9f}\\x{200e}\\x{200f}\\x{202a}-\\x{202e}\\x{2066}-\\x{2069}]"; "")
     | .[0:60] | if . == "" then "(blank)" else . end;
   def age($s): if $s < 60 then "\($s)s" elif $s < 3600 then "\($s / 60 | floor)m"
@@ -195,4 +220,6 @@ printf '%s' "$parsed" | jq -r --argjson now "$NOW" --argjson stale "$STALE_SECON
       | "note: \(.name | clean) also reported other firmware in the last 7 days: \(.older | map(clean) | join(", "))"),
     (if agesec(.newest) > $stale then "WARNING: the newest sample is older than \(age($stale)); the data is STALE" else empty end),
     ([$rows[] | select(.l | test("STALE"))] | length) as $sd
-    | (if $sd > 0 and agesec(.newest) <= $stale then "WARNING: \($sd) device(s) have not reported for over \(age($stale)) (STALE)" else empty end)'
+    | (if $sd > 0 and agesec(.newest) <= $stale then "WARNING: \($sd) device(s) have not reported for over \(age($stale)) (STALE)" else empty end)' 2>&1) \
+    || die "could not format the Grafana answer: $(printf '%s' "$formatted" | head -c 300 | tr -d '[:cntrl:]')"
+printf '%s\n' "$formatted"

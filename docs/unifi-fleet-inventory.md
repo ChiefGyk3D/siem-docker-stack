@@ -3,17 +3,37 @@
 `scripts/unifi-fleet-inventory.sh` prints the UniFi devices that unpoller reports, with firmware and
 update state, from the data already in InfluxDB. It is read-only: one query through Grafana's
 `/api/ds/query` endpoint, using the Grafana Viewer token from the secret manager on your machine.
-The token is never printed, never on a command line and never written to a file.
+The token is never printed (not even under `bash -x`, which the script switches off), never on a command
+line, never exported to a child process and never written to a file.
 
 ## Run it (on your laptop)
 
+With an https address (or a loopback one such as `http://localhost:3000` through a tunnel):
+
 ```bash
-GRAFANA_BASE_URL=<your Grafana address, e.g. http://host:3000> bash scripts/unifi-fleet-inventory.sh
+GRAFANA_BASE_URL=<your Grafana address, e.g. https://host:3000> bash scripts/unifi-fleet-inventory.sh
 ```
 
-`GRAFANA_BASE_URL` has no default; the script stops with a message if it is unset. A plain `http://`
-address sends the token unencrypted, the same as the Grafana export script does. Needs `jq`, `curl`
-and a logged-in `doppler` (token `GRAFANA_VIEWER_TOKEN`, project `homelab`, config `prd_network`).
+For plain `http://` to a private address you trust (the case when Grafana has no TLS on the LAN), say so
+on purpose:
+
+```bash
+UNIFI_INVENTORY_ALLOW_HTTP=1 GRAFANA_BASE_URL=<your Grafana address, e.g. http://host:3000> bash scripts/unifi-fleet-inventory.sh
+```
+
+Needs `jq`, `curl` and a logged-in `doppler` (token `GRAFANA_VIEWER_TOKEN`, project `homelab`, config
+`prd_network`).
+
+### Where the token goes (trust assumption)
+
+The script sends the Viewer token to whatever `GRAFANA_BASE_URL` names. The script cannot tell whether
+that is your Grafana, so treat the variable like `PATH`: set it yourself on the command line and do not
+run the script in a shell whose environment you did not set. It refuses a missing or malformed address,
+an address with a user name or password in it, and plain `http://` to a non-loopback host unless
+`UNIFI_INVENTORY_ALLOW_HTTP=1` is set. With that opt-in the token crosses the network unencrypted, the
+same as the Grafana export script. It is a Viewer token, so the damage from interception is read access
+to Grafana. A fixed host allowlist is not implemented (see issue #252 follow-up), because the
+address is deliberately not in the repository.
 
 ## Where the data lives (VERIFIED with `--discover`, 2026-11-27)
 

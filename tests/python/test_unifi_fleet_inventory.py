@@ -23,6 +23,7 @@ BASE = "http://grafana.invalid:3000"
 FAKE_CURL = r'''#!/usr/bin/env bash
 printf '%s\n' "$@" > "$FAKE_DIR/curl.argv"
 cat > "$FAKE_DIR/curl.stdin"
+env > "$FAKE_DIR/curl.env"
 if [ -n "${FAKE_CURL_EXIT:-}" ]; then echo "curl: (28) timed out" >&2; exit "$FAKE_CURL_EXIT"; fi
 cat "$FAKE_DIR/body.json"
 printf '\n%s' "${FAKE_CURL_CODE:-200}"
@@ -30,7 +31,7 @@ printf '\n%s' "${FAKE_CURL_CODE:-200}"
 FAKE_DOPPLER = r'''#!/usr/bin/env bash
 printf '%s\n' "$@" > "$FAKE_DIR/doppler.argv"
 if [ -n "${FAKE_DOPPLER_FAIL:-}" ]; then echo "not logged in" >&2; exit 1; fi
-printf '%s' "${FAKE_TOKEN-}"
+cat "$FAKE_DIR/token.txt"
 '''
 
 
@@ -56,22 +57,26 @@ def env(tmp_path):
         p = d / name
         p.write_text(body)
         p.chmod(p.stat().st_mode | stat.S_IXUSR)
+    # the token reaches the fake secret command through a private file, never through the environment
+    (d / "token.txt").write_text(TOKEN)
     e = dict(os.environ)
-    e.update(PATH=f"{d}:{os.environ['PATH']}", FAKE_DIR=str(d), FAKE_TOKEN=TOKEN,
-             GRAFANA_BASE_URL=BASE)
+    e.update(PATH=f"{d}:{os.environ['PATH']}", FAKE_DIR=str(d), GRAFANA_BASE_URL=BASE,
+             UNIFI_INVENTORY_ALLOW_HTTP="1")
     for k in ("FAKE_CURL_EXIT", "FAKE_CURL_CODE", "FAKE_DOPPLER_FAIL"):
         e.pop(k, None)
     return e, d
 
 
-def run(env, body=None, **extra):
+def run(env, body=None, args=(), **extra):
     e, d = env
     if body is not None:
         (d / "body.json").write_text(body if isinstance(body, str) else json.dumps(body))
+    if "FAKE_TOKEN" in extra:
+        (d / "token.txt").write_text(extra.pop("FAKE_TOKEN"))
     e = {**e, **extra}
     for k in [k for k, v in e.items() if v is None]:
         del e[k]
-    return subprocess.run(["bash", SCRIPT], capture_output=True, text=True, env=e,
+    return subprocess.run(["bash", *args, SCRIPT], capture_output=True, text=True, env=e,
                           stdin=subprocess.DEVNULL, timeout=60, check=False)
 
 
@@ -108,6 +113,57 @@ def test_token_only_on_stdin_never_printed(env):
     assert f"Authorization: Bearer {TOKEN}" in (d / "curl.stdin").read_text()
     argv = (d / "curl.argv").read_text()
     assert "--max-time" in argv and "-K" in argv and BASE + "/api/ds/query" in argv
+    # the token is not in curl's environment either (no export of the variable that holds it)
+    curl_env = (d / "curl.env").read_text()
+    assert TOKEN not in curl_env and not any(ln.startswith("TOK=") for ln in curl_env.splitlines())
+
+
+def test_token_not_printed_under_shell_tracing(env):
+    r = run(env, answer([("AP1", "U6", "1.0", False)], now_ms()), args=("-x",))
+    assert r.returncode == 0, r.stderr
+    assert TOKEN not in r.stdout + r.stderr
+
+
+def test_token_not_printed_under_tracing_on_failure(env):
+    r = run(env, "{not json", args=("-x",))
+    assert r.returncode == 1
+    assert TOKEN not in r.stdout + r.stderr
+
+
+def test_plain_http_needs_explicit_opt_in(env):
+    body = answer([("AP", "U6", "1", False)], now_ms())
+    r = run(env, body, UNIFI_INVENTORY_ALLOW_HTTP=None)
+    assert r.returncode == 1 and r.stdout == "" and "UNIFI_INVENTORY_ALLOW_HTTP" in r.stderr
+    assert not (env[1] / "curl.stdin").exists()  # the token was never sent
+    for v in ("0", "yes", ""):
+        r = run(env, body, UNIFI_INVENTORY_ALLOW_HTTP=v)
+        assert r.returncode == 1 and r.stdout == ""
+    assert run(env, body).returncode == 0  # explicit opt-in "1"
+
+
+@pytest.mark.parametrize("url", ["https://grafana.invalid", "http://localhost:3000", "http://127.0.0.1:3000/g",
+                                 "http://[::1]:3000"])
+def test_https_and_loopback_need_no_opt_in(env, url):
+    r = run(env, answer([("AP", "U6", "1", False)], now_ms()), GRAFANA_BASE_URL=url,
+            UNIFI_INVENTORY_ALLOW_HTTP=None)
+    assert r.returncode == 0, r.stderr
+
+
+@pytest.mark.parametrize("url", ["http://localhost.attacker.invalid", "http://127.0.0.1.evil.invalid",
+                                 "http://127.0.0.256", "http://10.0.0.1:3000"])
+def test_loopback_lookalikes_are_not_loopback(env, url):
+    r = run(env, answer([("AP", "U6", "1", False)], now_ms()), GRAFANA_BASE_URL=url,
+            UNIFI_INVENTORY_ALLOW_HTTP=None)
+    assert r.returncode == 1 and r.stdout == ""
+    assert not (env[1] / "curl.stdin").exists()
+
+
+@pytest.mark.parametrize("bad_t", [-1e300, 1e300, -1, 253402300800000])
+def test_out_of_range_timestamp_fails_with_clean_message(env, bad_t):
+    body = {"results": {"A": {"frames": [frame("AP", [True], [bad_t], model="U6", version="1")]}}}
+    r = run(env, body)
+    assert r.returncode == 1 and r.stdout == ""
+    assert r.stderr.startswith("unifi-fleet-inventory:")
 
 
 def test_token_not_printed_on_failures(env):
