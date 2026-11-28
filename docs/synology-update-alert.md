@@ -80,26 +80,19 @@ Nothing below is done by the repository. Do them in order, and do not unpause th
    only read, SHA authentication and AES privacy to match the example, and
    passphrases of at least 8 characters.
 2. Create the InfluxDB write account (same pattern as `twingate_wo`, runbook
-   section 10). Run these in a shell where `SYNOLOGY_INFLUX_USER` and
-   `SYNOLOGY_INFLUX_PASSWORD` are already exported from the secret manager. First
-   the name check (the user goes into a quoted InfluxQL identifier and the password
-   into a quoted literal, so only a narrow character set is accepted; it stops
-   at the first problem):
-
-```
-# validate-influx-names
-set -eu
-case "${SYNOLOGY_INFLUX_USER:-}" in ''|*[!A-Za-z0-9_]*) echo "SYNOLOGY_INFLUX_USER must be letters, digits and _ only" >&2; exit 1;; esac
-case "${SYNOLOGY_INFLUX_PASSWORD:-}" in ''|*[!A-Za-z0-9_.@%+=-]*) echo "SYNOLOGY_INFLUX_PASSWORD must be letters, digits and _ . @ % + = - only" >&2; exit 1;; esac
-echo "names ok"
-```
-
-   Then the account. The user name is passed into the container with
-   `docker exec -e` (no value on the command line) so the verification sees it:
+   section 10). Run this ONE script in a shell where `SYNOLOGY_INFLUX_USER` and
+   `SYNOLOGY_INFLUX_PASSWORD` are already exported from the secret manager. It
+   validates both values first and stops before any privileged call if either
+   is wrong, so there is no separate check to skip: the user goes into a quoted
+   InfluxQL identifier and the password into a quoted literal, so only a narrow
+   character set is accepted. The user name is passed into the verification
+   with `docker exec -e` (no value on any command line):
 
 ```
 # create-influx-account
 set -eu
+case "${SYNOLOGY_INFLUX_USER:-}" in ''|*[!A-Za-z0-9_]*) echo "SYNOLOGY_INFLUX_USER must be letters, digits and _ only" >&2; exit 1;; esac
+case "${SYNOLOGY_INFLUX_PASSWORD:-}" in ''|*[!A-Za-z0-9_.@%+=-]*) echo "SYNOLOGY_INFLUX_PASSWORD must be letters, digits and _ . @ % + = - only" >&2; exit 1;; esac
 siem-run bash -c 'docker exec -i influxdb sh -c '\''INFLUX_USERNAME="$INFLUXDB_ADMIN_USER" INFLUX_PASSWORD="$INFLUXDB_ADMIN_PASSWORD" influx'\'' > /dev/null <<EOSQL
 CREATE USER "$SYNOLOGY_INFLUX_USER" WITH PASSWORD '\''$SYNOLOGY_INFLUX_PASSWORD'\''
 GRANT WRITE ON "telegraf" TO "$SYNOLOGY_INFLUX_USER"
@@ -124,7 +117,7 @@ dir=$(mktemp -d "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/snmpconf.XXXXXX")
 trap 'rm -f -- "$dir/snmp.conf"; rmdir -- "$dir"' EXIT
 trap 'exit 130' HUP INT TERM
 printf 'defVersion 3\ndefSecurityLevel authPriv\ndefSecurityName %s\ndefAuthType SHA\ndefPrivType AES\ndefAuthPassphrase %s\ndefPrivPassphrase %s\n' "$SYNOLOGY_SNMP_USER" "$SYNOLOGY_SNMP_AUTH_PASSWORD" "$SYNOLOGY_SNMP_PRIV_PASSWORD" > "$dir/snmp.conf"
-SNMPCONFPATH="$dir" snmpget -v3 "udp:$SYNOLOGY_SNMP_AGENT:161" .1.3.6.1.4.1.6574.1.5.3.0 .1.3.6.1.4.1.6574.1.5.4.0
+SNMPCONFPATH="$dir" env -u SYNOLOGY_SNMP_AUTH_PASSWORD -u SYNOLOGY_SNMP_PRIV_PASSWORD snmpget -v3 "udp:$SYNOLOGY_SNMP_AGENT:161" .1.3.6.1.4.1.6574.1.5.3.0 .1.3.6.1.4.1.6574.1.5.4.0
 ```
 
    Expected: two lines, a string for the DSM version and an INTEGER for
@@ -164,6 +157,7 @@ manual, not re-read), and the exact DSM screens.
   rule file header): an update that follows an applied one within 7 days can
   escalate early.
 - Value 5 (others) and any unexpected value count as a failed check (the check-failing rule).
-- The pending rules treat no data as OK (UniFi pattern); the stale rule owns a dead poller. A failing query still raises the pending rule's own alert (a critical pages), as for UniFi.
+- The pending rules treat no data as OK (UniFi pattern); the stale rule owns a dead poller. A failing query still raises the pending rule's own alert (a critical pages), exactly as the UniFi pending rules do; a repo test requires `execErrState: Alerting` on every update rule, and a separate query-health rule would not stop that. Reviewed and accepted residual (issue #257).
+- The router allow-list matches on title only, so any authenticated Grafana alert with a Synology title and the paging labels gets the same priority. This is how every allow-listed update title works today, and a test requires every update rule title to be listed; narrowing it is a router-wide change outside this issue.
 - SHA and AES are the compatibility pair. During the live check pick the strongest pair DSM lists (SHA-2 with AES-192 or AES-256 if offered) and set both ends and `defAuthType` and `defPrivType` to match.
 - Alert names are on the router allow-list; a rename must change both places.

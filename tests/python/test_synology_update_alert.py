@@ -222,7 +222,7 @@ def test_doc_covers_scope_limits_secrets_and_the_live_check():
 
 def test_doc_never_puts_a_passphrase_on_a_command_line():  # the -u/-A/-X scan covers every block
     text = DOC.read_text(encoding="utf-8")
-    assert not re.search(r"\s-[AXaxu]\s+\S", text.replace("-v3", "")), "no -A/-X/-u option with a value"
+    assert not re.search(r"\s-[AXaxu]\s+\S", re.sub(r"env( -u \w+)+", "env", text).replace("-v3", "")), "no -A/-X/-u option with a value"
     assert "SNMPCONFPATH" in text
 
 
@@ -240,26 +240,58 @@ def _run(script, env, **kw):
     return subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True, timeout=30, **kw)
 
 
+def _fake_tools(tmp_path):
+    """siem-run and docker stand-ins that record that they ran and the SQL text they were fed."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    log = tmp_path / "calls.log"
+    for name in ("siem-run", "docker"):
+        (bindir / name).write_text(f'#!/bin/bash\necho "{name}" >> "{log}"\n'
+                                   f'if [ "{name}" = siem-run ]; then bash -c "$3" >> "{log}" 2>&1; fi\n')
+        (bindir / name).chmod(0o700)
+    return bindir, log
+
+
 @pytest.mark.parametrize("user,password,ok", [
     ("synology_wo", "pw-Ok_1.2@3", True),
+    ('x"; DROP DATABASE "telegraf"; --', "pw-Ok_1.2@3", False),
     ('syn"x', "pw-Ok_1.2@3", False),
     ("synology_wo", "pw'x", False),
     ("synology_wo", "pw\\x", False),
+    ("synology_wo", "pw\nDROP", False),
     ("", "pw-Ok_1.2@3", False),
     ("synology_wo", "", False),
     ("a b", "pw-Ok_1.2@3", False),
 ])
-def test_influx_names_are_validated_before_any_query_is_built(user, password, ok):
-    env = {"PATH": os.environ["PATH"], "SYNOLOGY_INFLUX_USER": user, "SYNOLOGY_INFLUX_PASSWORD": password}
-    r = _run(_block("validate-influx-names"), env)
+def test_the_one_account_script_validates_before_it_runs_anything_privileged(tmp_path, user, password, ok):
+    bindir, log = _fake_tools(tmp_path)
+    env = {"PATH": f"{bindir}:{os.environ['PATH']}", "SYNOLOGY_INFLUX_USER": user,
+           "SYNOLOGY_INFLUX_PASSWORD": password}
+    r = _run(_block("create-influx-account"), env)
+    calls = log.read_text() if log.exists() else ""
     assert (r.returncode == 0) is ok, r.stderr
+    assert ("siem-run" in calls) is ok, "a bad value must stop the script before the privileged call"
+    if not ok:
+        assert "DROP" not in calls
 
 
-def test_influx_commands_pass_the_user_name_into_the_container_and_stay_in_one_script():
-    text = _block("create-influx-account")
-    assert "set -eu" in text and "validate-influx-names" not in text
-    assert "docker exec -e SYNOLOGY_INFLUX_USER" in text and "SHOW GRANTS FOR" in text
-    assert "-password" not in text
+def test_there_is_no_separate_validation_block_to_skip():
+    text = DOC.read_text(encoding="utf-8")
+    assert "# validate-influx-names" not in text
+    block = _block("create-influx-account")
+    assert block.index("set -eu") < block.index("[!A-Za-z0-9_]") < block.index("siem-run")
+    assert "docker exec -e SYNOLOGY_INFLUX_USER" in block and "SHOW GRANTS FOR" in block
+    assert "-password" not in block
+
+
+def test_pending_rules_use_the_unifi_no_data_and_error_states():
+    # SYN-R2-01: same tuple as the UniFi pending rules (reviewed residual: a failed query can still page)
+    unifi = yaml.safe_load((REPO_ROOT / "docker/grafana/provisioning/alerting/update-alert-rules-unifi.yml")
+                           .read_text(encoding="utf-8"))["groups"][0]["rules"]
+    ref = {(r["noDataState"], r["execErrState"], r["for"]) for r in unifi if "pending" in r["uid"]}
+    _, rules = _rules()
+    mine = {(r["noDataState"], r["execErrState"], r["for"]) for u, r in rules.items() if "pending" in u}
+    assert ref == mine == {("OK", "Alerting", "0s")}
 
 
 def _snmp_env(tmp_path, fake_body):
@@ -288,6 +320,12 @@ def test_snmpget_script_removes_the_passphrase_file_on_success_failure_and_signa
         assert list(run.iterdir()) == [], f"{name}: passphrase file left behind"
         assert "authpass-123" not in r.stdout + r.stderr and "privpass-456" not in r.stdout + r.stderr
         assert (r.returncode == 0) is (name == "ok"), (name, r.returncode, r.stderr)
+
+
+def test_snmpget_does_not_inherit_the_passphrases(tmp_path):
+    env, run = _snmp_env(tmp_path, 'env | grep -q "SYNOLOGY_SNMP_.*PASSWORD" && exit 7\nexit 0\n')
+    r = _run(_block("snmpget-confirm"), env)
+    assert r.returncode == 0, "snmpget saw a passphrase in its environment"
 
 
 def test_snmpget_script_refuses_to_run_without_a_passphrase(tmp_path):
