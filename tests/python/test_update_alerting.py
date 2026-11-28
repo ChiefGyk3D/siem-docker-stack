@@ -85,8 +85,30 @@ def _run_build(body, origin=None, enabled=None):
     return json.loads(r.stdout)
 
 
-def _alert(status, labels=None, name=GOOD_NAME, fp=GOOD_FP, **extra):
-    a = {"labels": dict({"alertname": name}, **(labels or {})),
+def _provisioned_identity():
+    """title -> (rule uid, source label) read from the provisioned update rules (#261)."""
+    out = {}
+    for path in sorted(ALERTING.glob("update-alert-rules-*.yml")):
+        for group in yaml.safe_load(path.read_text(encoding="utf-8"))["groups"]:
+            for r in group["rules"]:
+                if r["labels"].get("update_alert") == "true":
+                    out[r["title"]] = (r["uid"], r["labels"]["source"])
+    return out
+
+
+def _generator_url(uid):
+    return "https://grafana.example.com/alerting/grafana/" + uid + "/view?orgId=1"
+
+
+def _alert(status, labels=None, name=GOOD_NAME, fp=GOOD_FP, identity=True, **extra):
+    """A Grafana-style alert. For a provisioned title it carries that rule's identity
+    (generatorURL uid, source and update_alert labels) unless identity=False (#261)."""
+    base = {"alertname": name}
+    ident = _provisioned_identity().get(name)
+    if identity and ident:
+        base.update({"source": ident[1], "update_alert": "true"})
+        extra.setdefault("generatorURL", _generator_url(ident[0]))
+    a = {"labels": dict(base, **(labels or {})),
          "annotations": {"summary": "s"}, "fingerprint": fp}
     a.update(extra)
     return {"status": status, "alerts": [a]}
@@ -341,6 +363,67 @@ def test_public_alert_names_equal_provisioned_rule_titles():
     provisioned = {r["title"] for _, _, r in _rules() if r["labels"].get("update_alert") == "true"}
     assert len(listed) == len(set(listed))
     assert set(listed) == provisioned and len(provisioned) >= 6
+
+
+def test_router_rule_identity_equals_provisioned_rules():
+    """#261: the router binds each allowed title to its rule uid and source label."""
+    js = _build_node()["parameters"]["jsCode"]
+    m = re.search(r"const ALLOWED_RULES = \{(.*?)\n\};", js, re.S)
+    assert m, "ALLOWED_RULES identity map missing"
+    pairs = re.findall(r"'([^']+)': \{ uid: '([^']+)', source: '([^']+)' \}", m.group(1))
+    assert len(pairs) == len({p[0] for p in pairs}) == len(_provisioned_identity()) >= 6
+    assert {p[0]: (p[1], p[2]) for p in pairs} == _provisioned_identity()
+    listed = re.findall(r"'([^']*)'", re.search(r"const ALLOWED_ALERTNAMES = \[(.*?)\];", js, re.S).group(1))
+    assert set(listed) == {p[0] for p in pairs}
+
+
+def test_identity_bound_rules_keep_emergency_routing():
+    assert len(_provisioned_identity()) >= 6
+    for title in _provisioned_identity():
+        res = _run_build(_alert("firing", {"severity": "critical", "phone": "true"}, name=title), enabled=True)
+        assert res["pushover"]["priority"] == 2 and res["pushover"]["tags"].startswith("upd-"), title
+        assert res["enabled"] is True
+        assert _run_build(_alert("resolved", {"phone": "true"}, name=title))["cancelTag"].startswith("upd-"), title
+
+
+FORGED = {
+    "same title, no uid at all": dict(identity=False),
+    "same title, source label only": dict(identity=False, labels={"source": "unifi", "update_alert": "true"}),
+    "empty labels besides the title": dict(identity=False, labels={}),
+    "uid of a different rule": dict(generatorURL=_generator_url("update-unifi-pending-7d")),
+    "uid in a query string only": dict(generatorURL="https://evil.example/x?u=/alerting/grafana/update-unifi-pending-24h/view"),
+    "uid not on the grafana path": dict(generatorURL="https://evil.example/other/update-unifi-pending-24h/view"),
+    "uid with a trailing suffix": dict(generatorURL=_generator_url("update-unifi-pending-24h-x")),
+    "uid label disagrees with url": dict(labels={"__alert_rule_uid__": "someone-else"}),
+    "wrong source label": dict(labels={"source": "other"}),
+    "missing update_alert label": dict(labels={"update_alert": ""}),
+    "empty generatorURL": dict(generatorURL=""),
+    "uid label empty and no url": dict(identity=False, labels={"__alert_rule_uid__": ""}),
+}
+
+
+@pytest.mark.parametrize("case", sorted(FORGED))
+def test_forged_title_cannot_reach_emergency_or_cancel(case):
+    spec = dict(FORGED[case])
+    labels = dict({"severity": "critical", "phone": "true"}, **spec.pop("labels", {}))
+    fire = _run_build(_alert("firing", labels, **spec), enabled=True)
+    assert fire["pushover"]["priority"] == 1, case
+    assert "tags" not in fire["pushover"] and "retry" not in fire["pushover"], case
+    res = _run_build(_alert("resolved", {k: v for k, v in labels.items() if k != "severity"}, **spec))
+    assert res["cancelTag"] == "", case
+
+
+def test_uid_label_alone_is_accepted_when_it_matches():
+    uid, source = _provisioned_identity()[GOOD_NAME]
+    labels = {"severity": "critical", "phone": "true", "__alert_rule_uid__": uid,
+              "source": source, "update_alert": "true"}
+    assert _run_build(_alert("firing", labels, identity=False), enabled=True)["pushover"]["priority"] == 2
+
+
+def test_title_matching_object_prototype_names_is_unknown():
+    for name in ("constructor", "__proto__", "toString", "hasOwnProperty"):
+        res = _run_build(_alert("firing", {"severity": "critical", "phone": "true"}, name=name), enabled=True)
+        assert res["pushover"]["priority"] == 1 and "tags" not in res["pushover"], name
 
 
 # --- webhook secret handling -------------------------------------------------
