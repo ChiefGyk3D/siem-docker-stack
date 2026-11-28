@@ -540,6 +540,29 @@ def test_the_baseline_fixture_is_the_unedited_pre_change_router():
     assert len(d["nodes"]) == 21 and d["nodes"][0] == GRAFANA_HOOK_PINNED
 
 
+_IDENTITY_MAP_RE = re.compile(r"const ALLOWED_RULES = \{.*?\n\};\n", re.S)
+_IDENTITY_COMMENT = ("ALLOWED_RULES:\n// a title only counts when the alert also carries that rule's uid (label\n"
+                     "// __alert_rule_uid__ or the generatorURL path /alerting/grafana/<uid>/view)\n"
+                     "// and its source and update_alert=true labels; any other sender of the same\n"
+                     "// title is unknown and tops out at priority 1 with no cancel tag.")
+_KNOWN_NEW = "const known = isKnownRule(alertname, a, l);"
+_KNOWN_OLD = "const known = ALLOWED_ALERTNAMES.indexOf(alertname) !== -1;"
+
+
+def _without_rule_identity(code):
+    """Strip exactly the #261 rule-identity additions (ALLOWED_RULES map, its comment, the helper
+    functions, the one changed line) so the rest can still be compared with the pre-127 baseline."""
+    assert len(_IDENTITY_MAP_RE.findall(code)) == 1
+    code = _IDENTITY_MAP_RE.sub("", code, count=1)
+    assert code.count(" " + _IDENTITY_COMMENT) == 1
+    code = code.replace(" " + _IDENTITY_COMMENT, "", 1)
+    start, end = code.index("const has = "), code.index("function build() {")
+    assert 0 < start < end and code.count("const has = ") == 1
+    code = code[:start] + code[end:]
+    assert code.count(_KNOWN_NEW) == 1
+    return code.replace(_KNOWN_NEW, _KNOWN_OLD, 1)
+
+
 _ALLOWLIST_RE = re.compile(r"const ALLOWED_ALERTNAMES = \[(.*?)\];", re.S)
 
 
@@ -571,6 +594,8 @@ def test_every_existing_node_and_connection_is_kept_and_only_four_nodes_are_adde
                 n["parameters"]["options"]["timeout"] = old_nodes[name]["parameters"]["options"]["timeout"]
             if name == "Build Pushover Payload":
                 # the allowlist may only grow, by provisioned update-rule titles (issue #200); the rest is pinned
+                n = copy.deepcopy(n)
+                n["parameters"]["jsCode"] = _without_rule_identity(n["parameters"]["jsCode"])
                 titles, rest = _without_allowlist(n)
                 old_titles, old_rest = _without_allowlist(old_nodes[name])
                 assert rest == old_rest, "an existing node changed: " + name
