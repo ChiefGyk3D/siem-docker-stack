@@ -34,21 +34,18 @@ printf '%s' "${FAKE_TOKEN-}"
 '''
 
 
-def frame(name, values, times, field="last"):
+def frame(name, values, times, field="last", **tags):
+    labels = {"name": name, **tags}
     return {"schema": {"fields": [{"name": "Time", "type": "time"},
-                                  {"name": field, "labels": {"name": name}}]},
+                                  {"name": field, "labels": labels}]},
             "data": {"values": [times, values]}}
 
 
 def answer(devices, now_ms, age_s=60):
-    """devices: list of (name, model, version, upgradeable)."""
+    """devices: list of (name, model, version, upgradeable). Model and version are tags."""
     t = [now_ms - age_s * 1000]
-    a = [frame(n, [u], t) for n, _, _, u in devices]
-    b = [frame(n, [m], t) for n, m, _, _ in devices]
-    c = [frame(n, [v], t) for n, _, v, _ in devices]
-    return {"results": {"A": {"status": 200, "frames": a},
-                        "B": {"status": 200, "frames": b},
-                        "C": {"status": 200, "frames": c}}}
+    a = [frame(n, [u], t, model=m, version=v) for n, m, v, u in devices]
+    return {"results": {"A": {"status": 200, "frames": a}}}
 
 
 @pytest.fixture
@@ -164,9 +161,11 @@ def test_http_error_status(env):
 @pytest.mark.parametrize("body", [
     "{not json", "[]", "{}", '{"results":{}}', '{"results":{"A":{"frames":[]}}}',
     '{"message":"boom"}',
-    '{"results":{"A":{"error":"bad","status":400},"B":{"frames":[]},"C":{"frames":[]}}}',
-    '{"results":{"A":{"frames":[{"schema":{"fields":[]},"data":{"values":[]}}]},"B":{"frames":[]},"C":{"frames":[]}}}',
-    '{"results":{"A":{"frames":[{"schema":{"fields":[{},{"labels":{"name":5}}]},"data":{"values":[[1],[true]]}}]},"B":{"frames":[]},"C":{"frames":[]}}}',
+    '{"results":{"A":{"error":"bad","status":400}}}',
+    '{"results":{"A":{"frames":[{"schema":{"fields":[]},"data":{"values":[]}}]}}}',
+    '{"results":{"A":{"frames":[{"schema":{"fields":[{},{"labels":{"name":5}}]},"data":{"values":[[1],[true]]}}]}}}',
+    '{"results":{"A":{"frames":[{"schema":{"fields":[{},{"labels":{"name":"x","model":5}}]},"data":{"values":[[1],[true]]}}]}}}',
+    '{"results":{"A":{"frames":[]},"B":{"frames":[]}}}',
 ])
 def test_malformed_json_fails_closed(env, body):
     r = run(env, body)
@@ -191,15 +190,39 @@ def test_too_many_devices_fails(env):
     assert r.returncode == 1 and "200" in r.stderr
 
 
-def test_model_and_version_queries_failing_degrades_visibly(env):
+def test_model_and_version_come_from_tags_in_one_query(env):
+    _, d = env
+    r = run(env, answer([("AP", "U6-Pro", "6.6.77", True)], now_ms()))
+    assert r.returncode == 0, r.stderr
+    assert "U6-Pro" in r.stdout and "6.6.77" in r.stdout
+    sent = json.loads(next(ln for ln in (d / "curl.argv").read_text().splitlines() if ln.startswith("{")))
+    assert len(sent["queries"]) == 1
+    q = sent["queries"][0]["query"]
+    assert 'GROUP BY "name","model","version"' in q and 'last("upgradeable")' in q
+    assert "UNVERIFIED" not in r.stderr and r.stderr == ""
+
+
+def test_missing_model_or_version_tag_shows_question_mark(env):
     t = [now_ms() - 60000]
-    body = {"results": {"A": {"frames": [frame("AP", [True], t)]},
-                        "B": {"error": "field not found", "status": 400},
-                        "C": {"frames": []}}}
+    body = {"results": {"A": {"frames": [frame("AP", [True], t), frame("SW", [False], t, model="USW-8")]}}}
     r = run(env, body)
     assert r.returncode == 0, r.stderr
-    assert "UNVERIFIED" in r.stderr
-    assert "AP" in r.stdout and "?" in r.stdout
+    ap = next(ln for ln in r.stdout.splitlines() if ln.startswith("AP"))
+    assert ap.split()[1:3] == ["?", "?"]
+    sw = next(ln for ln in r.stdout.splitlines() if ln.startswith("SW"))
+    assert sw.split()[1:3] == ["USW-8", "?"]
+
+
+def test_same_name_two_versions_shows_newest_and_footer(env):
+    now = now_ms()
+    old = frame("AP", [False], [now - 3 * 86400 * 1000], model="U6", version="1.0.0")
+    new = frame("AP", [True], [now - 60000], model="U6", version="2.0.0")
+    r = run(env, {"results": {"A": {"frames": [old, new]}}})
+    assert r.returncode == 0, r.stderr
+    rows = [ln for ln in r.stdout.splitlines() if ln.startswith("AP")]
+    assert len(rows) == 1 and "2.0.0" in rows[0] and "1.0.0" not in rows[0] and "yes" in rows[0]
+    assert "devices: 1" in r.stdout
+    assert any("AP" in ln and "1.0.0" in ln and ln.startswith("note") for ln in r.stdout.splitlines())
 
 
 def test_script_is_read_only_shape():
@@ -209,7 +232,7 @@ def test_script_is_read_only_shape():
     assert "set -eu" in text and "--max-time" in text
 
 
-# ---- --discover mode and the empty model/version warning ----
+# ---- --discover mode ----
 
 MEASUREMENTS = ["uap", "usw", "ugw", "udm", "uxg"]
 
@@ -301,20 +324,3 @@ def test_discover_rejects_unknown_argument(env):
                        stdin=subprocess.DEVNULL, timeout=60, check=False)
     assert r.returncode == 1 and "usage" in r.stderr.lower()
 
-
-def test_empty_model_and_version_frames_warn_with_discover_hint(env):
-    t = [now_ms() - 60000]
-    body = {"results": {"A": {"frames": [frame("AP", [True], t), frame("SW", [False], t)]},
-                        "B": {"frames": []}, "C": {"frames": []}}}
-    r = run(env, body)
-    assert r.returncode == 0, r.stderr
-    assert r.stderr.count("--discover") == 2 and "no data" in r.stderr
-    assert "AP" in r.stdout and "?" in r.stdout
-
-
-def test_no_warning_when_model_present_for_some(env):
-    t = [now_ms() - 60000]
-    body = {"results": {"A": {"frames": [frame("AP", [True], t), frame("SW", [False], t)]},
-                        "B": {"frames": [frame("AP", ["U6"], t)]}, "C": {"frames": [frame("AP", ["1"], t)]}}}
-    r = run(env, body)
-    assert r.returncode == 0 and r.stderr == ""

@@ -18,10 +18,12 @@
 # Verified against the digest workflow (n8n/weekly-update-digest.json) and the Grafana rule
 # export: datasource uid influxdb-unifi, measurements uap|usw|ugw|udm|uxg, the field
 # "upgradeable", the tag "name".
-# UNVERIFIED against live data: the fields "model" and "version" (query B and C below).
-# If Grafana rejects them the table shows "?" in those columns and a warning goes to stderr.
-# "Last seen" is the timestamp of the newest "upgradeable" point per device (verified field),
-# not a separate last_seen field.
+# VERIFIED by --discover on 2026-11-27: model, version, name, mac, serial, site_name, source and
+# type are TAGS (not fields); upgradeable is a boolean field. So model and firmware come from the
+# tags of the upgradeable series (GROUP BY name, model, version); a missing tag shows "?".
+# "Last seen" is the timestamp of the newest "upgradeable" point per device.
+# A device that changed firmware inside the 7-day window has two series: the newest sample wins
+# and the older versions are listed in a note line under the table.
 set -euo pipefail
 
 STALE_SECONDS=7200   # same freshness limit as the update digest (2 hours)
@@ -54,11 +56,12 @@ case "$TOK" in
 esac
 
 SERIES='/^(uap|usw|ugw|udm|uxg)$/'
+# One query: model and version are TAGS on the upgradeable series (VERIFIED by --discover on
+# 2026-11-27), so they arrive as labels of each result frame.
 payload=$(jq -nc --arg s "$SERIES" '
-  def q($ref; $field): {refId: $ref, datasource: {type: "influxdb", uid: "influxdb-unifi"},
+  {from: "now-7d", to: "now", queries: [{refId: "A", datasource: {type: "influxdb", uid: "influxdb-unifi"},
     rawQuery: true, resultFormat: "time_series",
-    query: ("SELECT last(\"" + $field + "\") FROM " + $s + " WHERE time > now() - 7d GROUP BY \"name\" SLIMIT 201")};
-  {from: "now-7d", to: "now", queries: [q("A"; "upgradeable"), q("B"; "model"), q("C"; "version")]}')
+    query: ("SELECT last(\"upgradeable\") FROM " + $s + " WHERE time > now() - 7d GROUP BY \"name\",\"model\",\"version\" SLIMIT 201")}]}')
 MEASUREMENTS=(uap usw ugw udm uxg)
 if [ "$MODE" = discover ]; then
     # Read-only schema discovery: key names and field types only, no values.
@@ -128,8 +131,11 @@ parsed=$(printf '%s' "$body" | jq -c --argjson now "$NOW" --argjson max "$MAX_DE
        and ((.schema.fields[1].labels.name | type) == "string")
     then (.data.values[0]) as $t | (.data.values[1]) as $v
       | [range(0; ($t | length)) | select($v[.] != null)] as $ix
-      | {name: .schema.fields[1].labels.name,
-         t: (if ($ix | length) > 0 then $t[$ix[-1]] else null end),
+      | .schema.fields[1].labels as $l
+      | ([$l.model, $l.version] | all(. == null or type == "string")) as $tagsok
+      | if ($tagsok | not) then error("a model or version tag is not text") else . end
+      | {name: .schema.fields[1].labels.name, model: $l.model, version: $l.version,
+         t:(if ($ix | length) > 0 then $t[$ix[-1]] else null end),
          v: (if ($ix | length) > 0 then $v[$ix[-1]] else null end)}
       | if (.t != null and (.t | type) != "number") then error("a sample time is not a number") else . end
     else error("a result frame is malformed") end;
@@ -143,32 +149,26 @@ parsed=$(printf '%s' "$body" | jq -c --argjson now "$NOW" --argjson max "$MAX_DE
   elif has("message") or has("error") then error("Grafana returned an error")
   elif ((.results | type) != "object") then error("the answer has no results")
   else
-    frames("A") as $a | frames("B") as $b | frames("C") as $c
+    if (.results | keys) != ["A"] then error("the answer results do not match the query sent")
+    else frames("A") as $a
     | if $a == null then error("the upgradeable query returned an error")
       elif ($a | length) == 0 then error("no UniFi devices in the data (last 7 days)")
-      elif ($a | length) > $max then error("more than " + ($max | tostring) + " devices; refusing a truncated list")
-      elif ([$a[].name] | length) != ([$a[].name] | unique | length) then error("duplicate device names in the answer")
+      elif ($a | length) > $max then error("more than " + ($max | tostring) + " series; refusing a truncated list")
       else
-        def lookup($list): if $list == null then {} else ($list | map({key: .name, value: .v}) | from_entries) end;
-        (lookup($b)) as $m | (lookup($c)) as $f
-        | { warnings: ([ (if $b != null and (($b | length) == 0 or ($b | all(.v == null))) then "WARNING: the model query returned no data for any device; the field name may be wrong (run with --discover to list the real field names)" else empty end),
-                         (if $c != null and (($c | length) == 0 or ($c | all(.v == null))) then "WARNING: the firmware query returned no data for any device; the field name may be wrong (run with --discover to list the real field names)" else empty end),
-                         (if $b == null then "WARNING: the model query returned an error; the MODEL column shows ? (field name UNVERIFIED against live data)" else empty end),
-                         (if $c == null then "WARNING: the firmware query returned an error; the FIRMWARE column shows ? (field name UNVERIFIED against live data)" else empty end) ]),
-            devices: ($a | sort_by(.name) | map({
-              name, t,
-              model: (if ($m[.name] | type) == "string" or ($m[.name] | type) == "number" then ($m[.name] | tostring) else null end),
-              version: (if ($f[.name] | type) == "string" or ($f[.name] | type) == "number" then ($f[.name] | tostring) else null end),
-              upd: (if .v == true then "yes" elif .v == false then "no"
-                    elif (.v | type) == "number" then (if .v > 0 then "yes" else "no" end) else "?" end)})) }
+        { devices: ($a | group_by(.name) | map(
+            (sort_by(.t // -1) | reverse) as $s
+            | $s[0] as $n
+            | {name: $n.name, t: $n.t, model: $n.model, version: $n.version,
+               older: ([$s[1:][] | select(.version != $n.version) | (.version // "?")] | unique),
+               upd: (if $n.v == true then "yes" elif $n.v == false then "no"
+                     elif ($n.v | type) == "number" then (if $n.v > 0 then "yes" else "no" end) else "?" end)})) }
         | .newest = ([.devices[].t | select(. != null)] | max)
         | if .newest == null then error("no device has a sample time")
           elif (.newest / 1000) > ($now + 300) then error("the newest sample is in the future; not trusting the data")
           else . end
       end
+    end
   end' 2>&1) || die "could not read the Grafana answer: $(printf '%s' "$parsed" | head -c 300 | tr -d '[:cntrl:]')"
-
-printf '%s' "$parsed" | jq -r '.warnings[]' >&2
 
 # Pass 2: format. The only place untrusted text is printed; it is stripped here.
 printf '%s' "$parsed" | jq -r --argjson now "$NOW" --argjson stale "$STALE_SECONDS" '
@@ -191,6 +191,8 @@ printf '%s' "$parsed" | jq -r --argjson now "$NOW" --argjson stale "$STALE_SECON
     "updates available: \([$rows[] | select(.u == "yes")] | length)",
     "update state unknown: \([$rows[] | select(.u == "?")] | length)",
     "newest sample: \(.newest / 1000 | floor | todate) (\(age(agesec(.newest))) ago)",
+    (.devices[] | select((.older | length) > 0)
+      | "note: \(.name | clean) also reported other firmware in the last 7 days: \(.older | map(clean) | join(", "))"),
     (if agesec(.newest) > $stale then "WARNING: the newest sample is older than \(age($stale)); the data is STALE" else empty end),
     ([$rows[] | select(.l | test("STALE"))] | length) as $sd
     | (if $sd > 0 and agesec(.newest) <= $stale then "WARNING: \($sd) device(s) have not reported for over \(age($stale)) (STALE)" else empty end)'

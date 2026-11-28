@@ -15,29 +15,37 @@ GRAFANA_BASE_URL=<your Grafana address, e.g. http://host:3000> bash scripts/unif
 address sends the token unencrypted, the same as the Grafana export script does. Needs `jq`, `curl`
 and a logged-in `doppler` (token `GRAFANA_VIEWER_TOKEN`, project `homelab`, config `prd_network`).
 
-## Find the real field names (`--discover`)
+## Where the data lives (VERIFIED with `--discover`, 2026-11-27)
 
-If MODEL or FIRMWARE show `?` for every device, the script prints a stderr WARNING that the query
-returned no data. The guessed field names are then wrong. List what the database really holds:
+Measurements `uap` (access points) and `usw` (switches) hold data. `ugw`, `udm` and `uxg` returned
+nothing on the checked fleet; the script still queries them in case a gateway is added.
+
+| Kind | Keys |
+| --- | --- |
+| Tags | `name`, `model`, `version`, `mac`, `serial`, `site_name`, `source`, `type` |
+| Fields | `upgradeable` (boolean), `last_seen` (float), `uptime`, `system_uptime`, `ip` (string), `cpu`, `mem` and others |
+
+`model` and `version` are tags, not fields. The script therefore asks one question:
+`SELECT last("upgradeable") ... GROUP BY "name","model","version"`, and reads model and firmware from the
+labels of each answer series. A missing tag shows `?`.
+
+If the data ever looks wrong, list the real keys again:
 
 ```bash
 GRAFANA_BASE_URL=<your Grafana address> bash scripts/unifi-fleet-inventory.sh --discover
 ```
 
-It runs `SHOW FIELD KEYS` and `SHOW TAG KEYS` for `uap`, `usw`, `ugw`, `udm` and `uxg` through the same
-`/api/ds/query` call and the same token handling, and prints per measurement the sorted field keys with
-their types and the sorted tag keys. Key names only, no values. Key names are stripped of control
-characters. The answer format for these statements (a table frame with `fieldKey`, `fieldType` or
-`tagKey` columns, or the first column as a fallback) is UNVERIFIED against live Grafana; an unexpected
-shape stops the script with a message.
+`--discover` runs `SHOW FIELD KEYS` and `SHOW TAG KEYS` for the five measurements through the same call
+and the same token handling and prints, per measurement, the sorted field keys with their types and the
+sorted tag keys. Key names only, no values, control characters stripped.
 
 ## Columns
 
 | Column | Meaning |
 | --- | --- |
-| NAME | The `name` tag unpoller sets. Control characters are stripped and the name is cut at 60 characters. |
-| MODEL | Latest `model` field. |
-| FIRMWARE | Latest `version` field. |
+| NAME | The `name` tag. Control characters are stripped and the name is cut at 60 characters. |
+| MODEL | The `model` tag of the newest sample. |
+| FIRMWARE | The `version` tag of the newest sample. |
 | UPDATE | `yes` when the latest `upgradeable` value is true (or above 0), `no` when false, `?` when unknown. |
 | LAST SEEN | Time of the newest `upgradeable` sample for that device (UTC) and its age. `STALE` means older than 2 hours. |
 
@@ -45,18 +53,12 @@ Under the table: device count, updates available, devices with unknown update st
 newest sample anywhere. If that is older than 2 hours the script prints a `WARNING ... STALE` line, so
 a dead collector is visible instead of looking like an up-to-date fleet.
 
+A device that changed firmware inside the 7-day window has one series per version. The row shows the
+newest sample's firmware, and a `note:` line under the summary lists the older versions seen.
+
 ## Failure behavior
 
 Any error stops the script with a message on stderr and exit code 1: unset address, token missing or
 unusable, curl failure or timeout (20 s), non-200 answer, an answer that is not the expected shape,
-no devices, more than 200 devices, or a newest sample dated in the future. Nothing is printed to stdout
+no devices, more than 200 series, or a newest sample dated in the future. Nothing is printed to stdout
 in those cases.
-
-## Verified and unverified
-
-Verified from the update digest workflow and the Grafana rule export: datasource `influxdb-unifi`,
-measurements `uap`, `usw`, `ugw`, `udm`, `uxg`, field `upgradeable`, tag `name`.
-
-**UNVERIFIED against live data:** the `model` and `version` fields (queries B and C in the script).
-If Grafana rejects them, the MODEL or FIRMWARE column shows `?` and a warning is printed on stderr.
-If the real field names differ, change the two field names in the script's `payload` query.
