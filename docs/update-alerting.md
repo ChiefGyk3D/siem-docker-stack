@@ -38,6 +38,7 @@ you turn it on.
 | `scripts/pfsense-update-metric.sh` | Read-only metric source for the firewall (deployed 2026-11-26) |
 | `docker/grafana/provisioning/alerting/update-alert-rules-twingate.yml` | Twingate Connector rules and a collector health rule, shipped paused |
 | `scripts/twingate-update-metric.py` | Read-only metric source for Twingate Connectors (not deployed) |
+| `docker/grafana/provisioning/alerting/update-alert-rules-synology.yml` | Synology DSM pending-update rules (SNMPv3), shipped paused; see [synology-update-alert.md](synology-update-alert.md) |
 | `tests/python/test_update_alerting.py` | Tests for all of the above (Node is required) |
 
 ### Rules

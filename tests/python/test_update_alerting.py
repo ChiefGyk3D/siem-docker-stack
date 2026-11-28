@@ -33,6 +33,7 @@ GOOD_FP = "abcdef0123456789"
 
 
 PENDING_UNIFI = ("update-unifi-pending-24h", "update-unifi-pending-7d")
+PENDING_SYNOLOGY = ("update-synology-pending-24h", "update-synology-pending-7d")  # #257: stale rule owns no data
 
 
 def _workflow():
@@ -397,7 +398,7 @@ def test_rule_schema():
         assert rule["labels"]["severity"] in {"warning", "critical"}, rule["title"]
         assert rule["labels"]["update_alert"] == "true", rule["title"]
         assert rule["for"], rule["title"]
-        if rule["uid"] in PENDING_UNIFI:
+        if rule["uid"] in PENDING_UNIFI + PENDING_SYNOLOGY:
             # no data legitimately means no pending update; a failing query must alert
             assert rule["noDataState"] == "OK", rule["title"]
             assert rule["execErrState"] == "Alerting", rule["title"]
@@ -513,7 +514,10 @@ def test_pending_update_rules_all_push_to_the_phone():
         # the operator-managed Twingate rule auto-updates and never pages (#200)
         want = "false" if r["uid"] in {"update-unifi-pending-24h", "update-pfsense-pending-24h",
                                        "update-twingate-operator-behind",
-                                       "update-twingate-unexpected-connector"} else "true"
+                                       "update-twingate-unexpected-connector",
+                                       # #257: the two Synology health rules are quiet (Discord and Matrix only)
+                                       "update-synology-data-stale", "update-synology-check-failing",
+                                       "update-synology-pending-24h"} else "true"
         assert r["labels"]["phone"] == want, r["uid"]
     uids = {r["uid"] for r in pending}
     assert {"update-unifi-pending-24h", "update-unifi-pending-7d"} <= uids
@@ -1435,7 +1439,9 @@ def test_every_update_rule_sets_the_phone_label_explicitly():
         # the poller-stale rule and the two 24h rules (P2, owner decision 2026-11-20, issue #152) stay off the phone;
         # the UniFi 24h rule is also quiet by owner decision 2026-11-26 (7-day wait, issue #199)
         p2 = {"update-unifi-poller-stale", "update-unifi-pending-24h", "update-pfsense-pending-24h",
-              "update-twingate-operator-behind", "update-twingate-unexpected-connector"}  # operator: digest only (#200); unexpected: warning, no phone (#222)
+              "update-twingate-operator-behind", "update-twingate-unexpected-connector",
+              "update-synology-data-stale", "update-synology-check-failing",
+              "update-synology-pending-24h"}  # synology health: quiet (#257); operator: digest only (#200); unexpected: warning, no phone (#222)
         want = "false" if rule["uid"] in p2 else "true"
         assert rule["labels"].get("phone") == want, rule["uid"]
         seen += 1
@@ -1486,8 +1492,8 @@ def test_no_update_rule_treats_a_query_error_as_ok():
 def test_each_update_rule_alerts_on_query_error(uid):
     rule = {r["uid"]: r for _, _, r in _rules()}[uid]
     assert rule["execErrState"] == "Alerting"
-    # NoData is a separate decision: only the two UniFi pending rules treat it as OK
-    expect = "OK" if uid in PENDING_UNIFI else "Alerting"
+    # NoData is a separate decision: only the UniFi and Synology pending rules treat it as OK (#257)
+    expect = "OK" if uid in PENDING_UNIFI + PENDING_SYNOLOGY else "Alerting"
     assert rule["noDataState"] == expect
 
 
