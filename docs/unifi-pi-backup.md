@@ -96,8 +96,14 @@ the script runs as root, so it does not trust paths between a check and a use.
   failure. The strongest mitigations here: the share and folder should be writable only by the
   sync account on the NAS (the script cannot see the NAS's permissions: on CIFS the mode shown is
   the one this mount sets), and the destination folder is refused unless it is owned by root and not
-  writable by group or others as the kernel reports it. Whether this is accepted is the owner's
-  decision.
+  writable by group or others as the kernel reports it. Mode 0700 is only a coarse check: a POSIX
+  ACL can give another user write access to a 0700 folder. The script refuses a destination that
+  `ls -ld` marks with `+` (an extended access ACL; code 3), but a filesystem that does not report
+  ACLs (CIFS shows only this mount's modes) is not covered, so reviewing the ACLs of the share and
+  folder on the NAS is mandatory. Residuals (2) and (3) are shown by tests that place the change
+  after the last check (`test_accepted_residual_*`): the replacement of a prune candidate is deleted
+  and nothing else is touched; a final name created after the absence check is overwritten by the
+  verified copy. Whether this is accepted is the owner's decision.
 - Size bounds (the state filesystem is shared with the Pi): a file larger than `MAX_BACKUP_BYTES`
   (default 1 GiB) is refused (code 2) before anything is read; free space on the state filesystem
   must be at least the file size plus `MIN_FREE_BYTES` (default 256 MiB), else it is refused (code
@@ -326,8 +332,14 @@ restore needs a compatible controller version. Test a restore once before you ne
   Use a NAS account that can write only to that one share.
 - **Not a mirror.** Copies are only added. Retention prunes by file age, only for exact backup
   names. A backup removed on the Pi stays on the NAS until it is older than the retention.
-- **The age is the file time.** The NAS copy keeps the source file time. If a share cannot set file
-  times, the copy fails (code 4) rather than reporting a wrong age.
+- **The age is the time in the backup name.** Both ages (`where=local` and `where=nas`) come from
+  the epoch in the exact autobackup name (10 digits = seconds, 13 digits = milliseconds), never
+  below 0, so the clock of the NAS cannot change them. (Issue 251: a NAS clock about 30 s ahead
+  of the Pi and a share that does not keep the copy's time gave `-30`.) A name whose epoch is not
+  usable (another length, or more than 300 s after the Pi clock) falls back to the file time,
+  clamped at 0, and a stderr note names the file. The file time is still what the prune uses, and
+  the NAS copy is still given the source file time (if a share cannot set file times, the copy
+  fails with code 4). A clock skew above 300 s on the NAS is refused as a future time (code 6).
 - **Reads of the NAS copies.** Every run hashes each existing NAS copy to prove it is intact (about
   25 files of 21 MB over the LAN each day with the default timer).
 - **Stale temp files.** A run killed with SIGKILL can leave a `.partial-*` file on the NAS. The next
@@ -347,8 +359,9 @@ restore needs a compatible controller version. Test a restore once before you ne
   the unit, `ProtectSystem=strict` together with a CIFS mount inside the unit's namespace and
   `SystemCallFilter=@mount` are written from the man pages and may need adjusting; run
   `systemd-analyze security` and the dry run first.
-- The UniFi OS backup time and the unit of the epoch in the file names are not known; the age uses
-  file times, not the name.
+- The unit of the epoch in the real UniFi OS file names (seconds or milliseconds) is not confirmed:
+  the age accepts both by length (10 or 13 digits) and falls back to the file time for any other
+  length. Check one real name against its file time.
 - The Grafana rule files were checked for structure only, not loaded into a live Grafana. The
   math expression in the warning rule has not run against real data.
 - Whether the SIEM scrapes the Pi's `prometheus-node-exporter` is unverified.

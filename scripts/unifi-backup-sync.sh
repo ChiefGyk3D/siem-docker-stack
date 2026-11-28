@@ -36,7 +36,9 @@
 # The credentials file is never read or printed by this script; only its path is handed to mount.
 #
 # Success (exit 0):
-#   unifi_backup_newest_age_seconds,where=local|nas value=<n>i
+#   unifi_backup_newest_age_seconds,where=local|nas value=<n>i   (never below 0; taken from the epoch
+#       in the backup name, not from file times, so a NAS clock that runs ahead cannot skew it; a
+#       name without a usable epoch falls back to the file time, clamped at 0, with a stderr note)
 #   unifi_backup_count,where=local|nas value=<n>i
 #   unifi_backup_sync_last_success_timestamp value=<epoch>i
 #   unifi_backup_sync_success value=1i
@@ -66,6 +68,7 @@ stat_bin=/usr/bin/stat
 perl_bin=/usr/bin/perl
 env_bin=/usr/bin/env
 df_bin=/usr/bin/df
+ls_bin=/usr/bin/ls
 mv_bin=/usr/bin/mv
 rm_bin=/usr/bin/rm
 mkdir_bin=/usr/bin/mkdir
@@ -117,6 +120,16 @@ read_last_success() {
     printf '%s\n' "$last_success"
 }
 
+# Age in seconds of a backup time, never below zero (a clock a few seconds ahead must not show a
+# negative age).
+clamped_age() {
+    if [ "$1" -gt "$now" ]; then
+        printf '0\n'
+    else
+        printf '%s\n' "$((now - $1))"
+    fi
+}
+
 on_exit() {
     trap - EXIT
     if [ -n "$partial" ]; then
@@ -144,8 +157,8 @@ on_exit() {
         fi
     fi
     if [ "$rc_code" -eq 0 ]; then
-        printf 'unifi_backup_newest_age_seconds,where=local value=%si\n' "$((now - local_newest))"
-        printf 'unifi_backup_newest_age_seconds,where=nas value=%si\n' "$((now - nas_newest))"
+        printf 'unifi_backup_newest_age_seconds,where=local value=%si\n' "$(clamped_age "$local_newest")"
+        printf 'unifi_backup_newest_age_seconds,where=nas value=%si\n' "$(clamped_age "$nas_newest")"
         printf 'unifi_backup_count,where=local value=%si\n' "$local_count"
         printf 'unifi_backup_count,where=nas value=%si\n' "$nas_count"
         printf 'unifi_backup_sync_last_success_timestamp value=%si\n' "$now"
@@ -484,6 +497,7 @@ if ($op eq "prune") {
     # test-hook: before-unlink
     my @n = lstat($pre . $name);
     bye(23) unless @n && same_file(\@s, \@n);
+    # test-hook: after-prune-check
     unlink($pre . $name) or bye(34);
     exit 0;
 }
@@ -547,10 +561,30 @@ EOF
     printf '%s\n' "$((fb_avail * 1024))"
 }
 
-# Count and newest mtime of the valid backups in a folder: sets scan_count and scan_newest.
+# The backup time of a valid name: the epoch in the name (seconds, 10 digits, or milliseconds, 13
+# digits). It does not depend on any clock of the NAS. Sets backup_time; returns 1 when the epoch is
+# not usable (another length, a leading zero, or more than 300 s after this Pi's clock).
+name_epoch() { # <name>; valid_name must have accepted it
+    case "${#vn_epoch}" in
+        10) backup_time=$vn_epoch ;;
+        13) backup_time=${vn_epoch%???} ;;
+        *) return 1 ;;
+    esac
+    case "$backup_time" in
+        0*) return 1 ;;
+    esac
+    [ "$backup_time" -le $((now + 300)) ]
+}
+
+# Count of the valid backups in a folder, their newest mtime (scan_newest, used to protect the newest
+# copy from the prune) and their newest backup time (scan_best_newest, used for the age metric). The
+# backup time is the epoch in the name; only when the name has no usable epoch is the file time used,
+# with a note on stderr. The file time of a NAS copy follows the NAS clock, so it is never the first
+# choice for the age.
 scan_dir() {
     scan_count=0
     scan_newest=0
+    scan_best_newest=0
     for sd_f in "$1"/*.unf; do
         [ -e "$sd_f" ] || [ -L "$sd_f" ] || continue
         sd_n=${sd_f##*/}
@@ -559,6 +593,13 @@ scan_dir() {
         sd_t=$(file_mtime "$sd_f") || return 1
         scan_count=$((scan_count + 1))
         [ "$sd_t" -le "$scan_newest" ] || scan_newest=$sd_t
+        if name_epoch; then
+            sd_b=$backup_time
+        else
+            log "note: $sd_n has no usable epoch in its name; age taken from the file time"
+            sd_b=$sd_t
+        fi
+        [ "$sd_b" -le "$scan_best_newest" ] || scan_best_newest=$sd_b
     done
     return 0
 }
@@ -570,7 +611,7 @@ scan_dir "$src_dir" || fail 2 "a source file has an unreadable or future time"
 [ "$scan_count" -gt 0 ] || fail 2 "source folder has no autobackup .unf files"
 [ "$scan_count" -le "$max_files" ] || fail 2 "source folder has more than $max_files backup files"
 local_count=$scan_count
-local_newest=$scan_newest
+local_newest=$scan_best_newest
 
 # ---------------------------------------------------------------- mount
 # Read the options of the mount on NAS_MOUNT_POINT from the mount table and set mount_opts (empty
@@ -681,6 +722,16 @@ EOF
     if [ "$dp_uid" != "$root_uid" ] || [ $(((dp_mode / 10 % 10) & 2)) -ne 0 ] || [ $((dp_mode % 10 & 2)) -ne 0 ]; then
         fail 3 "destination must be owned by root and not writable by group or others; refusing"
     fi
+    # The mode bits above say nothing about a POSIX ACL (a named user can hold rwx on a 0700
+    # folder). ls marks a folder that has an extended ACL with a "+" after the mode; such a folder
+    # is refused. Not every filesystem reports it (CIFS shows only this mount's modes), so this is a
+    # coarse check and the ACLs of the share and folder still need a review on the NAS.
+    dest_ls=$("$ls_bin" -ld -- "$dest" 2>/dev/null) || fail 3 "cannot list the destination"
+    dest_ls=${dest_ls%% *}
+    case "$dest_ls" in
+        ?????????? | ??????????[!+]*) ;;
+        *) fail 3 "destination has an extended access ACL; refusing (review the ACLs, then remove it)" ;;
+    esac
 fi
 
 dest_id=""
@@ -852,6 +903,6 @@ fi
 scan_dir "$dest" || fail 6 "a NAS file has an unreadable or future time"
 [ "$scan_count" -gt 0 ] || fail 5 "no verified copy is on the NAS"
 nas_count=$scan_count
-nas_newest=$scan_newest
+nas_newest=$scan_best_newest
 rc_code=0
 # Falling off the end runs the EXIT trap, which unmounts and prints the metrics.
