@@ -171,8 +171,9 @@ unifi_backup_sync_success value=1i
 unifi_backup_sync_result_code value=0i
 ```
 
-Ages come from the file times of the backups (the NAS copy keeps the source file time). On a
-failure the script prints only `unifi_backup_sync_success value=0i`, the result code and, when one
+Ages come from the epoch in the exact backup name (10 digits seconds, 13 digits milliseconds),
+never below 0, not from file times; a name without a usable epoch falls back to its file time,
+clamped at 0 (see "Honest limits"). On a failure the script prints only `unifi_backup_sync_success value=0i`, the result code and, when one
 is on record, the old last-success time: never zero-valued ages or counts, so a broken run cannot
 look healthy.
 
@@ -336,10 +337,15 @@ restore needs a compatible controller version. Test a restore once before you ne
   the epoch in the exact autobackup name (10 digits = seconds, 13 digits = milliseconds), never
   below 0, so the clock of the NAS cannot change them. (Issue 251: a NAS clock about 30 s ahead
   of the Pi and a share that does not keep the copy's time gave `-30`.) A name whose epoch is not
-  usable (another length, or more than 300 s after the Pi clock) falls back to the file time,
-  clamped at 0, and a stderr note names the file. The file time is still what the prune uses, and
-  the NAS copy is still given the source file time (if a share cannot set file times, the copy
-  fails with code 4). A clock skew above 300 s on the NAS is refused as a future time (code 6).
+  usable (a length other than 10 or 13 digits, a leading zero, or more than 300 s after the Pi
+  clock) falls back to the file time, clamped at 0, and a stderr note names the file. The same
+  definition of "newest" (epoch first, file time only as that fallback) feeds the age and protects
+  the newest copy from the prune; the retention cutoff itself still uses the file time, and the NAS
+  copy is still given the source file time (if a share cannot set file times, the copy
+  fails with code 4). A clock skew above 300 s on the NAS is refused as a future time (code 6). A principal who can
+  write the NAS folder can forge NAS freshness with a well-named file (inside the stated model,
+  not new); the local age goes stale independently, so alert on local OR NAS stale (the shipped
+  rules do).
 - **Reads of the NAS copies.** Every run hashes each existing NAS copy to prove it is intact (about
   25 files of 21 MB over the LAN each day with the default timer).
 - **Stale temp files.** A run killed with SIGKILL can leave a `.partial-*` file on the NAS. The next

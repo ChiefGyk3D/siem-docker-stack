@@ -576,14 +576,21 @@ name_epoch() { # <name>; valid_name must have accepted it
     [ "$backup_time" -le $((now + 300)) ]
 }
 
-# Count of the valid backups in a folder, their newest mtime (scan_newest, used to protect the newest
-# copy from the prune) and their newest backup time (scan_best_newest, used for the age metric). The
-# backup time is the epoch in the name; only when the name has no usable epoch is the file time used,
-# with a note on stderr. The file time of a NAS copy follows the NAS clock, so it is never the first
-# choice for the age.
+# The backup time of a file, one definition for the age metric and the prune protection: the epoch
+# in its name; only when the name has no usable epoch the file time (a note goes to stderr). Sets
+# backup_time. The file time of a NAS copy follows the NAS clock, so it is never the first choice.
+# valid_name must have accepted the name; the file time is the second argument.
+best_time() { # <name> <file time>
+    if name_epoch; then
+        return 0
+    fi
+    log "note: $1 has no usable epoch in its name; age taken from the file time"
+    backup_time=$2
+}
+
+# Count of the valid backups in a folder and their newest backup time (scan_best_newest).
 scan_dir() {
     scan_count=0
-    scan_newest=0
     scan_best_newest=0
     for sd_f in "$1"/*.unf; do
         [ -e "$sd_f" ] || [ -L "$sd_f" ] || continue
@@ -592,14 +599,8 @@ scan_dir() {
         regular_file "$sd_f" || continue
         sd_t=$(file_mtime "$sd_f") || return 1
         scan_count=$((scan_count + 1))
-        [ "$sd_t" -le "$scan_newest" ] || scan_newest=$sd_t
-        if name_epoch; then
-            sd_b=$backup_time
-        else
-            log "note: $sd_n has no usable epoch in its name; age taken from the file time"
-            sd_b=$sd_t
-        fi
-        [ "$sd_b" -le "$scan_best_newest" ] || scan_best_newest=$sd_b
+        best_time "$sd_n" "$sd_t"
+        [ "$backup_time" -le "$scan_best_newest" ] || scan_best_newest=$backup_time
     done
     return 0
 }
@@ -857,7 +858,7 @@ done
 prune_rc=0
 if [ "$copy_rc" -eq 0 ] && [ -d "$dest" ]; then
     scan_dir "$dest" || fail 6 "a NAS file has an unreadable or future time"
-    protect=$scan_newest
+    protect=$scan_best_newest
     limit=$((retention_days * 86400))
     for f in "$dest"/*.unf; do
         [ -e "$f" ] || continue
@@ -872,7 +873,9 @@ EOF
             prune_rc=6
             continue
         fi
-        if [ "$c_mtime" -eq "$protect" ] || [ $((now - c_mtime)) -le "$limit" ]; then
+        # the newest copy is the one the age metric calls newest (same definition, same function)
+        best_time "$name" "$c_mtime"
+        if [ "$backup_time" -eq "$protect" ] || [ $((now - c_mtime)) -le "$limit" ]; then
             continue
         fi
         if [ "$c_dev" != "$mp_dev" ] || [ "$c_nl" != 1 ]; then

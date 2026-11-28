@@ -137,7 +137,9 @@ class Env:
             '/usr/bin/sha256sum "$@"; rc=$?\n'
             '[ -n "${FAKE_SHA_FAIL_FROM:-}" ] && [ "$n" -ge "$FAKE_SHA_FAIL_FROM" ] && exit 1\n'
             'exit $rc\n') % (root / "sha.count", root / "sha.count"))
-        _fake(self.bin / "ls", 'if [ -n "${FAKE_LS_ACL:-}" ]; then echo "drwx------+ 2 root root 4096 Jan 1 00:00 $3"; exit 0; fi\n'
+        _fake(self.bin / "ls", '[ -n "${FAKE_LS_FAIL:-}" ] && exit 2\n'
+              'if [ -n "${FAKE_LS_MARK:-}" ]; then echo "drwx------$FAKE_LS_MARK 2 root root 4096 Jan 1 00:00 $3"; exit 0; fi\n'
+              'if [ -n "${FAKE_LS_ACL:-}" ]; then echo "drwx------+ 2 root root 4096 Jan 1 00:00 $3"; exit 0; fi\n'
               'exec /usr/bin/ls "$@"\n')
         _fake(self.bin / "df", 'if [ -n "${FAKE_DF_AVAIL:-}" ]; then\n'
               '  echo "Filesystem 1024-blocks Used Available Capacity Mounted on"\n'
@@ -1141,6 +1143,61 @@ def test_destination_with_an_extended_acl_is_refused(env):
     assert "extended access ACL" in r.stderr
     assert not any(p.is_file() for p in env.nas.iterdir())
     _assert_unmounted_clean(env)
+
+
+def test_prune_protects_the_newest_by_epoch_even_when_its_file_time_is_old(env):
+    # R1-1 (PR 262): newest by epoch has an mtime beyond retention; an older-by-epoch backup has the
+    # newest mtime. One definition of newest: the epoch. The prune must keep the newest-by-epoch copy.
+    newest = name_at(1 * DAY)
+    older = name_at(30 * DAY)
+    env.add_source(newest, age_days=200)   # file time beyond the 90 day retention
+    env.add_source(older, age_days=0)      # newest file time
+    env.nas.mkdir()
+    for n, d in ((newest, 200), (older, 0)):
+        (env.nas / n).write_bytes((env.src / n).read_bytes())
+        os.utime(env.nas / n, (NOW - d * DAY,) * 2)
+    r = env.run(RETENTION_DAYS="90")
+    assert r.returncode == 0, r.stderr
+    assert newest in env.nas_files()
+    assert "removed %s" % newest not in r.stderr
+    assert _ages(r) == (1 * DAY, 1 * DAY)
+
+
+def test_prune_protects_the_fallback_newest_when_the_epoch_is_unusable(env):
+    odd = "autobackup_9.0.114_20261109_0300_1.unf"
+    env.add_source(odd, age_days=200)
+    r = env.run(RETENTION_DAYS="90")
+    assert r.returncode == 0, r.stderr
+    assert env.nas_files() == [odd]
+    assert _ages(r) == (200 * DAY, 200 * DAY)
+
+
+def test_leading_zero_epoch_is_not_trusted(env):
+    env.add_source("autobackup_9.0.114_20261109_0300_0%d.unf" % (NOW - DAY), age_days=3)
+    r = env.run()
+    assert r.returncode == 0, r.stderr
+    assert _ages(r) == (3 * DAY, 3 * DAY)
+    assert "age taken from the file time" in r.stderr
+
+
+def test_ls_failure_refuses_the_destination(env):
+    _populate(env)
+    env.nas.mkdir()
+    env.nas.chmod(0o700)
+    r = env.run(FAKE_LS_FAIL="1")
+    assert r.returncode == 1
+    assert _metrics(r.stdout)["unifi_backup_sync_result_code"] == 3
+    assert "cannot list the destination" in r.stderr
+    assert not any(p.is_file() for p in env.nas.iterdir())
+
+
+@pytest.mark.parametrize("marker", [".", "@"])
+def test_other_ls_markers_are_accepted(env, marker):
+    _populate(env)
+    env.nas.mkdir()
+    env.nas.chmod(0o700)
+    r = env.run(FAKE_LS_MARK=marker)
+    assert r.returncode == 0, r.stderr
 
 
 def test_destination_without_an_acl_is_accepted(env):
